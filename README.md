@@ -103,3 +103,10 @@ Codex CLI supports a rich set of configuration options, with preferences stored 
 
 This repository is licensed under the [Apache-2.0 License](LICENSE).
 
+
+
+## Fork Notes
+
+This fork (Smarty-Pants-Inc/codex) intentionally omits upstream GitHub Actions (ci, rust-ci, rust-release, cla, codespell). We develop locally with hooks-first workflows and keep CI surfaces minimal.
+
+Local development and secrets helpers are provided via the repo (e.g., `.secrets/`, `.sops.yaml`, and `scripts/secrets`) instead of CI-based secret bootstrap.
