@@ -36,6 +36,7 @@ mod mcp_tool_call;
 mod message_history;
 mod model_provider_info;
 pub mod parse_command;
+mod remote;
 mod truncate;
 mod unified_exec;
 mod user_instructions;
@@ -49,6 +50,8 @@ mod event_mapping;
 pub use codex_protocol::protocol::InitialHistory;
 pub use conversation_manager::ConversationManager;
 pub use conversation_manager::NewConversation;
+pub use conversation_manager::RemoteConversationOptions;
+pub mod loopback_remote;
 // Re-export common auth types for workspace consumers
 pub use auth::AuthManager;
 pub use auth::CodexAuth;

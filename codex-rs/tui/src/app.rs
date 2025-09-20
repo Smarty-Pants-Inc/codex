@@ -10,6 +10,7 @@ use crate::tui::TuiEvent;
 use codex_ansi_escape::ansi_escape_line;
 use codex_core::AuthManager;
 use codex_core::ConversationManager;
+use codex_core::RemoteConversationOptions;
 use codex_core::config::Config;
 use codex_core::config::persist_model_selection;
 use codex_core::model_family::find_family_for_model;
@@ -70,12 +71,16 @@ impl App {
         initial_prompt: Option<String>,
         initial_images: Vec<PathBuf>,
         resume_selection: ResumeSelection,
+        remote: Option<RemoteConversationOptions>,
     ) -> Result<TokenUsage> {
         use tokio_stream::StreamExt;
         let (app_event_tx, mut app_event_rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(app_event_tx);
 
-        let conversation_manager = Arc::new(ConversationManager::new(auth_manager.clone()));
+        let conversation_manager = Arc::new(match remote {
+            Some(opts) => ConversationManager::with_remote(auth_manager.clone(), opts),
+            None => ConversationManager::new(auth_manager.clone()),
+        });
 
         let enhanced_keys_supported = supports_keyboard_enhancement().unwrap_or(false);
 

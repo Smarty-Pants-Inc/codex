@@ -97,6 +97,12 @@ pub enum CodexErr {
     #[error("internal error; agent loop died unexpectedly")]
     InternalAgentDied,
 
+    #[error("remote event stream closed unexpectedly")]
+    RemoteStreamClosed,
+
+    #[error("remote transport error: {0}")]
+    RemoteTransport(String),
+
     /// Sandbox error
     #[error("sandbox error: {0}")]
     Sandbox(#[from] SandboxErr),
