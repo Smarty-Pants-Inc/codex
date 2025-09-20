@@ -25,7 +25,7 @@ anyhow = "1"
 async-stream = "0.3.6"
 base64 = "0.22.1"
 chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 codex-ansi-escape = { path = "../ansi-escape" }
 codex-arg0 = { path = "../arg0" }
 codex-common = { path = "../common", features = [
