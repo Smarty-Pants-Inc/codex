@@ -740,6 +740,7 @@ dependencies = [
  "predicates",
  "serde_json",
  "shlex",
+ "smarty-codex-overlay-exec",
  "tempfile",
  "tokio",
  "tracing",
@@ -946,6 +947,7 @@ dependencies = [
  "serde",
  "serde_json",
  "shlex",
+ "smarty-codex-overlay-tui",
  "strum 0.27.2",
  "strum_macros 0.27.2",
  "supports-color",
@@ -4190,6 +4192,27 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
+
+[[package]]
+name = "smarty-codex-overlay-core"
+version = "0.1.0"
+dependencies = [
+ "codex-core",
+]
+
+[[package]]
+name = "smarty-codex-overlay-exec"
+version = "0.1.0"
+dependencies = [
+ "codex-core",
+]
+
+[[package]]
+name = "smarty-codex-overlay-tui"
+version = "0.1.0"
+dependencies = [
+ "ratatui",
+]
 
 [[package]]
 name = "smawk"

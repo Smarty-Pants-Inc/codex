@@ -1,6 +1,6 @@
 ---
 source: tui/src/chatwidget/tests.rs
-assertion_line: 648
+assertion_line: 824
 expression: visible_after
 ---
 > I’m going to scan the workspace and Cargo manifests to see build profiles and
@@ -15,9 +15,6 @@ expression: visible_after
         file-search linux-sandbox login mcp-client mcp-server mcp-types ollama
         tui; do echo "--- $d/Cargo.toml"; sed -n '1,200p' $d/Cargo.toml; echo;
         done
-
-• Explored
-  └ Read Cargo.toml
 
 > Here’s what’s driving size in this workspace’s binaries.
 

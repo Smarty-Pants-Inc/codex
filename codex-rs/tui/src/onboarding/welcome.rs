@@ -1,8 +1,9 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::Widget;
-use ratatui::style::Stylize;
-use ratatui::text::Line;
+#[allow(unused_imports)]
+use ratatui::style::{Modifier, Style};
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::WidgetRef;
 use ratatui::widgets::Wrap;
@@ -57,10 +58,15 @@ impl WidgetRef for &WelcomeWidget {
             lines.extend(frames[idx].lines().map(|l| l.into()));
             lines.push("".into());
         }
+        #[cfg(feature = "smarty-sdk")]
+        let welcome_style = smarty_codex_overlay_tui::branded_header_style();
+        #[cfg(not(feature = "smarty-sdk"))]
+        let welcome_style = Style::default();
+
         lines.push(Line::from(vec![
             "  ".into(),
-            "Welcome to ".into(),
-            "Codex".bold(),
+            Span::styled("Welcome to ", welcome_style),
+            Span::styled("Codex", welcome_style.add_modifier(Modifier::BOLD)),
             ", OpenAI's command-line coding agent".into(),
         ]));
 

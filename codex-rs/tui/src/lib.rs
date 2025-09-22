@@ -7,7 +7,6 @@ use app::App;
 use codex_core::AuthManager;
 use codex_core::BUILT_IN_OSS_MODEL_PROVIDER_ID;
 use codex_core::CodexAuth;
-use codex_core::loopback_remote::LoopbackRemote;
 use codex_core::RemoteConversationOptions;
 use codex_core::RolloutRecorder;
 use codex_core::config::Config;
@@ -18,6 +17,7 @@ use codex_core::config::find_codex_home;
 use codex_core::config::load_config_as_toml_with_cli_overrides;
 use codex_core::config::persist_model_selection;
 use codex_core::find_conversation_path_by_id_str;
+use codex_core::loopback_remote::LoopbackRemote;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::SandboxPolicy;
 use codex_ollama::DEFAULT_OSS_MODEL;
@@ -285,13 +285,16 @@ pub async fn run_main(
             Err(_) => None,
         };
 
-        (Some(RemoteConversationOptions {
-            remote_url,
-            sse_base_url,
-            token: cli.remote_token.clone(),
-            timeout: Duration::from_secs(timeout_secs),
-            trust_cert: trust_cert_bytes,
-        }), None)
+        (
+            Some(RemoteConversationOptions {
+                remote_url,
+                sse_base_url,
+                token: cli.remote_token.clone(),
+                timeout: Duration::from_secs(timeout_secs),
+                trust_cert: trust_cert_bytes,
+            }),
+            None,
+        )
     } else {
         match LoopbackRemote::start(&config).await {
             Ok(loopback) => {

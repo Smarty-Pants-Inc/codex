@@ -1,0 +1,11 @@
+[package]
+name = "smarty-codex-overlay-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+codex-core = { path = "../core" }
+
+[lib]
+path = "src/lib.rs"

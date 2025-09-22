@@ -34,6 +34,8 @@ use crate::cli::Command as ExecCommand;
 use crate::event_processor::CodexStatus;
 use crate::event_processor::EventProcessor;
 use codex_core::find_conversation_path_by_id_str;
+#[cfg(feature = "smarty-sdk")]
+use smarty_codex_overlay_exec::observer;
 
 pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()> {
     let Cli {
@@ -183,6 +185,9 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         ))
     };
 
+    #[cfg(feature = "smarty-sdk")]
+    observer::clear();
+
     if oss {
         codex_ollama::ensure_oss_ready(&config)
             .await
@@ -293,6 +298,8 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
 
     // Run the loop until the task is complete.
     while let Some(event) = rx.recv().await {
+        #[cfg(feature = "smarty-sdk")]
+        observer::observe(&event);
         let shutdown: CodexStatus = event_processor.process_event(event);
         match shutdown {
             CodexStatus::Running => continue,

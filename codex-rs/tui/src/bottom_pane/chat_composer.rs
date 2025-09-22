@@ -1,5 +1,4 @@
 use codex_core::protocol::TokenUsageInfo;
-use codex_protocol::num_format::format_si_suffix;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
@@ -46,6 +45,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
+use token_footer::{format_with_thousands, percent_remaining};
 
 /// If the pasted content exceeds this number of characters, replace it with a
 /// placeholder in the UI.
@@ -1307,25 +1307,25 @@ impl WidgetRef for ChatComposer {
                     hint.push(
                         Span::from(format!(
                             "{} tokens used",
-                            format_si_suffix(token_usage.blended_total())
+                            format_with_thousands(token_usage.blended_total())
                         ))
                         .style(Style::default().add_modifier(Modifier::DIM)),
                     );
-                    let last_token_usage = &token_usage_info.last_token_usage;
                     if let Some(context_window) = token_usage_info.model_context_window {
-                        let percent_remaining: u8 = if context_window > 0 {
-                            last_token_usage.percent_of_context_window_remaining(context_window)
+                        let tokens_in_context = token_usage.tokens_in_context_window();
+                        let context_percent: u8 = if context_window > 0 {
+                            percent_remaining(context_window, tokens_in_context)
                         } else {
                             100
                         };
-                        let context_style = if percent_remaining < 20 {
+                        let context_style = if context_percent < 20 {
                             Style::default().fg(Color::Yellow)
                         } else {
                             Style::default().add_modifier(Modifier::DIM)
                         };
                         hint.push("   ".into());
                         hint.push(Span::styled(
-                            format!("{percent_remaining}% context left"),
+                            format!("{context_percent}% context left"),
                             context_style,
                         ));
                     }

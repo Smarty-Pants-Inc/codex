@@ -17,6 +17,9 @@ members = [
     "ollama",
     "protocol",
     "protocol-ts", "token-footer",
+    "overlay-core",
+    "overlay-exec",
+    "overlay-tui",
     "tui",
 ]
 resolver = "2"

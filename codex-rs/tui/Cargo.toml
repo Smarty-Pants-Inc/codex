@@ -12,6 +12,8 @@ name = "codex_tui"
 path = "src/lib.rs"
 
 [features]
+default = ["smarty-sdk"]
+smarty-sdk = ["smarty-codex-overlay-tui"]
 # Enable vt100-based tests (emulator) when running with `--features vt100-tests`.
 vt100-tests = []
 # Gate verbose debug logging inside the TUI implementation.
@@ -38,6 +40,7 @@ codex-file-search = { path = "../file-search" }
 codex-login = { path = "../login" }
 codex-ollama = { path = "../ollama" }
 codex-protocol = { path = "../protocol" }
+smarty-codex-overlay-tui = { path = "../overlay-tui", optional = true }
 token-footer = { path = "../token-footer" }
 color-eyre = "0.6.3"
 crossterm = { version = "0.28.1", features = [
