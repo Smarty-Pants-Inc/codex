@@ -682,7 +682,9 @@ dependencies = [
  "libc",
  "maplit",
  "mcp-types",
+ "model-id",
  "native-tls",
+ "once_cell",
  "openssl-sys",
  "os_info",
  "portable-pty",
@@ -701,6 +703,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.16",
  "time",
+ "token-footer",
  "tokio",
  "tokio-test",
  "tokio-tungstenite",
@@ -887,6 +890,7 @@ dependencies = [
  "strum_macros 0.27.2",
  "sys-locale",
  "tempfile",
+ "token-footer",
  "tracing",
  "ts-rs",
  "uuid",
@@ -947,6 +951,7 @@ dependencies = [
  "supports-color",
  "tempfile",
  "textwrap 0.16.2",
+ "token-footer",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -2813,6 +2818,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "model-id"
+version = "0.0.0"
+
+[[package]]
 name = "moxcms"
 version = "0.7.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4567,6 +4576,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "thousands"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3bf63baf9f5039dadc247375c29eb13706706cfde997d0330d05aa63a77d8820"
+
+[[package]]
 name = "thread_local"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4651,6 +4666,13 @@ checksum = "5d4f6d1145dcb577acf783d4e601bc1d76a13337bb54e6233add580b07344c8b"
 dependencies = [
  "displaydoc",
  "zerovec",
+]
+
+[[package]]
+name = "token-footer"
+version = "0.1.0"
+dependencies = [
+ "thousands",
 ]
 
 [[package]]

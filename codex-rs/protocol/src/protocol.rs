@@ -18,6 +18,7 @@ use crate::message_history::HistoryEntry;
 use crate::models::ContentItem;
 use crate::models::ResponseItem;
 use crate::num_format::format_with_separators;
+use token_footer::{percent_remaining, tokens_in_context_window};
 use crate::parse_command::ParsedCommand;
 use crate::plan_tool::UpdatePlanArgs;
 use mcp_types::CallToolResult;
@@ -591,9 +592,6 @@ pub struct TokenCountEvent {
     pub info: Option<TokenUsageInfo>,
 }
 
-// Includes prompts, tools and space to call compact.
-const BASELINE_TOKENS: u64 = 12000;
-
 impl TokenUsage {
     pub fn is_zero(&self) -> bool {
         self.total_tokens == 0
@@ -617,8 +615,7 @@ impl TokenUsage {
     /// We approximate this here by subtracting reasoning output tokens from the total.
     /// This will be off for the current turn and pending function calls.
     pub fn tokens_in_context_window(&self) -> u64 {
-        self.total_tokens
-            .saturating_sub(self.reasoning_output_tokens)
+        tokens_in_context_window(self.total_tokens, self.reasoning_output_tokens)
     }
 
     /// Estimate the remaining user-controllable percentage of the model's context window.
@@ -632,16 +629,7 @@ impl TokenUsage {
     /// baseline, so immediately after the first prompt the UI shows 100% left
     /// and trends toward 0% as the user fills the effective window.
     pub fn percent_of_context_window_remaining(&self, context_window: u64) -> u8 {
-        if context_window <= BASELINE_TOKENS {
-            return 0;
-        }
-
-        let effective_window = context_window - BASELINE_TOKENS;
-        let used = self
-            .tokens_in_context_window()
-            .saturating_sub(BASELINE_TOKENS);
-        let remaining = effective_window.saturating_sub(used);
-        ((remaining as f32 / effective_window as f32) * 100.0).clamp(0.0, 100.0) as u8
+        percent_remaining(context_window, self.tokens_in_context_window())
     }
 
     /// In-place element-wise sum of token counts.

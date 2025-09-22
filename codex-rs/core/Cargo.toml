@@ -23,6 +23,9 @@ codex-file-search = { path = "../file-search" }
 codex-mcp-client = { path = "../mcp-client" }
 codex-protocol = { path = "../protocol" }
 dirs = "6"
+model-id = { path = "../model-id" }
+once_cell = "1.19"
+token-footer = { path = "../token-footer" }
 env-flags = "0.1.1"
 eventsource-stream = "0.2.3"
 futures = "0.3"
