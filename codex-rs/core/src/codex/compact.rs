@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use super::AgentTask;
+use super::MutexExt;
 use super::Session;
 use super::TurnContext;
 use super::get_last_assistant_message_from_turn;
@@ -36,7 +37,7 @@ struct HistoryBridgeTemplate<'a> {
     summary_text: &'a str,
 }
 
-pub(super) async fn spawn_compact_task(
+pub(super) fn spawn_compact_task(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
     sub_id: String,
@@ -49,7 +50,7 @@ pub(super) async fn spawn_compact_task(
         input,
         SUMMARIZATION_PROMPT.to_string(),
     );
-    sess.set_task(task).await;
+    sess.set_task(task);
 }
 
 pub(super) async fn run_inline_auto_compact_task(
@@ -78,29 +79,15 @@ pub(super) async fn run_compact_task(
     input: Vec<InputItem>,
     compact_instructions: String,
 ) {
-    let start_event = Event {
-        id: sub_id.clone(),
-        msg: EventMsg::TaskStarted(TaskStartedEvent {
-            model_context_window: turn_context.client.get_model_context_window(),
-        }),
-    };
-    sess.send_event(start_event).await;
     run_compact_task_inner(
-        sess.clone(),
+        sess,
         turn_context,
-        sub_id.clone(),
+        sub_id,
         input,
         compact_instructions,
         true,
     )
     .await;
-    let event = Event {
-        id: sub_id,
-        msg: EventMsg::TaskComplete(TaskCompleteEvent {
-            last_agent_message: None,
-        }),
-    };
-    sess.send_event(event).await;
 }
 
 async fn run_compact_task_inner(
@@ -111,11 +98,18 @@ async fn run_compact_task_inner(
     compact_instructions: String,
     remove_task_on_completion: bool,
 ) {
+    let model_context_window = turn_context.client.get_model_context_window();
+    let start_event = Event {
+        id: sub_id.clone(),
+        msg: EventMsg::TaskStarted(TaskStartedEvent {
+            model_context_window,
+        }),
+    };
+    sess.send_event(start_event).await;
+
     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
     let instructions_override = compact_instructions;
-    let turn_input = sess
-        .turn_input_with_history(vec![initial_input_for_turn.clone().into()])
-        .await;
+    let turn_input = sess.turn_input_with_history(vec![initial_input_for_turn.clone().into()]);
 
     let prompt = Prompt {
         input: turn_input,
@@ -174,10 +168,10 @@ async fn run_compact_task_inner(
     }
 
     if remove_task_on_completion {
-        sess.remove_task(&sub_id).await;
+        sess.remove_task(&sub_id);
     }
     let history_snapshot = {
-        let state = sess.state.lock().await;
+        let state = sess.state.lock_unchecked();
         state.history.contents()
     };
     let summary_text = get_last_assistant_message_from_turn(&history_snapshot).unwrap_or_default();
@@ -185,7 +179,7 @@ async fn run_compact_task_inner(
     let initial_context = sess.build_initial_context(turn_context.as_ref());
     let new_history = build_compacted_history(initial_context, &user_messages, &summary_text);
     {
-        let mut state = sess.state.lock().await;
+        let mut state = sess.state.lock_unchecked();
         state.history.replace(new_history);
     }
 
@@ -201,9 +195,16 @@ async fn run_compact_task_inner(
         }),
     };
     sess.send_event(event).await;
+    let event = Event {
+        id: sub_id.clone(),
+        msg: EventMsg::TaskComplete(TaskCompleteEvent {
+            last_agent_message: None,
+        }),
+    };
+    sess.send_event(event).await;
 }
 
-pub fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
+fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
     let mut pieces = Vec::new();
     for item in content {
         match item {
@@ -235,7 +236,7 @@ pub(crate) fn collect_user_messages(items: &[ResponseItem]) -> Vec<String> {
         .collect()
 }
 
-pub fn is_session_prefix_message(text: &str) -> bool {
+fn is_session_prefix_message(text: &str) -> bool {
     matches!(
         InputMessageKind::from(("user", text)),
         InputMessageKind::UserInstructions | InputMessageKind::EnvironmentContext
@@ -289,7 +290,7 @@ async fn drain_to_completed(
         };
         match event {
             Ok(ResponseEvent::OutputItemDone(item)) => {
-                let mut state = sess.state.lock().await;
+                let mut state = sess.state.lock_unchecked();
                 state.history.record_items(std::slice::from_ref(&item));
             }
             Ok(ResponseEvent::Completed { .. }) => {

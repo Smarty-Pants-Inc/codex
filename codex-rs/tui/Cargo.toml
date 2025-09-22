@@ -25,7 +25,7 @@ anyhow = "1"
 async-stream = "0.3.6"
 base64 = "0.22.1"
 chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 codex-ansi-escape = { path = "../ansi-escape" }
 codex-arg0 = { path = "../arg0" }
 codex-common = { path = "../common", features = [
@@ -38,6 +38,7 @@ codex-file-search = { path = "../file-search" }
 codex-login = { path = "../login" }
 codex-ollama = { path = "../ollama" }
 codex-protocol = { path = "../protocol" }
+token-footer = { path = "../token-footer" }
 color-eyre = "0.6.3"
 crossterm = { version = "0.28.1", features = [
     "bracketed-paste",
@@ -85,7 +86,6 @@ unicode-segmentation = "1.12.0"
 unicode-width = "0.1"
 url = "2"
 pathdiff = "0.2"
-owo-colors = "4.2.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

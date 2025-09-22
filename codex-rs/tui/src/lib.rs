@@ -4,10 +4,11 @@
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 #![deny(clippy::disallowed_methods)]
 use app::App;
-pub use app::AppExitInfo;
 use codex_core::AuthManager;
 use codex_core::BUILT_IN_OSS_MODEL_PROVIDER_ID;
 use codex_core::CodexAuth;
+use codex_core::loopback_remote::LoopbackRemote;
+use codex_core::RemoteConversationOptions;
 use codex_core::RolloutRecorder;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
@@ -24,16 +25,18 @@ use codex_protocol::config_types::SandboxMode;
 use codex_protocol::mcp_protocol::AuthMode;
 use std::fs::OpenOptions;
 use std::path::PathBuf;
+use std::time::Duration;
 use tracing::error;
 use tracing_appender::non_blocking;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
+use url::Url;
 
 mod app;
 mod app_backtrack;
 mod app_event;
 mod app_event_sender;
-mod ascii_animation;
+mod backtrack_helpers;
 mod bottom_pane;
 mod chatwidget;
 mod citation_regex;
@@ -55,7 +58,6 @@ mod markdown_stream;
 mod new_model_popup;
 pub mod onboarding;
 mod pager_overlay;
-mod rate_limits_view;
 mod render;
 mod resume_picker;
 mod session_log;
@@ -87,7 +89,7 @@ use codex_core::internal_storage::InternalStorage;
 pub async fn run_main(
     cli: Cli,
     codex_linux_sandbox_exe: Option<PathBuf>,
-) -> std::io::Result<AppExitInfo> {
+) -> std::io::Result<codex_core::protocol::TokenUsage> {
     let (sandbox_mode, approval_policy) = if cli.full_auto {
         (
             Some(SandboxMode::WorkspaceWrite),
@@ -200,6 +202,109 @@ pub async fn run_main(
 
     let internal_storage = InternalStorage::load(&config.codex_home);
 
+    let remote_mode_env = std::env::var("SMARTY_TUI_MODE").ok();
+    let force_remote = remote_mode_env
+        .as_ref()
+        .map(|value| value.eq_ignore_ascii_case("remote"))
+        .unwrap_or(false);
+
+    let remote_requested = cli.remote.is_some() || force_remote;
+    let (remote_options, _loopback_guard) = if remote_requested {
+        let remote_str = match &cli.remote {
+            Some(value) => value.clone(),
+            None => {
+                #[allow(clippy::print_stderr)]
+                {
+                    eprintln!(
+                        "SMARTY_TUI_MODE=remote requires --remote or SMARTY_TUI_REMOTE to be set"
+                    );
+                }
+                std::process::exit(1);
+            }
+        };
+
+        let remote_url = match Url::parse(&remote_str) {
+            Ok(url) => url,
+            Err(err) => {
+                #[allow(clippy::print_stderr)]
+                {
+                    eprintln!("Invalid remote URL '{remote_str}': {err}");
+                }
+                std::process::exit(1);
+            }
+        };
+
+        match remote_url.scheme() {
+            "ws" | "wss" | "tcp" => {}
+            other => {
+                #[allow(clippy::print_stderr)]
+                {
+                    eprintln!("Unsupported remote scheme '{other}'. Use ws://, wss://, or tcp://");
+                }
+                std::process::exit(1);
+            }
+        }
+
+        let sse_base_url = if let Some(sse) = cli.sse_base.clone() {
+            match Url::parse(&sse) {
+                Ok(url) => url,
+                Err(err) => {
+                    #[allow(clippy::print_stderr)]
+                    {
+                        eprintln!("Invalid --sse-base URL '{sse}': {err}");
+                    }
+                    std::process::exit(1);
+                }
+            }
+        } else if let Some(derived) = derive_default_sse_base(&remote_url) {
+            derived
+        } else {
+            #[allow(clippy::print_stderr)]
+            {
+                eprintln!(
+                    "--sse-base is required when using remote scheme '{}'",
+                    remote_url.scheme()
+                );
+            }
+            std::process::exit(1);
+        };
+
+        let timeout_secs = cli.remote_timeout_secs.unwrap_or(30).max(1);
+
+        let trust_cert_bytes = match std::env::var("SMARTY_TUI_TRUST_CERT") {
+            Ok(path) => match std::fs::read(&path) {
+                Ok(bytes) => Some(bytes),
+                Err(err) => {
+                    #[allow(clippy::print_stderr)]
+                    {
+                        eprintln!("Failed to read SMARTY_TUI_TRUST_CERT at {}: {err}", path);
+                    }
+                    std::process::exit(1);
+                }
+            },
+            Err(_) => None,
+        };
+
+        (Some(RemoteConversationOptions {
+            remote_url,
+            sse_base_url,
+            token: cli.remote_token.clone(),
+            timeout: Duration::from_secs(timeout_secs),
+            trust_cert: trust_cert_bytes,
+        }), None)
+    } else {
+        match LoopbackRemote::start(&config).await {
+            Ok(loopback) => {
+                let options = loopback.options().clone();
+                (Some(options), Some(loopback))
+            }
+            Err(err) => {
+                tracing::warn!(target: "remote", "Loopback remote unavailable: {err}");
+                (None, None)
+            }
+        }
+    };
+
     let log_dir = codex_core::config::log_dir(&config)?;
     std::fs::create_dir_all(&log_dir)?;
     // Open (or create) your log file, appending to it.
@@ -248,6 +353,7 @@ pub async fn run_main(
         internal_storage,
         active_profile,
         should_show_trust_screen,
+        remote_options,
     )
     .await
     .map_err(|err| std::io::Error::other(err.to_string()))
@@ -259,7 +365,8 @@ async fn run_ratatui_app(
     mut internal_storage: InternalStorage,
     active_profile: Option<String>,
     should_show_trust_screen: bool,
-) -> color_eyre::Result<AppExitInfo> {
+    remote_options: Option<RemoteConversationOptions>,
+) -> color_eyre::Result<codex_core::protocol::TokenUsage> {
     let mut config = config;
     color_eyre::install()?;
 
@@ -371,10 +478,7 @@ async fn run_ratatui_app(
             resume_picker::ResumeSelection::Exit => {
                 restore();
                 session_log::log_session_end();
-                return Ok(AppExitInfo {
-                    token_usage: codex_core::protocol::TokenUsage::default(),
-                    conversation_id: None,
-                });
+                return Ok(codex_core::protocol::TokenUsage::default());
             }
             other => other,
         }
@@ -422,6 +526,7 @@ async fn run_ratatui_app(
         prompt,
         images,
         resume_selection,
+        remote_options,
     )
     .await;
 
@@ -430,6 +535,27 @@ async fn run_ratatui_app(
     session_log::log_session_end();
     // ignore error when collecting usage – report underlying error instead
     app_result
+}
+
+fn derive_default_sse_base(remote: &Url) -> Option<Url> {
+    match remote.scheme() {
+        "ws" | "wss" => {
+            let mut derived = remote.clone();
+            let new_scheme = if remote.scheme() == "wss" {
+                "https"
+            } else {
+                "http"
+            };
+            derived.set_scheme(new_scheme).ok()?;
+            if derived.path() != "/" {
+                derived.set_path("/");
+            }
+            derived.set_query(None);
+            derived.set_fragment(None);
+            Some(derived)
+        }
+        _ => None,
+    }
 }
 
 #[expect(

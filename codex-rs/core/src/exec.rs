@@ -3,7 +3,6 @@ use std::os::unix::process::ExitStatusExt;
 
 use std::collections::HashMap;
 use std::io;
-use std::path::Path;
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::time::Duration;
@@ -45,7 +44,7 @@ const AGGREGATE_BUFFER_INITIAL_CAPACITY: usize = 8 * 1024; // 8 KiB
 /// Aggregation still collects full output; only the live event stream is capped.
 pub(crate) const MAX_EXEC_OUTPUT_DELTAS_PER_CALL: usize = 10_000;
 
-#[derive(Clone, Debug)]
+#[derive(Debug, Clone)]
 pub struct ExecParams {
     pub command: Vec<String>,
     pub cwd: PathBuf,
@@ -83,7 +82,6 @@ pub async fn process_exec_tool_call(
     params: ExecParams,
     sandbox_type: SandboxType,
     sandbox_policy: &SandboxPolicy,
-    sandbox_cwd: &Path,
     codex_linux_sandbox_exe: &Option<PathBuf>,
     stdout_stream: Option<StdoutStream>,
 ) -> Result<ExecToolCallOutput> {
@@ -96,16 +94,12 @@ pub async fn process_exec_tool_call(
         SandboxType::None => exec(params, sandbox_policy, stdout_stream.clone()).await,
         SandboxType::MacosSeatbelt => {
             let ExecParams {
-                command,
-                cwd: command_cwd,
-                env,
-                ..
+                command, cwd, env, ..
             } = params;
             let child = spawn_command_under_seatbelt(
                 command,
-                command_cwd,
                 sandbox_policy,
-                sandbox_cwd,
+                cwd,
                 StdioPolicy::RedirectForShellTool,
                 env,
             )
@@ -114,10 +108,7 @@ pub async fn process_exec_tool_call(
         }
         SandboxType::LinuxSeccomp => {
             let ExecParams {
-                command,
-                cwd: command_cwd,
-                env,
-                ..
+                command, cwd, env, ..
             } = params;
 
             let codex_linux_sandbox_exe = codex_linux_sandbox_exe
@@ -126,9 +117,8 @@ pub async fn process_exec_tool_call(
             let child = spawn_command_under_linux_sandbox(
                 codex_linux_sandbox_exe,
                 command,
-                command_cwd,
                 sandbox_policy,
-                sandbox_cwd,
+                cwd,
                 StdioPolicy::RedirectForShellTool,
                 env,
             )

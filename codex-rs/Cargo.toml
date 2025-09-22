@@ -13,10 +13,10 @@ members = [
     "login",
     "mcp-client",
     "mcp-server",
-    "mcp-types",
+    "mcp-types", "model-id",
     "ollama",
     "protocol",
-    "protocol-ts",
+    "protocol-ts", "token-footer",
     "tui",
 ]
 resolver = "2"

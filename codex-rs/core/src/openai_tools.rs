@@ -7,6 +7,8 @@ use std::collections::HashMap;
 
 use crate::model_family::ModelFamily;
 use crate::plan_tool::PLAN_TOOL;
+use crate::protocol::AskForApproval;
+use crate::protocol::SandboxPolicy;
 use crate::tool_apply_patch::ApplyPatchToolType;
 use crate::tool_apply_patch::create_apply_patch_freeform_tool;
 use crate::tool_apply_patch::create_apply_patch_json_tool;
@@ -55,9 +57,10 @@ pub(crate) enum OpenAiTool {
 
 #[derive(Debug, Clone)]
 pub enum ConfigShellToolType {
-    Default,
-    Local,
-    Streamable,
+    DefaultShell,
+    ShellWithRequest { sandbox_policy: SandboxPolicy },
+    LocalShell,
+    StreamableShell,
 }
 
 #[derive(Debug, Clone)]
@@ -72,6 +75,8 @@ pub(crate) struct ToolsConfig {
 
 pub(crate) struct ToolsConfigParams<'a> {
     pub(crate) model_family: &'a ModelFamily,
+    pub(crate) approval_policy: AskForApproval,
+    pub(crate) sandbox_policy: SandboxPolicy,
     pub(crate) include_plan_tool: bool,
     pub(crate) include_apply_patch_tool: bool,
     pub(crate) include_web_search_request: bool,
@@ -84,6 +89,8 @@ impl ToolsConfig {
     pub fn new(params: &ToolsConfigParams) -> Self {
         let ToolsConfigParams {
             model_family,
+            approval_policy,
+            sandbox_policy,
             include_plan_tool,
             include_apply_patch_tool,
             include_web_search_request,
@@ -91,13 +98,18 @@ impl ToolsConfig {
             include_view_image_tool,
             experimental_unified_exec_tool,
         } = params;
-        let shell_type = if *use_streamable_shell_tool {
-            ConfigShellToolType::Streamable
+        let mut shell_type = if *use_streamable_shell_tool {
+            ConfigShellToolType::StreamableShell
         } else if model_family.uses_local_shell_tool {
-            ConfigShellToolType::Local
+            ConfigShellToolType::LocalShell
         } else {
-            ConfigShellToolType::Default
+            ConfigShellToolType::DefaultShell
         };
+        if matches!(approval_policy, AskForApproval::OnRequest) && !use_streamable_shell_tool {
+            shell_type = ConfigShellToolType::ShellWithRequest {
+                sandbox_policy: sandbox_policy.clone(),
+            }
+        }
 
         let apply_patch_tool_type = match model_family.apply_patch_tool_type {
             Some(ApplyPatchToolType::Freeform) => Some(ApplyPatchToolType::Freeform),
@@ -158,6 +170,40 @@ pub(crate) enum JsonSchema {
     },
 }
 
+fn create_shell_tool() -> OpenAiTool {
+    let mut properties = BTreeMap::new();
+    properties.insert(
+        "command".to_string(),
+        JsonSchema::Array {
+            items: Box::new(JsonSchema::String { description: None }),
+            description: Some("The command to execute".to_string()),
+        },
+    );
+    properties.insert(
+        "workdir".to_string(),
+        JsonSchema::String {
+            description: Some("The working directory to execute the command in".to_string()),
+        },
+    );
+    properties.insert(
+        "timeout_ms".to_string(),
+        JsonSchema::Number {
+            description: Some("The timeout for the command in milliseconds".to_string()),
+        },
+    );
+
+    OpenAiTool::Function(ResponsesApiTool {
+        name: "shell".to_string(),
+        description: "Runs a shell command and returns its output".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["command".to_string()]),
+            additional_properties: Some(false),
+        },
+    })
+}
+
 fn create_unified_exec_tool() -> OpenAiTool {
     let mut properties = BTreeMap::new();
     properties.insert(
@@ -205,7 +251,7 @@ fn create_unified_exec_tool() -> OpenAiTool {
     })
 }
 
-fn create_shell_tool() -> OpenAiTool {
+fn create_shell_tool_for_sandbox(sandbox_policy: &SandboxPolicy) -> OpenAiTool {
     let mut properties = BTreeMap::new();
     properties.insert(
         "command".to_string(),
@@ -227,18 +273,20 @@ fn create_shell_tool() -> OpenAiTool {
         },
     );
 
-    properties.insert(
+    if !matches!(sandbox_policy, SandboxPolicy::DangerFullAccess) {
+        properties.insert(
         "with_escalated_permissions".to_string(),
         JsonSchema::Boolean {
             description: Some("Whether to request escalated permissions. Set to true if command needs to be run without sandbox restrictions".to_string()),
         },
     );
-    properties.insert(
+        properties.insert(
         "justification".to_string(),
         JsonSchema::String {
             description: Some("Only set if with_escalated_permissions is true. 1-sentence explanation of why we want to run this command.".to_string()),
         },
     );
+    }
 
     OpenAiTool::Function(ResponsesApiTool {
         name: "shell".to_string(),
@@ -285,7 +333,7 @@ pub(crate) struct ApplyPatchToolArgs {
 /// Responses API:
 /// https://platform.openai.com/docs/guides/function-calling?api-mode=responses
 pub fn create_tools_json_for_responses_api(
-    tools: &[OpenAiTool],
+    tools: &Vec<OpenAiTool>,
 ) -> crate::error::Result<Vec<serde_json::Value>> {
     let mut tools_json = Vec::new();
 
@@ -300,7 +348,7 @@ pub fn create_tools_json_for_responses_api(
 /// Chat Completions API:
 /// https://platform.openai.com/docs/guides/function-calling?api-mode=chat
 pub(crate) fn create_tools_json_for_chat_completions_api(
-    tools: &[OpenAiTool],
+    tools: &Vec<OpenAiTool>,
 ) -> crate::error::Result<Vec<serde_json::Value>> {
     // We start with the JSON for the Responses API and than rewrite it to match
     // the chat completions tool call format.
@@ -489,13 +537,16 @@ pub(crate) fn get_openai_tools(
         tools.push(create_unified_exec_tool());
     } else {
         match &config.shell_type {
-            ConfigShellToolType::Default => {
+            ConfigShellToolType::DefaultShell => {
                 tools.push(create_shell_tool());
             }
-            ConfigShellToolType::Local => {
+            ConfigShellToolType::ShellWithRequest { sandbox_policy } => {
+                tools.push(create_shell_tool_for_sandbox(sandbox_policy));
+            }
+            ConfigShellToolType::LocalShell => {
                 tools.push(OpenAiTool::LocalShell {});
             }
-            ConfigShellToolType::Streamable => {
+            ConfigShellToolType::StreamableShell => {
                 tools.push(OpenAiTool::Function(
                     crate::exec_command::create_exec_command_tool_for_responses_api(),
                 ));
@@ -585,6 +636,8 @@ mod tests {
             .expect("codex-mini-latest should be a valid model family");
         let config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::ReadOnly,
             include_plan_tool: true,
             include_apply_patch_tool: false,
             include_web_search_request: true,
@@ -605,6 +658,8 @@ mod tests {
         let model_family = find_family_for_model("o3").expect("o3 should be a valid model family");
         let config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::ReadOnly,
             include_plan_tool: true,
             include_apply_patch_tool: false,
             include_web_search_request: true,
@@ -625,6 +680,8 @@ mod tests {
         let model_family = find_family_for_model("o3").expect("o3 should be a valid model family");
         let config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::ReadOnly,
             include_plan_tool: false,
             include_apply_patch_tool: false,
             include_web_search_request: true,
@@ -729,6 +786,8 @@ mod tests {
         let model_family = find_family_for_model("o3").expect("o3 should be a valid model family");
         let config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::ReadOnly,
             include_plan_tool: false,
             include_apply_patch_tool: false,
             include_web_search_request: false,
@@ -805,6 +864,8 @@ mod tests {
         let model_family = find_family_for_model("o3").expect("o3 should be a valid model family");
         let config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::ReadOnly,
             include_plan_tool: false,
             include_apply_patch_tool: false,
             include_web_search_request: true,
@@ -866,6 +927,8 @@ mod tests {
         let model_family = find_family_for_model("o3").expect("o3 should be a valid model family");
         let config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::ReadOnly,
             include_plan_tool: false,
             include_apply_patch_tool: false,
             include_web_search_request: true,
@@ -922,6 +985,8 @@ mod tests {
         let model_family = find_family_for_model("o3").expect("o3 should be a valid model family");
         let config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::ReadOnly,
             include_plan_tool: false,
             include_apply_patch_tool: false,
             include_web_search_request: true,
@@ -981,6 +1046,8 @@ mod tests {
         let model_family = find_family_for_model("o3").expect("o3 should be a valid model family");
         let config = ToolsConfig::new(&ToolsConfigParams {
             model_family: &model_family,
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::ReadOnly,
             include_plan_tool: false,
             include_apply_patch_tool: false,
             include_web_search_request: true,
@@ -1033,8 +1100,14 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_tool() {
-        let tool = super::create_shell_tool();
+    fn test_shell_tool_for_sandbox_workspace_write() {
+        let sandbox_policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec!["workspace".into()],
+            network_access: false,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
+        let tool = super::create_shell_tool_for_sandbox(&sandbox_policy);
         let OpenAiTool::Function(ResponsesApiTool {
             description, name, ..
         }) = &tool
@@ -1045,5 +1118,34 @@ mod tests {
 
         let expected = "Runs a shell command and returns its output.";
         assert_eq!(description, expected);
+    }
+
+    #[test]
+    fn test_shell_tool_for_sandbox_readonly() {
+        let tool = super::create_shell_tool_for_sandbox(&SandboxPolicy::ReadOnly);
+        let OpenAiTool::Function(ResponsesApiTool {
+            description, name, ..
+        }) = &tool
+        else {
+            panic!("expected function tool");
+        };
+        assert_eq!(name, "shell");
+
+        let expected = "Runs a shell command and returns its output.";
+        assert_eq!(description, expected);
+    }
+
+    #[test]
+    fn test_shell_tool_for_sandbox_danger_full_access() {
+        let tool = super::create_shell_tool_for_sandbox(&SandboxPolicy::DangerFullAccess);
+        let OpenAiTool::Function(ResponsesApiTool {
+            description, name, ..
+        }) = &tool
+        else {
+            panic!("expected function tool");
+        };
+        assert_eq!(name, "shell");
+
+        assert_eq!(description, "Runs a shell command and returns its output.");
     }
 }

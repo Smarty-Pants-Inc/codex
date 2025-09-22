@@ -1,0 +1,9 @@
+[package]
+name = "model-id"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -171,8 +171,6 @@ async fn python_getpwuid_works_under_seatbelt() {
 
     // ReadOnly is sufficient here since we are only exercising user lookup.
     let policy = SandboxPolicy::ReadOnly;
-    let command_cwd = std::env::current_dir().expect("getcwd");
-    let sandbox_cwd = command_cwd.clone();
 
     let mut child = spawn_command_under_seatbelt(
         vec![
@@ -181,9 +179,8 @@ async fn python_getpwuid_works_under_seatbelt() {
             // Print the passwd struct; success implies lookup worked.
             "import pwd, os; print(pwd.getpwuid(os.getuid()))".to_string(),
         ],
-        command_cwd,
         &policy,
-        sandbox_cwd.as_path(),
+        std::env::current_dir().expect("should be able to get current dir"),
         StdioPolicy::RedirectForShellTool,
         HashMap::new(),
     )
@@ -219,16 +216,13 @@ fn create_test_scenario(tmp: &TempDir) -> TestScenario {
 /// Note that `path` must be absolute.
 async fn touch(path: &Path, policy: &SandboxPolicy) -> bool {
     assert!(path.is_absolute(), "Path must be absolute: {path:?}");
-    let command_cwd = std::env::current_dir().expect("getcwd");
-    let sandbox_cwd = command_cwd.clone();
     let mut child = spawn_command_under_seatbelt(
         vec![
             "/usr/bin/touch".to_string(),
             path.to_string_lossy().to_string(),
         ],
-        command_cwd,
         policy,
-        sandbox_cwd.as_path(),
+        std::env::current_dir().expect("should be able to get current dir"),
         StdioPolicy::RedirectForShellTool,
         HashMap::new(),
     )

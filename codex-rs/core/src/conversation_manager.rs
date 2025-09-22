@@ -3,8 +3,6 @@ use crate::CodexAuth;
 use crate::codex::Codex;
 use crate::codex::CodexSpawnOk;
 use crate::codex::INITIAL_SUBMIT_ID;
-use crate::codex::compact::content_items_to_text;
-use crate::codex::compact::is_session_prefix_message;
 use crate::codex_conversation::CodexConversation;
 use crate::config::Config;
 use crate::error::CodexErr;
@@ -12,6 +10,7 @@ use crate::error::Result as CodexResult;
 use crate::protocol::Event;
 use crate::protocol::EventMsg;
 use crate::protocol::SessionConfiguredEvent;
+use crate::remote::{RemoteSpawnParams, spawn_remote_conversation};
 use crate::rollout::RolloutRecorder;
 use codex_protocol::mcp_protocol::ConversationId;
 use codex_protocol::models::ResponseItem;
@@ -20,7 +19,10 @@ use codex_protocol::protocol::RolloutItem;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::RwLock;
+use url::Url;
+use uuid::Uuid;
 
 /// Represents a newly created Codex conversation, including the first event
 /// (which is [`EventMsg::SessionConfigured`]).
@@ -35,14 +37,12 @@ pub struct NewConversation {
 pub struct ConversationManager {
     conversations: Arc<RwLock<HashMap<ConversationId, Arc<CodexConversation>>>>,
     auth_manager: Arc<AuthManager>,
+    remote: Option<RemoteConversationOptions>,
 }
 
 impl ConversationManager {
     pub fn new(auth_manager: Arc<AuthManager>) -> Self {
-        Self {
-            conversations: Arc::new(RwLock::new(HashMap::new())),
-            auth_manager,
-        }
+        Self::with_options(auth_manager, None)
     }
 
     /// Construct with a dummy AuthManager containing the provided CodexAuth.
@@ -51,9 +51,28 @@ impl ConversationManager {
         Self::new(crate::AuthManager::from_auth_for_testing(auth))
     }
 
+    pub fn with_remote(auth_manager: Arc<AuthManager>, remote: RemoteConversationOptions) -> Self {
+        Self::with_options(auth_manager, Some(remote))
+    }
+
+    fn with_options(
+        auth_manager: Arc<AuthManager>,
+        remote: Option<RemoteConversationOptions>,
+    ) -> Self {
+        Self {
+            conversations: Arc::new(RwLock::new(HashMap::new())),
+            auth_manager,
+            remote,
+        }
+    }
+
     pub async fn new_conversation(&self, config: Config) -> CodexResult<NewConversation> {
-        self.spawn_conversation(config, self.auth_manager.clone())
-            .await
+        if let Some(remote) = &self.remote {
+            self.spawn_remote_conversation(config, remote.clone()).await
+        } else {
+            self.spawn_conversation(config, self.auth_manager.clone())
+                .await
+        }
     }
 
     async fn spawn_conversation(
@@ -87,7 +106,7 @@ impl ConversationManager {
             }
         };
 
-        let conversation = Arc::new(CodexConversation::new(codex));
+        let conversation = Arc::new(CodexConversation::new_local(codex));
         self.conversations
             .write()
             .await
@@ -136,19 +155,19 @@ impl ConversationManager {
         self.conversations.write().await.remove(conversation_id)
     }
 
-    /// Fork an existing conversation by taking messages up to the given position
-    /// (not including the message at the given position) and starting a new
+    /// Fork an existing conversation by dropping the last `drop_last_messages`
+    /// user/assistant messages from its transcript and starting a new
     /// conversation with identical configuration (unless overridden by the
     /// caller's `config`). The new conversation will have a fresh id.
     pub async fn fork_conversation(
         &self,
-        nth_user_message: usize,
+        num_messages_to_drop: usize,
         config: Config,
         path: PathBuf,
     ) -> CodexResult<NewConversation> {
         // Compute the prefix up to the cut point.
         let history = RolloutRecorder::get_rollout_history(&path).await?;
-        let history = truncate_before_nth_user_message(history, nth_user_message);
+        let history = truncate_after_dropping_last_messages(history, num_messages_to_drop);
 
         // Spawn a new conversation with the computed initial history.
         let auth_manager = self.auth_manager.clone();
@@ -161,30 +180,33 @@ impl ConversationManager {
     }
 }
 
-/// Return a prefix of `items` obtained by cutting strictly before the nth user message
-/// (0-based) and all items that follow it.
-fn truncate_before_nth_user_message(history: InitialHistory, n: usize) -> InitialHistory {
-    // Work directly on rollout items, and cut the vector at the nth user message input.
+/// Return a prefix of `items` obtained by dropping the last `n` user messages
+/// and all items that follow them.
+fn truncate_after_dropping_last_messages(history: InitialHistory, n: usize) -> InitialHistory {
+    if n == 0 {
+        return InitialHistory::Forked(history.get_rollout_items());
+    }
+
+    // Work directly on rollout items, and cut the vector at the nth-from-last user message input.
     let items: Vec<RolloutItem> = history.get_rollout_items();
 
     // Find indices of user message inputs in rollout order.
     let mut user_positions: Vec<usize> = Vec::new();
     for (idx, item) in items.iter().enumerate() {
-        if let RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. }) = item
+        if let RolloutItem::ResponseItem(ResponseItem::Message { role, .. }) = item
             && role == "user"
-            && content_items_to_text(content).is_some_and(|text| !is_session_prefix_message(&text))
         {
             user_positions.push(idx);
         }
     }
 
-    // If fewer than or equal to n user messages exist, treat as empty (out of range).
-    if user_positions.len() <= n {
+    // If fewer than n user messages exist, treat as empty.
+    if user_positions.len() < n {
         return InitialHistory::New;
     }
 
-    // Cut strictly before the nth user message (do not keep the nth itself).
-    let cut_idx = user_positions[n];
+    // Cut strictly before the nth-from-last user message (do not keep the nth itself).
+    let cut_idx = user_positions[user_positions.len() - n];
     let rolled: Vec<RolloutItem> = items.into_iter().take(cut_idx).collect();
 
     if rolled.is_empty() {
@@ -194,14 +216,65 @@ fn truncate_before_nth_user_message(history: InitialHistory, n: usize) -> Initia
     }
 }
 
+#[derive(Clone)]
+pub struct RemoteConversationOptions {
+    pub remote_url: Url,
+    pub sse_base_url: Url,
+    pub token: Option<String>,
+    pub timeout: Duration,
+    pub trust_cert: Option<Vec<u8>>,
+}
+
+impl ConversationManager {
+    async fn spawn_remote_conversation(
+        &self,
+        config: Config,
+        remote: RemoteConversationOptions,
+    ) -> CodexResult<NewConversation> {
+        let RemoteConversationOptions {
+            remote_url,
+            sse_base_url,
+            token,
+            timeout,
+            trust_cert,
+        } = remote;
+
+        let spawn = spawn_remote_conversation(RemoteSpawnParams {
+            remote: remote_url,
+            sse_base: sse_base_url,
+            token,
+            cwd: Some(config.cwd.clone()),
+            timeout: Some(timeout),
+            trust_cert,
+        })
+        .await?;
+
+        let remote_conversation_id = spawn.conversation.conversation_id().to_string();
+        let uuid = Uuid::parse_str(&remote_conversation_id).map_err(|err| {
+            CodexErr::RemoteTransport(format!("invalid conversation id returned by remote: {err}"))
+        })?;
+        let conversation_id = ConversationId::from(uuid);
+
+        let conversation = Arc::new(CodexConversation::new_remote(spawn.conversation));
+        self.conversations
+            .write()
+            .await
+            .insert(conversation_id.clone(), conversation.clone());
+
+        Ok(NewConversation {
+            conversation_id,
+            conversation,
+            session_configured: spawn.session_configured,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codex::make_session_and_context;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::ReasoningItemReasoningSummary;
     use codex_protocol::models::ResponseItem;
-    use pretty_assertions::assert_eq;
 
     fn user_msg(text: &str) -> ResponseItem {
         ResponseItem::Message {
@@ -253,7 +326,7 @@ mod tests {
             .cloned()
             .map(RolloutItem::ResponseItem)
             .collect();
-        let truncated = truncate_before_nth_user_message(InitialHistory::Forked(initial), 1);
+        let truncated = truncate_after_dropping_last_messages(InitialHistory::Forked(initial), 1);
         let got_items = truncated.get_rollout_items();
         let expected_items = vec![
             RolloutItem::ResponseItem(items[0].clone()),
@@ -270,37 +343,7 @@ mod tests {
             .cloned()
             .map(RolloutItem::ResponseItem)
             .collect();
-        let truncated2 = truncate_before_nth_user_message(InitialHistory::Forked(initial2), 2);
+        let truncated2 = truncate_after_dropping_last_messages(InitialHistory::Forked(initial2), 2);
         assert!(matches!(truncated2, InitialHistory::New));
-    }
-
-    #[test]
-    fn ignores_session_prefix_messages_when_truncating() {
-        let (session, turn_context) = make_session_and_context();
-        let mut items = session.build_initial_context(&turn_context);
-        items.push(user_msg("feature request"));
-        items.push(assistant_msg("ack"));
-        items.push(user_msg("second question"));
-        items.push(assistant_msg("answer"));
-
-        let rollout_items: Vec<RolloutItem> = items
-            .iter()
-            .cloned()
-            .map(RolloutItem::ResponseItem)
-            .collect();
-
-        let truncated = truncate_before_nth_user_message(InitialHistory::Forked(rollout_items), 1);
-        let got_items = truncated.get_rollout_items();
-
-        let expected: Vec<RolloutItem> = vec![
-            RolloutItem::ResponseItem(items[0].clone()),
-            RolloutItem::ResponseItem(items[1].clone()),
-            RolloutItem::ResponseItem(items[2].clone()),
-        ];
-
-        assert_eq!(
-            serde_json::to_value(&got_items).unwrap(),
-            serde_json::to_value(&expected).unwrap()
-        );
     }
 }

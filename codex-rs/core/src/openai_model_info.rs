@@ -1,4 +1,6 @@
 use crate::model_family::ModelFamily;
+use crate::model_map::{context_window_for_slug, max_output_tokens_for_slug};
+use model_id::normalize;
 
 /// Metadata about a model, particularly OpenAI models.
 /// We may want to consider including details like the pricing for
@@ -28,8 +30,15 @@ impl ModelInfo {
 }
 
 pub(crate) fn get_model_info(model_family: &ModelFamily) -> Option<ModelInfo> {
-    let slug = model_family.slug.as_str();
-    match slug {
+    let slug = normalize(&model_family.slug);
+
+    if let Some(context_window) = context_window_for_slug(&slug) {
+        if let Some(max_output_tokens) = max_output_tokens_for_slug(&slug) {
+            return Some(ModelInfo::new(context_window, max_output_tokens));
+        }
+    }
+
+    match slug.as_str() {
         // OSS models have a 128k shared token pool.
         // Arbitrarily splitting it: 3/4 input context, 1/4 output.
         // https://openai.com/index/gpt-oss-model-card/

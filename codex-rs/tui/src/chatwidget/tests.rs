@@ -19,18 +19,10 @@ use codex_core::protocol::EventMsg;
 use codex_core::protocol::ExecApprovalRequestEvent;
 use codex_core::protocol::ExecCommandBeginEvent;
 use codex_core::protocol::ExecCommandEndEvent;
-use codex_core::protocol::ExitedReviewModeEvent;
 use codex_core::protocol::FileChange;
 use codex_core::protocol::InputMessageKind;
-use codex_core::protocol::Op;
 use codex_core::protocol::PatchApplyBeginEvent;
 use codex_core::protocol::PatchApplyEndEvent;
-use codex_core::protocol::RateLimitSnapshotEvent;
-use codex_core::protocol::ReviewCodeLocation;
-use codex_core::protocol::ReviewFinding;
-use codex_core::protocol::ReviewLineRange;
-use codex_core::protocol::ReviewOutputEvent;
-use codex_core::protocol::ReviewRequest;
 use codex_core::protocol::StreamErrorEvent;
 use codex_core::protocol::TaskCompleteEvent;
 use codex_core::protocol::TaskStartedEvent;
@@ -40,8 +32,6 @@ use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 use insta::assert_snapshot;
 use pretty_assertions::assert_eq;
-use ratatui::style::Color;
-use ratatui::style::Modifier;
 use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
@@ -194,79 +184,6 @@ fn resumed_initial_messages_render_history() {
     );
 }
 
-/// Entering review mode uses the hint provided by the review request.
-#[test]
-fn entered_review_mode_uses_request_hint() {
-    let (mut chat, mut rx, _ops) = make_chatwidget_manual();
-
-    chat.handle_codex_event(Event {
-        id: "review-start".into(),
-        msg: EventMsg::EnteredReviewMode(ReviewRequest {
-            prompt: "Review the latest changes".to_string(),
-            user_facing_hint: "feature branch".to_string(),
-        }),
-    });
-
-    let cells = drain_insert_history(&mut rx);
-    let banner = lines_to_single_string(cells.last().expect("review banner"));
-    assert_eq!(banner, ">> Code review started: feature branch <<\n");
-    assert!(chat.is_review_mode);
-}
-
-/// Entering review mode renders the current changes banner when requested.
-#[test]
-fn entered_review_mode_defaults_to_current_changes_banner() {
-    let (mut chat, mut rx, _ops) = make_chatwidget_manual();
-
-    chat.handle_codex_event(Event {
-        id: "review-start".into(),
-        msg: EventMsg::EnteredReviewMode(ReviewRequest {
-            prompt: "Review the current changes".to_string(),
-            user_facing_hint: "current changes".to_string(),
-        }),
-    });
-
-    let cells = drain_insert_history(&mut rx);
-    let banner = lines_to_single_string(cells.last().expect("review banner"));
-    assert_eq!(banner, ">> Code review started: current changes <<\n");
-    assert!(chat.is_review_mode);
-}
-
-/// Completing review with findings shows the selection popup and finishes with
-/// the closing banner while clearing review mode state.
-#[test]
-fn exited_review_mode_emits_results_and_finishes() {
-    let (mut chat, mut rx, _ops) = make_chatwidget_manual();
-
-    let review = ReviewOutputEvent {
-        findings: vec![ReviewFinding {
-            title: "[P1] Fix bug".to_string(),
-            body: "Something went wrong".to_string(),
-            confidence_score: 0.9,
-            priority: 1,
-            code_location: ReviewCodeLocation {
-                absolute_file_path: PathBuf::from("src/lib.rs"),
-                line_range: ReviewLineRange { start: 10, end: 12 },
-            },
-        }],
-        overall_correctness: "needs work".to_string(),
-        overall_explanation: "Investigate the failure".to_string(),
-        overall_confidence_score: 0.5,
-    };
-
-    chat.handle_codex_event(Event {
-        id: "review-end".into(),
-        msg: EventMsg::ExitedReviewMode(ExitedReviewModeEvent {
-            review_output: Some(review),
-        }),
-    });
-
-    let cells = drain_insert_history(&mut rx);
-    let banner = lines_to_single_string(cells.last().expect("finished banner"));
-    assert_eq!(banner, "\n<< Code review finished >>\n");
-    assert!(!chat.is_review_mode);
-}
-
 #[cfg_attr(
     target_os = "macos",
     ignore = "system configuration APIs are blocked under macOS seatbelt"
@@ -323,8 +240,6 @@ fn make_chatwidget_manual() -> (
         session_header: SessionHeader::new(cfg.model.clone()),
         initial_user_message: None,
         token_info: None,
-        rate_limit_snapshot: None,
-        rate_limit_warnings: RateLimitWarningState::default(),
         stream: StreamController::new(cfg),
         running_commands: HashMap::new(),
         task_complete_pending: false,
@@ -337,7 +252,6 @@ fn make_chatwidget_manual() -> (
         queued_user_messages: VecDeque::new(),
         suppress_session_configured_redraw: false,
         pending_notification: None,
-        is_review_mode: false,
     };
     (widget, rx, op_rx)
 }
@@ -378,158 +292,6 @@ fn lines_to_single_string(lines: &[ratatui::text::Line<'static>]) -> String {
         s.push('\n');
     }
     s
-}
-
-fn styled_lines_to_string(lines: &[ratatui::text::Line<'static>]) -> String {
-    let mut out = String::new();
-    for line in lines {
-        for span in &line.spans {
-            let mut tags: Vec<&str> = Vec::new();
-            if let Some(color) = span.style.fg {
-                let name = match color {
-                    Color::Black => "black",
-                    Color::Blue => "blue",
-                    Color::Cyan => "cyan",
-                    Color::DarkGray => "dark-gray",
-                    Color::Gray => "gray",
-                    Color::Green => "green",
-                    Color::LightBlue => "light-blue",
-                    Color::LightCyan => "light-cyan",
-                    Color::LightGreen => "light-green",
-                    Color::LightMagenta => "light-magenta",
-                    Color::LightRed => "light-red",
-                    Color::LightYellow => "light-yellow",
-                    Color::Magenta => "magenta",
-                    Color::Red => "red",
-                    Color::Rgb(_, _, _) => "rgb",
-                    Color::Indexed(_) => "indexed",
-                    Color::Reset => "reset",
-                    Color::Yellow => "yellow",
-                    Color::White => "white",
-                };
-                tags.push(name);
-            }
-            let modifiers = span.style.add_modifier;
-            if modifiers.contains(Modifier::BOLD) {
-                tags.push("bold");
-            }
-            if modifiers.contains(Modifier::DIM) {
-                tags.push("dim");
-            }
-            if modifiers.contains(Modifier::ITALIC) {
-                tags.push("italic");
-            }
-            if modifiers.contains(Modifier::UNDERLINED) {
-                tags.push("underlined");
-            }
-            if !tags.is_empty() {
-                out.push('[');
-                out.push_str(&tags.join("+"));
-                out.push(']');
-            }
-            out.push_str(&span.content);
-            if !tags.is_empty() {
-                out.push_str("[/]");
-            }
-        }
-        out.push('\n');
-    }
-    out
-}
-
-fn sample_rate_limit_snapshot(
-    primary_used_percent: f64,
-    weekly_used_percent: f64,
-    ratio_percent: f64,
-) -> RateLimitSnapshotEvent {
-    RateLimitSnapshotEvent {
-        primary_used_percent,
-        weekly_used_percent,
-        primary_to_weekly_ratio_percent: ratio_percent,
-        primary_window_minutes: 300,
-        weekly_window_minutes: 10_080,
-    }
-}
-
-fn capture_limits_snapshot(snapshot: Option<RateLimitSnapshotEvent>) -> String {
-    let lines = match snapshot {
-        Some(ref snapshot) => history_cell::new_limits_output(snapshot).display_lines(80),
-        None => history_cell::new_limits_unavailable().display_lines(80),
-    };
-    styled_lines_to_string(&lines)
-}
-
-#[test]
-fn limits_placeholder() {
-    let visual = capture_limits_snapshot(None);
-    assert_snapshot!(visual);
-}
-
-#[test]
-fn limits_snapshot_basic() {
-    let visual = capture_limits_snapshot(Some(sample_rate_limit_snapshot(30.0, 60.0, 40.0)));
-    assert_snapshot!(visual);
-}
-
-#[test]
-fn limits_snapshot_hourly_remaining() {
-    let visual = capture_limits_snapshot(Some(sample_rate_limit_snapshot(0.0, 20.0, 10.0)));
-    assert_snapshot!(visual);
-}
-
-#[test]
-fn limits_snapshot_mixed_usage() {
-    let visual = capture_limits_snapshot(Some(sample_rate_limit_snapshot(20.0, 20.0, 10.0)));
-    assert_snapshot!(visual);
-}
-
-#[test]
-fn limits_snapshot_weekly_heavy() {
-    let visual = capture_limits_snapshot(Some(sample_rate_limit_snapshot(98.0, 0.0, 10.0)));
-    assert_snapshot!(visual);
-}
-
-#[test]
-fn rate_limit_warnings_emit_thresholds() {
-    let mut state = RateLimitWarningState::default();
-    let mut warnings: Vec<String> = Vec::new();
-
-    warnings.extend(state.take_warnings(10.0, 55.0));
-    warnings.extend(state.take_warnings(55.0, 10.0));
-    warnings.extend(state.take_warnings(10.0, 80.0));
-    warnings.extend(state.take_warnings(80.0, 10.0));
-    warnings.extend(state.take_warnings(10.0, 95.0));
-    warnings.extend(state.take_warnings(95.0, 10.0));
-
-    assert_eq!(
-        warnings.len(),
-        6,
-        "expected one warning per threshold per limit"
-    );
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("Hourly usage exceeded 50%")),
-        "expected hourly 50% warning"
-    );
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("Weekly usage exceeded 50%")),
-        "expected weekly 50% warning"
-    );
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("Hourly usage exceeded 90%")),
-        "expected hourly 90% warning"
-    );
-    assert!(
-        warnings
-            .iter()
-            .any(|w| w.contains("Weekly usage exceeded 90%")),
-        "expected weekly 90% warning"
-    );
 }
 
 // (removed experimental resize snapshot test)

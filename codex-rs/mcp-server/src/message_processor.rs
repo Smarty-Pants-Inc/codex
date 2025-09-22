@@ -36,6 +36,7 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task;
+use uuid::Uuid;
 
 pub(crate) struct MessageProcessor {
     codex_message_processor: CodexMessageProcessor,
@@ -483,8 +484,8 @@ impl MessageProcessor {
                 return;
             }
         };
-        let conversation_id = match ConversationId::from_string(&conversation_id) {
-            Ok(id) => id,
+        let conversation_id = match Uuid::parse_str(&conversation_id) {
+            Ok(id) => ConversationId::from(id),
             Err(e) => {
                 tracing::error!("Failed to parse conversation_id: {e}");
                 let result = CallToolResult {

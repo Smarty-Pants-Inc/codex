@@ -72,6 +72,26 @@ pub struct Cli {
     #[arg(long = "search", default_value_t = false)]
     pub web_search: bool,
 
+    /// Remote control endpoint (ws://, wss://, tcp://) for remote attach mode.
+    #[arg(long = "remote", value_name = "URL", env = "SMARTY_TUI_REMOTE")]
+    pub remote: Option<String>,
+
+    /// Base URL for remote SSE event stream (http:// or https://).
+    #[arg(long = "sse-base", value_name = "URL", env = "SMARTY_TUI_SSE_BASE")]
+    pub sse_base: Option<String>,
+
+    /// Shared secret token for remote attach mode.
+    #[arg(long = "token", value_name = "TOKEN", env = "SMARTY_TUI_TOKEN")]
+    pub remote_token: Option<String>,
+
+    /// Timeout in seconds for remote RPC operations.
+    #[arg(
+        long = "remote-timeout-secs",
+        value_name = "SECONDS",
+        env = "SMARTY_TUI_REMOTE_TIMEOUT_SECS"
+    )]
+    pub remote_timeout_secs: Option<u64>,
+
     #[clap(skip)]
     pub config_overrides: CliConfigOverrides,
 }

@@ -7,7 +7,6 @@ use crossterm::event::KeyEventKind;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::Widget;
-use ratatui::style::Color;
 use ratatui::widgets::Clear;
 use ratatui::widgets::WidgetRef;
 
@@ -25,6 +24,7 @@ use crate::tui::TuiEvent;
 use color_eyre::eyre::Result;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::time::Instant;
 
 #[allow(clippy::large_enum_variant)]
 enum Step {
@@ -73,10 +73,11 @@ impl OnboardingScreen {
         } = args;
         let cwd = config.cwd.clone();
         let codex_home = config.codex_home;
-        let mut steps: Vec<Step> = vec![Step::Welcome(WelcomeWidget::new(
-            !matches!(login_status, LoginStatus::NotAuthenticated),
-            tui.frame_requester(),
-        ))];
+        let mut steps: Vec<Step> = vec![Step::Welcome(WelcomeWidget {
+            is_logged_in: !matches!(login_status, LoginStatus::NotAuthenticated),
+            request_frame: tui.frame_requester(),
+            start: Instant::now(),
+        })];
         if show_login_screen {
             steps.push(Step::Auth(AuthModeWidget {
                 request_frame: tui.frame_requester(),
@@ -188,13 +189,6 @@ impl KeyboardHandler for OnboardingScreen {
                 self.is_done = true;
             }
             _ => {
-                if let Some(Step::Welcome(widget)) = self
-                    .steps
-                    .iter_mut()
-                    .find(|step| matches!(step, Step::Welcome(_)))
-                {
-                    widget.handle_key_event(key_event);
-                }
                 if let Some(active_step) = self.current_steps_mut().into_iter().last() {
                     active_step.handle_key_event(key_event);
                 }
@@ -232,12 +226,8 @@ impl WidgetRef for &OnboardingScreen {
             for yy in 0..height {
                 let mut any = false;
                 for xx in 0..width {
-                    let cell = &tmp[(xx, yy)];
-                    let has_symbol = !cell.symbol().trim().is_empty();
-                    let has_style = cell.fg != Color::Reset
-                        || cell.bg != Color::Reset
-                        || !cell.modifier.is_empty();
-                    if has_symbol || has_style {
+                    let sym = tmp[(xx, yy)].symbol();
+                    if !sym.trim().is_empty() {
                         any = true;
                         break;
                     }
@@ -281,7 +271,7 @@ impl WidgetRef for &OnboardingScreen {
 impl KeyboardHandler for Step {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         match self {
-            Step::Welcome(widget) => widget.handle_key_event(key_event),
+            Step::Welcome(_) => (),
             Step::Auth(widget) => widget.handle_key_event(key_event),
             Step::TrustDirectory(widget) => widget.handle_key_event(key_event),
         }

@@ -1,0 +1,47 @@
+[family."gpt-5"]
+context_window = 272000
+max_output_tokens = 128000
+
+[family."gpt-4.1"]
+context_window = 128000
+max_output_tokens = 8192
+
+[family."gpt-4o"]
+context_window = 128000
+max_output_tokens = 8192
+
+[family."gpt-4"]
+context_window = 8192
+max_output_tokens = 4096
+
+[family."gpt-3.5"]
+context_window = 16385
+max_output_tokens = 4096
+
+[family."o4-mini"]
+context_window = 64000
+max_output_tokens = 4096
+
+[family."o3-mini"]
+context_window = 200000
+max_output_tokens = 8192
+
+[family."gpt-oss"]
+context_window = 32000
+max_output_tokens = 4096
+
+[family."claude-3.5"]
+context_window = 200000
+max_output_tokens = 8192
+
+[family."claude-3"]
+context_window = 200000
+max_output_tokens = 4096
+
+[slug."gpt-4o-mini"]
+context_window = 64000
+max_output_tokens = 4096
+
+[slug."gpt-4.1-mini"]
+context_window = 64000
+max_output_tokens = 4096
