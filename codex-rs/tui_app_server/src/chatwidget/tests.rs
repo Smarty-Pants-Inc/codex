@@ -2708,6 +2708,26 @@ async fn submit_user_message_with_mode_sets_coding_collaboration_mode() {
 }
 
 #[tokio::test]
+async fn submission_collaboration_mode_uses_active_mask() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.1-codex-max")).await;
+    chat.thread_id = Some(ThreadId::new());
+    chat.set_feature_enabled(Feature::CollaborationModes, /*enabled*/ true);
+    let plan_mask = collaboration_modes::plan_mask(chat.model_catalog.as_ref())
+        .expect("expected plan collaboration mode");
+    chat.set_collaboration_mask(plan_mask.clone());
+
+    let mode = chat
+        .submission_collaboration_mode()
+        .expect("expected active collaboration mode");
+
+    assert_eq!(mode.mode, ModeKind::Plan);
+    assert_eq!(
+        mode.model(),
+        plan_mask.model.as_deref().unwrap_or("gpt-5.1-codex-max")
+    );
+}
+
+#[tokio::test]
 async fn reasoning_selection_in_plan_mode_opens_scope_prompt_event() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.1-codex-max")).await;
     chat.thread_id = Some(ThreadId::new());
@@ -10139,6 +10159,19 @@ async fn fast_slash_command_updates_and_persists_local_service_tier() {
         "expected fast-mode persistence app event; events: {events:?}"
     );
 
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn oracle_slash_command_emits_app_event() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
+
+    chat.dispatch_command_with_args(SlashCommand::Oracle, "status".to_string(), Vec::new());
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::ConfigureOracleMode { raw_command }) if raw_command == "status"
+    );
     assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
 }
 

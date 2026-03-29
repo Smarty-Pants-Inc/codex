@@ -30,6 +30,8 @@ use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::StatusLineItem;
 use crate::bottom_pane::TerminalTitleItem;
 use crate::history_cell::HistoryCell;
+use crate::oracle_supervisor::OracleRequestKind;
+use crate::oracle_supervisor::OracleRunResult;
 
 use codex_core::config::types::ApprovalsReviewer;
 use codex_features::Feature;
@@ -518,6 +520,29 @@ pub(crate) enum AppEvent {
     SubmitUserMessageWithMode {
         text: String,
         collaboration_mode: CollaborationModeMask,
+    },
+
+    /// Configure Oracle supervisor mode from `/oracle on|off|status`.
+    ConfigureOracleMode {
+        raw_command: String,
+    },
+
+    /// Oracle CLI finished and returned a parsed control response.
+    OracleRunCompleted {
+        result: OracleRunResult,
+    },
+
+    /// Oracle CLI failed for a visible thread turn or checkpoint.
+    OracleRunFailed {
+        visible_thread_id: ThreadId,
+        kind: OracleRequestKind,
+        session_slug: String,
+        error: String,
+    },
+
+    /// Hidden orchestrator thread finished a milestone and should checkpoint back to Oracle.
+    OracleCheckpoint {
+        thread_id: ThreadId,
     },
 
     /// Open the approval popup.

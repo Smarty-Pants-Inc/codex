@@ -5154,6 +5154,9 @@ impl ChatWidget {
             SlashCommand::Skills => {
                 self.open_skills_menu();
             }
+            SlashCommand::Oracle => {
+                self.add_error_message("Usage: /oracle [on|off|status]".to_string());
+            }
             SlashCommand::Status => {
                 self.add_status_output();
             }
@@ -5283,6 +5286,12 @@ impl ChatWidget {
                         self.add_error_message("Usage: /fast [on|off|status]".to_string());
                     }
                 }
+            }
+            SlashCommand::Oracle if !trimmed.is_empty() => {
+                self.app_event_tx.send(AppEvent::ConfigureOracleMode {
+                    raw_command: trimmed.to_string(),
+                });
+                self.bottom_pane.drain_pending_submission_state();
             }
             SlashCommand::Rename if !trimmed.is_empty() => {
                 self.session_telemetry
@@ -9475,6 +9484,16 @@ impl ChatWidget {
     #[allow(dead_code)] // Used in tests
     pub(crate) fn current_collaboration_mode(&self) -> &CollaborationMode {
         &self.current_collaboration_mode
+    }
+
+    pub(crate) fn submission_collaboration_mode(&self) -> Option<CollaborationMode> {
+        if self.collaboration_modes_enabled() {
+            self.active_collaboration_mask
+                .as_ref()
+                .map(|_| self.effective_collaboration_mode())
+        } else {
+            None
+        }
     }
 
     pub(crate) fn current_reasoning_effort(&self) -> Option<ReasoningEffortConfig> {
