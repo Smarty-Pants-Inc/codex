@@ -393,6 +393,10 @@ impl AppServerSession {
         Ok(response.thread)
     }
 
+    pub(crate) async fn read_thread_with_turns(&mut self, thread_id: ThreadId) -> Result<Thread> {
+        self.thread_read(thread_id, /*include_turns*/ true).await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn turn_start(
         &mut self,

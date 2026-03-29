@@ -126,6 +126,7 @@ mod model_migration;
 mod multi_agents;
 mod notifications;
 pub mod onboarding;
+mod oracle_supervisor;
 mod oss_selection;
 mod pager_overlay;
 pub mod public_widgets;
