@@ -156,7 +156,7 @@ impl ShellSnapshot {
                 }
             };
 
-        let temp_snapshot = Self {
+        let mut temp_snapshot = Self {
             path: temp_path.clone(),
             cwd: session_cwd.to_path_buf(),
         };
@@ -173,10 +173,8 @@ impl ShellSnapshot {
             return Err("write_failed");
         }
 
-        Ok(Self {
-            path,
-            cwd: session_cwd.to_path_buf(),
-        })
+        temp_snapshot.path = path;
+        Ok(temp_snapshot)
     }
 }
 
