@@ -1892,8 +1892,8 @@ impl App {
                     .submission_collaboration_mode()
                     .unwrap_or_else(|| self.chat_widget.current_collaboration_mode().clone())
                     .with_updates(
-                        None,
-                        None,
+                        /*model*/ None,
+                        /*effort*/ None,
                         Some(Some(orchestrator_developer_instructions())),
                     );
                 let personality = self.chat_widget.config_ref().personality.filter(|_| {
@@ -1921,9 +1921,9 @@ impl App {
                         .clone(),
                     collaboration_mode.model().to_string(),
                     collaboration_mode.reasoning_effort(),
-                    None,
+                    /*summary*/ None,
                     self.chat_widget.config_ref().service_tier.map(Some),
-                    None,
+                    /*final_output_json_schema*/ None,
                     Some(collaboration_mode),
                     personality,
                 );
