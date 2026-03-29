@@ -9,7 +9,9 @@ use codex_protocol::protocol::SessionSource;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::io::Write;
 use tempfile::TempDir;
+
 fn write_index(path: &Path, lines: &[SessionIndexEntry]) -> std::io::Result<()> {
     let mut out = String::new();
     for entry in lines {
@@ -48,7 +50,7 @@ fn write_rollout_with_metadata(path: &Path, thread_id: ThreadId) -> std::io::Res
 }
 
 #[test]
-fn find_thread_id_by_name_prefers_latest_entry() -> std::io::Result<()> {
+fn scan_index_by_name_prefers_latest_entry() -> std::io::Result<()> {
     let temp = TempDir::new()?;
     let path = session_index_path(temp.path());
     let id1 = ThreadId::new();
@@ -306,5 +308,62 @@ fn scan_index_finds_latest_match_among_mixed_entries() -> std::io::Result<()> {
 
     let found_other_by_id = scan_index_from_end_by_id(&path, &id_other)?;
     assert_eq!(found_other_by_id, Some(expected_other));
+    Ok(())
+}
+
+#[tokio::test]
+async fn find_thread_path_by_name_skips_unsaved_latest_entry() -> std::io::Result<()> {
+    let temp = TempDir::new()?;
+    let path = session_index_path(temp.path());
+    let saved_id = ThreadId::new();
+    let unsaved_id = ThreadId::new();
+    let lines = vec![
+        SessionIndexEntry {
+            id: saved_id,
+            thread_name: "smarty-pants".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+        },
+        SessionIndexEntry {
+            id: unsaved_id,
+            thread_name: "smarty-pants".to_string(),
+            updated_at: "2024-01-02T00:00:00Z".to_string(),
+        },
+    ];
+    write_index(&path, &lines)?;
+
+    let rollout_dir = temp.path().join("sessions/2024/01/01");
+    std::fs::create_dir_all(&rollout_dir)?;
+    let rollout_path = rollout_dir.join(format!("rollout-2024-01-01T00-00-00-{saved_id}.jsonl"));
+    std::fs::write(&rollout_path, "")?;
+
+    let found = find_thread_path_by_name_str(temp.path(), "smarty-pants").await?;
+    assert_eq!(found, Some(rollout_path));
+    Ok(())
+}
+
+#[tokio::test]
+async fn find_thread_path_by_name_skips_invalid_utf8_lines() -> std::io::Result<()> {
+    let temp = TempDir::new()?;
+    let path = session_index_path(temp.path());
+    let saved_id = ThreadId::new();
+    write_index(
+        &path,
+        &[SessionIndexEntry {
+            id: saved_id,
+            thread_name: "smarty-pants".to_string(),
+            updated_at: "2024-01-01T00:00:00Z".to_string(),
+        }],
+    )?;
+
+    let mut file = std::fs::OpenOptions::new().append(true).open(&path)?;
+    file.write_all(b"\xFF\n")?;
+
+    let rollout_dir = temp.path().join("sessions/2024/01/01");
+    std::fs::create_dir_all(&rollout_dir)?;
+    let rollout_path = rollout_dir.join(format!("rollout-2024-01-01T00-00-00-{saved_id}.jsonl"));
+    std::fs::write(&rollout_path, "")?;
+
+    let found = find_thread_path_by_name_str(temp.path(), "smarty-pants").await?;
+    assert_eq!(found, Some(rollout_path));
     Ok(())
 }
