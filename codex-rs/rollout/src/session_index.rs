@@ -24,7 +24,7 @@ pub struct SessionIndexEntry {
 }
 
 /// Append a thread name update to the session index.
-/// The index is append-only; the most recent entry wins when resolving names or ids.
+/// The index is append-only; readers prefer newer entries when resolving names or ids.
 pub async fn append_thread_name(
     codex_home: &Path,
     thread_id: ThreadId,
@@ -45,7 +45,7 @@ pub async fn append_thread_name(
 }
 
 /// Append a raw session index entry to `session_index.jsonl`.
-/// The file is append-only; consumers scan from the end to find the newest match.
+/// The file is append-only; consumers generally scan from the end to prefer newer matches.
 pub async fn append_session_index_entry(
     codex_home: &Path,
     entry: &SessionIndexEntry,
@@ -111,35 +111,38 @@ pub async fn find_thread_names_by_ids(
     Ok(names)
 }
 
-/// Find the most recently updated thread id for a thread name, if any.
-pub async fn find_thread_id_by_name(
-    codex_home: &Path,
-    name: &str,
-) -> std::io::Result<Option<ThreadId>> {
-    if name.trim().is_empty() {
-        return Ok(None);
-    }
-    let path = session_index_path(codex_home);
-    if !path.exists() {
-        return Ok(None);
-    }
-    let name = name.to_string();
-    let entry = tokio::task::spawn_blocking(move || scan_index_from_end_by_name(&path, &name))
-        .await
-        .map_err(std::io::Error::other)??;
-    Ok(entry.map(|entry| entry.id))
-}
-
-/// Locate a recorded thread rollout file by thread name using newest-first ordering.
+/// Locate a recorded thread rollout file by thread name, preferring newer entries first
+/// and skipping names that do not yet resolve to saved rollout data.
 /// Returns `Ok(Some(path))` if found, `Ok(None)` if not present.
 pub async fn find_thread_path_by_name_str(
     codex_home: &Path,
     name: &str,
 ) -> std::io::Result<Option<PathBuf>> {
-    let Some(thread_id) = find_thread_id_by_name(codex_home, name).await? else {
+    let name = name.trim();
+    if name.is_empty() {
         return Ok(None);
-    };
-    super::list::find_thread_path_by_id_str(codex_home, &thread_id.to_string()).await
+    }
+
+    let path = session_index_path(codex_home);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let name = name.to_string();
+    let thread_ids =
+        tokio::task::spawn_blocking(move || scan_index_from_end_thread_ids_by_name(&path, &name))
+            .await
+            .map_err(std::io::Error::other)??;
+
+    for thread_id in thread_ids {
+        if let Some(path) =
+            super::list::find_thread_path_by_id_str(codex_home, &thread_id.to_string()).await?
+        {
+            return Ok(Some(path));
+        }
+    }
+
+    Ok(None)
 }
 
 fn session_index_path(codex_home: &Path) -> PathBuf {
@@ -153,11 +156,44 @@ fn scan_index_from_end_by_id(
     scan_index_from_end(path, |entry| entry.id == *thread_id)
 }
 
+#[cfg(test)]
 fn scan_index_from_end_by_name(
     path: &Path,
     name: &str,
 ) -> std::io::Result<Option<SessionIndexEntry>> {
     scan_index_from_end(path, |entry| entry.thread_name == name)
+}
+
+fn scan_index_from_end_thread_ids_by_name(
+    path: &Path,
+    name: &str,
+) -> std::io::Result<Vec<ThreadId>> {
+    let mut file = File::open(path)?;
+    let mut remaining = file.metadata()?.len();
+    let mut line_rev: Vec<u8> = Vec::new();
+    let mut buf = vec![0u8; READ_CHUNK_SIZE];
+    let mut thread_ids = Vec::new();
+    let mut seen = HashSet::new();
+
+    while remaining > 0 {
+        let read_size = usize::try_from(remaining.min(READ_CHUNK_SIZE as u64))
+            .map_err(std::io::Error::other)?;
+        remaining -= read_size as u64;
+        file.seek(SeekFrom::Start(remaining))?;
+        file.read_exact(&mut buf[..read_size])?;
+
+        for &byte in buf[..read_size].iter().rev() {
+            if byte == b'\n' {
+                collect_thread_id_from_rev(&mut line_rev, name, &mut seen, &mut thread_ids)?;
+                continue;
+            }
+            line_rev.push(byte);
+        }
+    }
+
+    collect_thread_id_from_rev(&mut line_rev, name, &mut seen, &mut thread_ids)?;
+
+    Ok(thread_ids)
 }
 
 fn scan_index_from_end<F>(
@@ -195,6 +231,21 @@ where
     }
 
     Ok(None)
+}
+
+fn collect_thread_id_from_rev(
+    line_rev: &mut Vec<u8>,
+    name: &str,
+    seen: &mut HashSet<ThreadId>,
+    thread_ids: &mut Vec<ThreadId>,
+) -> std::io::Result<()> {
+    let Some(entry) = parse_line_from_rev(line_rev, &mut |entry| entry.thread_name == name)? else {
+        return Ok(());
+    };
+    if seen.insert(entry.id) {
+        thread_ids.push(entry.id);
+    }
+    Ok(())
 }
 
 fn parse_line_from_rev<F>(
