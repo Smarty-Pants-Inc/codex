@@ -38,6 +38,9 @@ use crate::multi_agents::agent_picker_status_dot_spans;
 use crate::multi_agents::format_agent_picker_item_name;
 use crate::multi_agents::next_agent_shortcut_matches;
 use crate::multi_agents::previous_agent_shortcut_matches;
+use crate::oracle_broker::OracleBrokerClient;
+use crate::oracle_broker::OracleBrokerRequest;
+use crate::oracle_broker::spawn_oracle_broker;
 use crate::oracle_supervisor::OracleAction;
 use crate::oracle_supervisor::OracleCommand;
 use crate::oracle_supervisor::OracleRequestKind;
@@ -51,6 +54,7 @@ use crate::oracle_supervisor::find_oracle_repo;
 use crate::oracle_supervisor::generate_session_slug;
 use crate::oracle_supervisor::oracle_history_cell;
 use crate::oracle_supervisor::orchestrator_developer_instructions;
+use crate::oracle_supervisor::parse_oracle_response;
 use crate::oracle_supervisor::resolve_context_requests;
 use crate::oracle_supervisor::run_oracle;
 use crate::oracle_supervisor::summarize_thread;
@@ -1011,6 +1015,7 @@ pub(crate) struct App {
     pending_primary_events: VecDeque<ThreadBufferedEvent>,
     pending_app_server_requests: PendingAppServerRequests,
     oracle_state: OracleSupervisorState,
+    oracle_broker: Option<(PathBuf, OracleBrokerClient)>,
 }
 
 #[derive(Default)]
@@ -1715,14 +1720,61 @@ impl App {
         parts.join("\n")
     }
 
+    fn oracle_user_turn_files(items: &[UserInput], base_cwd: &Path) -> Vec<String> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                UserInput::LocalImage { path } => Some(
+                    if path.is_absolute() {
+                        path.clone()
+                    } else {
+                        base_cwd.join(path)
+                    }
+                    .display()
+                    .to_string(),
+                ),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn start_oracle_run(&mut self, request: OracleRunRequest) {
         self.oracle_state.busy = true;
+        let broker = match self.ensure_oracle_broker(request.oracle_repo.as_path()) {
+            Ok(broker) => broker,
+            Err(error) => {
+                self.oracle_state.busy = false;
+                self.chat_widget.add_error_message(error.to_string());
+                return;
+            }
+        };
         let tx = self.app_event_tx.clone();
         tokio::spawn(async move {
             let visible_thread_id = request.visible_thread_id;
             let kind = request.kind;
             let session_slug = request.session_slug.clone();
-            match run_oracle(request).await {
+            let broker_result = broker
+                .request(OracleBrokerRequest {
+                    prompt: request.prompt.clone(),
+                    session_slug: request.session_slug.clone(),
+                    followup_session: request.followup_session.clone(),
+                    files: request.files.clone(),
+                    cwd: request.workspace_cwd.clone(),
+                })
+                .await;
+            let result = match broker_result {
+                Ok(response) => Ok(OracleRunResult {
+                    visible_thread_id,
+                    kind,
+                    requested_slug: session_slug.clone(),
+                    session_id: response.session_id.unwrap_or(session_slug.clone()),
+                    response: parse_oracle_response(response.output.as_deref().unwrap_or("")),
+                }),
+                Err(error) => run_oracle(request)
+                    .await
+                    .map_err(|fallback_error| format!("{error}; fallback failed: {fallback_error}")),
+            };
+            match result {
                 Ok(result) => tx.send(AppEvent::OracleRunCompleted { result }),
                 Err(error) => tx.send(AppEvent::OracleRunFailed {
                     visible_thread_id,
@@ -1740,6 +1792,19 @@ impl App {
         self.oracle_state.orchestrator_thread_id = None;
         self.oracle_state.last_orchestrator_task = None;
         self.oracle_state.busy = false;
+        self.oracle_broker = None;
+    }
+
+    fn ensure_oracle_broker(&mut self, oracle_repo: &Path) -> Result<OracleBrokerClient> {
+        if let Some((repo, broker)) = &self.oracle_broker {
+            if repo == oracle_repo {
+                return Ok(broker.clone());
+            }
+        }
+        self.oracle_broker = None;
+        let broker = spawn_oracle_broker(oracle_repo).map_err(|err| color_eyre::eyre::eyre!(err))?;
+        self.oracle_broker = Some((oracle_repo.to_path_buf(), broker.clone()));
+        Ok(broker)
     }
 
     fn disable_oracle_mode(&mut self) {
@@ -1801,11 +1866,14 @@ impl App {
             slug
         };
         self.oracle_state.last_status = Some("Waiting for Oracle.".to_string());
+        let workspace_cwd = self.chat_widget.config_ref().cwd.to_path_buf();
         self.start_oracle_run(OracleRunRequest {
             visible_thread_id: thread_id,
             kind: OracleRequestKind::UserTurn,
             session_slug,
             prompt: build_user_turn_prompt(&self.oracle_state, &prompt_text),
+            files: Self::oracle_user_turn_files(items, workspace_cwd.as_path()),
+            workspace_cwd,
             oracle_repo,
             followup_session: self.oracle_state.current_session_id.clone(),
         });
@@ -1981,6 +2049,8 @@ impl App {
                     kind: result.kind,
                     session_slug,
                     prompt: build_context_prompt(&self.oracle_state, &requests, &context),
+                    files: Vec::new(),
+                    workspace_cwd: cwd,
                     oracle_repo,
                     followup_session: self.oracle_state.current_session_id.clone(),
                 });
@@ -2008,6 +2078,7 @@ impl App {
             return Ok(());
         }
         self.oracle_state.busy = false;
+        self.oracle_broker = None;
         self.oracle_state.last_status = Some(format!("Oracle failed: {error}"));
         self.chat_widget
             .add_error_message(format!("Oracle supervisor failed: {error}"));
@@ -2058,6 +2129,8 @@ impl App {
             kind: OracleRequestKind::Checkpoint,
             session_slug,
             prompt: build_checkpoint_prompt(&self.oracle_state, &thread, &git_status, &diff_stat),
+            files: Vec::new(),
+            workspace_cwd: thread.cwd.clone(),
             oracle_repo,
             followup_session: self.oracle_state.current_session_id.clone(),
         });
@@ -3304,6 +3377,7 @@ impl App {
         self.primary_session_configured = None;
         self.pending_primary_events.clear();
         self.oracle_state = OracleSupervisorState::default();
+        self.oracle_broker = None;
         self.pending_app_server_requests.clear();
         self.chat_widget.set_pending_thread_approvals(Vec::new());
         self.sync_active_agent_label();
@@ -3842,6 +3916,7 @@ impl App {
             pending_primary_events: VecDeque::new(),
             pending_app_server_requests: PendingAppServerRequests::default(),
             oracle_state: OracleSupervisorState::default(),
+            oracle_broker: None,
         };
         if let Some(started) = initial_started_thread {
             app.enqueue_primary_thread_session(started.session, started.turns)
@@ -9005,6 +9080,7 @@ guardian_approval = true
             pending_primary_events: VecDeque::new(),
             pending_app_server_requests: PendingAppServerRequests::default(),
             oracle_state: OracleSupervisorState::default(),
+            oracle_broker: None,
         }
     }
 
@@ -9060,6 +9136,7 @@ guardian_approval = true
                 pending_primary_events: VecDeque::new(),
                 pending_app_server_requests: PendingAppServerRequests::default(),
                 oracle_state: OracleSupervisorState::default(),
+                oracle_broker: None,
             },
             rx,
             op_rx,

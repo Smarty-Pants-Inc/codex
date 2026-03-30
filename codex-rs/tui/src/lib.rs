@@ -125,6 +125,7 @@ mod model_catalog;
 mod model_migration;
 mod multi_agents;
 mod notifications;
+mod oracle_broker;
 pub mod onboarding;
 mod oracle_supervisor;
 mod oss_selection;
