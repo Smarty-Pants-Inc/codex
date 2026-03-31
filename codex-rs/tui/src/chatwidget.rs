@@ -5343,9 +5343,10 @@ impl ChatWidget {
                 self.open_skills_menu();
             }
             SlashCommand::Oracle => {
-                self.add_error_message(
-                    "Usage: /oracle [on|off|status|model [pro|thinking]]".to_string(),
-                );
+                self.app_event_tx.send(AppEvent::ConfigureOracleMode {
+                    raw_command: String::new(),
+                });
+                self.bottom_pane.drain_pending_submission_state();
             }
             SlashCommand::Status => {
                 self.add_status_output();
@@ -5477,7 +5478,7 @@ impl ChatWidget {
                     }
                 }
             }
-            SlashCommand::Oracle if !trimmed.is_empty() => {
+            SlashCommand::Oracle => {
                 self.app_event_tx.send(AppEvent::ConfigureOracleMode {
                     raw_command: trimmed.to_string(),
                 });

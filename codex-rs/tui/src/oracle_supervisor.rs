@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
@@ -18,8 +19,11 @@ use crate::history_cell::PlainHistoryCell;
 const ORACLE_CONTEXT_FILE_LIMIT: usize = 4;
 const ORACLE_CONTEXT_CHAR_LIMIT: usize = 12_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OracleCommand {
+    Browse,
+    NewThread,
+    AttachThread(String),
     On,
     Off,
     Status,
@@ -28,17 +32,34 @@ pub(crate) enum OracleCommand {
 
 impl OracleCommand {
     pub(crate) fn parse(raw: &str) -> Result<Self, String> {
-        let normalized = raw.trim().to_ascii_lowercase();
-        let parts = normalized.split_whitespace().collect::<Vec<_>>();
-        match parts.as_slice() {
-            ["on"] => Ok(Self::On),
-            ["off"] => Ok(Self::Off),
-            ["status"] => Ok(Self::Status),
-            ["model"] => Ok(Self::Model(None)),
-            ["model", value] => OracleModelPreset::parse(value)
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(Self::Browse);
+        }
+        let parts = trimmed.split_whitespace().collect::<Vec<_>>();
+        let command = parts
+            .first()
+            .map(|value| value.to_ascii_lowercase())
+            .unwrap_or_default();
+        match command.as_str() {
+            "browse" | "threads" if parts.len() == 1 => Ok(Self::Browse),
+            "new" if parts.len() == 1 => Ok(Self::NewThread),
+            "attach" if parts.len() == 2 && !parts[1].trim().is_empty() => {
+                Ok(Self::AttachThread(parts[1].to_string()))
+            }
+            "on" if parts.len() == 1 => Ok(Self::On),
+            "off" if parts.len() == 1 => Ok(Self::Off),
+            "status" if parts.len() == 1 => Ok(Self::Status),
+            "model" if parts.len() == 1 => Ok(Self::Model(None)),
+            "model" if parts.len() == 2 => OracleModelPreset::parse(parts[1])
                 .map(|model| Self::Model(Some(model)))
-                .ok_or_else(|| "Usage: /oracle [on|off|status|model [pro|thinking]]".to_string()),
-            _ => Err("Usage: /oracle [on|off|status|model [pro|thinking]]".to_string()),
+                .ok_or_else(|| {
+                    "Usage: /oracle [browse|new|attach <conversation_id>|on|off|status|model [pro|thinking]]".to_string()
+                }),
+            _ => Err(
+                "Usage: /oracle [browse|new|attach <conversation_id>|on|off|status|model [pro|thinking]]"
+                    .to_string(),
+            ),
         }
     }
 }
@@ -161,8 +182,24 @@ pub(crate) struct OracleResponse {
 }
 
 #[derive(Debug, Clone, Default)]
+pub(crate) struct OracleThreadBinding {
+    pub(crate) session_root_slug: Option<String>,
+    pub(crate) current_session_id: Option<String>,
+    pub(crate) orchestrator_thread_id: Option<ThreadId>,
+    pub(crate) phase: OracleSupervisorPhase,
+    pub(crate) last_status: Option<String>,
+    pub(crate) last_orchestrator_task: Option<String>,
+    pub(crate) pending_turn_id: Option<String>,
+    pub(crate) automatic_context_followups: u8,
+    pub(crate) conversation_id: Option<String>,
+    pub(crate) remote_title: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
 pub(crate) struct OracleSupervisorState {
+    /// Active visible Oracle thread (legacy working view for in-flight workflows).
     pub(crate) oracle_thread_id: Option<ThreadId>,
+    /// Legacy working view fields mirrored from `bindings[oracle_thread_id]`.
     pub(crate) session_root_slug: Option<String>,
     pub(crate) current_session_id: Option<String>,
     pub(crate) orchestrator_thread_id: Option<ThreadId>,
@@ -172,37 +209,41 @@ pub(crate) struct OracleSupervisorState {
     pub(crate) last_orchestrator_task: Option<String>,
     pub(crate) pending_turn_id: Option<String>,
     pub(crate) automatic_context_followups: u8,
+    /// Per-visible-thread Oracle session state.
+    pub(crate) bindings: HashMap<ThreadId, OracleThreadBinding>,
+    /// Hidden orchestrator thread -> visible Oracle thread.
+    pub(crate) orchestrator_owner: HashMap<ThreadId, ThreadId>,
 }
 
 impl OracleSupervisorState {
     pub(crate) fn intercepts(&self, thread_id: ThreadId) -> bool {
-        self.oracle_thread_id == Some(thread_id)
+        self.oracle_thread_id == Some(thread_id) || self.bindings.contains_key(&thread_id)
     }
 
     pub(crate) fn status_message(&self) -> String {
-        let enabled = self
+        let enabled = if self.bindings.is_empty() {
+            "off".to_string()
+        } else {
+            format!("on for {} thread(s)", self.bindings.len())
+        };
+        let active = self
             .oracle_thread_id
-            .map_or("off".to_string(), |id| format!("on for {id}"));
-        let root_slug = self
-            .session_root_slug
-            .clone()
-            .unwrap_or_else(|| "not started".to_string());
-        let current_session = self
-            .current_session_id
-            .clone()
-            .unwrap_or_else(|| "not started".to_string());
-        let orchestrator = self
-            .orchestrator_thread_id
             .map(|id| id.to_string())
-            .unwrap_or_else(|| "not created".to_string());
-        let last = self
-            .last_status
-            .clone()
-            .unwrap_or_else(|| "no activity yet".to_string());
+            .unwrap_or_else(|| "none".to_string());
+        let last = self.last_status.clone().unwrap_or_else(|| {
+            self.oracle_thread_id
+                .and_then(|thread_id| {
+                    self.bindings
+                        .get(&thread_id)
+                        .and_then(|binding| binding.last_status.clone())
+                })
+                .unwrap_or_else(|| "no activity yet".to_string())
+        });
         format!(
-            "Oracle mode: {enabled}\nRequested model: {}\nBrowser strategy: select\nSession root slug: {root_slug}\nCurrent session: {current_session}\nOrchestrator: {orchestrator}\nState: {}\nLast status: {last}",
+            "Oracle mode: {enabled}\nRequested model: {}\nBrowser strategy: select\nActive oracle thread: {active}\nTracked oracle threads: {}\nState: {}\nLast status: {last}",
             self.model.display_name(),
-            self.phase.description(),
+            self.bindings.len(),
+            self.phase.description()
         )
     }
 }
@@ -232,13 +273,13 @@ pub(crate) fn generate_session_slug(thread_id: ThreadId) -> String {
 
 pub(crate) fn build_user_turn_prompt(state: &OracleSupervisorState, user_text: &str) -> String {
     format!(
-        "You are Oracle, the slow and expensive master supervisor over a Codex orchestrator.\n\
-Optimize for high-leverage planning, not micromanagement. The hierarchy is human <-> oracle <-> orchestrator <-> many parallel workers <-> potentially more subagents.\n\
-Default behavior: clarify with the human until the major feature is well specified, then delegate substantial work to the orchestrator. Re-engage only for milestones, blockers, elevated risk, or true HITL questions.\n\
-If you need more repository context, return action=request_context with explicit machine-readable requests only: git_status, git_diff_stat, git_diff, orchestrator_summary, file:relative/path, or glob:pattern.\n\
-Return JSON only with this schema:\n\
+        "You are Oracle, a remote reasoning collaborator connected to a Codex harness.\n\
+Mode: direct_human\n\
+Make the best useful progress from the current context. Do not require unnecessary clarifying turns.\n\
+Use prose by default. If you need explicit machine control, append one final fenced block with language `oracle_control` and JSON body using this schema:\n\
 {{\"action\":\"reply|delegate|request_context|ask_user|finish\",\"message_for_user\":\"...\",\"task_for_orchestrator\":\"optional\",\"context_requests\":[\"optional\"]}}\n\
-Current controller state:\n\
+When requesting context, ask for targeted delta context only (git_status, git_diff_stat, git_diff, orchestrator_summary, file:relative/path, glob:pattern).\n\
+Current harness state:\n\
 - orchestrator_thread_id: {}\n\
 - last_orchestrator_task: {}\n\
 Human message:\n{}\n",
@@ -258,12 +299,11 @@ pub(crate) fn build_checkpoint_prompt(
     diff_stat: &str,
 ) -> String {
     format!(
-        "You are Oracle continuing the same long-lived supervisor thread.\n\
-Decide whether to delegate more work, ask the human for clarification, or finish the milestone.\n\
-If you need more repository context, return action=request_context with explicit machine-readable requests only: git_status, git_diff_stat, git_diff, orchestrator_summary, file:relative/path, or glob:pattern.\n\
-Return JSON only with this schema:\n\
-{{\"action\":\"reply|delegate|request_context|ask_user|finish\",\"message_for_user\":\"...\",\"task_for_orchestrator\":\"optional\",\"context_requests\":[\"optional\"]}}\n\
-Current controller state:\n\
+        "You are Oracle continuing the same long-lived collaboration.\n\
+Mode: checkpoint_review\n\
+Use prose by default. If you need machine control, append one final fenced `oracle_control` JSON block.\n\
+When requesting context, ask only for targeted deltas.\n\
+Current harness state:\n\
 - orchestrator_thread_id: {}\n\
 - last_orchestrator_task: {}\n\
 Orchestrator checkpoint:\n{}\n\
@@ -283,11 +323,11 @@ pub(crate) fn build_context_prompt(
     context: &str,
 ) -> String {
     format!(
-        "You are Oracle continuing the same long-lived supervisor thread.\n\
-You asked for more repository context. Use the context below to continue supervising the Codex orchestrator.\n\
-Return JSON only with this schema:\n\
-{{\"action\":\"reply|delegate|request_context|ask_user|finish\",\"message_for_user\":\"...\",\"task_for_orchestrator\":\"optional\",\"context_requests\":[\"optional\"]}}\n\
-Current controller state:\n\
+        "You are Oracle continuing the same long-lived collaboration.\n\
+Mode: planner_review\n\
+You asked for additional repository context. Continue from this delta context without resetting the conversation.\n\
+Use prose by default. If needed, append one final fenced `oracle_control` JSON block.\n\
+Current harness state:\n\
 - orchestrator_thread_id: {}\n\
 - last_orchestrator_task: {}\n\
 Requested context:\n\
@@ -346,7 +386,7 @@ pub(crate) fn summarize_thread(thread: &Thread) -> String {
 }
 
 pub(crate) fn orchestrator_developer_instructions() -> String {
-    "You are the hidden orchestrator operating under an Oracle supervisor. Oracle is slow and expensive, so do substantial work before escalating. Break the task into milestones, use parallel worker agents when subproblems are independent, and only stop when the milestone is complete or you are blocked on a human-level clarification. End with a concise checkpoint covering outcome, files changed, tests run, and remaining blockers.".to_string()
+    "You are the hidden orchestrator operating with Oracle as a remote reasoning collaborator. Oracle turns are expensive and slow, so do substantial multi-turn work before escalating. Break work into milestones, run safe parallel workers for independent subproblems, and only escalate at major milestones, blockers, or true human-level clarification needs. End checkpoints with outcome, files changed, tests run, and unresolved blockers.".to_string()
 }
 
 pub(crate) fn find_oracle_repo(start: &Path) -> Option<PathBuf> {
@@ -557,7 +597,9 @@ pub(crate) async fn resolve_context_requests(
 }
 
 pub(crate) fn parse_oracle_response(raw: &str) -> OracleResponse {
-    let candidate = extract_json(raw).unwrap_or_else(|| raw.trim().to_string());
+    let candidate = extract_oracle_control_json(raw)
+        .or_else(|| extract_json(raw))
+        .unwrap_or_else(|| raw.trim().to_string());
     if let Ok(parsed) = serde_json::from_str::<OracleJson>(&candidate) {
         let action = match parsed
             .action
@@ -590,6 +632,15 @@ pub(crate) fn parse_oracle_response(raw: &str) -> OracleResponse {
     }
 }
 
+fn extract_oracle_control_json(raw: &str) -> Option<String> {
+    let marker = "```oracle_control";
+    let start = raw.rfind(marker)?;
+    let after = &raw[start + marker.len()..];
+    let end = after.find("```")?;
+    let body = after[..end].trim();
+    (!body.is_empty()).then(|| body.to_string())
+}
+
 fn extract_json(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.starts_with('{') && trimmed.ends_with('}') {
@@ -606,6 +657,13 @@ mod tests {
 
     #[test]
     fn parse_oracle_command_accepts_fast_style_args() {
+        assert_eq!(OracleCommand::parse(""), Ok(OracleCommand::Browse));
+        assert_eq!(OracleCommand::parse("browse"), Ok(OracleCommand::Browse));
+        assert_eq!(OracleCommand::parse("new"), Ok(OracleCommand::NewThread));
+        assert_eq!(
+            OracleCommand::parse("attach abc-123"),
+            Ok(OracleCommand::AttachThread("abc-123".to_string()))
+        );
         assert_eq!(OracleCommand::parse("on"), Ok(OracleCommand::On));
         assert_eq!(OracleCommand::parse("off"), Ok(OracleCommand::Off));
         assert_eq!(OracleCommand::parse("status"), Ok(OracleCommand::Status));
