@@ -86,7 +86,7 @@ impl SlashCommand {
             SlashCommand::Copy => "copy the latest Codex output to your clipboard",
             SlashCommand::Mention => "mention a file",
             SlashCommand::Skills => "use skills to improve how Codex performs specific tasks",
-            SlashCommand::Oracle => "toggle Oracle supervisor mode",
+            SlashCommand::Oracle => "manage the Oracle supervisor thread and requested model",
             SlashCommand::Status => "show current session configuration and token usage",
             SlashCommand::DebugConfig => "show config layers and requirement sources for debugging",
             SlashCommand::Title => "configure which items appear in the terminal title",

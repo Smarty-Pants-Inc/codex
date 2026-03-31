@@ -506,7 +506,7 @@ pub(crate) enum AppEvent {
         collaboration_mode: CollaborationModeMask,
     },
 
-    /// Configure Oracle supervisor mode from `/oracle on|off|status`.
+    /// Configure the Oracle supervisor thread from `/oracle ...`.
     ConfigureOracleMode {
         raw_command: String,
     },

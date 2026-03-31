@@ -1,7 +1,6 @@
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -18,23 +17,66 @@ use crate::history_cell::PlainHistoryCell;
 
 const ORACLE_CONTEXT_FILE_LIMIT: usize = 4;
 const ORACLE_CONTEXT_CHAR_LIMIT: usize = 12_000;
-const ORACLE_MAX_SLUG_WORDS: usize = 5;
-const ORACLE_MAX_SLUG_WORD_LENGTH: usize = 10;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OracleCommand {
     On,
     Off,
     Status,
+    Model(Option<OracleModelPreset>),
 }
 
 impl OracleCommand {
     pub(crate) fn parse(raw: &str) -> Result<Self, String> {
+        let normalized = raw.trim().to_ascii_lowercase();
+        let parts = normalized.split_whitespace().collect::<Vec<_>>();
+        match parts.as_slice() {
+            ["on"] => Ok(Self::On),
+            ["off"] => Ok(Self::Off),
+            ["status"] => Ok(Self::Status),
+            ["model"] => Ok(Self::Model(None)),
+            ["model", value] => OracleModelPreset::parse(value)
+                .map(|model| Self::Model(Some(model)))
+                .ok_or_else(|| "Usage: /oracle [on|off|status|model [pro|thinking]]".to_string()),
+            _ => Err("Usage: /oracle [on|off|status|model [pro|thinking]]".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum OracleModelPreset {
+    #[default]
+    Pro,
+    Thinking,
+}
+
+impl OracleModelPreset {
+    fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "on" => Ok(Self::On),
-            "off" => Ok(Self::Off),
-            "status" => Ok(Self::Status),
-            _ => Err("Usage: /oracle [on|off|status]".to_string()),
+            "pro" | "gpt-5.4-pro" => Some(Self::Pro),
+            "thinking" | "gpt-5.4" => Some(Self::Thinking),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn model_id(self) -> &'static str {
+        match self {
+            Self::Pro => "gpt-5.4-pro",
+            Self::Thinking => "gpt-5.4",
+        }
+    }
+
+    pub(crate) fn browser_label(self) -> &'static str {
+        match self {
+            Self::Pro => "GPT-5.4 Pro",
+            Self::Thinking => "Thinking 5.4",
+        }
+    }
+
+    pub(crate) fn display_name(self) -> &'static str {
+        match self {
+            Self::Pro => "gpt-5.4-pro",
+            Self::Thinking => "gpt-5.4 (Thinking 5.4)",
         }
     }
 }
@@ -43,6 +85,38 @@ impl OracleCommand {
 pub(crate) enum OracleRequestKind {
     UserTurn,
     Checkpoint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum OracleSupervisorPhase {
+    #[default]
+    Disabled,
+    Idle,
+    WaitingForOracle(OracleRequestKind),
+    WaitingForOrchestrator,
+}
+
+impl OracleSupervisorPhase {
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Idle => "idle",
+            Self::WaitingForOracle(OracleRequestKind::UserTurn) => {
+                "waiting for Oracle user-turn reply"
+            }
+            Self::WaitingForOracle(OracleRequestKind::Checkpoint) => {
+                "waiting for Oracle checkpoint review"
+            }
+            Self::WaitingForOrchestrator => "waiting for orchestrator",
+        }
+    }
+
+    pub(crate) fn is_busy(self) -> bool {
+        matches!(
+            self,
+            Self::WaitingForOracle(_) | Self::WaitingForOrchestrator
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,7 +130,7 @@ pub(crate) enum OracleAction {
 
 #[derive(Debug, Clone)]
 pub(crate) struct OracleRunRequest {
-    pub(crate) visible_thread_id: ThreadId,
+    pub(crate) oracle_thread_id: ThreadId,
     pub(crate) kind: OracleRequestKind,
     pub(crate) session_slug: String,
     pub(crate) prompt: String,
@@ -64,11 +138,14 @@ pub(crate) struct OracleRunRequest {
     pub(crate) workspace_cwd: PathBuf,
     pub(crate) oracle_repo: PathBuf,
     pub(crate) followup_session: Option<String>,
+    pub(crate) model: OracleModelPreset,
+    pub(crate) browser_model_strategy: String,
+    pub(crate) browser_model_label: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct OracleRunResult {
-    pub(crate) visible_thread_id: ThreadId,
+    pub(crate) oracle_thread_id: ThreadId,
     pub(crate) kind: OracleRequestKind,
     pub(crate) requested_slug: String,
     pub(crate) session_id: String,
@@ -85,29 +162,27 @@ pub(crate) struct OracleResponse {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct OracleSupervisorState {
-    pub(crate) enabled_thread_id: Option<ThreadId>,
-    pub(crate) owner_thread_id: Option<ThreadId>,
+    pub(crate) oracle_thread_id: Option<ThreadId>,
     pub(crate) session_root_slug: Option<String>,
     pub(crate) current_session_id: Option<String>,
     pub(crate) orchestrator_thread_id: Option<ThreadId>,
-    pub(crate) busy: bool,
+    pub(crate) phase: OracleSupervisorPhase,
+    pub(crate) model: OracleModelPreset,
     pub(crate) last_status: Option<String>,
     pub(crate) last_orchestrator_task: Option<String>,
+    pub(crate) pending_turn_id: Option<String>,
+    pub(crate) automatic_context_followups: u8,
 }
 
 impl OracleSupervisorState {
     pub(crate) fn intercepts(&self, thread_id: ThreadId) -> bool {
-        self.enabled_thread_id == Some(thread_id)
+        self.oracle_thread_id == Some(thread_id)
     }
 
     pub(crate) fn status_message(&self) -> String {
         let enabled = self
-            .enabled_thread_id
+            .oracle_thread_id
             .map_or("off".to_string(), |id| format!("on for {id}"));
-        let owner = self
-            .owner_thread_id
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "none".to_string());
         let root_slug = self
             .session_root_slug
             .clone()
@@ -120,13 +195,14 @@ impl OracleSupervisorState {
             .orchestrator_thread_id
             .map(|id| id.to_string())
             .unwrap_or_else(|| "not created".to_string());
-        let busy = if self.busy { "busy" } else { "idle" };
         let last = self
             .last_status
             .clone()
             .unwrap_or_else(|| "no activity yet".to_string());
         format!(
-            "Oracle mode: {enabled}\nOwner thread: {owner}\nSession root slug: {root_slug}\nCurrent session: {current_session}\nOrchestrator: {orchestrator}\nState: {busy}\nLast status: {last}"
+            "Oracle mode: {enabled}\nRequested model: {}\nBrowser strategy: select\nSession root slug: {root_slug}\nCurrent session: {current_session}\nOrchestrator: {orchestrator}\nState: {}\nLast status: {last}",
+            self.model.display_name(),
+            self.phase.description(),
         )
     }
 }
@@ -152,110 +228,6 @@ pub(crate) fn generate_session_slug(thread_id: ThreadId) -> String {
         .unwrap_or_default();
     let short: String = thread_id.to_string().chars().take(8).collect();
     format!("codex-oracle-{short}-{millis}")
-}
-
-fn normalize_oracle_slug(candidate: &str) -> Option<String> {
-    let mut words = Vec::new();
-    let mut current = String::new();
-
-    let push_word = |word: &mut String, words: &mut Vec<String>| {
-        if word.is_empty() || words.len() >= ORACLE_MAX_SLUG_WORDS {
-            word.clear();
-            return;
-        }
-        words.push(word.chars().take(ORACLE_MAX_SLUG_WORD_LENGTH).collect());
-        word.clear();
-    };
-
-    for ch in candidate.chars() {
-        if ch.is_ascii_alphanumeric() {
-            current.push(ch.to_ascii_lowercase());
-        } else {
-            push_word(&mut current, &mut words);
-            if words.len() >= ORACLE_MAX_SLUG_WORDS {
-                break;
-            }
-        }
-    }
-    push_word(&mut current, &mut words);
-
-    (!words.is_empty()).then(|| words.join("-"))
-}
-
-fn sanitize_session_id_token(value: &str) -> String {
-    value
-        .chars()
-        .take_while(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
-        .collect()
-}
-
-fn parse_oracle_session_id(output: &str) -> Option<String> {
-    for line in output.lines() {
-        if let Some((_, rest)) = line.split_once("oracle session ") {
-            let session_id = sanitize_session_id_token(rest.trim());
-            if !session_id.is_empty() {
-                return Some(session_id);
-            }
-        }
-    }
-
-    for line in output.lines() {
-        if let Some(rest) = line.trim().strip_prefix("Session ") {
-            let session_id = sanitize_session_id_token(rest.trim());
-            if !session_id.is_empty() {
-                return Some(session_id);
-            }
-        }
-    }
-
-    None
-}
-
-fn oracle_sessions_dir() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("ORACLE_HOME_DIR") {
-        return Some(PathBuf::from(dir).join("sessions"));
-    }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".oracle").join("sessions"))
-}
-
-async fn resolve_oracle_session_id(requested_slug: &str) -> Option<String> {
-    let normalized = normalize_oracle_slug(requested_slug)?;
-    let sessions_dir = oracle_sessions_dir()?;
-
-    let direct_meta_path = sessions_dir.join(&normalized).join("meta.json");
-    if fs::try_exists(&direct_meta_path).await.ok()? {
-        return Some(normalized);
-    }
-
-    let prefix = format!("{normalized}-");
-    let mut entries = fs::read_dir(sessions_dir).await.ok()?;
-    let mut newest_match: Option<(SystemTime, String)> = None;
-
-    while let Some(entry) = entries.next_entry().await.ok()? {
-        let Ok(file_type) = entry.file_type().await else {
-            continue;
-        };
-        if !file_type.is_dir() {
-            continue;
-        }
-        let file_name = entry.file_name();
-        let session_id = file_name.to_string_lossy().to_string();
-        if session_id != normalized && !session_id.starts_with(&prefix) {
-            continue;
-        }
-        let modified = entry
-            .metadata()
-            .await
-            .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .unwrap_or(UNIX_EPOCH + Duration::from_secs(0));
-        match &newest_match {
-            Some((current_modified, _)) if modified <= *current_modified => {}
-            _ => newest_match = Some((modified, session_id)),
-        }
-    }
-
-    newest_match.map(|(_, session_id)| session_id)
 }
 
 pub(crate) fn build_user_turn_prompt(state: &OracleSupervisorState, user_text: &str) -> String {
@@ -378,14 +350,18 @@ pub(crate) fn orchestrator_developer_instructions() -> String {
 }
 
 pub(crate) fn find_oracle_repo(start: &Path) -> Option<PathBuf> {
-    start
-        .ancestors()
-        .find_map(|dir| {
-            ["forks/oracle", "external/oracle"]
-                .into_iter()
-                .map(|suffix| dir.join(suffix))
-                .find(|path| path.join("package.json").exists())
-        })
+    start.ancestors().find_map(|dir| {
+        ["forks/oracle", "external/oracle"]
+            .into_iter()
+            .map(|suffix| dir.join(suffix))
+            .find(|path| {
+                path.join("package.json").exists()
+                    && path
+                        .join("bin")
+                        .join("oracle-supervisor-broker.ts")
+                        .exists()
+            })
+    })
 }
 
 fn truncate_context(text: &str) -> String {
@@ -580,79 +556,6 @@ pub(crate) async fn resolve_context_requests(
     }
 }
 
-pub(crate) async fn run_oracle(request: OracleRunRequest) -> Result<OracleRunResult, String> {
-    let output_path = std::env::temp_dir().join(format!("{}.md", request.session_slug));
-    let use_true_headless = std::env::var("CODEX_ORACLE_TRUE_HEADLESS")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes"
-            )
-        })
-        .unwrap_or(false);
-    let mut command = Command::new("pnpm");
-    command
-        .arg("exec")
-        .arg("tsx")
-        .arg("bin/oracle-cli.ts")
-        .arg("--engine")
-        .arg("browser")
-        .arg("--model")
-        .arg("gpt-5.4-pro")
-        .arg("--browser-manual-login")
-        .arg("--browser-model-strategy")
-        .arg("current")
-        .arg("--wait")
-        .arg("--no-notify")
-        .arg("--slug")
-        .arg(&request.session_slug)
-        .arg("--write-output")
-        .arg(&output_path)
-        .arg("--prompt")
-        .arg(&request.prompt)
-        .current_dir(&request.oracle_repo);
-    for file in &request.files {
-        command.arg("--file").arg(file);
-    }
-    if use_true_headless {
-        command.arg("--browser-headless");
-    } else if cfg!(target_os = "macos") {
-        command.arg("--browser-hide-window");
-    }
-    if let Some(session) = &request.followup_session {
-        command.arg("--followup").arg(session);
-    }
-    let output = command
-        .output()
-        .await
-        .map_err(|error| format!("failed to start Oracle CLI: {error}"))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Oracle CLI failed: {}", stderr.trim()));
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let session_id = parse_oracle_session_id(&stdout)
-        .or_else(|| parse_oracle_session_id(&String::from_utf8_lossy(&output.stderr)));
-    let session_id = match session_id {
-        Some(session_id) => session_id,
-        None => resolve_oracle_session_id(&request.session_slug)
-            .await
-            .unwrap_or_else(|| request.session_slug.clone()),
-    };
-    let raw = fs::read_to_string(&output_path)
-        .await
-        .map_err(|error| format!("failed to read Oracle output: {error}"))?;
-    let _ = fs::remove_file(&output_path).await;
-    Ok(OracleRunResult {
-        visible_thread_id: request.visible_thread_id,
-        kind: request.kind,
-        requested_slug: request.session_slug,
-        session_id,
-        response: parse_oracle_response(&raw),
-    })
-}
-
 pub(crate) fn parse_oracle_response(raw: &str) -> OracleResponse {
     let candidate = extract_json(raw).unwrap_or_else(|| raw.trim().to_string());
     if let Ok(parsed) = serde_json::from_str::<OracleJson>(&candidate) {
@@ -706,6 +609,18 @@ mod tests {
         assert_eq!(OracleCommand::parse("on"), Ok(OracleCommand::On));
         assert_eq!(OracleCommand::parse("off"), Ok(OracleCommand::Off));
         assert_eq!(OracleCommand::parse("status"), Ok(OracleCommand::Status));
+        assert_eq!(
+            OracleCommand::parse("model"),
+            Ok(OracleCommand::Model(None))
+        );
+        assert_eq!(
+            OracleCommand::parse("model pro"),
+            Ok(OracleCommand::Model(Some(OracleModelPreset::Pro)))
+        );
+        assert_eq!(
+            OracleCommand::parse("model thinking"),
+            Ok(OracleCommand::Model(Some(OracleModelPreset::Thinking)))
+        );
     }
 
     #[test]
@@ -802,20 +717,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_oracle_session_id_reads_reattach_hint() {
-        let output = "oracle (browser) gpt-5.4-pro\nReattach via: oracle session codex-oracle-019d374d-1774749385\n";
-        assert_eq!(
-            parse_oracle_session_id(output).as_deref(),
-            Some("codex-oracle-019d374d-1774749385")
-        );
-    }
-
-    #[test]
-    fn normalize_oracle_slug_matches_oracle_word_truncation() {
-        assert_eq!(
-            normalize_oracle_slug("codex-oracle-019d374d-1774749385364").as_deref(),
-            Some("codex-oracle-019d374d-1774749385")
-        );
+    fn oracle_model_preset_maps_to_expected_browser_values() {
+        assert_eq!(OracleModelPreset::Pro.model_id(), "gpt-5.4-pro");
+        assert_eq!(OracleModelPreset::Pro.browser_label(), "GPT-5.4 Pro");
+        assert_eq!(OracleModelPreset::Thinking.model_id(), "gpt-5.4");
+        assert_eq!(OracleModelPreset::Thinking.browser_label(), "Thinking 5.4");
     }
 
     #[test]
@@ -823,11 +729,16 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let forks = temp.path().join("forks").join("oracle");
         let external = temp.path().join("external").join("oracle");
-        std::fs::create_dir_all(&forks).expect("mkdir forks");
+        std::fs::create_dir_all(forks.join("bin")).expect("mkdir forks");
         std::fs::create_dir_all(&external).expect("mkdir external");
         std::fs::write(forks.join("package.json"), "{}\n").expect("write forks package");
+        std::fs::write(forks.join("bin").join("oracle-supervisor-broker.ts"), "")
+            .expect("write forks broker");
         std::fs::write(external.join("package.json"), "{}\n").expect("write external package");
 
-        assert_eq!(find_oracle_repo(temp.path()).as_deref(), Some(forks.as_path()));
+        assert_eq!(
+            find_oracle_repo(temp.path()).as_deref(),
+            Some(forks.as_path())
+        );
     }
 }
