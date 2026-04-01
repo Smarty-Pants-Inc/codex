@@ -1,3 +1,4 @@
+use std::env;
 use std::collections::HashMap;
 use std::path::Component;
 use std::path::Path;
@@ -389,8 +390,8 @@ pub(crate) fn orchestrator_developer_instructions() -> String {
     "You are the hidden orchestrator operating with Oracle as a remote reasoning collaborator. Oracle turns are expensive and slow, so do substantial multi-turn work before escalating. Break work into milestones, run safe parallel workers for independent subproblems, and only escalate at major milestones, blockers, or true human-level clarification needs. End checkpoints with outcome, files changed, tests run, and unresolved blockers.".to_string()
 }
 
-pub(crate) fn find_oracle_repo(start: &Path) -> Option<PathBuf> {
-    start.ancestors().find_map(|dir| {
+fn search_oracle_repo_from_root(root: &Path) -> Option<PathBuf> {
+    root.ancestors().find_map(|dir| {
         ["forks/oracle", "external/oracle"]
             .into_iter()
             .map(|suffix| dir.join(suffix))
@@ -402,6 +403,25 @@ pub(crate) fn find_oracle_repo(start: &Path) -> Option<PathBuf> {
                         .exists()
             })
     })
+}
+
+pub(crate) fn find_oracle_repo(start: &Path) -> Option<PathBuf> {
+    search_oracle_repo_from_root(start)
+        .or_else(|| {
+            env::var_os("SMARTY_CODE_ROOT")
+                .map(PathBuf::from)
+                .and_then(|root| search_oracle_repo_from_root(root.as_path()))
+        })
+        .or_else(|| {
+            env::var_os("SMARTY_CODEX_REPO_DIR")
+                .map(PathBuf::from)
+                .and_then(|root| search_oracle_repo_from_root(root.as_path()))
+        })
+        .or_else(|| {
+            env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().and_then(search_oracle_repo_from_root))
+        })
 }
 
 fn truncate_context(text: &str) -> String {
@@ -654,6 +674,42 @@ fn extract_json(raw: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
+    use std::ffi::OsString;
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &Path) -> Self {
+            let original = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+
+        fn remove(key: &'static str) -> Self {
+            let original = std::env::var_os(key);
+            unsafe {
+                std::env::remove_var(key);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.original {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
+    }
 
     #[test]
     fn parse_oracle_command_accepts_fast_style_args() {
@@ -796,6 +852,31 @@ mod tests {
 
         assert_eq!(
             find_oracle_repo(temp.path()).as_deref(),
+            Some(forks.as_path())
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn find_oracle_repo_uses_smarty_codex_repo_dir_when_workspace_is_outside_project() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path().join("smarty-code");
+        let codex = project.join("forks").join("codex");
+        let forks = project.join("forks").join("oracle");
+        let outside = temp.path().join("workspace");
+
+        std::fs::create_dir_all(codex.join("codex-rs")).expect("mkdir codex");
+        std::fs::create_dir_all(forks.join("bin")).expect("mkdir oracle");
+        std::fs::create_dir_all(&outside).expect("mkdir workspace");
+        std::fs::write(forks.join("package.json"), "{}\n").expect("write oracle package");
+        std::fs::write(forks.join("bin").join("oracle-supervisor-broker.ts"), "")
+            .expect("write oracle broker");
+
+        let _code_root_guard = EnvVarGuard::remove("SMARTY_CODE_ROOT");
+        let _repo_guard = EnvVarGuard::set("SMARTY_CODEX_REPO_DIR", codex.as_path());
+
+        assert_eq!(
+            find_oracle_repo(outside.as_path()).as_deref(),
             Some(forks.as_path())
         );
     }
