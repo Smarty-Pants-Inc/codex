@@ -45,6 +45,7 @@ use crate::oracle_broker::OracleBrokerThreadOpenResponse;
 use crate::oracle_broker::spawn_oracle_broker;
 use crate::oracle_supervisor::OracleAction;
 use crate::oracle_supervisor::OracleCommand;
+use crate::oracle_supervisor::OracleModelPreset;
 use crate::oracle_supervisor::OracleRequestKind;
 use crate::oracle_supervisor::OracleRunRequest;
 use crate::oracle_supervisor::OracleRunResult;
@@ -153,6 +154,8 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread;
@@ -1019,6 +1022,8 @@ pub(crate) struct App {
     pending_app_server_requests: PendingAppServerRequests,
     oracle_state: OracleSupervisorState,
     oracle_broker: Option<(PathBuf, OracleBrokerClient)>,
+    #[cfg(test)]
+    oracle_test_broker_hooks: Arc<StdMutex<OracleTestBrokerHooks>>,
 }
 
 #[derive(Default)]
@@ -1026,6 +1031,47 @@ struct WindowsSandboxState {
     setup_started_at: Option<Instant>,
     // One-shot suppression of the next world-writable scan after user confirmation.
     skip_world_writable_scan_once: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OracleNewThreadBinding {
+    thread_id: ThreadId,
+    title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OracleAttachThreadBinding {
+    ReattachedLocal {
+        thread_id: ThreadId,
+        title: String,
+        conversation_id: String,
+    },
+    AttachedRemote {
+        thread_id: ThreadId,
+        title: String,
+        conversation_id: String,
+    },
+}
+
+impl OracleAttachThreadBinding {
+    fn thread_id(&self) -> ThreadId {
+        match self {
+            Self::ReattachedLocal { thread_id, .. } | Self::AttachedRemote { thread_id, .. } => {
+                *thread_id
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct OracleTestBrokerHooks {
+    list_thread_results: VecDeque<Result<Vec<OracleBrokerThreadEntry>, String>>,
+    new_thread_results: VecDeque<Result<OracleBrokerThreadOpenResponse, String>>,
+    attach_thread_results: VecDeque<Result<OracleBrokerThreadOpenResponse, String>>,
+    list_thread_calls: usize,
+    new_thread_calls: usize,
+    attach_thread_calls: Vec<String>,
 }
 
 fn normalize_harness_overrides_for_cwd(
@@ -3935,6 +3981,25 @@ impl App {
     }
 
     async fn oracle_list_remote_threads(&mut self) -> Result<Vec<OracleBrokerThreadEntry>> {
+        #[cfg(test)]
+        if let Some(result) = {
+            let mut hooks = self
+                .oracle_test_broker_hooks
+                .lock()
+                .expect("oracle test broker hooks");
+            hooks.list_thread_results.pop_front().map(|result| {
+                hooks.list_thread_calls += 1;
+                result
+            })
+        } {
+            let mut remote_threads = result.map_err(|err| color_eyre::eyre::eyre!(err))?;
+            remote_threads.sort_by(|a, b| {
+                b.is_current
+                    .cmp(&a.is_current)
+                    .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
+            });
+            return Ok(remote_threads);
+        }
         let Some(oracle_repo) = find_oracle_repo(self.chat_widget.config_ref().cwd.as_path())
         else {
             return Err(color_eyre::eyre::eyre!(
@@ -3957,6 +4022,19 @@ impl App {
     }
 
     async fn oracle_new_remote_thread(&mut self) -> Result<OracleBrokerThreadOpenResponse> {
+        #[cfg(test)]
+        if let Some(result) = {
+            let mut hooks = self
+                .oracle_test_broker_hooks
+                .lock()
+                .expect("oracle test broker hooks");
+            hooks.new_thread_results.pop_front().map(|result| {
+                hooks.new_thread_calls += 1;
+                result
+            })
+        } {
+            return result.map_err(|err| color_eyre::eyre::eyre!(err));
+        }
         let Some(oracle_repo) = find_oracle_repo(self.chat_widget.config_ref().cwd.as_path())
         else {
             return Err(color_eyre::eyre::eyre!(
@@ -3976,6 +4054,20 @@ impl App {
         &mut self,
         conversation_id: String,
     ) -> Result<OracleBrokerThreadOpenResponse> {
+        #[cfg(test)]
+        if let Some(result) = {
+            let mut hooks = self
+                .oracle_test_broker_hooks
+                .lock()
+                .expect("oracle test broker hooks");
+            let conversation_id_for_log = conversation_id.clone();
+            hooks.attach_thread_results.pop_front().map(|result| {
+                hooks.attach_thread_calls.push(conversation_id_for_log);
+                result
+            })
+        } {
+            return result.map_err(|err| color_eyre::eyre::eyre!(err));
+        }
         let Some(oracle_repo) = find_oracle_repo(self.chat_widget.config_ref().cwd.as_path())
         else {
             return Err(color_eyre::eyre::eyre!(
@@ -4157,6 +4249,16 @@ impl App {
         "Oracle is currently waiting on a browser turn. Finish or cancel that turn before creating or attaching a different remote Oracle thread."
     }
 
+    fn ensure_oracle_remote_thread_mutation_allowed(&self) -> Result<()> {
+        if self.oracle_browser_is_busy() {
+            return Err(color_eyre::eyre::eyre!(
+                "{}",
+                self.oracle_remote_thread_mutation_blocked_message()
+            ));
+        }
+        Ok(())
+    }
+
     async fn bind_oracle_remote_thread(
         &mut self,
         remote: OracleBrokerThreadOpenResponse,
@@ -4182,6 +4284,93 @@ impl App {
         );
         self.sync_oracle_thread_session(thread_id).await;
         thread_id
+    }
+
+    async fn create_oracle_thread_binding(&mut self) -> Result<OracleNewThreadBinding> {
+        self.ensure_oracle_remote_thread_mutation_allowed()?;
+        let remote = self.oracle_new_remote_thread().await?;
+        let title = remote.title.clone();
+        let thread_id = self.bind_oracle_remote_thread(remote).await;
+        self.oracle_state.last_status = Some(format!("Attached new Oracle thread on {thread_id}."));
+        self.persist_active_oracle_binding();
+        Ok(OracleNewThreadBinding { thread_id, title })
+    }
+
+    async fn attach_oracle_thread_binding(
+        &mut self,
+        conversation_id: String,
+        title_hint: Option<String>,
+    ) -> Result<OracleAttachThreadBinding> {
+        self.ensure_oracle_remote_thread_mutation_allowed()?;
+        if let Some(thread_id) =
+            self.find_oracle_thread_by_conversation_id(conversation_id.as_str())
+        {
+            self.activate_oracle_binding(thread_id);
+            self.sync_oracle_thread_session(thread_id).await;
+            self.oracle_state.last_status = Some(format!(
+                "Reattached existing local Oracle thread {thread_id}."
+            ));
+            self.persist_active_oracle_binding();
+            let title = title_hint
+                .or_else(|| {
+                    self.oracle_state
+                        .bindings
+                        .get(&thread_id)
+                        .and_then(|binding| binding.remote_title.clone())
+                })
+                .filter(|title| !title.trim().is_empty())
+                .unwrap_or_else(|| format!("Conversation {conversation_id}"));
+            return Ok(OracleAttachThreadBinding::ReattachedLocal {
+                thread_id,
+                title,
+                conversation_id,
+            });
+        }
+
+        let remote = self
+            .oracle_attach_remote_thread(conversation_id.clone())
+            .await?;
+        let title = remote.title.clone();
+        let thread_id = self.bind_oracle_remote_thread(remote).await;
+        self.oracle_state.last_status = Some(format!("Attached Oracle thread on {thread_id}."));
+        self.persist_active_oracle_binding();
+        Ok(OracleAttachThreadBinding::AttachedRemote {
+            thread_id,
+            title,
+            conversation_id,
+        })
+    }
+
+    async fn set_oracle_model_preference(&mut self, model: OracleModelPreset) -> String {
+        self.oracle_state.model = model;
+        let oracle_thread_ids = self
+            .oracle_state
+            .bindings
+            .keys()
+            .copied()
+            .collect::<Vec<_>>();
+        for thread_id in oracle_thread_ids {
+            self.sync_oracle_thread_session(thread_id).await;
+        }
+        let any_busy = self
+            .oracle_state
+            .bindings
+            .values()
+            .any(|binding| binding.phase.is_busy());
+        let status = if any_busy {
+            format!(
+                "Oracle model preference set to {}. The current in-flight step will finish with its existing request. The next Oracle browser run will switch to the new model automatically.",
+                model.display_name()
+            )
+        } else {
+            format!(
+                "Oracle model preference set to {}. The next Oracle browser run will switch to that model automatically.",
+                model.display_name()
+            )
+        };
+        self.oracle_state.last_status = Some(status.clone());
+        self.persist_active_oracle_binding();
+        status
     }
 
     fn is_terminal_thread_read_error(err: &color_eyre::Report) -> bool {
@@ -5094,6 +5283,8 @@ impl App {
             pending_app_server_requests: PendingAppServerRequests::default(),
             oracle_state: OracleSupervisorState::default(),
             oracle_broker: None,
+            #[cfg(test)]
+            oracle_test_broker_hooks: Arc::new(StdMutex::new(OracleTestBrokerHooks::default())),
         };
         if let Some(started) = initial_started_thread {
             app.enqueue_primary_thread_session(started.session, started.turns)
@@ -5575,65 +5766,50 @@ impl App {
                                 .add_error_message(format!("Failed to open Oracle picker: {err}"));
                         }
                     }
-                    Ok(OracleCommand::NewThread) if self.oracle_browser_is_busy() => {
-                        self.chat_widget.add_error_message(
-                            self.oracle_remote_thread_mutation_blocked_message()
-                                .to_string(),
-                        );
-                    }
-                    Ok(OracleCommand::NewThread) => match self.oracle_new_remote_thread().await {
-                        Ok(remote) => {
-                            let title = remote.title.clone();
-                            let thread_id = self.bind_oracle_remote_thread(remote).await;
-                            if self.active_thread_id != Some(thread_id) {
-                                self.select_agent_thread(tui, app_server, thread_id).await?;
+                    Ok(OracleCommand::NewThread) => match self.create_oracle_thread_binding().await
+                    {
+                        Ok(binding) => {
+                            if self.active_thread_id != Some(binding.thread_id) {
+                                self.select_agent_thread(tui, app_server, binding.thread_id)
+                                    .await?;
                             }
-                            self.oracle_state.last_status =
-                                Some(format!("Attached new Oracle thread on {thread_id}."));
-                            self.persist_active_oracle_binding();
                             self.chat_widget.add_to_history(oracle_history_cell(
                                 "Oracle",
-                                &format!("Attached new Oracle thread on {thread_id}: {title}"),
+                                &format!(
+                                    "Attached new Oracle thread on {}: {}",
+                                    binding.thread_id, binding.title
+                                ),
                             ));
+                        }
+                        Err(err)
+                            if err.to_string()
+                                == self.oracle_remote_thread_mutation_blocked_message() =>
+                        {
+                            self.chat_widget.add_error_message(err.to_string());
                         }
                         Err(err) => self.chat_widget.add_error_message(format!(
                             "Failed to create a new Oracle thread: {err}"
                         )),
                     },
-                    Ok(OracleCommand::AttachThread(_)) if self.oracle_browser_is_busy() => {
-                        self.chat_widget.add_error_message(
-                            self.oracle_remote_thread_mutation_blocked_message()
-                                .to_string(),
-                        );
-                    }
                     Ok(OracleCommand::AttachThread(conversation_id)) => {
-                        if let Some(thread_id) =
-                            self.find_oracle_thread_by_conversation_id(conversation_id.as_str())
+                        match self
+                            .attach_oracle_thread_binding(
+                                conversation_id.clone(),
+                                /*title_hint*/ None,
+                            )
+                            .await
                         {
-                            self.activate_oracle_binding(thread_id);
-                            self.sync_oracle_thread_session(thread_id).await;
-                            if self.active_thread_id != Some(thread_id) {
-                                self.select_agent_thread(tui, app_server, thread_id).await?;
-                            }
-                            self.oracle_state.last_status = Some(format!(
-                                "Reattached existing local Oracle thread {thread_id}."
-                            ));
-                            self.persist_active_oracle_binding();
-                        } else {
-                            match self
-                                .oracle_attach_remote_thread(conversation_id.clone())
-                                .await
-                            {
-                                Ok(remote) => {
-                                    let title = remote.title.clone();
-                                    let thread_id = self.bind_oracle_remote_thread(remote).await;
-                                    if self.active_thread_id != Some(thread_id) {
-                                        self.select_agent_thread(tui, app_server, thread_id)
-                                            .await?;
-                                    }
-                                    self.oracle_state.last_status =
-                                        Some(format!("Attached Oracle thread on {thread_id}."));
-                                    self.persist_active_oracle_binding();
+                            Ok(binding) => {
+                                let thread_id = binding.thread_id();
+                                if self.active_thread_id != Some(thread_id) {
+                                    self.select_agent_thread(tui, app_server, thread_id).await?;
+                                }
+                                if let OracleAttachThreadBinding::AttachedRemote {
+                                    title,
+                                    conversation_id,
+                                    ..
+                                } = binding
+                                {
                                     self.chat_widget.add_to_history(oracle_history_cell(
                                         "Oracle",
                                         &format!(
@@ -5641,10 +5817,16 @@ impl App {
                                         ),
                                     ));
                                 }
-                                Err(err) => self.chat_widget.add_error_message(format!(
-                                    "Failed to attach Oracle thread {conversation_id}: {err}"
-                                )),
                             }
+                            Err(err)
+                                if err.to_string()
+                                    == self.oracle_remote_thread_mutation_blocked_message() =>
+                            {
+                                self.chat_widget.add_error_message(err.to_string());
+                            }
+                            Err(err) => self.chat_widget.add_error_message(format!(
+                                "Failed to attach Oracle thread {conversation_id}: {err}"
+                            )),
                         }
                     }
                     Ok(OracleCommand::On) => {
@@ -5690,34 +5872,7 @@ impl App {
                     }
                     Ok(OracleCommand::Model(model)) => {
                         if let Some(model) = model {
-                            self.oracle_state.model = model;
-                            let oracle_thread_ids = self
-                                .oracle_state
-                                .bindings
-                                .keys()
-                                .copied()
-                                .collect::<Vec<_>>();
-                            for thread_id in oracle_thread_ids {
-                                self.sync_oracle_thread_session(thread_id).await;
-                            }
-                            let any_busy = self
-                                .oracle_state
-                                .bindings
-                                .values()
-                                .any(|binding| binding.phase.is_busy());
-                            let status = if any_busy {
-                                format!(
-                                    "Oracle model preference set to {}. The current in-flight step will finish with its existing request. The next Oracle browser run will switch to the new model automatically.",
-                                    model.display_name()
-                                )
-                            } else {
-                                format!(
-                                    "Oracle model preference set to {}. The next Oracle browser run will switch to that model automatically.",
-                                    model.display_name()
-                                )
-                            };
-                            self.oracle_state.last_status = Some(status.clone());
-                            self.persist_active_oracle_binding();
+                            let status = self.set_oracle_model_preference(model).await;
                             self.chat_widget
                                 .add_to_history(oracle_history_cell("Oracle Model", &status));
                         } else {
@@ -5733,78 +5888,69 @@ impl App {
                     Err(error) => self.chat_widget.add_error_message(error),
                 }
             }
-            AppEvent::OracleCreateThread if self.oracle_browser_is_busy() => {
-                self.chat_widget.add_error_message(
-                    self.oracle_remote_thread_mutation_blocked_message()
-                        .to_string(),
-                );
-            }
-            AppEvent::OracleCreateThread => match self.oracle_new_remote_thread().await {
-                Ok(remote) => {
-                    let title = remote.title.clone();
-                    let thread_id = self.bind_oracle_remote_thread(remote).await;
-                    if self.active_thread_id != Some(thread_id) {
-                        self.select_agent_thread(tui, app_server, thread_id).await?;
+            AppEvent::OracleCreateThread => match self.create_oracle_thread_binding().await {
+                Ok(binding) => {
+                    if self.active_thread_id != Some(binding.thread_id) {
+                        self.select_agent_thread(tui, app_server, binding.thread_id)
+                            .await?;
                     }
-                    self.oracle_state.last_status =
-                        Some(format!("Attached new Oracle thread on {thread_id}."));
-                    self.persist_active_oracle_binding();
                     self.chat_widget.add_to_history(oracle_history_cell(
                         "Oracle",
-                        &format!("Attached new Oracle thread on {thread_id}: {title}"),
+                        &format!(
+                            "Attached new Oracle thread on {}: {}",
+                            binding.thread_id, binding.title
+                        ),
                     ));
+                }
+                Err(err)
+                    if err.to_string() == self.oracle_remote_thread_mutation_blocked_message() =>
+                {
+                    self.chat_widget.add_error_message(err.to_string());
                 }
                 Err(err) => self
                     .chat_widget
                     .add_error_message(format!("Failed to create a new Oracle thread: {err}")),
             },
-            AppEvent::OracleAttachThread { .. } if self.oracle_browser_is_busy() => {
-                self.chat_widget.add_error_message(
-                    self.oracle_remote_thread_mutation_blocked_message()
-                        .to_string(),
-                );
-            }
             AppEvent::OracleAttachThread {
                 conversation_id,
                 title,
                 url: _url,
             } => {
-                if let Some(thread_id) =
-                    self.find_oracle_thread_by_conversation_id(conversation_id.as_str())
-                {
-                    self.activate_oracle_binding(thread_id);
-                    self.sync_oracle_thread_session(thread_id).await;
-                    if self.active_thread_id != Some(thread_id) {
-                        self.select_agent_thread(tui, app_server, thread_id).await?;
-                    }
-                    self.oracle_state.last_status = Some(format!(
-                        "Reattached existing local Oracle thread {thread_id}."
-                    ));
-                    self.persist_active_oracle_binding();
-                    self.chat_widget.add_to_history(oracle_history_cell(
-                        "Oracle",
-                        &format!("Reattached existing local Oracle thread {thread_id}: {title}"),
-                    ));
-                    return Ok(AppRunControl::Continue);
-                }
                 match self
-                    .oracle_attach_remote_thread(conversation_id.clone())
+                    .attach_oracle_thread_binding(conversation_id.clone(), Some(title.clone()))
                     .await
                 {
-                    Ok(remote) => {
-                        let thread_id = self.bind_oracle_remote_thread(remote).await;
+                    Ok(binding) => {
+                        let thread_id = binding.thread_id();
                         if self.active_thread_id != Some(thread_id) {
                             self.select_agent_thread(tui, app_server, thread_id).await?;
                         }
-                        self.oracle_state.last_status =
-                            Some(format!("Attached Oracle thread on {thread_id}."));
-                        self.persist_active_oracle_binding();
-                        self.chat_widget.add_to_history(oracle_history_cell(
-                            "Oracle",
-                            &format!(
-                                "Attached Oracle thread on {thread_id}: {title} ({conversation_id})"
-                            ),
-                        ));
+                        match binding {
+                            OracleAttachThreadBinding::ReattachedLocal { title, .. } => {
+                                self.chat_widget.add_to_history(oracle_history_cell(
+                                    "Oracle",
+                                    &format!(
+                                        "Reattached existing local Oracle thread {thread_id}: {title}"
+                                    ),
+                                ));
+                            }
+                            OracleAttachThreadBinding::AttachedRemote {
+                                conversation_id, ..
+                            } => {
+                                self.chat_widget.add_to_history(oracle_history_cell(
+                                    "Oracle",
+                                    &format!(
+                                        "Attached Oracle thread on {thread_id}: {title} ({conversation_id})"
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    Err(err)
+                        if err.to_string()
+                            == self.oracle_remote_thread_mutation_blocked_message() =>
+                    {
+                        self.chat_widget.add_error_message(err.to_string());
                     }
                     Err(err) => self.chat_widget.add_error_message(format!(
                         "Failed to attach Oracle thread {conversation_id}: {err}"
@@ -9762,6 +9908,78 @@ guardian_approval = true
         Ok(())
     }
 
+    fn queue_test_oracle_list_threads_result(
+        app: &App,
+        result: Result<Vec<OracleBrokerThreadEntry>, String>,
+    ) {
+        app.oracle_test_broker_hooks
+            .lock()
+            .expect("oracle test broker hooks")
+            .list_thread_results
+            .push_back(result);
+    }
+
+    fn queue_test_oracle_new_thread_result(
+        app: &App,
+        result: Result<OracleBrokerThreadOpenResponse, String>,
+    ) {
+        app.oracle_test_broker_hooks
+            .lock()
+            .expect("oracle test broker hooks")
+            .new_thread_results
+            .push_back(result);
+    }
+
+    fn queue_test_oracle_attach_thread_result(
+        app: &App,
+        result: Result<OracleBrokerThreadOpenResponse, String>,
+    ) {
+        app.oracle_test_broker_hooks
+            .lock()
+            .expect("oracle test broker hooks")
+            .attach_thread_results
+            .push_back(result);
+    }
+
+    #[tokio::test]
+    async fn open_oracle_picker_loads_remote_threads_from_broker_when_idle() -> Result<()> {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        queue_test_oracle_list_threads_result(
+            &app,
+            Ok(vec![OracleBrokerThreadEntry {
+                title: "Fresh Thread".to_string(),
+                conversation_id: "fresh-2".to_string(),
+                url: Some("https://chatgpt.com/c/fresh-2".to_string()),
+                is_current: false,
+            }]),
+        );
+
+        app.open_oracle_picker().await?;
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_matches!(
+            app_event_rx.try_recv(),
+            Ok(AppEvent::OracleAttachThread {
+                conversation_id,
+                title,
+                url,
+            }) if conversation_id == "fresh-2"
+                && title == "Fresh Thread"
+                && url.as_deref() == Some("https://chatgpt.com/c/fresh-2")
+        );
+        assert_eq!(
+            app.oracle_test_broker_hooks
+                .lock()
+                .expect("oracle test broker hooks")
+                .list_thread_calls,
+            1
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn show_oracle_picker_dedupes_attached_remote_threads_and_emits_attach_event() {
         let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
@@ -9837,6 +10055,212 @@ guardian_approval = true
             app_event_rx.try_recv(),
             Ok(AppEvent::SelectAgentThread(selected_thread_id)) if selected_thread_id == thread_id
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_oracle_thread_binding_updates_local_state_from_remote_metadata() -> Result<()> {
+        let mut app = make_test_app().await;
+        queue_test_oracle_new_thread_result(
+            &app,
+            Ok(OracleBrokerThreadOpenResponse {
+                title: "Fresh Thread".to_string(),
+                conversation_id: Some("fresh-3".to_string()),
+                url: Some("https://chatgpt.com/c/fresh-3".to_string()),
+            }),
+        );
+
+        let binding = app.create_oracle_thread_binding().await?;
+
+        assert_eq!(binding.title, "Fresh Thread");
+        assert_eq!(app.oracle_state.oracle_thread_id, Some(binding.thread_id));
+        assert_eq!(
+            app.oracle_state
+                .bindings
+                .get(&binding.thread_id)
+                .and_then(|binding| binding.conversation_id.as_deref()),
+            Some("fresh-3")
+        );
+        assert_eq!(
+            app.oracle_state
+                .bindings
+                .get(&binding.thread_id)
+                .and_then(|binding| binding.remote_title.as_deref()),
+            Some("Fresh Thread")
+        );
+        assert_eq!(
+            app.oracle_state.last_status.as_deref(),
+            Some(format!("Attached new Oracle thread on {}.", binding.thread_id).as_str())
+        );
+        assert_eq!(
+            app.agent_navigation
+                .get(&binding.thread_id)
+                .and_then(|entry| entry.agent_role.as_deref()),
+            Some("supervisor")
+        );
+        let channel = app
+            .thread_event_channels
+            .get(&binding.thread_id)
+            .expect("oracle thread channel");
+        let store = channel.store.lock().await;
+        assert_eq!(
+            store.session.as_ref().map(|session| session.model.as_str()),
+            Some("requested gpt-5.4-pro")
+        );
+        assert_eq!(
+            app.oracle_test_broker_hooks
+                .lock()
+                .expect("oracle test broker hooks")
+                .new_thread_calls,
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_oracle_thread_binding_rejects_busy_browser_state() {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.activate_oracle_binding(thread_id);
+        app.oracle_state.phase =
+            OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::UserTurn);
+        app.persist_active_oracle_binding();
+
+        let err = app
+            .create_oracle_thread_binding()
+            .await
+            .expect_err("busy oracle browser should block remote thread mutation");
+
+        assert_eq!(
+            err.to_string(),
+            app.oracle_remote_thread_mutation_blocked_message()
+        );
+        assert_eq!(
+            app.oracle_test_broker_hooks
+                .lock()
+                .expect("oracle test broker hooks")
+                .new_thread_calls,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_oracle_thread_binding_reuses_existing_local_thread_without_remote_attach()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_remote_metadata(
+            thread_id,
+            Some("attached-1".to_string()),
+            Some("Attached Thread".to_string()),
+        );
+        app.sync_oracle_thread_session(thread_id).await;
+
+        let binding = app
+            .attach_oracle_thread_binding(
+                "attached-1".to_string(),
+                Some("Attached Thread".to_string()),
+            )
+            .await?;
+
+        assert_eq!(
+            binding,
+            OracleAttachThreadBinding::ReattachedLocal {
+                thread_id,
+                title: "Attached Thread".to_string(),
+                conversation_id: "attached-1".to_string(),
+            }
+        );
+        assert_eq!(app.oracle_state.oracle_thread_id, Some(thread_id));
+        assert_eq!(
+            app.oracle_state.last_status.as_deref(),
+            Some(format!("Reattached existing local Oracle thread {thread_id}.").as_str())
+        );
+        assert!(
+            app.oracle_test_broker_hooks
+                .lock()
+                .expect("oracle test broker hooks")
+                .attach_thread_calls
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attach_oracle_thread_binding_fetches_remote_thread_when_not_already_bound()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        queue_test_oracle_attach_thread_result(
+            &app,
+            Ok(OracleBrokerThreadOpenResponse {
+                title: "Remote Thread".to_string(),
+                conversation_id: Some("remote-7".to_string()),
+                url: Some("https://chatgpt.com/c/remote-7".to_string()),
+            }),
+        );
+
+        let binding = app
+            .attach_oracle_thread_binding("remote-7".to_string(), None)
+            .await?;
+        let thread_id = binding.thread_id();
+
+        assert_eq!(
+            binding,
+            OracleAttachThreadBinding::AttachedRemote {
+                thread_id,
+                title: "Remote Thread".to_string(),
+                conversation_id: "remote-7".to_string(),
+            }
+        );
+        assert_eq!(
+            app.oracle_state
+                .bindings
+                .get(&thread_id)
+                .and_then(|binding| binding.conversation_id.as_deref()),
+            Some("remote-7")
+        );
+        assert_eq!(
+            app.oracle_state.last_status.as_deref(),
+            Some(format!("Attached Oracle thread on {thread_id}.").as_str())
+        );
+        assert_eq!(
+            app.oracle_test_broker_hooks
+                .lock()
+                .expect("oracle test broker hooks")
+                .attach_thread_calls,
+            vec!["remote-7".to_string()]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn set_oracle_model_preference_updates_all_visible_oracle_thread_sessions() -> Result<()>
+    {
+        let mut app = make_test_app().await;
+        let first_thread_id = app.create_visible_oracle_thread().await;
+        let second_thread_id = app.create_visible_oracle_thread().await;
+        app.activate_oracle_binding(first_thread_id);
+        app.oracle_state.phase =
+            OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::Checkpoint);
+        app.persist_active_oracle_binding();
+
+        let status = app
+            .set_oracle_model_preference(OracleModelPreset::Thinking)
+            .await;
+
+        assert_eq!(app.oracle_state.model, OracleModelPreset::Thinking);
+        assert!(status.contains("current in-flight step will finish"));
+        for thread_id in [first_thread_id, second_thread_id] {
+            let channel = app
+                .thread_event_channels
+                .get(&thread_id)
+                .expect("oracle thread channel");
+            let store = channel.store.lock().await;
+            assert_eq!(
+                store.session.as_ref().map(|session| session.model.as_str()),
+                Some("requested gpt-5.4 (Thinking 5.4)")
+            );
+        }
         Ok(())
     }
 
@@ -10878,6 +11302,7 @@ guardian_approval = true
             pending_app_server_requests: PendingAppServerRequests::default(),
             oracle_state: OracleSupervisorState::default(),
             oracle_broker: None,
+            oracle_test_broker_hooks: Arc::new(StdMutex::new(OracleTestBrokerHooks::default())),
         }
     }
 
@@ -10934,6 +11359,7 @@ guardian_approval = true
                 pending_app_server_requests: PendingAppServerRequests::default(),
                 oracle_state: OracleSupervisorState::default(),
                 oracle_broker: None,
+                oracle_test_broker_hooks: Arc::new(StdMutex::new(OracleTestBrokerHooks::default())),
             },
             rx,
             op_rx,
