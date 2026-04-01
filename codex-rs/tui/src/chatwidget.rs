@@ -57,6 +57,7 @@ use crate::model_catalog::ModelCatalog;
 use crate::multi_agents;
 use crate::status::RateLimitWindowDisplay;
 use crate::status::StatusAccountDisplay;
+use crate::status::StatusHistoryHandle;
 use crate::status::format_directory_display;
 use crate::status::format_tokens_compact;
 use crate::status::rate_limit_snapshot_display_for_limit;
@@ -301,7 +302,6 @@ use crate::bottom_pane::ColumnWidthMode;
 use crate::bottom_pane::DOUBLE_PRESS_QUIT_SHORTCUT_ENABLED;
 use crate::bottom_pane::ExperimentalFeatureItem;
 use crate::bottom_pane::ExperimentalFeaturesView;
-use crate::bottom_pane::FeedbackAudience;
 use crate::bottom_pane::InputResult;
 use crate::bottom_pane::LocalImageAttachment;
 use crate::bottom_pane::McpServerElicitationFormRequest;
@@ -553,7 +553,6 @@ pub(crate) struct ChatWidgetInit {
     pub(crate) model_catalog: Arc<ModelCatalog>,
     pub(crate) feedback: codex_feedback::CodexFeedback,
     pub(crate) is_first_run: bool,
-    pub(crate) feedback_audience: FeedbackAudience,
     pub(crate) status_account_display: Option<StatusAccountDisplay>,
     pub(crate) initial_plan_type: Option<PlanType>,
     pub(crate) model: Option<String>,
@@ -763,6 +762,8 @@ pub(crate) struct ChatWidget {
     status_account_display: Option<StatusAccountDisplay>,
     token_info: Option<TokenUsageInfo>,
     rate_limit_snapshots_by_limit_id: BTreeMap<String, RateLimitSnapshotDisplay>,
+    refreshing_status_outputs: Vec<(u64, StatusHistoryHandle)>,
+    next_status_refresh_request_id: u64,
     plan_type: Option<PlanType>,
     rate_limit_warnings: RateLimitWarningState,
     rate_limit_switch_prompt: RateLimitSwitchPromptState,
@@ -915,7 +916,6 @@ pub(crate) struct ChatWidget {
     last_rendered_width: std::cell::Cell<Option<usize>>,
     // Feedback sink for /feedback
     feedback: codex_feedback::CodexFeedback,
-    feedback_audience: FeedbackAudience,
     // Current session rollout path (if known)
     current_rollout_path: Option<PathBuf>,
     // Current working directory (if known)
@@ -2115,28 +2115,18 @@ impl ChatWidget {
         category: crate::app_event::FeedbackCategory,
         include_logs: bool,
     ) {
-        let snapshot = self.feedback.snapshot(self.thread_id);
-        self.show_feedback_note(category, include_logs, snapshot);
+        self.show_feedback_note(category, include_logs);
     }
 
     fn show_feedback_note(
         &mut self,
         category: crate::app_event::FeedbackCategory,
         include_logs: bool,
-        snapshot: codex_feedback::FeedbackSnapshot,
     ) {
-        let rollout = if include_logs {
-            self.current_rollout_path.clone()
-        } else {
-            None
-        };
         let view = crate::bottom_pane::FeedbackNoteView::new(
             category,
-            snapshot,
-            rollout,
             self.app_event_tx.clone(),
             include_logs,
-            self.feedback_audience,
         );
         self.bottom_pane.show_view(Box::new(view));
         self.request_redraw();
@@ -4649,7 +4639,6 @@ impl ChatWidget {
             model_catalog,
             feedback,
             is_first_run,
-            feedback_audience,
             status_account_display,
             initial_plan_type,
             model,
@@ -4719,6 +4708,8 @@ impl ChatWidget {
             status_account_display,
             token_info: None,
             rate_limit_snapshots_by_limit_id: BTreeMap::new(),
+            refreshing_status_outputs: Vec::new(),
+            next_status_refresh_request_id: 0,
             plan_type: initial_plan_type,
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
@@ -4788,7 +4779,6 @@ impl ChatWidget {
             turn_runtime_metrics: RuntimeMetricsSummary::default(),
             last_rendered_width: std::cell::Cell::new(None),
             feedback,
-            feedback_audience,
             current_rollout_path: None,
             current_cwd,
             session_network_proxy: None,
@@ -5349,7 +5339,18 @@ impl ChatWidget {
                 self.bottom_pane.drain_pending_submission_state();
             }
             SlashCommand::Status => {
-                self.add_status_output();
+                if self.should_prefetch_rate_limits() {
+                    let request_id = self.next_status_refresh_request_id;
+                    self.next_status_refresh_request_id =
+                        self.next_status_refresh_request_id.wrapping_add(1);
+                    self.add_status_output(/*refreshing_rate_limits*/ true, Some(request_id));
+                    self.app_event_tx
+                        .send(AppEvent::RefreshRateLimits { request_id });
+                } else {
+                    self.add_status_output(
+                        /*refreshing_rate_limits*/ false, /*request_id*/ None,
+                    );
+                }
             }
             SlashCommand::DebugConfig => {
                 self.add_debug_config_output();
@@ -7371,7 +7372,11 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    pub(crate) fn add_status_output(&mut self) {
+    pub(crate) fn add_status_output(
+        &mut self,
+        refreshing_rate_limits: bool,
+        request_id: Option<u64>,
+    ) {
         let default_usage = TokenUsage::default();
         let token_info = self.token_info.as_ref();
         let total_usage = token_info
@@ -7384,7 +7389,7 @@ impl ChatWidget {
             .values()
             .cloned()
             .collect();
-        self.add_to_history(crate::status::new_status_output_with_rate_limits(
+        let (cell, handle) = crate::status::new_status_output_with_rate_limits_handle(
             &self.config,
             self.status_account_display.as_ref(),
             token_info,
@@ -7398,7 +7403,39 @@ impl ChatWidget {
             self.model_display_name(),
             collaboration_mode,
             reasoning_effort_override,
-        ));
+            refreshing_rate_limits,
+        );
+        if let Some(request_id) = request_id {
+            self.refreshing_status_outputs.push((request_id, handle));
+        }
+        self.add_to_history(cell);
+    }
+
+    pub(crate) fn finish_status_rate_limit_refresh(&mut self, request_id: u64) {
+        if self.refreshing_status_outputs.is_empty() {
+            return;
+        }
+
+        let rate_limit_snapshots: Vec<RateLimitSnapshotDisplay> = self
+            .rate_limit_snapshots_by_limit_id
+            .values()
+            .cloned()
+            .collect();
+        let now = Local::now();
+        let mut remaining = Vec::with_capacity(self.refreshing_status_outputs.len());
+        let mut updated_any = false;
+        for (pending_request_id, handle) in self.refreshing_status_outputs.drain(..) {
+            if pending_request_id == request_id {
+                updated_any = true;
+                handle.finish_rate_limit_refresh(rate_limit_snapshots.as_slice(), now);
+            } else {
+                remaining.push((pending_request_id, handle));
+            }
+        }
+        self.refreshing_status_outputs = remaining;
+        if updated_any {
+            self.request_redraw();
+        }
     }
 
     pub(crate) fn add_debug_config_output(&mut self) {
