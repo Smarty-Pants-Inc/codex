@@ -43,6 +43,7 @@ use crate::multi_agents::agent_picker_status_dot_spans;
 use crate::multi_agents::format_agent_picker_item_name;
 use crate::multi_agents::next_agent_shortcut_matches;
 use crate::multi_agents::previous_agent_shortcut_matches;
+use crate::multi_agents::system_event_cell;
 use crate::oracle_broker::OracleBrokerClient;
 use crate::oracle_broker::OracleBrokerRequest;
 use crate::oracle_broker::OracleBrokerThreadEntry;
@@ -551,6 +552,7 @@ enum ThreadBufferedEvent {
     Request(ServerRequest),
     HistoryEntryResponse(GetHistoryEntryResponseEvent),
     FeedbackSubmission(FeedbackThreadEvent),
+    OracleWorkflowEvent(OracleWorkflowThreadEvent),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -559,6 +561,12 @@ struct FeedbackThreadEvent {
     include_logs: bool,
     feedback_audience: FeedbackAudience,
     result: Result<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OracleWorkflowThreadEvent {
+    title: String,
+    details: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -581,6 +589,7 @@ impl ThreadEventStore {
                 | ThreadBufferedEvent::Notification(ServerNotification::HookStarted(_))
                 | ThreadBufferedEvent::Notification(ServerNotification::HookCompleted(_))
                 | ThreadBufferedEvent::FeedbackSubmission(_)
+                | ThreadBufferedEvent::OracleWorkflowEvent(_)
         )
     }
 
@@ -686,7 +695,8 @@ impl ThreadEventStore {
                         .should_replay_snapshot_request(request),
                     ThreadBufferedEvent::Notification(_)
                     | ThreadBufferedEvent::HistoryEntryResponse(_)
-                    | ThreadBufferedEvent::FeedbackSubmission(_) => true,
+                    | ThreadBufferedEvent::FeedbackSubmission(_)
+                    | ThreadBufferedEvent::OracleWorkflowEvent(_) => true,
                 })
                 .cloned()
                 .collect(),
@@ -2388,13 +2398,52 @@ impl App {
         }
     }
 
-    fn oracle_delegate_user_message(message_for_user: &str) -> String {
-        let objective = "Oracle delegated work to the orchestrator.";
+    fn oracle_status_thread_event(message: &str) -> OracleWorkflowThreadEvent {
+        OracleWorkflowThreadEvent {
+            title: message.trim().to_string(),
+            details: Vec::new(),
+        }
+    }
+
+    fn oracle_delegate_thread_event(
+        workflow: &OracleWorkflowBinding,
+        message_for_user: &str,
+    ) -> OracleWorkflowThreadEvent {
+        let mut details = vec![format!(
+            "Workflow: {} v{}",
+            workflow.workflow_id, workflow.version
+        )];
         let note = message_for_user.trim();
-        if note.is_empty() || note == objective {
-            objective.to_string()
-        } else {
-            format!("{objective}\n\nOracle note:\n{note}")
+        if !note.is_empty()
+            && !note.eq_ignore_ascii_case("Oracle delegated work to the orchestrator.")
+        {
+            details.push(format!("Note: {note}"));
+        }
+        OracleWorkflowThreadEvent {
+            title: "Oracle delegated work to the orchestrator.".to_string(),
+            details,
+        }
+    }
+
+    fn oracle_context_request_thread_event(
+        requested_context: &[String],
+        message_for_user: &str,
+    ) -> OracleWorkflowThreadEvent {
+        let mut details = Vec::new();
+        if !requested_context.is_empty() {
+            details.push(format!("Requested: {}", requested_context.join(", ")));
+        }
+        let note = message_for_user.trim();
+        if !note.is_empty()
+            && !note
+                .to_ascii_lowercase()
+                .starts_with("oracle requested more context")
+        {
+            details.push(format!("Note: {note}"));
+        }
+        OracleWorkflowThreadEvent {
+            title: "Oracle requested more context.".to_string(),
+            details,
         }
     }
 
@@ -2474,12 +2523,14 @@ impl App {
                 self.activate_oracle_binding(*oracle_thread_id);
                 self.oracle_state.last_status = Some(message.to_string());
                 if self.oracle_state.pending_turn_id.is_some() {
-                    self.complete_pending_oracle_turn(*oracle_thread_id, message)
-                        .await;
-                } else {
-                    self.append_oracle_agent_turn(*oracle_thread_id, message)
+                    self.complete_pending_oracle_turn_without_reply(*oracle_thread_id)
                         .await;
                 }
+                self.enqueue_thread_oracle_workflow_event(
+                    *oracle_thread_id,
+                    Self::oracle_status_thread_event(message),
+                )
+                .await;
             }
             self.mark_agent_picker_thread_closed(*oracle_thread_id);
             if let Some(orchestrator_thread_id) = binding.orchestrator_thread_id {
@@ -2786,9 +2837,7 @@ impl App {
                     tx.send(AppEvent::SelectAgentThread(orchestrator_thread_id));
                 })],
                 dismiss_on_select: true,
-                search_value: Some(format!(
-                    "{name} {orchestrator_thread_id} {description}"
-                )),
+                search_value: Some(format!("{name} {orchestrator_thread_id} {description}")),
                 ..Default::default()
             });
         }
@@ -2820,8 +2869,11 @@ impl App {
             } else {
                 "linked workflow thread"
             };
-            let description =
-                self.oracle_workflow_picker_thread_description(thread_id, "Workflow thread", detail);
+            let description = self.oracle_workflow_picker_thread_description(
+                thread_id,
+                "Workflow thread",
+                detail,
+            );
             if self.active_thread_id == Some(thread_id) {
                 initial_selected_idx = Some(items.len());
             }
@@ -3019,31 +3071,47 @@ impl App {
     }
 
     async fn complete_pending_oracle_turn(&mut self, thread_id: ThreadId, message: &str) {
+        self.complete_pending_oracle_turn_with_optional_reply(thread_id, Some(message))
+            .await;
+    }
+
+    async fn complete_pending_oracle_turn_without_reply(&mut self, thread_id: ThreadId) {
+        self.complete_pending_oracle_turn_with_optional_reply(thread_id, None)
+            .await;
+    }
+
+    async fn complete_pending_oracle_turn_with_optional_reply(
+        &mut self,
+        thread_id: ThreadId,
+        message: Option<&str>,
+    ) {
         self.activate_oracle_binding(thread_id);
-        if message.trim().is_empty() {
-            return;
-        }
+        let trimmed_message = message.map(str::trim).filter(|message| !message.is_empty());
         let Some(turn_id) = self.oracle_state.pending_turn_id.take() else {
-            self.append_oracle_agent_turn(thread_id, message).await;
+            if let Some(message) = trimmed_message {
+                self.append_oracle_agent_turn(thread_id, message).await;
+            }
             return;
         };
-        let agent_item = ThreadItem::AgentMessage {
+        let agent_item = trimmed_message.map(|message| ThreadItem::AgentMessage {
             id: format!("oracle-assistant-{}", Uuid::new_v4()),
-            text: message.trim().to_string(),
+            text: message.to_string(),
             phase: None,
             memory_citation: None,
-        };
+        });
         let should_render = self.active_thread_id == Some(thread_id);
         if let Some(channel) = self.thread_event_channels.get(&thread_id) {
             let mut store = channel.store.lock().await;
             if let Some(turn) = store.turns.iter_mut().rev().find(|turn| turn.id == turn_id) {
-                turn.items.push(agent_item.clone());
+                if let Some(agent_item) = &agent_item {
+                    turn.items.push(agent_item.clone());
+                }
                 turn.status = TurnStatus::Completed;
                 turn.error = None;
             } else {
                 store.turns.push(Turn {
                     id: turn_id.clone(),
-                    items: vec![agent_item.clone()],
+                    items: agent_item.iter().cloned().collect(),
                     status: TurnStatus::Completed,
                     error: None,
                 });
@@ -3056,7 +3124,7 @@ impl App {
             self.chat_widget.replay_thread_turns(
                 vec![Turn {
                     id: turn_id,
-                    items: vec![agent_item],
+                    items: agent_item.into_iter().collect(),
                     status: TurnStatus::Completed,
                     error: None,
                 }],
@@ -3064,6 +3132,55 @@ impl App {
             );
         }
         self.persist_active_oracle_binding();
+    }
+
+    fn handle_oracle_workflow_thread_event(&mut self, event: OracleWorkflowThreadEvent) {
+        self.chat_widget
+            .add_to_history(system_event_cell(event.title, event.details));
+    }
+
+    async fn append_oracle_workflow_event(
+        &mut self,
+        thread_id: ThreadId,
+        event: OracleWorkflowThreadEvent,
+    ) {
+        if event.title.trim().is_empty() {
+            return;
+        }
+        self.enqueue_thread_oracle_workflow_event(thread_id, event)
+            .await;
+    }
+
+    async fn append_oracle_status_event(&mut self, thread_id: ThreadId, message: &str) {
+        self.append_oracle_workflow_event(thread_id, Self::oracle_status_thread_event(message))
+            .await;
+    }
+
+    async fn complete_pending_oracle_turn_with_status_event(
+        &mut self,
+        thread_id: ThreadId,
+        message: &str,
+    ) {
+        if message.trim().is_empty() {
+            return;
+        }
+        self.complete_pending_oracle_turn_without_reply(thread_id)
+            .await;
+        self.append_oracle_status_event(thread_id, message).await;
+    }
+
+    async fn record_oracle_status_event_for_run_kind(
+        &mut self,
+        thread_id: ThreadId,
+        kind: OracleRequestKind,
+        message: &str,
+    ) {
+        if matches!(kind, OracleRequestKind::UserTurn) {
+            self.complete_pending_oracle_turn_with_status_event(thread_id, message)
+                .await;
+        } else {
+            self.append_oracle_status_event(thread_id, message).await;
+        }
     }
 
     async fn handle_oracle_user_turn(
@@ -3140,7 +3257,8 @@ impl App {
             let message = format!("Oracle failed before the run started: {err}");
             self.oracle_state.phase = OracleSupervisorPhase::Idle;
             self.oracle_state.last_status = Some(message.clone());
-            self.complete_pending_oracle_turn(thread_id, &message).await;
+            self.complete_pending_oracle_turn_with_status_event(thread_id, &message)
+                .await;
             self.chat_widget
                 .add_error_message(format!("Oracle supervisor failed: {err}"));
         }
@@ -3557,13 +3675,12 @@ impl App {
             let message = Self::oracle_repo_not_found_message().to_string();
             self.oracle_state.phase = OracleSupervisorPhase::Idle;
             self.oracle_state.last_status = Some(message.clone());
-            if matches!(result.kind, OracleRequestKind::UserTurn) {
-                self.complete_pending_oracle_turn(result.oracle_thread_id, &message)
-                    .await;
-            } else {
-                self.append_oracle_agent_turn(result.oracle_thread_id, &message)
-                    .await;
-            }
+            self.record_oracle_status_event_for_run_kind(
+                result.oracle_thread_id,
+                result.kind,
+                &message,
+            )
+            .await;
             self.chat_widget.add_error_message(message);
             self.persist_active_oracle_binding();
             return Ok(());
@@ -3661,13 +3778,12 @@ impl App {
         if let Some(message) = self.active_oracle_workflow_stale_reason(directive.as_ref()) {
             self.oracle_state.phase = OracleSupervisorPhase::Idle;
             self.oracle_state.last_status = Some(message.clone());
-            if matches!(result.kind, OracleRequestKind::UserTurn) {
-                self.complete_pending_oracle_turn(result.oracle_thread_id, &message)
-                    .await;
-            } else {
-                self.append_oracle_agent_turn(result.oracle_thread_id, &message)
-                    .await;
-            }
+            self.record_oracle_status_event_for_run_kind(
+                result.oracle_thread_id,
+                result.kind,
+                &message,
+            )
+            .await;
             self.persist_active_oracle_binding();
             self.maybe_process_pending_oracle_checkpoints(app_server, result.oracle_thread_id)
                 .await?;
@@ -3675,9 +3791,6 @@ impl App {
         }
 
         let mut message_for_user = result.response.message_for_user.trim().to_string();
-        if message_for_user.is_empty() && matches!(action, OracleAction::Delegate) {
-            message_for_user = "Oracle delegated work to the orchestrator.".to_string();
-        }
         if message_for_user.is_empty()
             && matches!(action, OracleAction::RequestContext)
             && !requested_context.is_empty()
@@ -3695,13 +3808,12 @@ impl App {
                             .to_string();
                     self.oracle_state.phase = OracleSupervisorPhase::Idle;
                     self.oracle_state.last_status = Some(message.clone());
-                    if matches!(result.kind, OracleRequestKind::UserTurn) {
-                        self.complete_pending_oracle_turn(result.oracle_thread_id, &message)
-                            .await;
-                    } else {
-                        self.append_oracle_agent_turn(result.oracle_thread_id, &message)
-                            .await;
-                    }
+                    self.record_oracle_status_event_for_run_kind(
+                        result.oracle_thread_id,
+                        result.kind,
+                        &message,
+                    )
+                    .await;
                     self.chat_widget.add_error_message(message);
                     self.persist_active_oracle_binding();
                     return Ok(());
@@ -3730,13 +3842,12 @@ impl App {
                         );
                         self.oracle_state.phase = OracleSupervisorPhase::Idle;
                         self.oracle_state.last_status = Some(message.clone());
-                        if matches!(result.kind, OracleRequestKind::UserTurn) {
-                            self.complete_pending_oracle_turn(result.oracle_thread_id, &message)
-                                .await;
-                        } else {
-                            self.append_oracle_agent_turn(result.oracle_thread_id, &message)
-                                .await;
-                        }
+                        self.record_oracle_status_event_for_run_kind(
+                            result.oracle_thread_id,
+                            result.kind,
+                            &message,
+                        )
+                        .await;
                         self.persist_active_oracle_binding();
                         return Err(err);
                     }
@@ -3783,24 +3894,24 @@ impl App {
                         "Oracle delegated a task, but Codex failed to start the orchestrator turn: {err}"
                     );
                     self.oracle_state.last_status = Some(message.clone());
-                    if matches!(result.kind, OracleRequestKind::UserTurn) {
-                        self.complete_pending_oracle_turn(result.oracle_thread_id, &message)
-                            .await;
-                    } else {
-                        self.append_oracle_agent_turn(result.oracle_thread_id, &message)
-                            .await;
-                    }
+                    self.record_oracle_status_event_for_run_kind(
+                        result.oracle_thread_id,
+                        result.kind,
+                        &message,
+                    )
+                    .await;
                     self.persist_active_oracle_binding();
                     return Err(err);
                 }
-                let delegate_message = Self::oracle_delegate_user_message(&message_for_user);
                 if matches!(result.kind, OracleRequestKind::UserTurn) {
-                    self.complete_pending_oracle_turn(result.oracle_thread_id, &delegate_message)
-                        .await;
-                } else {
-                    self.append_oracle_agent_turn(result.oracle_thread_id, &delegate_message)
+                    self.complete_pending_oracle_turn_without_reply(result.oracle_thread_id)
                         .await;
                 }
+                self.append_oracle_workflow_event(
+                    result.oracle_thread_id,
+                    Self::oracle_delegate_thread_event(&workflow, &message_for_user),
+                )
+                .await;
             }
             OracleAction::RequestContext => {
                 let requests = requested_context;
@@ -3809,13 +3920,12 @@ impl App {
                         "Oracle requested more context without any context_requests.".to_string();
                     self.oracle_state.phase = OracleSupervisorPhase::Idle;
                     self.oracle_state.last_status = Some(message.clone());
-                    if matches!(result.kind, OracleRequestKind::UserTurn) {
-                        self.complete_pending_oracle_turn(result.oracle_thread_id, &message)
-                            .await;
-                    } else {
-                        self.append_oracle_agent_turn(result.oracle_thread_id, &message)
-                            .await;
-                    }
+                    self.record_oracle_status_event_for_run_kind(
+                        result.oracle_thread_id,
+                        result.kind,
+                        &message,
+                    )
+                    .await;
                     self.persist_active_oracle_binding();
                     return Ok(());
                 }
@@ -3826,13 +3936,12 @@ impl App {
                     );
                     self.oracle_state.phase = OracleSupervisorPhase::Idle;
                     self.oracle_state.last_status = Some(message.clone());
-                    if matches!(result.kind, OracleRequestKind::UserTurn) {
-                        self.complete_pending_oracle_turn(result.oracle_thread_id, &message)
-                            .await;
-                    } else {
-                        self.append_oracle_agent_turn(result.oracle_thread_id, &message)
-                            .await;
-                    }
+                    self.record_oracle_status_event_for_run_kind(
+                        result.oracle_thread_id,
+                        result.kind,
+                        &message,
+                    )
+                    .await;
                     self.persist_active_oracle_binding();
                     return Ok(());
                 }
@@ -3842,13 +3951,12 @@ impl App {
                     let message = Self::oracle_repo_not_found_message().to_string();
                     self.oracle_state.phase = OracleSupervisorPhase::Idle;
                     self.oracle_state.last_status = Some(message.clone());
-                    if matches!(result.kind, OracleRequestKind::UserTurn) {
-                        self.complete_pending_oracle_turn(result.oracle_thread_id, &message)
-                            .await;
-                    } else {
-                        self.append_oracle_agent_turn(result.oracle_thread_id, &message)
-                            .await;
-                    }
+                    self.record_oracle_status_event_for_run_kind(
+                        result.oracle_thread_id,
+                        result.kind,
+                        &message,
+                    )
+                    .await;
                     self.chat_widget.add_error_message(message);
                     self.persist_active_oracle_binding();
                     return Ok(());
@@ -3886,6 +3994,11 @@ impl App {
                     "Oracle requested more context: {}",
                     requests.join(", ")
                 ));
+                self.append_oracle_workflow_event(
+                    result.oracle_thread_id,
+                    Self::oracle_context_request_thread_event(&requests, &message_for_user),
+                )
+                .await;
                 if let Err(err) = self.start_oracle_run(OracleRunRequest {
                     oracle_thread_id: result.oracle_thread_id,
                     kind: result.kind,
@@ -3903,13 +4016,12 @@ impl App {
                         format!("Oracle failed to continue after requesting context: {err}");
                     self.oracle_state.phase = OracleSupervisorPhase::Idle;
                     self.oracle_state.last_status = Some(message.clone());
-                    if matches!(result.kind, OracleRequestKind::UserTurn) {
-                        self.complete_pending_oracle_turn(result.oracle_thread_id, &message)
-                            .await;
-                    } else {
-                        self.append_oracle_agent_turn(result.oracle_thread_id, &message)
-                            .await;
-                    }
+                    self.record_oracle_status_event_for_run_kind(
+                        result.oracle_thread_id,
+                        result.kind,
+                        &message,
+                    )
+                    .await;
                     self.chat_widget
                         .add_error_message(format!("Oracle supervisor failed: {err}"));
                 }
@@ -4005,13 +4117,8 @@ impl App {
         if Self::oracle_failure_requires_broker_reset(&error) {
             self.shutdown_oracle_broker(false);
         }
-        if matches!(kind, OracleRequestKind::UserTurn) {
-            self.complete_pending_oracle_turn(visible_thread_id, &message)
-                .await;
-        } else {
-            self.append_oracle_agent_turn(visible_thread_id, &message)
-                .await;
-        }
+        self.record_oracle_status_event_for_run_kind(visible_thread_id, kind, &message)
+            .await;
         self.chat_widget.add_error_message(message);
         self.persist_active_oracle_binding();
         self.maybe_process_pending_oracle_checkpoints(app_server, visible_thread_id)
@@ -4066,7 +4173,7 @@ impl App {
             let message = "Oracle checkpoint requested without an active session.".to_string();
             self.oracle_state.phase = OracleSupervisorPhase::Idle;
             self.oracle_state.last_status = Some(message.clone());
-            self.append_oracle_agent_turn(oracle_thread_id, &message)
+            self.append_oracle_status_event(oracle_thread_id, &message)
                 .await;
             self.chat_widget.add_error_message(message);
             self.persist_active_oracle_binding();
@@ -4077,7 +4184,7 @@ impl App {
             let message = Self::oracle_repo_not_found_message().to_string();
             self.oracle_state.phase = OracleSupervisorPhase::Idle;
             self.oracle_state.last_status = Some(message.clone());
-            self.append_oracle_agent_turn(oracle_thread_id, &message)
+            self.append_oracle_status_event(oracle_thread_id, &message)
                 .await;
             self.chat_widget.add_error_message(message);
             self.persist_active_oracle_binding();
@@ -4113,7 +4220,7 @@ impl App {
             let message = format!("Oracle checkpoint failed before the run started: {err}");
             self.oracle_state.phase = OracleSupervisorPhase::Idle;
             self.oracle_state.last_status = Some(message.clone());
-            self.append_oracle_agent_turn(oracle_thread_id, &message)
+            self.append_oracle_status_event(oracle_thread_id, &message)
                 .await;
             self.chat_widget
                 .add_error_message(format!("Oracle supervisor failed: {err}"));
@@ -4476,6 +4583,49 @@ impl App {
                 .add_to_history(history_cell::new_error_event(format!(
                     "Failed to upload feedback: {err}"
                 ))),
+        }
+    }
+
+    async fn enqueue_thread_oracle_workflow_event(
+        &mut self,
+        thread_id: ThreadId,
+        event: OracleWorkflowThreadEvent,
+    ) {
+        let (sender, store) = {
+            let channel = self.ensure_thread_channel(thread_id);
+            (channel.sender.clone(), Arc::clone(&channel.store))
+        };
+
+        let should_send = {
+            let mut guard = store.lock().await;
+            guard
+                .buffer
+                .push_back(ThreadBufferedEvent::OracleWorkflowEvent(event.clone()));
+            if guard.buffer.len() > guard.capacity
+                && let Some(removed) = guard.buffer.pop_front()
+                && let ThreadBufferedEvent::Request(request) = &removed
+            {
+                guard
+                    .pending_interactive_replay
+                    .note_evicted_server_request(request);
+            }
+            guard.active
+        };
+
+        if should_send {
+            match sender.try_send(ThreadBufferedEvent::OracleWorkflowEvent(event)) {
+                Ok(()) => {}
+                Err(TrySendError::Full(event)) => {
+                    tokio::spawn(async move {
+                        if let Err(err) = sender.send(event).await {
+                            tracing::warn!("thread {thread_id} event channel closed: {err}");
+                        }
+                    });
+                }
+                Err(TrySendError::Closed(_)) => {
+                    tracing::warn!("thread {thread_id} event channel closed");
+                }
+            }
         }
     }
 
@@ -5006,7 +5156,7 @@ impl App {
             "The orchestrator thread {thread_id} closed before reporting back. Oracle supervision is idle again."
         );
         self.oracle_state.last_status = Some(message.clone());
-        self.append_oracle_agent_turn(oracle_thread_id, &message)
+        self.append_oracle_status_event(oracle_thread_id, &message)
             .await;
         self.persist_active_oracle_binding();
     }
@@ -5238,6 +5388,10 @@ impl App {
                 }
                 ThreadBufferedEvent::FeedbackSubmission(event) => {
                     self.enqueue_thread_feedback_event(thread_id, event).await;
+                }
+                ThreadBufferedEvent::OracleWorkflowEvent(event) => {
+                    self.enqueue_thread_oracle_workflow_event(thread_id, event)
+                        .await;
                 }
             }
         }
@@ -8862,6 +9016,9 @@ impl App {
             ThreadBufferedEvent::FeedbackSubmission(event) => {
                 self.handle_feedback_thread_event(event);
             }
+            ThreadBufferedEvent::OracleWorkflowEvent(event) => {
+                self.handle_oracle_workflow_thread_event(event);
+            }
         }
         if needs_refresh {
             self.refresh_status_line();
@@ -8881,6 +9038,9 @@ impl App {
             }
             ThreadBufferedEvent::FeedbackSubmission(event) => {
                 self.handle_feedback_thread_event(event);
+            }
+            ThreadBufferedEvent::OracleWorkflowEvent(event) => {
+                self.handle_oracle_workflow_thread_event(event);
             }
         }
     }
@@ -12235,15 +12395,11 @@ guardian_approval = true
             .get(&oracle_thread_id)
             .expect("oracle thread channel");
         let store = channel.store.lock().await;
-        assert!(store.turns.iter().any(|turn| {
-            turn.items.iter().any(|item| {
-                matches!(
-                    item,
-                    ThreadItem::AgentMessage { text, .. }
-                        if text.contains("closed before reporting back")
-                )
-            })
-        }));
+        assert!(store.buffer.iter().any(|event| matches!(
+            event,
+            ThreadBufferedEvent::OracleWorkflowEvent(OracleWorkflowThreadEvent { title, .. })
+                if title.contains("closed before reporting back")
+        )));
         Ok(())
     }
 
@@ -12278,18 +12434,23 @@ guardian_approval = true
     }
 
     #[test]
-    fn oracle_delegate_user_message_prefixes_objective_status() {
-        assert_eq!(
-            App::oracle_delegate_user_message(""),
-            "Oracle delegated work to the orchestrator."
+    fn oracle_delegate_thread_event_formats_workflow_and_note() {
+        let event = App::oracle_delegate_thread_event(
+            &OracleWorkflowBinding {
+                workflow_id: "oracle-routing".to_string(),
+                version: 2,
+                ..Default::default()
+            },
+            "Milestone complete.",
         );
+
+        assert_eq!(event.title, "Oracle delegated work to the orchestrator.");
         assert_eq!(
-            App::oracle_delegate_user_message("Oracle delegated work to the orchestrator."),
-            "Oracle delegated work to the orchestrator."
-        );
-        assert_eq!(
-            App::oracle_delegate_user_message("Milestone complete."),
-            "Oracle delegated work to the orchestrator.\n\nOracle note:\nMilestone complete."
+            event.details,
+            vec![
+                "Workflow: oracle-routing v2".to_string(),
+                "Note: Milestone complete.".to_string(),
+            ]
         );
     }
 
@@ -12378,6 +12539,96 @@ guardian_approval = true
         assert!(routed_text.contains("oracle-routing"));
         assert!(routed_text.contains("version 2"));
         assert!(routed_text.contains("Audit the diff and summarize risks."));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oracle_delegate_status_replays_as_system_event_not_assistant_message() -> Result<()> {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let thread_id = app.ensure_visible_oracle_thread().await;
+        app.oracle_state.phase =
+            OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::UserTurn);
+        app.oracle_state.pending_turn_id = Some("oracle-turn-1".to_string());
+        app.persist_active_oracle_binding();
+        if let Some(channel) = app.thread_event_channels.get(&thread_id) {
+            let mut store = channel.store.lock().await;
+            store.active_turn_id = Some("oracle-turn-1".to_string());
+            store.turns.push(Turn {
+                id: "oracle-turn-1".to_string(),
+                items: vec![ThreadItem::UserMessage {
+                    id: "oracle-user-1".to_string(),
+                    content: vec![codex_app_server_protocol::UserInput::Text {
+                        text: "ship the feature".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                }],
+                status: TurnStatus::InProgress,
+                error: None,
+            });
+        }
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        app.handle_oracle_run_completed(
+            &mut app_server,
+            OracleRunResult {
+                oracle_thread_id: thread_id,
+                kind: OracleRequestKind::UserTurn,
+                requested_slug: "oracle-session-a".to_string(),
+                session_id: "oracle-session-a".to_string(),
+                response: parse_oracle_response(
+                    r#"{"op":"handoff","message":"Audit the diff and summarize risks.","message_for_user":"Implementation handoff ready.","workflow_id":"oracle-routing","workflow_version":2,"objective":"Ship the Oracle workflow refactor","summary":"Implementation plan ready"}"#,
+                ),
+            },
+        )
+        .await?;
+
+        let snapshot = {
+            let channel = app
+                .thread_event_channels
+                .get(&thread_id)
+                .expect("oracle thread channel");
+            let store = channel.store.lock().await;
+            let turn = store
+                .turns
+                .iter()
+                .find(|turn| turn.id == "oracle-turn-1")
+                .expect("oracle turn");
+            assert_eq!(turn.status, TurnStatus::Completed);
+            assert!(!turn.items.iter().any(|item| matches!(
+                item,
+                ThreadItem::AgentMessage { text, .. }
+                    if text.contains("Oracle delegated work to the orchestrator.")
+            )));
+            assert!(store.buffer.iter().any(|event| matches!(
+                event,
+                ThreadBufferedEvent::OracleWorkflowEvent(OracleWorkflowThreadEvent { title, details })
+                    if title == "Oracle delegated work to the orchestrator."
+                        && details.iter().any(|detail| detail == "Workflow: oracle-routing v2")
+                        && details.iter().any(|detail| detail == "Note: Implementation handoff ready.")
+            )));
+            store.snapshot()
+        };
+
+        while app_event_rx.try_recv().is_ok() {}
+        app.replay_thread_snapshot(snapshot, /*resume_restored_queue*/ false);
+
+        let rendered_cells = std::iter::from_fn(|| app_event_rx.try_recv().ok())
+            .filter_map(|event| match event {
+                AppEvent::InsertHistoryCell(cell) => {
+                    Some(lines_to_single_string(&cell.display_lines(/*width*/ 120)))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert!(rendered_cells.iter().any(|cell| {
+            cell.contains("• Oracle delegated work to the orchestrator.")
+                && cell.contains("Workflow: oracle-routing v2")
+                && cell.contains("Note: Implementation handoff ready.")
+        }));
         Ok(())
     }
 
@@ -12508,13 +12759,11 @@ guardian_approval = true
             .find(|turn| turn.id == "oracle-turn-1")
             .expect("oracle turn");
         assert_eq!(turn.status, TurnStatus::Completed);
-        assert!(turn.items.iter().any(|item| {
-            matches!(
-                item,
-                ThreadItem::AgentMessage { text, .. }
-                    if text.contains("stale workflow version")
-            )
-        }));
+        assert!(store.buffer.iter().any(|event| matches!(
+            event,
+            ThreadBufferedEvent::OracleWorkflowEvent(OracleWorkflowThreadEvent { title, .. })
+                if title.contains("stale workflow version")
+        )));
         Ok(())
     }
 
@@ -12561,6 +12810,26 @@ guardian_approval = true
         assert_eq!(app.oracle_state.phase, OracleSupervisorPhase::Idle);
         assert_eq!(app.oracle_state.workflow, None);
         assert_eq!(app.oracle_state.orchestrator_thread_id, None);
+        let channel = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("oracle thread channel");
+        let store = channel.store.lock().await;
+        let turn = store
+            .turns
+            .iter()
+            .find(|turn| turn.id == "oracle-turn-1")
+            .expect("oracle turn");
+        assert!(turn.items.iter().any(|item| matches!(
+            item,
+            ThreadItem::AgentMessage { text, .. } if text == "Hello back."
+        )));
+        assert!(
+            !store
+                .buffer
+                .iter()
+                .any(|event| matches!(event, ThreadBufferedEvent::OracleWorkflowEvent(_)))
+        );
         Ok(())
     }
 
@@ -12697,13 +12966,16 @@ guardian_approval = true
             .find(|turn| turn.id == "oracle-turn-1")
             .expect("oracle turn");
         assert_eq!(turn.status, TurnStatus::Completed);
-        assert!(turn.items.iter().any(|item| {
-            matches!(
-                item,
-                ThreadItem::AgentMessage { text, .. }
-                    if text.contains("without an orchestrator task")
-            )
-        }));
+        assert!(!turn.items.iter().any(|item| matches!(
+            item,
+            ThreadItem::AgentMessage { text, .. }
+                if text.contains("without an orchestrator task")
+        )));
+        assert!(store.buffer.iter().any(|event| matches!(
+            event,
+            ThreadBufferedEvent::OracleWorkflowEvent(OracleWorkflowThreadEvent { title, .. })
+                if title.contains("without an orchestrator task")
+        )));
         Ok(())
     }
 
