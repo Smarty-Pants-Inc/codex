@@ -171,14 +171,14 @@ async fn slash_copy_state_is_preserved_during_running_task() {
 }
 
 #[tokio::test]
-async fn oracle_slash_command_emits_app_event() {
+async fn oracle_slash_command_ignores_inline_args_and_opens_picker() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
 
     chat.dispatch_command_with_args(SlashCommand::Oracle, "status".to_string(), Vec::new());
 
     assert_matches!(
         rx.try_recv(),
-        Ok(AppEvent::ConfigureOracleMode { raw_command }) if raw_command == "status"
+        Ok(AppEvent::ConfigureOracleMode { raw_command }) if raw_command.is_empty()
     );
     assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
 }

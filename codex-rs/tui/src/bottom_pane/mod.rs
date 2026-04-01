@@ -87,6 +87,7 @@ mod skills_toggle_view;
 mod slash_commands;
 pub(crate) use footer::CollaborationModeIndicator;
 pub(crate) use list_selection_view::ColumnWidthMode;
+pub(crate) use list_selection_view::ListSelectionView;
 pub(crate) use list_selection_view::SelectionViewParams;
 pub(crate) use list_selection_view::SideContentWidth;
 pub(crate) use list_selection_view::popup_content_width;
@@ -153,6 +154,7 @@ pub(crate) use experimental_features_view::ExperimentalFeatureItem;
 pub(crate) use experimental_features_view::ExperimentalFeaturesView;
 pub(crate) use list_selection_view::SelectionAction;
 pub(crate) use list_selection_view::SelectionItem;
+pub(crate) use list_selection_view::SelectionShortcut;
 
 /// Pane displayed in the lower half of the chat UI.
 ///
@@ -799,6 +801,12 @@ impl BottomPane {
             .last()
             .filter(|view| view.view_id() == Some(view_id))
             .and_then(|view| view.selected_index())
+    }
+
+    pub(crate) fn is_active_view(&self, view_id: &'static str) -> bool {
+        self.view_stack
+            .last()
+            .is_some_and(|view| view.view_id() == Some(view_id))
     }
 
     /// Update the pending-input preview shown above the composer.

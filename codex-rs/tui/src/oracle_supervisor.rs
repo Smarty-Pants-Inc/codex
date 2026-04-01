@@ -1,5 +1,5 @@
-use std::env;
 use std::collections::HashMap;
+use std::env;
 use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
@@ -50,15 +50,15 @@ impl OracleCommand {
             }
             "on" if parts.len() == 1 => Ok(Self::On),
             "off" if parts.len() == 1 => Ok(Self::Off),
-            "status" if parts.len() == 1 => Ok(Self::Status),
+            "status" | "info" if parts.len() == 1 => Ok(Self::Status),
             "model" if parts.len() == 1 => Ok(Self::Model(None)),
             "model" if parts.len() == 2 => OracleModelPreset::parse(parts[1])
                 .map(|model| Self::Model(Some(model)))
                 .ok_or_else(|| {
-                    "Usage: /oracle [browse|new|attach <conversation_id>|on|off|status|model [pro|thinking]]".to_string()
+                    "Usage: /oracle [browse|new|attach <conversation_id>|on|off|info|model [pro|thinking]]".to_string()
                 }),
             _ => Err(
-                "Usage: /oracle [browse|new|attach <conversation_id>|on|off|status|model [pro|thinking]]"
+                "Usage: /oracle [browse|new|attach <conversation_id>|on|off|info|model [pro|thinking]]"
                     .to_string(),
             ),
         }
@@ -150,6 +150,230 @@ pub(crate) enum OracleAction {
     Finish,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OracleControlOp {
+    Reply,
+    Handoff,
+    Send,
+    Spawn,
+    List,
+    Search,
+    RequestContext,
+    Finish,
+}
+
+impl OracleControlOp {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "reply" => Some(Self::Reply),
+            "handoff" => Some(Self::Handoff),
+            "send" | "delegate" => Some(Self::Send),
+            "spawn" => Some(Self::Spawn),
+            "list" => Some(Self::List),
+            "search" => Some(Self::Search),
+            "request_context" | "context" => Some(Self::RequestContext),
+            "finish" => Some(Self::Finish),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OracleControlParticipant {
+    pub(crate) address: String,
+    pub(crate) kind: Option<String>,
+    pub(crate) role: Option<String>,
+    pub(crate) visibility: Option<String>,
+}
+
+impl OracleControlParticipant {
+    fn from_address(raw: &str) -> Option<Self> {
+        let address = normalize_non_empty(raw)?;
+        Some(Self {
+            kind: infer_participant_kind(address.as_str()),
+            address,
+            role: None,
+            visibility: None,
+        })
+    }
+
+    fn from_json(value: OracleControlParticipantValue) -> Option<Self> {
+        match value {
+            OracleControlParticipantValue::Address(raw) => Self::from_address(raw.as_str()),
+            OracleControlParticipantValue::Detailed(json) => {
+                let address = normalize_non_empty_option(json.address)
+                    .or_else(|| normalize_non_empty_option(json.id))
+                    .or_else(|| normalize_non_empty_option(json.target))
+                    .or_else(|| normalize_non_empty_option(json.name))
+                    .or_else(|| normalize_non_empty_option(json.kind.clone()))?;
+                let kind = normalize_non_empty_option(json.kind)
+                    .or_else(|| infer_participant_kind(address.as_str()));
+                let role = normalize_non_empty_option(json.role);
+                let visibility = normalize_non_empty_option(json.visibility);
+                Some(Self {
+                    address,
+                    kind,
+                    role,
+                    visibility,
+                })
+            }
+        }
+    }
+
+    fn display_label(&self) -> String {
+        match (&self.kind, &self.role) {
+            (Some(kind), Some(role))
+                if !self.address.eq_ignore_ascii_case(kind.as_str())
+                    && !self
+                        .address
+                        .to_ascii_lowercase()
+                        .starts_with(&format!("{kind}:")) =>
+            {
+                format!("{kind} {} ({role})", self.address)
+            }
+            (Some(kind), _)
+                if !self.address.eq_ignore_ascii_case(kind.as_str())
+                    && !self
+                        .address
+                        .to_ascii_lowercase()
+                        .starts_with(&format!("{kind}:")) =>
+            {
+                format!("{kind} {}", self.address)
+            }
+            (_, Some(role)) => format!("{} ({role})", self.address),
+            _ => self.address.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct OracleControlDirective {
+    pub(crate) op: Option<OracleControlOp>,
+    pub(crate) action_hint: Option<OracleAction>,
+    pub(crate) to: Option<String>,
+    pub(crate) participants: Vec<OracleControlParticipant>,
+    pub(crate) message: Option<String>,
+    pub(crate) message_for_user: Option<String>,
+    pub(crate) task_for_orchestrator: Option<String>,
+    pub(crate) context_requests: Vec<String>,
+    pub(crate) query: Option<String>,
+    pub(crate) workflow_id: Option<String>,
+    pub(crate) workflow_version: Option<u64>,
+    pub(crate) objective: Option<String>,
+    pub(crate) summary: Option<String>,
+    pub(crate) status: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum OracleParticipantVisibility {
+    #[default]
+    Visible,
+    Hidden,
+}
+
+impl OracleParticipantVisibility {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Visible => "visible",
+            Self::Hidden => "hidden",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct OracleRoutingParticipant {
+    pub(crate) address: String,
+    pub(crate) thread_id: Option<ThreadId>,
+    pub(crate) title: Option<String>,
+    pub(crate) kind: Option<String>,
+    pub(crate) role: Option<String>,
+    pub(crate) visibility: OracleParticipantVisibility,
+    pub(crate) owned_by_oracle: bool,
+    pub(crate) route_completions: bool,
+    pub(crate) route_closures: bool,
+    pub(crate) last_task: Option<String>,
+}
+
+impl OracleRoutingParticipant {
+    pub(crate) fn summary_line(&self) -> String {
+        let thread = self
+            .thread_id
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| "no-thread".to_string());
+        let title = self.title.as_deref().unwrap_or("untitled");
+        let kind = self.kind.as_deref().unwrap_or("destination");
+        let role = self.role.as_deref().unwrap_or(kind);
+        let mut summary = format!(
+            "- {} [{} {}] -> {} ({title})",
+            self.address,
+            kind,
+            self.visibility.label(),
+            thread,
+        );
+        if !role.eq_ignore_ascii_case(kind) {
+            summary.push_str(format!(" role={role}").as_str());
+        }
+        summary
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct OracleRoutedThreadOwner {
+    pub(crate) oracle_thread_id: ThreadId,
+    pub(crate) address: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum OracleWorkflowMode {
+    #[default]
+    Chat,
+    Supervising,
+}
+
+impl OracleWorkflowMode {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Supervising => "supervising",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum OracleWorkflowStatus {
+    #[default]
+    Idle,
+    Running,
+    NeedsHuman,
+    Complete,
+    Failed,
+}
+
+impl OracleWorkflowStatus {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Running => "running",
+            Self::NeedsHuman => "needs_human",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct OracleWorkflowBinding {
+    pub(crate) workflow_id: String,
+    pub(crate) mode: OracleWorkflowMode,
+    pub(crate) status: OracleWorkflowStatus,
+    pub(crate) version: u64,
+    pub(crate) objective: Option<String>,
+    pub(crate) summary: Option<String>,
+    pub(crate) last_checkpoint: Option<String>,
+    pub(crate) last_blocker: Option<String>,
+    pub(crate) orchestrator_thread_id: Option<ThreadId>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct OracleRunRequest {
     pub(crate) oracle_thread_id: ThreadId,
@@ -180,6 +404,7 @@ pub(crate) struct OracleResponse {
     pub(crate) message_for_user: String,
     pub(crate) task_for_orchestrator: Option<String>,
     pub(crate) context_requests: Vec<String>,
+    pub(crate) directive: Option<OracleControlDirective>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -187,6 +412,7 @@ pub(crate) struct OracleThreadBinding {
     pub(crate) session_root_slug: Option<String>,
     pub(crate) current_session_id: Option<String>,
     pub(crate) orchestrator_thread_id: Option<ThreadId>,
+    pub(crate) workflow: Option<OracleWorkflowBinding>,
     pub(crate) phase: OracleSupervisorPhase,
     pub(crate) last_status: Option<String>,
     pub(crate) last_orchestrator_task: Option<String>,
@@ -194,6 +420,9 @@ pub(crate) struct OracleThreadBinding {
     pub(crate) automatic_context_followups: u8,
     pub(crate) conversation_id: Option<String>,
     pub(crate) remote_title: Option<String>,
+    pub(crate) participants: HashMap<String, OracleRoutingParticipant>,
+    pub(crate) pending_checkpoint_threads: Vec<ThreadId>,
+    pub(crate) pending_checkpoint_versions: HashMap<ThreadId, u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -204,6 +433,7 @@ pub(crate) struct OracleSupervisorState {
     pub(crate) session_root_slug: Option<String>,
     pub(crate) current_session_id: Option<String>,
     pub(crate) orchestrator_thread_id: Option<ThreadId>,
+    pub(crate) workflow: Option<OracleWorkflowBinding>,
     pub(crate) phase: OracleSupervisorPhase,
     pub(crate) model: OracleModelPreset,
     pub(crate) last_status: Option<String>,
@@ -212,8 +442,8 @@ pub(crate) struct OracleSupervisorState {
     pub(crate) automatic_context_followups: u8,
     /// Per-visible-thread Oracle session state.
     pub(crate) bindings: HashMap<ThreadId, OracleThreadBinding>,
-    /// Hidden orchestrator thread -> visible Oracle thread.
-    pub(crate) orchestrator_owner: HashMap<ThreadId, ThreadId>,
+    /// Routed child thread -> owning visible Oracle thread + destination address.
+    pub(crate) routed_thread_owner: HashMap<ThreadId, OracleRoutedThreadOwner>,
 }
 
 impl OracleSupervisorState {
@@ -240,8 +470,19 @@ impl OracleSupervisorState {
                 })
                 .unwrap_or_else(|| "no activity yet".to_string())
         });
+        let workflow = self.workflow.as_ref().map_or_else(
+            || "none".to_string(),
+            |workflow| {
+                format!(
+                    "{} v{} ({})",
+                    workflow.workflow_id,
+                    workflow.version,
+                    workflow.status.label()
+                )
+            },
+        );
         format!(
-            "Oracle mode: {enabled}\nRequested model: {}\nBrowser strategy: select\nActive oracle thread: {active}\nTracked oracle threads: {}\nState: {}\nLast status: {last}",
+            "Oracle mode: {enabled}\nRequested model: {}\nBrowser strategy: select\nActive oracle thread: {active}\nTracked oracle threads: {}\nWorkflow: {workflow}\nState: {}\nLast status: {last}",
             self.model.display_name(),
             self.bindings.len(),
             self.phase.description()
@@ -249,12 +490,47 @@ impl OracleSupervisorState {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct OracleJson {
+#[derive(Debug, Clone, Deserialize)]
+struct OracleControlJson {
     action: Option<String>,
+    op: Option<String>,
+    operation: Option<String>,
+    to: Option<String>,
+    recipient: Option<String>,
+    target: Option<String>,
+    participant: Option<OracleControlParticipantValue>,
+    participants: Option<Vec<OracleControlParticipantValue>>,
     message_for_user: Option<String>,
+    message: Option<String>,
+    body: Option<String>,
     task_for_orchestrator: Option<String>,
     context_requests: Option<Vec<String>>,
+    requests: Option<Vec<String>>,
+    query: Option<String>,
+    search: Option<String>,
+    workflow_id: Option<String>,
+    workflow_version: Option<u64>,
+    objective: Option<String>,
+    summary: Option<String>,
+    status: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct OracleControlParticipantJson {
+    address: Option<String>,
+    id: Option<String>,
+    name: Option<String>,
+    kind: Option<String>,
+    role: Option<String>,
+    visibility: Option<String>,
+    target: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum OracleControlParticipantValue {
+    Address(String),
+    Detailed(OracleControlParticipantJson),
 }
 
 pub(crate) fn oracle_history_cell(title: &str, body: &str) -> PlainHistoryCell {
@@ -272,24 +548,104 @@ pub(crate) fn generate_session_slug(thread_id: ThreadId) -> String {
     format!("codex-oracle-{short}-{millis}")
 }
 
-pub(crate) fn build_user_turn_prompt(state: &OracleSupervisorState, user_text: &str) -> String {
+fn oracle_control_schema_help() -> &'static str {
+    "If you need machine control, append one final fenced block with language `oracle_control` and JSON body.\n\
+Preferred schema:\n\
+{\"op\":\"reply|handoff|request_context|finish\",\"message\":\"optional\",\"message_for_user\":\"optional\",\"context_requests\":[\"optional\"],\"workflow_id\":\"optional\",\"workflow_version\":0,\"objective\":\"optional\",\"summary\":\"optional\",\"status\":\"optional\"}\n\
+Compatibility: older callers may still send legacy `delegate`/`send`/`spawn`-style payloads. Codex only honors them when they clearly map to a human reply or an orchestrator handoff. Obsolete routing discovery ops such as `list`/`search` may be rejected."
+}
+
+fn oracle_workflow_snapshot(state: &OracleSupervisorState) -> String {
+    let orchestrator = state
+        .orchestrator_thread_id
+        .map(|id| format!("thread {id}"))
+        .unwrap_or_else(|| "not attached".to_string());
+    let last_task = state.last_orchestrator_task.as_deref().unwrap_or("none");
+    let workflow = state.workflow.as_ref().map_or_else(
+        || "No workflow is currently attached. This conversation is in chat mode until you explicitly hand work off to the orchestrator.".to_string(),
+        |workflow| {
+            format!(
+                "workflow_id: {}\nmode: {}\nstatus: {}\nversion: {}\nobjective: {}\nsummary: {}\nlast_checkpoint: {}\nlast_blocker: {}\norchestrator_cache: {}",
+                workflow.workflow_id,
+                workflow.mode.label(),
+                workflow.status.label(),
+                workflow.version,
+                workflow.objective.as_deref().unwrap_or("none"),
+                workflow.summary.as_deref().unwrap_or("none"),
+                workflow.last_checkpoint.as_deref().unwrap_or("none"),
+                workflow.last_blocker.as_deref().unwrap_or("none"),
+                workflow
+                    .orchestrator_thread_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| orchestrator.clone())
+            )
+        },
+    );
     format!(
-        "You are Oracle, a remote reasoning collaborator connected to a Codex harness.\n\
-Mode: direct_human\n\
-Make the best useful progress from the current context. Do not require unnecessary clarifying turns.\n\
-Use prose by default. If you need explicit machine control, append one final fenced block with language `oracle_control` and JSON body using this schema:\n\
-{{\"action\":\"reply|delegate|request_context|ask_user|finish\",\"message_for_user\":\"...\",\"task_for_orchestrator\":\"optional\",\"context_requests\":[\"optional\"]}}\n\
-When requesting context, ask for targeted delta context only (git_status, git_diff_stat, git_diff, orchestrator_summary, file:relative/path, glob:pattern).\n\
-Current harness state:\n\
-- orchestrator_thread_id: {}\n\
-- last_orchestrator_task: {}\n\
-Human message:\n{}\n",
-        state
-            .orchestrator_thread_id
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "none".to_string()),
-        state.last_orchestrator_task.as_deref().unwrap_or("none"),
-        user_text.trim()
+        "Workflow contract:\n\
+- Stay conversation-first: the human talks only in this Oracle thread.\n\
+- If you need execution, use `handoff` to the orchestrator. Workers are private orchestrator details, not Oracle-managed peers.\n\
+- If you need more repository state, use `request_context`.\n\
+- Oracle turns are slow and expensive, so only checkpoint at major milestones, blockers, or completion.\n\
+- Thread ids are runtime cache only. Workflow continuity comes from snapshot state, not from persistent agent-thread mappings.\n\
+Known state:\n\
+- orchestrator_cache: {orchestrator}\n\
+- last_orchestrator_task: {last_task}\n\
+Workflow snapshot:\n\
+{workflow}"
+    )
+}
+
+pub(crate) fn build_oracle_workflow_reminder(
+    workflow: &OracleWorkflowBinding,
+    oracle_thread_id: ThreadId,
+    task: &str,
+) -> String {
+    let objective = workflow.objective.as_deref().unwrap_or("none");
+    format!(
+        "Oracle workflow contract:\n\
+- Oracle thread: {oracle_thread_id}\n\
+- Workflow: `{}` version {}\n\
+- Objective: {objective}\n\
+- Oracle turns are slow and expensive. Do substantial work before escalating.\n\
+- Workers are private implementation details. Report only a major milestone, blocker, or final completion in this orchestrator thread.\n\
+\nTask from Oracle:\n{task}",
+        workflow.workflow_id, workflow.version,
+    )
+}
+
+fn build_oracle_prompt(
+    mode: &str,
+    intro: &str,
+    state: &OracleSupervisorState,
+    sections: Vec<(&str, String)>,
+) -> String {
+    let mut parts = vec![
+        "You are Oracle, a remote reasoning collaborator connected to a Codex harness.".to_string(),
+        format!("Mode: {mode}"),
+        intro.trim().to_string(),
+        oracle_control_schema_help().to_string(),
+        oracle_workflow_snapshot(state),
+    ];
+    for (label, body) in sections {
+        let body = body.trim();
+        if !body.is_empty() {
+            parts.push(format!("{label}:\n{body}"));
+        }
+    }
+    parts.join("\n\n")
+}
+
+pub(crate) fn build_user_turn_prompt(state: &OracleSupervisorState, user_text: &str) -> String {
+    build_oracle_prompt(
+        if state.workflow.is_some() {
+            "workflow_supervision"
+        } else {
+            "direct_chat"
+        },
+        "Make the best useful progress from the current context. Prefer direct prose. Only use machine control when you are handing work to the orchestrator, asking for targeted context, or marking a workflow milestone complete.",
+        state,
+        vec![("Human message", user_text.trim().to_string())],
     )
 }
 
@@ -299,22 +655,16 @@ pub(crate) fn build_checkpoint_prompt(
     git_status: &str,
     diff_stat: &str,
 ) -> String {
-    format!(
-        "You are Oracle continuing the same long-lived collaboration.\n\
-Mode: checkpoint_review\n\
-Use prose by default. If you need machine control, append one final fenced `oracle_control` JSON block.\n\
-When requesting context, ask only for targeted deltas.\n\
-Current harness state:\n\
-- orchestrator_thread_id: {}\n\
-- last_orchestrator_task: {}\n\
-Orchestrator checkpoint:\n{}\n\
-Git status:\n{}\n\
-Git diff stat:\n{}\n",
-        thread.id,
-        state.last_orchestrator_task.as_deref().unwrap_or("none"),
-        summarize_thread(thread),
-        git_status.trim(),
-        diff_stat.trim()
+    build_oracle_prompt(
+        "checkpoint_review",
+        "You are continuing the same long-lived collaboration. Review the orchestrator workflow checkpoint, keep Oracle turns sparse, and only escalate when the milestone needs new direction, more context, or completion.",
+        state,
+        vec![
+            ("Orchestrator thread", thread.id.to_string()),
+            ("Orchestrator checkpoint", summarize_thread(thread)),
+            ("Git status", git_status.trim().to_string()),
+            ("Git diff stat", diff_stat.trim().to_string()),
+        ],
     )
 }
 
@@ -323,25 +673,14 @@ pub(crate) fn build_context_prompt(
     requests: &[String],
     context: &str,
 ) -> String {
-    format!(
-        "You are Oracle continuing the same long-lived collaboration.\n\
-Mode: planner_review\n\
-You asked for additional repository context. Continue from this delta context without resetting the conversation.\n\
-Use prose by default. If needed, append one final fenced `oracle_control` JSON block.\n\
-Current harness state:\n\
-- orchestrator_thread_id: {}\n\
-- last_orchestrator_task: {}\n\
-Requested context:\n\
-{}\n\
-Resolved context:\n\
-{}\n",
-        state
-            .orchestrator_thread_id
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "none".to_string()),
-        state.last_orchestrator_task.as_deref().unwrap_or("none"),
-        requests.join("\n"),
-        context.trim()
+    build_oracle_prompt(
+        "planner_review",
+        "You asked for additional repository context. Continue from this delta context without resetting the conversation. When requesting more context, ask only for targeted deltas.",
+        state,
+        vec![
+            ("Requested context", requests.join("\n")),
+            ("Resolved context", context.trim().to_string()),
+        ],
     )
 }
 
@@ -387,7 +726,7 @@ pub(crate) fn summarize_thread(thread: &Thread) -> String {
 }
 
 pub(crate) fn orchestrator_developer_instructions() -> String {
-    "You are the hidden orchestrator operating with Oracle as a remote reasoning collaborator. Oracle turns are expensive and slow, so do substantial multi-turn work before escalating. Break work into milestones, run safe parallel workers for independent subproblems, and only escalate at major milestones, blockers, or true human-level clarification needs. End checkpoints with outcome, files changed, tests run, and unresolved blockers.".to_string()
+    "You are the hidden orchestrator operating under Oracle supervision. Oracle turns are expensive and slow, so do substantial work before escalating. Break work into milestones, use parallel workers for independent subproblems, keep worker topology private, and only surface a milestone, blocker, or final completion when it materially changes the workflow. End checkpoints with outcome, files changed, tests run, and unresolved blockers.".to_string()
 }
 
 fn search_oracle_repo_from_root(root: &Path) -> Option<PathBuf> {
@@ -616,32 +955,268 @@ pub(crate) async fn resolve_context_requests(
     }
 }
 
-pub(crate) fn parse_oracle_response(raw: &str) -> OracleResponse {
+fn normalize_non_empty(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn normalize_non_empty_option(raw: Option<String>) -> Option<String> {
+    raw.and_then(|value| normalize_non_empty(value.as_str()))
+}
+
+fn infer_participant_kind(address: &str) -> Option<String> {
+    let head = address.split(':').next().unwrap_or(address);
+    match head.trim().to_ascii_lowercase().as_str() {
+        "human" | "user" => Some("human".to_string()),
+        "oracle" => Some("oracle".to_string()),
+        "orchestrator" => Some("orchestrator".to_string()),
+        "worker" => Some("worker".to_string()),
+        "context" => Some("context".to_string()),
+        _ => None,
+    }
+}
+
+fn parse_legacy_action(raw: &str) -> Option<OracleAction> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "delegate" => Some(OracleAction::Delegate),
+        "request_context" => Some(OracleAction::RequestContext),
+        "ask_user" => Some(OracleAction::AskUser),
+        "finish" => Some(OracleAction::Finish),
+        "reply" => Some(OracleAction::Reply),
+        _ => None,
+    }
+}
+
+fn parse_oracle_control_json(raw: &str) -> Option<OracleControlJson> {
     let candidate = extract_oracle_control_json(raw)
         .or_else(|| extract_json(raw))
         .unwrap_or_else(|| raw.trim().to_string());
-    if let Ok(parsed) = serde_json::from_str::<OracleJson>(&candidate) {
-        let action = match parsed
-            .action
-            .as_deref()
-            .unwrap_or("reply")
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
+    serde_json::from_str::<OracleControlJson>(&candidate).ok()
+}
+
+fn normalize_context_requests(control: &OracleControlJson) -> Vec<String> {
+    control
+        .context_requests
+        .clone()
+        .unwrap_or_default()
+        .into_iter()
+        .chain(control.requests.clone().unwrap_or_default())
+        .filter_map(|request| normalize_non_empty(request.as_str()))
+        .collect()
+}
+
+fn normalize_participants(control: &OracleControlJson) -> Vec<OracleControlParticipant> {
+    control
+        .participant
+        .clone()
+        .into_iter()
+        .chain(control.participants.clone().unwrap_or_default())
+        .filter_map(OracleControlParticipant::from_json)
+        .collect()
+}
+
+pub(crate) fn parse_oracle_control(raw: &str) -> Option<OracleControlDirective> {
+    let control = parse_oracle_control_json(raw)?;
+    let op = control
+        .op
+        .as_ref()
+        .as_deref()
+        .and_then(|op| OracleControlOp::parse(op))
+        .or_else(|| {
+            control
+                .operation
+                .as_ref()
+                .as_deref()
+                .and_then(|op| OracleControlOp::parse(op))
+        })
+        .or_else(|| {
+            control
+                .action
+                .as_ref()
+                .as_deref()
+                .and_then(|op| OracleControlOp::parse(op))
+        });
+    let action_hint = control
+        .action
+        .as_ref()
+        .as_deref()
+        .and_then(|action| parse_legacy_action(action));
+    let to = normalize_non_empty_option(control.to.clone())
+        .or_else(|| normalize_non_empty_option(control.recipient.clone()))
+        .or_else(|| normalize_non_empty_option(control.target.clone()));
+    let message = normalize_non_empty_option(control.message.clone())
+        .or_else(|| normalize_non_empty_option(control.body.clone()))
+        .or_else(|| normalize_non_empty_option(control.task_for_orchestrator.clone()));
+    let message_for_user = normalize_non_empty_option(control.message_for_user.clone());
+    let task_for_orchestrator = normalize_non_empty_option(control.task_for_orchestrator.clone());
+    let query = normalize_non_empty_option(control.query.clone())
+        .or_else(|| normalize_non_empty_option(control.search.clone()));
+    Some(OracleControlDirective {
+        op,
+        action_hint,
+        to,
+        participants: normalize_participants(&control),
+        message,
+        message_for_user,
+        task_for_orchestrator,
+        context_requests: normalize_context_requests(&control),
+        query,
+        workflow_id: normalize_non_empty_option(control.workflow_id.clone()),
+        workflow_version: control.workflow_version,
+        objective: normalize_non_empty_option(control.objective.clone()),
+        summary: normalize_non_empty_option(control.summary.clone()),
+        status: normalize_non_empty_option(control.status.clone()),
+    })
+}
+
+fn directive_targets_human(directive: &OracleControlDirective) -> bool {
+    directive
+        .to
+        .as_deref()
+        .is_some_and(|target| matches!(target.to_ascii_lowercase().as_str(), "human" | "user"))
+        || directive
+            .participants
+            .iter()
+            .any(|participant| matches!(participant.kind.as_deref(), Some("human") | Some("user")))
+}
+
+fn directive_targets_delegate(directive: &OracleControlDirective) -> bool {
+    if directive.action_hint == Some(OracleAction::Delegate)
+        || directive.op == Some(OracleControlOp::Handoff)
+    {
+        return true;
+    }
+    let has_explicit_target = directive.to.is_some() || !directive.participants.is_empty();
+    match directive.op {
+        Some(OracleControlOp::Spawn) | Some(OracleControlOp::Send) => {
+            has_explicit_target
+                && directive
+                    .to
+                    .as_deref()
+                    .map(|target| {
+                        matches!(
+                            target.to_ascii_lowercase().as_str(),
+                            "orchestrator" | "worker" | "context"
+                        ) || target.to_ascii_lowercase().starts_with("worker:")
+                    })
+                    .unwrap_or_else(|| {
+                        directive.participants.iter().any(|participant| {
+                            matches!(
+                                participant.kind.as_deref(),
+                                Some("orchestrator") | Some("worker") | Some("context")
+                            )
+                        })
+                    })
+        }
+        Some(OracleControlOp::List) | Some(OracleControlOp::Search) => false,
+        _ => false,
+    }
+}
+
+fn delegate_task_from_directive(directive: &OracleControlDirective) -> Option<String> {
+    if let Some(task) = directive.task_for_orchestrator.clone() {
+        return Some(task);
+    }
+    let route = directive.to.clone().or_else(|| {
+        directive
+            .participants
+            .first()
+            .map(|participant| participant.display_label())
+    });
+    let detail = directive
+        .message
+        .clone()
+        .or_else(|| directive.query.clone())?;
+    match directive.op {
+        Some(OracleControlOp::Handoff) => Some(detail),
+        Some(OracleControlOp::Spawn) => Some(match route {
+            Some(route) => format!("Spawn or route {route}: {detail}"),
+            None => format!("Spawn or route a worker: {detail}"),
+        }),
+        Some(OracleControlOp::List) => Some(match route {
+            Some(route) => format!("List via {route}: {detail}"),
+            None => format!("List: {detail}"),
+        }),
+        Some(OracleControlOp::Search) => Some(match route {
+            Some(route) => format!("Search via {route}: {detail}"),
+            None => format!("Search: {detail}"),
+        }),
+        Some(OracleControlOp::Send) => Some(match route {
+            Some(route) if !route.eq_ignore_ascii_case("orchestrator") => {
+                format!("Route to {route}: {detail}")
+            }
+            _ => detail,
+        }),
+        _ => Some(detail),
+    }
+}
+
+fn collapse_oracle_action(directive: &OracleControlDirective) -> OracleAction {
+    directive.action_hint.unwrap_or_else(|| match directive.op {
+        Some(OracleControlOp::RequestContext) => OracleAction::RequestContext,
+        Some(OracleControlOp::Finish) => OracleAction::Finish,
+        Some(OracleControlOp::Reply) => OracleAction::Reply,
+        Some(OracleControlOp::Handoff) => OracleAction::Delegate,
+        Some(OracleControlOp::Send) | Some(OracleControlOp::Spawn) => {
+            if directive_targets_human(directive) {
+                OracleAction::AskUser
+            } else if directive_targets_delegate(directive) {
+                OracleAction::Delegate
+            } else {
+                OracleAction::Reply
+            }
+        }
+        Some(OracleControlOp::List) | Some(OracleControlOp::Search) => OracleAction::Reply,
+        None => OracleAction::Reply,
+    })
+}
+
+fn legacy_control_rejection_message(directive: &OracleControlDirective) -> Option<String> {
+    match directive.op {
+        Some(OracleControlOp::List) | Some(OracleControlOp::Search) => Some(
+            "Legacy Oracle routing discovery is no longer supported. Use `request_context` for repository state or `handoff` for orchestrator work."
+                .to_string(),
+        ),
+        Some(OracleControlOp::Send) | Some(OracleControlOp::Spawn)
+            if !directive_targets_human(directive) && !directive_targets_delegate(directive) =>
         {
-            "delegate" => OracleAction::Delegate,
-            "request_context" => OracleAction::RequestContext,
-            "ask_user" => OracleAction::AskUser,
-            "finish" => OracleAction::Finish,
-            _ => OracleAction::Reply,
-        };
+            Some(
+                "Legacy Oracle routing is missing a supported destination. Use `handoff` for orchestrator work or `reply` for the human."
+                    .to_string(),
+            )
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn parse_oracle_response(raw: &str) -> OracleResponse {
+    if let Some(directive) = parse_oracle_control(raw) {
+        let action = collapse_oracle_action(&directive);
+        let rejection_message = legacy_control_rejection_message(&directive);
+        let message_for_user = rejection_message.unwrap_or_else(|| {
+            directive
+                .message_for_user
+                .clone()
+                .unwrap_or_else(|| match action {
+                    OracleAction::Reply | OracleAction::AskUser | OracleAction::Finish => directive
+                        .message
+                        .clone()
+                        .or_else(|| directive.query.clone())
+                        .unwrap_or_else(|| raw.trim().to_string()),
+                    _ => String::new(),
+                })
+        });
+        let context_requests = directive.context_requests.clone();
         return OracleResponse {
             action,
-            message_for_user: parsed
-                .message_for_user
-                .unwrap_or_else(|| raw.trim().to_string()),
-            task_for_orchestrator: parsed.task_for_orchestrator,
-            context_requests: parsed.context_requests.unwrap_or_default(),
+            message_for_user,
+            task_for_orchestrator: if matches!(action, OracleAction::Delegate) {
+                delegate_task_from_directive(&directive)
+            } else {
+                directive.task_for_orchestrator.clone()
+            },
+            context_requests,
+            directive: Some(directive),
         };
     }
     OracleResponse {
@@ -649,6 +1224,7 @@ pub(crate) fn parse_oracle_response(raw: &str) -> OracleResponse {
         message_for_user: raw.trim().to_string(),
         task_for_orchestrator: None,
         context_requests: Vec::new(),
+        directive: None,
     }
 }
 
@@ -723,6 +1299,7 @@ mod tests {
         assert_eq!(OracleCommand::parse("on"), Ok(OracleCommand::On));
         assert_eq!(OracleCommand::parse("off"), Ok(OracleCommand::Off));
         assert_eq!(OracleCommand::parse("status"), Ok(OracleCommand::Status));
+        assert_eq!(OracleCommand::parse("info"), Ok(OracleCommand::Status));
         assert_eq!(
             OracleCommand::parse("model"),
             Ok(OracleCommand::Model(None))
@@ -754,6 +1331,53 @@ mod tests {
     }
 
     #[test]
+    fn parse_oracle_control_reads_workflow_handoff_directive() {
+        let parsed = parse_oracle_control(
+            r#"{"op":"handoff","message":"Audit the diff","workflow_id":"oracle-routing","workflow_version":3,"objective":"Ship the Oracle routing patch","summary":"Diff review milestone","status":"running"}"#,
+        )
+        .expect("directive");
+
+        assert_eq!(parsed.op, Some(OracleControlOp::Handoff));
+        assert_eq!(parsed.message.as_deref(), Some("Audit the diff"));
+        assert_eq!(parsed.workflow_id.as_deref(), Some("oracle-routing"));
+        assert_eq!(parsed.workflow_version, Some(3));
+        assert_eq!(
+            parsed.objective.as_deref(),
+            Some("Ship the Oracle routing patch")
+        );
+        assert_eq!(parsed.summary.as_deref(), Some("Diff review milestone"));
+        assert_eq!(parsed.status.as_deref(), Some("running"));
+    }
+
+    #[test]
+    fn parse_oracle_response_collapses_addressed_send_to_delegate() {
+        let parsed = parse_oracle_response(
+            r#"{"op":"send","to":"orchestrator","message":"Implement milestone A"}"#,
+        );
+
+        assert_eq!(parsed.action, OracleAction::Delegate);
+        assert_eq!(
+            parsed.task_for_orchestrator.as_deref(),
+            Some("Implement milestone A")
+        );
+        assert!(parsed.message_for_user.is_empty());
+    }
+
+    #[test]
+    fn parse_oracle_response_collapses_human_send_to_ask_user() {
+        let parsed = parse_oracle_response(
+            r#"{"op":"send","to":"human","message":"Need clarification on the rollout plan."}"#,
+        );
+
+        assert_eq!(parsed.action, OracleAction::AskUser);
+        assert_eq!(
+            parsed.message_for_user,
+            "Need clarification on the rollout plan."
+        );
+        assert_eq!(parsed.task_for_orchestrator, None);
+    }
+
+    #[test]
     fn parse_oracle_response_reads_context_requests() {
         let parsed = parse_oracle_response(
             r#"{"action":"request_context","message_for_user":"Need files.","context_requests":["git_diff","file:src/main.rs"]}"#,
@@ -763,6 +1387,198 @@ mod tests {
             parsed.context_requests,
             vec!["git_diff".to_string(), "file:src/main.rs".to_string()]
         );
+    }
+
+    #[test]
+    fn parse_oracle_response_maps_handoff_to_delegate_with_workflow_metadata() {
+        let parsed = parse_oracle_response(
+            r#"{"op":"handoff","message":"Implement milestone A","workflow_id":"oracle-routing","workflow_version":7,"objective":"Ship the workflow refactor","summary":"Ready for implementation","status":"running"}"#,
+        );
+
+        assert_eq!(parsed.action, OracleAction::Delegate);
+        assert_eq!(
+            parsed.task_for_orchestrator.as_deref(),
+            Some("Implement milestone A")
+        );
+        let directive = parsed.directive.expect("directive");
+        assert_eq!(directive.workflow_id.as_deref(), Some("oracle-routing"));
+        assert_eq!(directive.workflow_version, Some(7));
+        assert_eq!(
+            directive.objective.as_deref(),
+            Some("Ship the workflow refactor")
+        );
+        assert_eq!(
+            directive.summary.as_deref(),
+            Some("Ready for implementation")
+        );
+        assert_eq!(directive.status.as_deref(), Some("running"));
+    }
+
+    #[test]
+    fn parse_oracle_response_rejects_legacy_search_ops() {
+        let parsed =
+            parse_oracle_response(r#"{"op":"search","query":"find oracle delegate callers"}"#);
+
+        assert_eq!(parsed.action, OracleAction::Reply);
+        assert!(parsed.task_for_orchestrator.is_none());
+        assert!(
+            parsed
+                .message_for_user
+                .contains("routing discovery is no longer supported")
+        );
+    }
+
+    #[test]
+    fn parse_oracle_response_rejects_ambiguous_legacy_send_without_destination() {
+        let parsed = parse_oracle_response(r#"{"op":"send","message":"Do the work quietly"}"#);
+
+        assert_eq!(parsed.action, OracleAction::Reply);
+        assert!(parsed.task_for_orchestrator.is_none());
+        assert!(
+            parsed
+                .message_for_user
+                .contains("routing is missing a supported destination")
+        );
+    }
+
+    #[test]
+    fn parse_oracle_response_maps_search_into_delegate_task() {
+        let parsed = parse_oracle_response(
+            r#"{"op":"search","to":"worker:searcher","query":"find oracle delegate callers"}"#,
+        );
+
+        assert_eq!(parsed.action, OracleAction::Reply);
+        assert!(parsed.task_for_orchestrator.is_none());
+        assert!(
+            parsed
+                .message_for_user
+                .contains("routing discovery is no longer supported")
+        );
+    }
+
+    #[test]
+    fn parse_oracle_response_keeps_unaddressed_search_as_reply() {
+        let parsed =
+            parse_oracle_response(r#"{"op":"search","query":"find oracle delegate callers"}"#);
+
+        assert_eq!(parsed.action, OracleAction::Reply);
+        assert_eq!(parsed.task_for_orchestrator, None);
+        assert!(
+            parsed
+                .message_for_user
+                .contains("routing discovery is no longer supported")
+        );
+    }
+
+    #[test]
+    fn build_user_turn_prompt_includes_workflow_contract_and_schema() {
+        let prompt = build_user_turn_prompt(&OracleSupervisorState::default(), "Ship the patch.");
+
+        assert!(prompt.contains("Workflow contract"));
+        assert!(prompt.contains("reply|handoff|request_context|finish"));
+        assert!(prompt.contains("chat mode"));
+        assert!(prompt.contains("Ship the patch."));
+    }
+
+    #[test]
+    fn build_user_turn_prompt_includes_workflow_snapshot_when_supervising() {
+        let oracle_thread_id = ThreadId::new();
+        let state = OracleSupervisorState {
+            oracle_thread_id: Some(oracle_thread_id),
+            orchestrator_thread_id: Some(ThreadId::new()),
+            workflow: Some(OracleWorkflowBinding {
+                workflow_id: "oracle-routing".to_string(),
+                mode: OracleWorkflowMode::Supervising,
+                status: OracleWorkflowStatus::Running,
+                version: 4,
+                objective: Some("Ship the Oracle workflow refactor".to_string()),
+                summary: Some("Checkpoint ready for review".to_string()),
+                last_checkpoint: Some("Tests are green".to_string()),
+                last_blocker: None,
+                orchestrator_thread_id: None,
+            }),
+            ..Default::default()
+        };
+
+        let prompt = build_user_turn_prompt(&state, "Ship the patch.");
+
+        assert!(prompt.contains("workflow_id: oracle-routing"));
+        assert!(prompt.contains("status: running"));
+        assert!(prompt.contains("version: 4"));
+        assert!(prompt.contains("Ship the Oracle workflow refactor"));
+        assert!(prompt.contains("Checkpoint ready for review"));
+    }
+
+    #[test]
+    fn build_oracle_workflow_reminder_mentions_workflow_thread_and_task() {
+        let oracle_thread_id = ThreadId::new();
+        let reminder = build_oracle_workflow_reminder(
+            &OracleWorkflowBinding {
+                workflow_id: "oracle-routing".to_string(),
+                mode: OracleWorkflowMode::Supervising,
+                status: OracleWorkflowStatus::Running,
+                version: 2,
+                objective: Some("Break the feature into milestones.".to_string()),
+                ..Default::default()
+            },
+            oracle_thread_id,
+            "Break the feature into milestones.",
+        );
+
+        assert!(reminder.contains("Oracle workflow contract"));
+        assert!(reminder.contains("oracle-routing"));
+        assert!(reminder.contains(oracle_thread_id.to_string().as_str()));
+        assert!(reminder.contains("slow and expensive"));
+        assert!(reminder.contains("Break the feature into milestones."));
+    }
+
+    #[test]
+    fn build_checkpoint_and_context_prompts_include_workflow_snapshot() {
+        let thread_id = ThreadId::new();
+        let state = OracleSupervisorState {
+            oracle_thread_id: Some(thread_id),
+            workflow: Some(OracleWorkflowBinding {
+                workflow_id: "oracle-routing".to_string(),
+                mode: OracleWorkflowMode::Supervising,
+                status: OracleWorkflowStatus::Running,
+                version: 5,
+                objective: Some("Ship the workflow refactor".to_string()),
+                summary: Some("Checkpoint ready".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let thread = Thread {
+            id: thread_id.to_string(),
+            preview: "preview".to_string(),
+            ephemeral: false,
+            model_provider: "provider".to_string(),
+            created_at: 0,
+            updated_at: 0,
+            status: codex_app_server_protocol::ThreadStatus::Idle,
+            path: None,
+            cwd: PathBuf::from("/tmp/oracle"),
+            cli_version: "0.0.0".to_string(),
+            source: codex_app_server_protocol::SessionSource::Unknown,
+            agent_nickname: Some("Oracle Orchestrator".to_string()),
+            agent_role: Some("orchestrator".to_string()),
+            git_info: None,
+            name: Some("Oracle Orchestrator".to_string()),
+            turns: Vec::new(),
+        };
+
+        let checkpoint_prompt = build_checkpoint_prompt(&state, &thread, "M file.rs", "1 file");
+        let context_prompt = build_context_prompt(
+            &state,
+            &["file:src/app.rs".to_string()],
+            "src/app.rs contents",
+        );
+
+        for prompt in [checkpoint_prompt, context_prompt] {
+            assert!(prompt.contains("workflow_id: oracle-routing"));
+            assert!(prompt.contains("version: 5"));
+            assert!(prompt.contains("Ship the workflow refactor"));
+        }
     }
 
     #[tokio::test]

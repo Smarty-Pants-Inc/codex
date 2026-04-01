@@ -5049,6 +5049,28 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    pub(crate) fn replace_selection_view_if_active(
+        &mut self,
+        view_id: &'static str,
+        params: SelectionViewParams,
+    ) -> bool {
+        let replaced = self
+            .bottom_pane
+            .replace_selection_view_if_active(view_id, params);
+        if replaced {
+            self.request_redraw();
+        }
+        replaced
+    }
+
+    pub(crate) fn selected_index_for_active_view(&self, view_id: &'static str) -> Option<usize> {
+        self.bottom_pane.selected_index_for_active_view(view_id)
+    }
+
+    pub(crate) fn selection_view_is_active(&self, view_id: &'static str) -> bool {
+        self.bottom_pane.is_active_view(view_id)
+    }
+
     pub(crate) fn no_modal_or_popup_active(&self) -> bool {
         self.bottom_pane.no_modal_or_popup_active()
     }

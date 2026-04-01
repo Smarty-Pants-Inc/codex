@@ -13,9 +13,11 @@ use crate::app_server_session::AppServerStartedThread;
 use crate::app_server_session::ThreadSessionState;
 use crate::app_server_session::app_server_rate_limit_snapshots_to_core;
 use crate::bottom_pane::ApprovalRequest;
+use crate::bottom_pane::ColumnWidthMode;
 use crate::bottom_pane::FeedbackAudience;
 use crate::bottom_pane::McpServerElicitationFormRequest;
 use crate::bottom_pane::SelectionItem;
+use crate::bottom_pane::SelectionShortcut;
 use crate::bottom_pane::SelectionViewParams;
 use crate::bottom_pane::popup_consts::standard_popup_hint_line;
 use crate::chatwidget::ChatWidget;
@@ -32,6 +34,7 @@ use crate::history_cell;
 use crate::history_cell::HistoryCell;
 #[cfg(not(debug_assertions))]
 use crate::history_cell::UpdateAvailableHistoryCell;
+use crate::key_hint;
 use crate::model_catalog::ModelCatalog;
 use crate::model_migration::ModelMigrationOutcome;
 use crate::model_migration::migration_copy_for_models;
@@ -47,15 +50,25 @@ use crate::oracle_broker::OracleBrokerThreadOpenResponse;
 use crate::oracle_broker::spawn_oracle_broker;
 use crate::oracle_supervisor::OracleAction;
 use crate::oracle_supervisor::OracleCommand;
+use crate::oracle_supervisor::OracleControlDirective;
+use crate::oracle_supervisor::OracleControlOp;
+use crate::oracle_supervisor::OracleControlParticipant;
 use crate::oracle_supervisor::OracleModelPreset;
+use crate::oracle_supervisor::OracleParticipantVisibility;
 use crate::oracle_supervisor::OracleRequestKind;
+use crate::oracle_supervisor::OracleRoutedThreadOwner;
+use crate::oracle_supervisor::OracleRoutingParticipant;
 use crate::oracle_supervisor::OracleRunRequest;
 use crate::oracle_supervisor::OracleRunResult;
 use crate::oracle_supervisor::OracleSupervisorPhase;
 use crate::oracle_supervisor::OracleSupervisorState;
 use crate::oracle_supervisor::OracleThreadBinding;
+use crate::oracle_supervisor::OracleWorkflowBinding;
+use crate::oracle_supervisor::OracleWorkflowMode;
+use crate::oracle_supervisor::OracleWorkflowStatus;
 use crate::oracle_supervisor::build_checkpoint_prompt;
 use crate::oracle_supervisor::build_context_prompt;
+use crate::oracle_supervisor::build_oracle_workflow_reminder;
 use crate::oracle_supervisor::build_user_turn_prompt;
 use crate::oracle_supervisor::find_oracle_repo;
 use crate::oracle_supervisor::generate_session_slug;
@@ -156,6 +169,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
@@ -1038,6 +1052,9 @@ pub(crate) struct App {
     pending_primary_events: VecDeque<ThreadBufferedEvent>,
     pending_app_server_requests: PendingAppServerRequests,
     oracle_state: OracleSupervisorState,
+    oracle_picker_show_info: bool,
+    oracle_picker_remote_threads: Vec<OracleBrokerThreadEntry>,
+    oracle_picker_include_new_thread: bool,
     oracle_broker: Option<(PathBuf, OracleBrokerClient)>,
     #[cfg(test)]
     oracle_test_broker_hooks: Arc<StdMutex<OracleTestBrokerHooks>>,
@@ -1069,6 +1086,12 @@ enum OracleAttachThreadBinding {
         conversation_id: String,
     },
 }
+
+const ORACLE_HUMAN_DESTINATION: &str = "human";
+const ORACLE_ORCHESTRATOR_DESTINATION: &str = "orchestrator";
+const AGENT_SELECTION_VIEW_ID: &str = "agent-selection";
+const ORACLE_SELECTION_VIEW_ID: &str = "oracle-selection";
+const ORACLE_WORKFLOW_SELECTION_VIEW_ID: &str = "oracle-workflow-selection";
 
 impl OracleAttachThreadBinding {
     fn thread_id(&self) -> ThreadId {
@@ -1768,54 +1791,68 @@ impl App {
         let Some(thread_id) = self.oracle_state.oracle_thread_id else {
             return;
         };
-        let binding = OracleThreadBinding {
+        let existing = self.oracle_state.bindings.get(&thread_id).cloned();
+        let mut binding = OracleThreadBinding {
             session_root_slug: self.oracle_state.session_root_slug.clone(),
             current_session_id: self.oracle_state.current_session_id.clone(),
             orchestrator_thread_id: self.oracle_state.orchestrator_thread_id,
+            workflow: self.oracle_state.workflow.clone().or_else(|| {
+                existing
+                    .as_ref()
+                    .and_then(|existing| existing.workflow.clone())
+            }),
             phase: self.oracle_state.phase,
             last_status: self.oracle_state.last_status.clone(),
             last_orchestrator_task: self.oracle_state.last_orchestrator_task.clone(),
             pending_turn_id: self.oracle_state.pending_turn_id.clone(),
             automatic_context_followups: self.oracle_state.automatic_context_followups,
-            conversation_id: self
-                .oracle_state
-                .bindings
-                .get(&thread_id)
+            conversation_id: existing
+                .as_ref()
                 .and_then(|existing| existing.conversation_id.clone()),
-            remote_title: self
+            remote_title: existing
+                .as_ref()
+                .and_then(|existing| existing.remote_title.clone()),
+            participants: HashMap::new(),
+            pending_checkpoint_threads: self
                 .oracle_state
                 .bindings
                 .get(&thread_id)
-                .and_then(|existing| existing.remote_title.clone()),
+                .map(|existing| existing.pending_checkpoint_threads.clone())
+                .unwrap_or_default(),
+            pending_checkpoint_versions: self
+                .oracle_state
+                .bindings
+                .get(&thread_id)
+                .map(|existing| existing.pending_checkpoint_versions.clone())
+                .unwrap_or_default(),
         };
-        self.oracle_state
-            .bindings
-            .insert(thread_id, binding.clone());
-        self.oracle_state
-            .orchestrator_owner
-            .retain(|_, owner| *owner != thread_id);
-        if let Some(orchestrator_thread_id) = binding.orchestrator_thread_id {
-            self.oracle_state
-                .orchestrator_owner
-                .insert(orchestrator_thread_id, thread_id);
-        }
+        Self::sync_legacy_oracle_binding_fields(&mut binding);
+        self.oracle_state.bindings.insert(thread_id, binding);
     }
 
     fn activate_oracle_binding(&mut self, thread_id: ThreadId) {
         self.persist_active_oracle_binding();
-        let binding = self
-            .oracle_state
+        self.oracle_state
             .bindings
             .entry(thread_id)
             .or_insert_with(|| OracleThreadBinding {
                 phase: OracleSupervisorPhase::Idle,
                 ..Default::default()
-            })
-            .clone();
+            });
+        if let Some(binding) = self.oracle_state.bindings.get_mut(&thread_id) {
+            Self::sync_legacy_oracle_binding_fields(binding);
+        }
+        let binding = self
+            .oracle_state
+            .bindings
+            .get(&thread_id)
+            .cloned()
+            .expect("oracle binding must exist");
         self.oracle_state.oracle_thread_id = Some(thread_id);
         self.oracle_state.session_root_slug = binding.session_root_slug;
         self.oracle_state.current_session_id = binding.current_session_id;
         self.oracle_state.orchestrator_thread_id = binding.orchestrator_thread_id;
+        self.oracle_state.workflow = binding.workflow;
         self.oracle_state.phase = binding.phase;
         self.oracle_state.last_status = binding.last_status;
         self.oracle_state.last_orchestrator_task = binding.last_orchestrator_task;
@@ -1846,6 +1883,332 @@ impl App {
                     ..Default::default()
                 })
                 .remote_title = Some(title);
+        }
+    }
+
+    fn generate_oracle_workflow_id(thread_id: ThreadId) -> String {
+        let short: String = thread_id.to_string().chars().take(8).collect();
+        format!("oracle-wf-{short}")
+    }
+
+    fn ensure_active_oracle_workflow(
+        &mut self,
+        workflow_id_hint: Option<String>,
+        objective_hint: Option<String>,
+        summary_hint: Option<String>,
+        version_hint: Option<u64>,
+    ) -> OracleWorkflowBinding {
+        let oracle_thread_id = self
+            .oracle_state
+            .oracle_thread_id
+            .expect("active oracle thread required for workflow");
+        let is_new_workflow = self.oracle_state.workflow.is_none();
+        let workflow = self
+            .oracle_state
+            .workflow
+            .get_or_insert_with(|| OracleWorkflowBinding {
+                workflow_id: workflow_id_hint
+                    .clone()
+                    .unwrap_or_else(|| Self::generate_oracle_workflow_id(oracle_thread_id)),
+                mode: OracleWorkflowMode::Supervising,
+                status: OracleWorkflowStatus::Running,
+                version: version_hint.unwrap_or(1).max(1),
+                ..Default::default()
+            });
+        workflow.mode = OracleWorkflowMode::Supervising;
+        workflow.status = OracleWorkflowStatus::Running;
+        if is_new_workflow {
+            workflow.version = version_hint.unwrap_or(1).max(1);
+        } else if let Some(version_hint) = version_hint {
+            workflow.version = version_hint.max(workflow.version.max(1));
+        } else {
+            workflow.version = workflow.version.max(1);
+        }
+        if let Some(objective) = objective_hint.filter(|value| !value.trim().is_empty()) {
+            workflow.objective = Some(objective);
+        } else if workflow.objective.is_none() {
+            workflow.objective = self.oracle_state.last_orchestrator_task.clone();
+        }
+        if let Some(summary) = summary_hint.filter(|value| !value.trim().is_empty()) {
+            workflow.summary = Some(summary);
+        }
+        workflow.last_blocker = None;
+        workflow.orchestrator_thread_id = self.oracle_state.orchestrator_thread_id;
+        workflow.clone()
+    }
+
+    fn current_oracle_workflow_status_line(binding: &OracleThreadBinding) -> String {
+        binding.workflow.as_ref().map_or_else(
+            || "Chat | no workflow".to_string(),
+            |workflow| {
+                format!(
+                    "Supervising | wf:{} | {} | v{}",
+                    workflow.workflow_id,
+                    workflow.status.label(),
+                    workflow.version
+                )
+            },
+        )
+    }
+
+    fn active_oracle_workflow_stale_reason(
+        &self,
+        directive: Option<&OracleControlDirective>,
+    ) -> Option<String> {
+        let directive = directive?;
+        let workflow = self.oracle_state.workflow.as_ref()?;
+        if let Some(workflow_id) = directive.workflow_id.as_deref()
+            && workflow_id != workflow.workflow_id
+        {
+            return Some(format!(
+                "Oracle replied for workflow `{workflow_id}`, but the active workflow is `{}`. Ignoring the stale response.",
+                workflow.workflow_id
+            ));
+        }
+        if let Some(version) = directive.workflow_version
+            && version < workflow.version
+        {
+            return Some(format!(
+                "Oracle replied with stale workflow version {version} for `{}` while the active workflow is already at version {}. Ignoring the stale response.",
+                workflow.workflow_id, workflow.version
+            ));
+        }
+        None
+    }
+
+    fn update_active_oracle_workflow_status(
+        &mut self,
+        status: OracleWorkflowStatus,
+        summary: Option<String>,
+        blocker: Option<String>,
+    ) {
+        let Some(workflow) = self.oracle_state.workflow.as_mut() else {
+            return;
+        };
+        workflow.status = status;
+        if let Some(summary) = summary.filter(|value| !value.trim().is_empty()) {
+            workflow.summary = Some(summary);
+        }
+        workflow.last_blocker = blocker.filter(|value| !value.trim().is_empty());
+        workflow.orchestrator_thread_id = self.oracle_state.orchestrator_thread_id;
+    }
+
+    fn oracle_workflow_status_from_hint(
+        status_hint: Option<&str>,
+        fallback: OracleWorkflowStatus,
+    ) -> OracleWorkflowStatus {
+        match status_hint
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("idle") => OracleWorkflowStatus::Idle,
+            Some("running") | Some("working") | Some("in_progress") => {
+                OracleWorkflowStatus::Running
+            }
+            Some("needs_human") | Some("needs_input") | Some("needs_you") => {
+                OracleWorkflowStatus::NeedsHuman
+            }
+            Some("complete") | Some("completed") | Some("done") => OracleWorkflowStatus::Complete,
+            Some("failed") | Some("blocked") | Some("error") => OracleWorkflowStatus::Failed,
+            _ => fallback,
+        }
+    }
+
+    fn find_oracle_thread_by_orchestrator_thread(&self, thread_id: ThreadId) -> Option<ThreadId> {
+        if self.oracle_state.orchestrator_thread_id == Some(thread_id) {
+            return self.oracle_state.oracle_thread_id;
+        }
+        self.oracle_state
+            .bindings
+            .iter()
+            .find_map(|(oracle_thread_id, binding)| {
+                let cached = binding.orchestrator_thread_id == Some(thread_id);
+                let workflow = binding
+                    .workflow
+                    .as_ref()
+                    .is_some_and(|workflow| workflow.orchestrator_thread_id == Some(thread_id));
+                (cached || workflow).then_some(*oracle_thread_id)
+            })
+    }
+
+    fn sync_legacy_oracle_binding_fields(binding: &mut OracleThreadBinding) {
+        if let Some(workflow) = binding.workflow.as_mut() {
+            workflow.orchestrator_thread_id = binding.orchestrator_thread_id;
+            if workflow.summary.is_none() {
+                workflow.summary = binding.last_orchestrator_task.clone();
+            }
+            return;
+        }
+        if binding.orchestrator_thread_id.is_none() {
+            binding.last_orchestrator_task = None;
+        }
+    }
+
+    fn ensure_oracle_human_destination(&mut self, thread_id: ThreadId) {
+        let binding = self
+            .oracle_state
+            .bindings
+            .entry(thread_id)
+            .or_insert_with(|| OracleThreadBinding {
+                phase: OracleSupervisorPhase::Idle,
+                ..Default::default()
+            });
+        binding
+            .participants
+            .entry(ORACLE_HUMAN_DESTINATION.to_string())
+            .or_insert_with(|| OracleRoutingParticipant {
+                address: ORACLE_HUMAN_DESTINATION.to_string(),
+                thread_id: Some(thread_id),
+                title: Some("Human".to_string()),
+                kind: Some("human".to_string()),
+                role: Some("human".to_string()),
+                visibility: OracleParticipantVisibility::Visible,
+                owned_by_oracle: false,
+                route_completions: false,
+                route_closures: false,
+                last_task: None,
+            });
+    }
+
+    fn refresh_routed_oracle_thread_owners(&mut self, oracle_thread_id: ThreadId) {
+        self.oracle_state
+            .routed_thread_owner
+            .retain(|_, owner| owner.oracle_thread_id != oracle_thread_id);
+        let Some(binding) = self.oracle_state.bindings.get(&oracle_thread_id) else {
+            return;
+        };
+        for participant in binding.participants.values() {
+            let Some(thread_id) = participant.thread_id else {
+                continue;
+            };
+            if participant.address == ORACLE_HUMAN_DESTINATION {
+                continue;
+            }
+            if !participant.route_completions && !participant.route_closures {
+                continue;
+            }
+            self.oracle_state.routed_thread_owner.insert(
+                thread_id,
+                OracleRoutedThreadOwner {
+                    oracle_thread_id,
+                    address: participant.address.clone(),
+                },
+            );
+        }
+    }
+
+    fn resolve_oracle_routed_thread_owner(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<OracleRoutedThreadOwner> {
+        if let Some(owner) = self.oracle_state.routed_thread_owner.get(&thread_id) {
+            return Some(owner.clone());
+        }
+        for (oracle_thread_id, binding) in &self.oracle_state.bindings {
+            if let Some((address, _participant)) =
+                binding.participants.iter().find(|(_, participant)| {
+                    participant.thread_id == Some(thread_id)
+                        && (participant.route_completions || participant.route_closures)
+                })
+            {
+                return Some(OracleRoutedThreadOwner {
+                    oracle_thread_id: *oracle_thread_id,
+                    address: address.clone(),
+                });
+            }
+            if binding.orchestrator_thread_id == Some(thread_id) {
+                return Some(OracleRoutedThreadOwner {
+                    oracle_thread_id: *oracle_thread_id,
+                    address: ORACLE_ORCHESTRATOR_DESTINATION.to_string(),
+                });
+            }
+        }
+        if self.oracle_state.orchestrator_thread_id == Some(thread_id) {
+            return self.oracle_state.oracle_thread_id.map(|oracle_thread_id| {
+                OracleRoutedThreadOwner {
+                    oracle_thread_id,
+                    address: ORACLE_ORCHESTRATOR_DESTINATION.to_string(),
+                }
+            });
+        }
+        None
+    }
+
+    fn oracle_participant_visibility(
+        hint: Option<&str>,
+        default: OracleParticipantVisibility,
+    ) -> OracleParticipantVisibility {
+        match hint
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("hidden") => OracleParticipantVisibility::Hidden,
+            Some("visible") => OracleParticipantVisibility::Visible,
+            _ => default,
+        }
+    }
+
+    fn register_oracle_participant_thread(
+        &mut self,
+        oracle_thread_id: ThreadId,
+        address: String,
+        thread_id: ThreadId,
+        title: Option<String>,
+        kind: Option<String>,
+        role: Option<String>,
+        visibility: OracleParticipantVisibility,
+        owned_by_oracle: bool,
+        route_completions: bool,
+        route_closures: bool,
+    ) {
+        let binding = self
+            .oracle_state
+            .bindings
+            .entry(oracle_thread_id)
+            .or_insert_with(|| OracleThreadBinding {
+                phase: OracleSupervisorPhase::Idle,
+                ..Default::default()
+            });
+        let participant = binding
+            .participants
+            .entry(address.clone())
+            .or_insert_with(|| OracleRoutingParticipant {
+                address: address.clone(),
+                ..Default::default()
+            });
+        participant.thread_id = Some(thread_id);
+        if let Some(title) = title.clone() {
+            participant.title = Some(title);
+        }
+        if let Some(kind) = kind.clone() {
+            participant.kind = Some(kind);
+        }
+        if let Some(role) = role.clone() {
+            participant.role = Some(role);
+        }
+        participant.visibility = visibility;
+        participant.owned_by_oracle |= owned_by_oracle;
+        participant.route_completions = route_completions;
+        participant.route_closures = route_closures;
+        Self::sync_legacy_oracle_binding_fields(binding);
+        self.refresh_routed_oracle_thread_owners(oracle_thread_id);
+
+        if visibility == OracleParticipantVisibility::Visible && address != ORACLE_HUMAN_DESTINATION
+        {
+            self.upsert_agent_picker_thread(
+                thread_id,
+                title.or_else(|| Some(address.clone())),
+                role.or(kind),
+                /*is_closed*/ false,
+            );
+        } else if visibility == OracleParticipantVisibility::Hidden {
+            self.agent_navigation.remove(thread_id);
+        }
+
+        if self.oracle_state.oracle_thread_id == Some(oracle_thread_id)
+            && address == ORACLE_ORCHESTRATOR_DESTINATION
+        {
+            self.oracle_state.orchestrator_thread_id = Some(thread_id);
         }
     }
 
@@ -1995,6 +2358,17 @@ impl App {
         }
     }
 
+    fn set_oracle_thread_session_id(&mut self, thread_id: ThreadId, session_id: Option<String>) {
+        self.oracle_state
+            .bindings
+            .entry(thread_id)
+            .or_insert_with(|| OracleThreadBinding {
+                phase: OracleSupervisorPhase::Idle,
+                ..Default::default()
+            })
+            .current_session_id = session_id;
+    }
+
     fn oracle_repo_not_found_message() -> &'static str {
         "Unable to locate forks/oracle or external/oracle from the current workspace."
     }
@@ -2066,28 +2440,35 @@ impl App {
         });
         for (oracle_thread_id, binding) in &bindings {
             let mut abort_message = Self::oracle_abort_message(binding.phase).map(str::to_string);
-            if binding.phase == OracleSupervisorPhase::WaitingForOrchestrator
-                && let Some(orchestrator_thread_id) = binding.orchestrator_thread_id
-                && let Some(turn_id) = self.active_turn_id_for_thread(orchestrator_thread_id).await
-            {
-                abort_message = match app_server
-                    .turn_interrupt(orchestrator_thread_id, turn_id)
-                    .await
-                {
-                    Ok(()) => Some(
-                        "Oracle mode was disabled while the orchestrator was still working. The active orchestrator turn was interrupted and the supervision workflow was aborted.".to_string(),
-                    ),
-                    Err(err) => {
-                        tracing::warn!(
-                            %orchestrator_thread_id,
-                            %err,
-                            "failed to interrupt hidden oracle orchestrator turn during shutdown"
-                        );
-                        Some(
-                            "Oracle mode was disabled while the orchestrator was still working. Codex could not interrupt the hidden orchestrator turn cleanly, so background work may still be winding down.".to_string(),
-                        )
+            if binding.phase == OracleSupervisorPhase::WaitingForOrchestrator {
+                if let Some(orchestrator_thread_id) = binding.orchestrator_thread_id {
+                    abort_message = Some(
+                        "Oracle mode was disabled while the orchestrator was still working. The supervision workflow was aborted."
+                            .to_string(),
+                    );
+                    if let Some(turn_id) =
+                        self.active_turn_id_for_thread(orchestrator_thread_id).await
+                    {
+                        abort_message =
+                            match app_server.turn_interrupt(orchestrator_thread_id, turn_id).await {
+                                Ok(()) => Some(
+                                    "Oracle mode was disabled while the orchestrator was still working. The active orchestrator turn was interrupted and the supervision workflow was aborted."
+                                        .to_string(),
+                                ),
+                                Err(err) => {
+                                    tracing::warn!(
+                                        %orchestrator_thread_id,
+                                        %err,
+                                        "failed to interrupt oracle orchestrator turn during shutdown"
+                                    );
+                                    Some(
+                                        "Oracle mode was disabled while the orchestrator was still working. Codex could not interrupt that turn cleanly, so background work may still be winding down."
+                                            .to_string(),
+                                    )
+                                }
+                            };
                     }
-                };
+                }
             }
             if let Some(message) = abort_message.as_deref() {
                 self.activate_oracle_binding(*oracle_thread_id);
@@ -2106,7 +2487,7 @@ impl App {
                     tracing::warn!(
                         %orchestrator_thread_id,
                         %err,
-                        "failed to unsubscribe hidden oracle orchestrator thread"
+                        "failed to unsubscribe oracle orchestrator thread during shutdown"
                     );
                 }
                 self.thread_event_channels.remove(&orchestrator_thread_id);
@@ -2225,10 +2606,14 @@ impl App {
     }
 
     fn is_hidden_oracle_thread(&self, thread_id: ThreadId) -> bool {
-        self.oracle_state
-            .orchestrator_owner
-            .contains_key(&thread_id)
-            || self.oracle_state.orchestrator_thread_id == Some(thread_id)
+        self.oracle_state.orchestrator_thread_id == Some(thread_id)
+            || self.oracle_state.bindings.values().any(|binding| {
+                binding.orchestrator_thread_id == Some(thread_id)
+                    || binding
+                        .workflow
+                        .as_ref()
+                        .is_some_and(|workflow| workflow.orchestrator_thread_id == Some(thread_id))
+            })
     }
 
     fn oracle_picker_description(&self, thread_id: ThreadId) -> Option<String> {
@@ -2246,9 +2631,312 @@ impl App {
             .as_deref()
             .map_or("unknown", |value| value);
         Some(format!(
-            "requested {} | {phase} | session {session} | convo {conversation}",
+            "requested {} | {} | {phase} | session {session} | convo {conversation}",
             self.oracle_state.model.display_name(),
+            Self::current_oracle_workflow_status_line(binding),
         ))
+    }
+
+    fn oracle_picker_thread_title(&self, thread_id: ThreadId) -> String {
+        self.oracle_state
+            .bindings
+            .get(&thread_id)
+            .and_then(|binding| binding.remote_title.as_deref())
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| "Oracle".to_string())
+    }
+
+    fn agent_picker_subtitle(&self) -> String {
+        let base = AgentNavigationState::picker_subtitle();
+        if self.oracle_state.bindings.is_empty() {
+            base
+        } else {
+            format!("{base} Enter on Oracle to browse workflow threads.")
+        }
+    }
+
+    fn oracle_workflow_picker_subtitle(&self, oracle_thread_id: ThreadId) -> String {
+        let label = self.oracle_thread_label(oracle_thread_id);
+        let workflow = self
+            .oracle_state
+            .bindings
+            .get(&oracle_thread_id)
+            .and_then(|binding| binding.workflow.as_ref())
+            .map(|workflow| {
+                format!(
+                    "{} v{}",
+                    workflow.status.label().replace('_', " "),
+                    workflow.version
+                )
+            })
+            .unwrap_or_else(|| "direct chat".to_string());
+        format!("{label} · {workflow}")
+    }
+
+    fn oracle_workflow_picker_thread_name(
+        title: Option<&str>,
+        role: Option<&str>,
+        fallback: &str,
+    ) -> String {
+        let title = title
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(fallback);
+        let role = role
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .filter(|value| !value.eq_ignore_ascii_case(title));
+        match role {
+            Some(role) => format!("{title} [{role}]"),
+            None => title.to_string(),
+        }
+    }
+
+    fn oracle_workflow_picker_thread_description(
+        &self,
+        thread_id: ThreadId,
+        label: &str,
+        detail: &str,
+    ) -> String {
+        let state = if self
+            .agent_navigation
+            .get(&thread_id)
+            .is_some_and(|entry| entry.is_closed)
+        {
+            "closed"
+        } else {
+            "open"
+        };
+        format!("{label} | {detail} | {state}")
+    }
+
+    fn open_oracle_workflow_picker(&mut self, oracle_thread_id: ThreadId) {
+        let Some(binding) = self.oracle_state.bindings.get(&oracle_thread_id).cloned() else {
+            self.chat_widget.add_error_message(format!(
+                "Oracle thread {oracle_thread_id} is no longer available."
+            ));
+            return;
+        };
+
+        let mut initial_selected_idx = None;
+        let mut items = Vec::new();
+        let mut seen_thread_ids = HashSet::from([oracle_thread_id]);
+
+        let supervisor_label = self.oracle_thread_label(oracle_thread_id);
+        let supervisor_name = Self::oracle_workflow_picker_thread_name(
+            Some(supervisor_label.as_str()),
+            Some("supervisor"),
+            "Oracle",
+        );
+        let supervisor_description = self.oracle_workflow_picker_thread_description(
+            oracle_thread_id,
+            "Supervisor thread",
+            "direct Oracle conversation",
+        );
+        if self.active_thread_id == Some(oracle_thread_id) {
+            initial_selected_idx = Some(items.len());
+        }
+        items.push(SelectionItem {
+            name: supervisor_name.clone(),
+            name_prefix_spans: agent_picker_status_dot_spans(
+                self.agent_navigation
+                    .get(&oracle_thread_id)
+                    .is_some_and(|entry| entry.is_closed),
+            ),
+            description: Some(supervisor_description.clone()),
+            is_current: self.active_thread_id == Some(oracle_thread_id),
+            actions: vec![Box::new(move |tx| {
+                tx.send(AppEvent::SelectAgentThread(oracle_thread_id));
+            })],
+            dismiss_on_select: true,
+            search_value: Some(format!(
+                "{supervisor_name} {oracle_thread_id} {supervisor_description}"
+            )),
+            ..Default::default()
+        });
+
+        if let Some(orchestrator_thread_id) = binding.orchestrator_thread_id
+            && seen_thread_ids.insert(orchestrator_thread_id)
+        {
+            let name = Self::oracle_workflow_picker_thread_name(
+                Some("Oracle Orchestrator"),
+                Some("orchestrator"),
+                "Oracle Orchestrator",
+            );
+            let description = self.oracle_workflow_picker_thread_description(
+                orchestrator_thread_id,
+                "Workflow thread",
+                "supervised orchestrator",
+            );
+            if self.active_thread_id == Some(orchestrator_thread_id) {
+                initial_selected_idx = Some(items.len());
+            }
+            items.push(SelectionItem {
+                name: name.clone(),
+                name_prefix_spans: agent_picker_status_dot_spans(
+                    self.agent_navigation
+                        .get(&orchestrator_thread_id)
+                        .is_some_and(|entry| entry.is_closed),
+                ),
+                description: Some(description.clone()),
+                is_current: self.active_thread_id == Some(orchestrator_thread_id),
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::SelectAgentThread(orchestrator_thread_id));
+                })],
+                dismiss_on_select: true,
+                search_value: Some(format!(
+                    "{name} {orchestrator_thread_id} {description}"
+                )),
+                ..Default::default()
+            });
+        }
+
+        let mut participants = binding.participants.values().cloned().collect::<Vec<_>>();
+        participants.sort_by(|a, b| {
+            a.title
+                .as_deref()
+                .unwrap_or(a.address.as_str())
+                .cmp(b.title.as_deref().unwrap_or(b.address.as_str()))
+        });
+        for participant in participants {
+            if participant.address == ORACLE_HUMAN_DESTINATION {
+                continue;
+            }
+            let Some(thread_id) = participant.thread_id else {
+                continue;
+            };
+            if !seen_thread_ids.insert(thread_id) {
+                continue;
+            }
+            let name = Self::oracle_workflow_picker_thread_name(
+                participant.title.as_deref(),
+                participant.role.as_deref().or(participant.kind.as_deref()),
+                participant.address.as_str(),
+            );
+            let detail = if participant.visibility == OracleParticipantVisibility::Hidden {
+                "linked hidden workflow thread"
+            } else {
+                "linked workflow thread"
+            };
+            let description =
+                self.oracle_workflow_picker_thread_description(thread_id, "Workflow thread", detail);
+            if self.active_thread_id == Some(thread_id) {
+                initial_selected_idx = Some(items.len());
+            }
+            items.push(SelectionItem {
+                name: name.clone(),
+                name_prefix_spans: agent_picker_status_dot_spans(
+                    self.agent_navigation
+                        .get(&thread_id)
+                        .is_some_and(|entry| entry.is_closed),
+                ),
+                description: Some(description.clone()),
+                is_current: self.active_thread_id == Some(thread_id),
+                actions: vec![Box::new(move |tx| {
+                    tx.send(AppEvent::SelectAgentThread(thread_id));
+                })],
+                dismiss_on_select: true,
+                search_value: Some(format!("{name} {thread_id} {description}")),
+                ..Default::default()
+            });
+        }
+
+        self.chat_widget.show_selection_view(SelectionViewParams {
+            view_id: Some(ORACLE_WORKFLOW_SELECTION_VIEW_ID),
+            title: Some("Oracle Workflow".to_string()),
+            subtitle: Some(self.oracle_workflow_picker_subtitle(oracle_thread_id)),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            initial_selected_idx,
+            ..Default::default()
+        });
+    }
+
+    fn oracle_picker_subtitle(&self, attached_count: usize, remote_count: usize) -> String {
+        if self.oracle_picker_show_info {
+            format!(
+                "Model: {}  Phase: {}  Attached: {}  Remote: {}",
+                self.oracle_state.model.browser_label(),
+                self.oracle_state.phase.description(),
+                attached_count,
+                remote_count,
+            )
+        } else if attached_count + remote_count == 0 {
+            "No Oracle threads yet. Use the hotkeys below.".to_string()
+        } else {
+            "Pick a thread or use the hotkeys below.".to_string()
+        }
+    }
+
+    fn oracle_picker_hotkeys_line(
+        &self,
+        include_new_thread: bool,
+        search_enabled: bool,
+    ) -> Line<'static> {
+        let next_model = match self.oracle_state.model {
+            OracleModelPreset::Pro => OracleModelPreset::Thinking,
+            OracleModelPreset::Thinking => OracleModelPreset::Pro,
+        };
+        let mut spans = vec!["Hotkeys: ".dim().into()];
+        if include_new_thread {
+            spans.push(key_hint::plain(KeyCode::Char('n')).into());
+            spans.push(" new  ".dim().into());
+        }
+        if search_enabled {
+            spans.push(key_hint::plain(KeyCode::Char('s')).into());
+            spans.push(" search  ".dim().into());
+        }
+        spans.push(key_hint::plain(KeyCode::Char('i')).into());
+        spans.push(" info  ".dim().into());
+        spans.push(key_hint::plain(KeyCode::Tab).into());
+        spans.push(
+            format!(" {}", next_model.browser_label().to_ascii_lowercase())
+                .dim()
+                .into(),
+        );
+        Line::from(spans)
+    }
+
+    fn refresh_oracle_picker_if_open(&mut self) -> bool {
+        if !self
+            .chat_widget
+            .selection_view_is_active(ORACLE_SELECTION_VIEW_ID)
+        {
+            return false;
+        }
+        self.show_oracle_picker(
+            self.oracle_picker_remote_threads.clone(),
+            self.oracle_picker_include_new_thread,
+        );
+        true
+    }
+
+    fn toggle_oracle_picker_info(&mut self) -> bool {
+        if !self
+            .chat_widget
+            .selection_view_is_active(ORACLE_SELECTION_VIEW_ID)
+        {
+            return false;
+        }
+        self.oracle_picker_show_info = !self.oracle_picker_show_info;
+        self.refresh_oracle_picker_if_open()
+    }
+
+    async fn toggle_oracle_picker_model(&mut self) -> bool {
+        if !self
+            .chat_widget
+            .selection_view_is_active(ORACLE_SELECTION_VIEW_ID)
+        {
+            return false;
+        }
+        let next_model = match self.oracle_state.model {
+            OracleModelPreset::Pro => OracleModelPreset::Thinking,
+            OracleModelPreset::Thinking => OracleModelPreset::Pro,
+        };
+        let _ = self.set_oracle_model_preference(next_model).await;
+        self.refresh_oracle_picker_if_open()
     }
 
     fn oracle_browser_model_strategy(&self) -> &'static str {
@@ -2380,6 +3068,7 @@ impl App {
 
     async fn handle_oracle_user_turn(
         &mut self,
+        _app_server: &mut AppServerSession,
         thread_id: ThreadId,
         items: &[UserInput],
     ) -> Result<bool> {
@@ -2463,10 +3152,17 @@ impl App {
         &mut self,
         app_server: &mut AppServerSession,
     ) -> Result<ThreadId> {
-        if let Some(thread_id) = self.oracle_state.orchestrator_thread_id {
+        if let Some(thread_id) = self
+            .oracle_state
+            .workflow
+            .as_ref()
+            .and_then(|workflow| workflow.orchestrator_thread_id)
+            .or(self.oracle_state.orchestrator_thread_id)
+        {
+            self.oracle_state.orchestrator_thread_id = Some(thread_id);
             return Ok(thread_id);
         }
-        let Some(oracle_thread_id) = self.oracle_state.oracle_thread_id else {
+        let Some(_oracle_thread_id) = self.oracle_state.oracle_thread_id else {
             return Err(color_eyre::eyre::eyre!(
                 "oracle orchestrator requested without an active oracle thread binding"
             ));
@@ -2487,11 +3183,455 @@ impl App {
             tracing::warn!(%thread_id, %err, "failed to name oracle orchestrator thread");
         }
         self.oracle_state.orchestrator_thread_id = Some(thread_id);
-        self.oracle_state
-            .orchestrator_owner
-            .insert(thread_id, oracle_thread_id);
+        if let Some(workflow) = self.oracle_state.workflow.as_mut() {
+            workflow.orchestrator_thread_id = Some(thread_id);
+        }
         self.persist_active_oracle_binding();
         Ok(thread_id)
+    }
+
+    fn oracle_is_human_destination(address: &str) -> bool {
+        matches!(
+            address.trim().to_ascii_lowercase().as_str(),
+            "human" | "user"
+        )
+    }
+
+    fn oracle_is_orchestrator_destination(address: &str) -> bool {
+        address
+            .trim()
+            .eq_ignore_ascii_case(ORACLE_ORCHESTRATOR_DESTINATION)
+    }
+
+    fn parse_oracle_thread_destination(address: &str) -> Option<ThreadId> {
+        let raw = address.trim().strip_prefix("thread:")?;
+        ThreadId::from_string(raw).ok()
+    }
+
+    fn oracle_destination_hint<'a>(
+        directive: &'a OracleControlDirective,
+        address: &str,
+    ) -> Option<&'a OracleControlParticipant> {
+        directive.participants.iter().find(|participant| {
+            participant.address.eq_ignore_ascii_case(address)
+                || participant
+                    .kind
+                    .as_deref()
+                    .is_some_and(|kind| kind.eq_ignore_ascii_case(address))
+        })
+    }
+
+    fn oracle_next_generated_worker_address(&self, oracle_thread_id: ThreadId) -> String {
+        let next = self
+            .oracle_state
+            .bindings
+            .get(&oracle_thread_id)
+            .map(|binding| {
+                binding
+                    .participants
+                    .keys()
+                    .filter(|address| address.starts_with("worker:"))
+                    .count()
+                    + 1
+            })
+            .unwrap_or(1);
+        format!("worker:{next}")
+    }
+
+    fn oracle_directive_destination_address(
+        &self,
+        oracle_thread_id: ThreadId,
+        directive: &OracleControlDirective,
+    ) -> String {
+        directive
+            .to
+            .clone()
+            .or_else(|| {
+                directive
+                    .participants
+                    .first()
+                    .map(|participant| participant.address.clone())
+            })
+            .unwrap_or_else(|| match directive.op {
+                Some(OracleControlOp::Spawn) => {
+                    self.oracle_next_generated_worker_address(oracle_thread_id)
+                }
+                _ => ORACLE_ORCHESTRATOR_DESTINATION.to_string(),
+            })
+    }
+
+    fn oracle_destination_title(address: &str, kind: Option<&str>, role: Option<&str>) -> String {
+        if Self::oracle_is_orchestrator_destination(address) {
+            return "Oracle Orchestrator".to_string();
+        }
+        if let Some(raw_thread) = Self::parse_oracle_thread_destination(address) {
+            return format!("Oracle Routed {}", raw_thread);
+        }
+        let base = address.replace(':', " ");
+        let label = role.or(kind).unwrap_or("agent");
+        format!("Oracle {label} {base}").trim().to_string()
+    }
+
+    fn oracle_directory_snapshot(&self, oracle_thread_id: ThreadId, query: Option<&str>) -> String {
+        let query = query.map(|value| value.trim().to_ascii_lowercase());
+        let matches_query = |text: &str| {
+            query
+                .as_ref()
+                .is_none_or(|query| text.to_ascii_lowercase().contains(query))
+        };
+        let mut lines = Vec::new();
+        if let Some(binding) = self.oracle_state.bindings.get(&oracle_thread_id) {
+            let mut participants = binding.participants.values().cloned().collect::<Vec<_>>();
+            participants.sort_by_key(|participant| participant.address.to_ascii_lowercase());
+            for participant in participants {
+                let summary = participant.summary_line();
+                if matches_query(summary.as_str()) {
+                    lines.push(summary);
+                }
+            }
+        }
+        for (thread_id, entry) in self.agent_navigation.ordered_threads() {
+            if thread_id == oracle_thread_id || self.is_hidden_oracle_thread(thread_id) {
+                continue;
+            }
+            let name = format_agent_picker_item_name(
+                entry.agent_nickname.as_deref(),
+                entry.agent_role.as_deref(),
+                self.primary_thread_id == Some(thread_id),
+            );
+            let summary = format!(
+                "- thread:{thread_id} [thread visible] -> {name} ({})",
+                if entry.is_closed { "closed" } else { "open" }
+            );
+            if matches_query(summary.as_str()) {
+                lines.push(summary);
+            }
+        }
+        if lines.is_empty() {
+            if let Some(query) = query {
+                format!("No Oracle destinations matched query `{query}`.")
+            } else {
+                "No additional Oracle destinations are registered.".to_string()
+            }
+        } else {
+            lines.join("\n")
+        }
+    }
+
+    async fn oracle_destination_task_op(
+        &self,
+        oracle_thread_id: ThreadId,
+        destination_thread_id: ThreadId,
+        _address: &str,
+        _role: Option<&str>,
+        task: String,
+        developer_instructions: Option<String>,
+    ) -> AppCommand {
+        let routed_model = self
+            .oracle_destination_task_model(destination_thread_id)
+            .await;
+        let collaboration_mode = self
+            .chat_widget
+            .submission_collaboration_mode()
+            .unwrap_or_else(|| self.chat_widget.current_collaboration_mode().clone())
+            .with_updates(
+                Some(routed_model.clone()),
+                /*effort*/ None,
+                Some(developer_instructions),
+            );
+        let personality = self.chat_widget.config_ref().personality.filter(|_| {
+            self.chat_widget
+                .config_ref()
+                .features
+                .enabled(Feature::Personality)
+        });
+        let reminder = self
+            .oracle_state
+            .workflow
+            .as_ref()
+            .map(|workflow| build_oracle_workflow_reminder(workflow, oracle_thread_id, &task))
+            .unwrap_or(task);
+        AppCommand::user_turn(
+            vec![UserInput::Text {
+                text: reminder,
+                text_elements: Vec::new(),
+            }],
+            self.chat_widget.config_ref().cwd.to_path_buf(),
+            self.chat_widget
+                .config_ref()
+                .permissions
+                .approval_policy
+                .value(),
+            self.chat_widget
+                .config_ref()
+                .permissions
+                .sandbox_policy
+                .get()
+                .clone(),
+            routed_model,
+            collaboration_mode.reasoning_effort(),
+            /*summary*/ None,
+            self.chat_widget.config_ref().service_tier.map(Some),
+            /*final_output_json_schema*/ None,
+            Some(collaboration_mode),
+            personality,
+        )
+    }
+
+    async fn oracle_destination_task_model(&self, destination_thread_id: ThreadId) -> String {
+        if let Some(channel) = self.thread_event_channels.get(&destination_thread_id) {
+            let store = channel.store.lock().await;
+            if let Some(session) = store.session.as_ref()
+                && session.model_provider_id != "oracle-browser"
+                && !session.model.trim().is_empty()
+            {
+                return session.model.clone();
+            }
+        }
+
+        if let Some(session) = self.primary_session_configured.as_ref()
+            && session.model_provider_id != "oracle-browser"
+            && !session.model.trim().is_empty()
+        {
+            return session.model.clone();
+        }
+
+        if let Some(model) = self
+            .chat_widget
+            .config_ref()
+            .model
+            .clone()
+            .filter(|model| !model.trim().is_empty())
+        {
+            return model;
+        }
+
+        if let Some(model) = self
+            .config
+            .model
+            .clone()
+            .filter(|model| !model.trim().is_empty())
+        {
+            return model;
+        }
+
+        self.chat_widget
+            .current_collaboration_mode()
+            .model()
+            .to_string()
+    }
+
+    async fn ensure_oracle_destination_thread(
+        &mut self,
+        app_server: &mut AppServerSession,
+        oracle_thread_id: ThreadId,
+        address: &str,
+        directive: &OracleControlDirective,
+        spawn_if_missing: bool,
+    ) -> Result<(ThreadId, String, Option<String>)> {
+        if Self::oracle_is_orchestrator_destination(address) {
+            let thread_id = self.ensure_orchestrator_thread(app_server).await?;
+            return Ok((
+                thread_id,
+                "Oracle Orchestrator".to_string(),
+                Some("orchestrator".to_string()),
+            ));
+        }
+        if let Some(thread_id) = self
+            .oracle_state
+            .bindings
+            .get(&oracle_thread_id)
+            .and_then(|binding| binding.participants.get(address))
+            .and_then(|participant| participant.thread_id)
+        {
+            let title = self
+                .oracle_state
+                .bindings
+                .get(&oracle_thread_id)
+                .and_then(|binding| binding.participants.get(address))
+                .and_then(|participant| participant.title.clone())
+                .unwrap_or_else(|| address.to_string());
+            let role = self
+                .oracle_state
+                .bindings
+                .get(&oracle_thread_id)
+                .and_then(|binding| binding.participants.get(address))
+                .and_then(|participant| participant.role.clone());
+            return Ok((thread_id, title, role));
+        }
+
+        let hint = Self::oracle_destination_hint(directive, address);
+        let kind = hint
+            .and_then(|participant| participant.kind.clone())
+            .or_else(|| {
+                if address.starts_with("worker:") {
+                    Some("worker".to_string())
+                } else if Self::parse_oracle_thread_destination(address).is_some() {
+                    Some("thread".to_string())
+                } else {
+                    None
+                }
+            });
+        let role = hint
+            .and_then(|participant| participant.role.clone())
+            .or_else(|| kind.clone());
+        let visibility = Self::oracle_participant_visibility(
+            hint.and_then(|participant| participant.visibility.as_deref()),
+            if Self::parse_oracle_thread_destination(address).is_some() {
+                OracleParticipantVisibility::Visible
+            } else {
+                OracleParticipantVisibility::Hidden
+            },
+        );
+
+        if let Some(thread_id) = Self::parse_oracle_thread_destination(address) {
+            let title = self
+                .agent_navigation
+                .get(&thread_id)
+                .and_then(|entry| entry.agent_nickname.clone())
+                .unwrap_or_else(|| address.to_string());
+            self.register_oracle_participant_thread(
+                oracle_thread_id,
+                address.to_string(),
+                thread_id,
+                Some(title.clone()),
+                kind.clone(),
+                role.clone(),
+                visibility,
+                /*owned_by_oracle*/ false,
+                /*route_completions*/ true,
+                /*route_closures*/ true,
+            );
+            return Ok((thread_id, title, role));
+        }
+
+        if !spawn_if_missing {
+            return Err(color_eyre::eyre::eyre!(
+                "Oracle destination `{address}` is not registered. Use `spawn` or target `thread:<id>`."
+            ));
+        }
+
+        let started = app_server
+            .start_thread(self.chat_widget.config_ref())
+            .await?;
+        let thread_id = started.session.thread_id;
+        let channel = self.ensure_thread_channel(thread_id);
+        {
+            let mut store = channel.store.lock().await;
+            store.set_session(started.session, started.turns);
+        }
+        let title = Self::oracle_destination_title(address, kind.as_deref(), role.as_deref());
+        if let Err(err) = app_server.thread_set_name(thread_id, title.clone()).await {
+            tracing::warn!(%thread_id, %err, "failed to name oracle destination thread");
+        }
+        self.register_oracle_participant_thread(
+            oracle_thread_id,
+            address.to_string(),
+            thread_id,
+            Some(title.clone()),
+            kind,
+            role.clone(),
+            visibility,
+            /*owned_by_oracle*/ true,
+            /*route_completions*/ true,
+            /*route_closures*/ true,
+        );
+        Ok((thread_id, title, role))
+    }
+
+    fn oracle_followup_limit_exceeded(&self, oracle_thread_id: ThreadId) -> bool {
+        self.oracle_state
+            .bindings
+            .get(&oracle_thread_id)
+            .map(|binding| binding.automatic_context_followups >= 2)
+            .unwrap_or(false)
+    }
+
+    async fn start_oracle_directory_followup(
+        &mut self,
+        result: &OracleRunResult,
+        query: Option<String>,
+    ) -> Result<()> {
+        let Some(oracle_repo) = find_oracle_repo(self.chat_widget.config_ref().cwd.as_path())
+        else {
+            let message = Self::oracle_repo_not_found_message().to_string();
+            self.oracle_state.phase = OracleSupervisorPhase::Idle;
+            self.oracle_state.last_status = Some(message.clone());
+            if matches!(result.kind, OracleRequestKind::UserTurn) {
+                self.complete_pending_oracle_turn(result.oracle_thread_id, &message)
+                    .await;
+            } else {
+                self.append_oracle_agent_turn(result.oracle_thread_id, &message)
+                    .await;
+            }
+            self.chat_widget.add_error_message(message);
+            self.persist_active_oracle_binding();
+            return Ok(());
+        };
+        let directory = self.oracle_directory_snapshot(result.oracle_thread_id, query.as_deref());
+        if let Some(binding) = self.oracle_state.bindings.get_mut(&result.oracle_thread_id) {
+            binding.automatic_context_followups =
+                binding.automatic_context_followups.saturating_add(1);
+        }
+        self.oracle_state.automatic_context_followups = self
+            .oracle_state
+            .automatic_context_followups
+            .saturating_add(1);
+        self.oracle_state.last_status = Some(match &query {
+            Some(query) => format!("Oracle searched destinations for `{query}`."),
+            None => "Oracle listed available destinations.".to_string(),
+        });
+        self.start_oracle_run(OracleRunRequest {
+            oracle_thread_id: result.oracle_thread_id,
+            kind: result.kind,
+            session_slug: result.requested_slug.clone(),
+            prompt: build_context_prompt(
+                &self.oracle_state,
+                &[query
+                    .map(|value| format!("search_destinations:{value}"))
+                    .unwrap_or_else(|| "list_destinations".to_string())],
+                &directory,
+            ),
+            files: Vec::new(),
+            workspace_cwd: self.chat_widget.config_ref().cwd.to_path_buf(),
+            oracle_repo,
+            followup_session: self.oracle_state.current_session_id.clone(),
+            model: self.oracle_state.model,
+            browser_model_strategy: self.oracle_browser_model_strategy().to_string(),
+            browser_model_label: Some(self.oracle_state.model.browser_label().to_string()),
+        })?;
+        Ok(())
+    }
+
+    async fn maybe_process_pending_oracle_checkpoints(
+        &mut self,
+        app_server: &mut AppServerSession,
+        oracle_thread_id: ThreadId,
+    ) -> Result<()> {
+        if self.oracle_state.phase.is_busy() {
+            return Ok(());
+        }
+        let next_thread = self
+            .oracle_state
+            .bindings
+            .get(&oracle_thread_id)
+            .and_then(|binding| binding.pending_checkpoint_threads.first().copied());
+        if let Some(thread_id) = next_thread {
+            let expected_workflow_version = self
+                .oracle_state
+                .bindings
+                .get(&oracle_thread_id)
+                .and_then(|binding| binding.pending_checkpoint_versions.get(&thread_id).copied());
+            self.handle_orchestrator_checkpoint(app_server, thread_id, expected_workflow_version)
+                .await?;
+            if let Some(binding) = self.oracle_state.bindings.get_mut(&oracle_thread_id) {
+                binding
+                    .pending_checkpoint_threads
+                    .retain(|pending| *pending != thread_id);
+                binding.pending_checkpoint_versions.remove(&thread_id);
+            }
+        }
+        Ok(())
     }
 
     async fn handle_oracle_run_completed(
@@ -2514,24 +3654,45 @@ impl App {
                 "Oracle finished reviewing the orchestrator checkpoint.".to_string()
             }
         });
+        let action = result.response.action;
+        let directive = result.response.directive.clone();
+        let delegated_task = result.response.task_for_orchestrator.clone();
+        let requested_context = result.response.context_requests.clone();
+        if let Some(message) = self.active_oracle_workflow_stale_reason(directive.as_ref()) {
+            self.oracle_state.phase = OracleSupervisorPhase::Idle;
+            self.oracle_state.last_status = Some(message.clone());
+            if matches!(result.kind, OracleRequestKind::UserTurn) {
+                self.complete_pending_oracle_turn(result.oracle_thread_id, &message)
+                    .await;
+            } else {
+                self.append_oracle_agent_turn(result.oracle_thread_id, &message)
+                    .await;
+            }
+            self.persist_active_oracle_binding();
+            self.maybe_process_pending_oracle_checkpoints(app_server, result.oracle_thread_id)
+                .await?;
+            return Ok(());
+        }
+
         let mut message_for_user = result.response.message_for_user.trim().to_string();
-        if message_for_user.is_empty() && matches!(result.response.action, OracleAction::Delegate) {
+        if message_for_user.is_empty() && matches!(action, OracleAction::Delegate) {
             message_for_user = "Oracle delegated work to the orchestrator.".to_string();
         }
         if message_for_user.is_empty()
-            && matches!(result.response.action, OracleAction::RequestContext)
-            && !result.response.context_requests.is_empty()
+            && matches!(action, OracleAction::RequestContext)
+            && !requested_context.is_empty()
         {
             message_for_user = format!(
                 "Oracle requested more context: {}",
-                result.response.context_requests.join(", ")
+                requested_context.join(", ")
             );
         }
-        match result.response.action {
+        match action {
             OracleAction::Delegate => {
-                let Some(task) = result.response.task_for_orchestrator else {
+                let Some(task) = delegated_task else {
                     let message =
-                        "Oracle requested delegation without an orchestrator task.".to_string();
+                        "Oracle requested a workflow handoff without an orchestrator task."
+                            .to_string();
                     self.oracle_state.phase = OracleSupervisorPhase::Idle;
                     self.oracle_state.last_status = Some(message.clone());
                     if matches!(result.kind, OracleRequestKind::UserTurn) {
@@ -2545,7 +3706,22 @@ impl App {
                     self.persist_active_oracle_binding();
                     return Ok(());
                 };
-                let task: String = task;
+                let workflow = self.ensure_active_oracle_workflow(
+                    directive
+                        .as_ref()
+                        .and_then(|value| value.workflow_id.clone()),
+                    directive
+                        .as_ref()
+                        .and_then(|value| value.objective.clone())
+                        .or_else(|| Some(task.clone())),
+                    directive
+                        .as_ref()
+                        .and_then(|value| value.summary.clone())
+                        .or_else(|| {
+                            (!message_for_user.is_empty()).then_some(message_for_user.clone())
+                        }),
+                    directive.as_ref().and_then(|value| value.workflow_version),
+                );
                 let thread_id = match self.ensure_orchestrator_thread(app_server).await {
                     Ok(thread_id) => thread_id,
                     Err(err) => {
@@ -2565,54 +3741,44 @@ impl App {
                         return Err(err);
                     }
                 };
-                let collaboration_mode = self
-                    .chat_widget
-                    .submission_collaboration_mode()
-                    .unwrap_or_else(|| self.chat_widget.current_collaboration_mode().clone())
-                    .with_updates(
-                        /*model*/ None,
-                        /*effort*/ None,
-                        Some(Some(orchestrator_developer_instructions())),
+                if let Some(active_workflow) = self.oracle_state.workflow.as_mut() {
+                    active_workflow.status = Self::oracle_workflow_status_from_hint(
+                        directive.as_ref().and_then(|value| value.status.as_deref()),
+                        OracleWorkflowStatus::Running,
                     );
-                let personality = self.chat_widget.config_ref().personality.filter(|_| {
-                    self.chat_widget
-                        .config_ref()
-                        .features
-                        .enabled(Feature::Personality)
-                });
-                let op = AppCommand::user_turn(
-                    vec![UserInput::Text {
-                        text: task.clone(),
-                        text_elements: Vec::new(),
-                    }],
-                    self.chat_widget.config_ref().cwd.to_path_buf(),
-                    self.chat_widget
-                        .config_ref()
-                        .permissions
-                        .approval_policy
-                        .value(),
-                    self.chat_widget
-                        .config_ref()
-                        .permissions
-                        .sandbox_policy
-                        .get()
-                        .clone(),
-                    collaboration_mode.model().to_string(),
-                    collaboration_mode.reasoning_effort(),
-                    /*summary*/ None,
-                    self.chat_widget.config_ref().service_tier.map(Some),
-                    /*final_output_json_schema*/ None,
-                    Some(collaboration_mode),
-                    personality,
-                );
+                    active_workflow.orchestrator_thread_id = Some(thread_id);
+                    if let Some(summary) =
+                        directive.as_ref().and_then(|value| value.summary.clone())
+                    {
+                        active_workflow.summary = Some(summary);
+                    }
+                    active_workflow.last_blocker = None;
+                }
+                self.oracle_state.orchestrator_thread_id = Some(thread_id);
+                let op = self
+                    .oracle_destination_task_op(
+                        result.oracle_thread_id,
+                        thread_id,
+                        ORACLE_ORCHESTRATOR_DESTINATION,
+                        Some("orchestrator"),
+                        task.clone(),
+                        Some(orchestrator_developer_instructions()),
+                    )
+                    .await;
                 self.oracle_state.last_orchestrator_task = Some(task);
                 self.oracle_state.last_status = Some(format!(
-                    "Oracle delegated to orchestrator thread {thread_id}."
+                    "Oracle handed workflow `{}` v{} to orchestrator thread {thread_id}.",
+                    workflow.workflow_id, workflow.version
                 ));
                 self.oracle_state.phase = OracleSupervisorPhase::WaitingForOrchestrator;
                 self.oracle_state.automatic_context_followups = 0;
                 if let Err(err) = self.submit_thread_op(app_server, thread_id, op).await {
                     self.oracle_state.phase = OracleSupervisorPhase::Idle;
+                    self.update_active_oracle_workflow_status(
+                        OracleWorkflowStatus::Failed,
+                        directive.as_ref().and_then(|value| value.summary.clone()),
+                        Some(err.to_string()),
+                    );
                     let message = format!(
                         "Oracle delegated a task, but Codex failed to start the orchestrator turn: {err}"
                     );
@@ -2637,7 +3803,7 @@ impl App {
                 }
             }
             OracleAction::RequestContext => {
-                let requests = result.response.context_requests;
+                let requests = requested_context;
                 if requests.is_empty() {
                     let message =
                         "Oracle requested more context without any context_requests.".to_string();
@@ -2704,6 +3870,17 @@ impl App {
                     orchestrator_summary.as_deref(),
                 )
                 .await;
+                if let Some(workflow) = self.oracle_state.workflow.as_mut() {
+                    workflow.status = Self::oracle_workflow_status_from_hint(
+                        directive.as_ref().and_then(|value| value.status.as_deref()),
+                        OracleWorkflowStatus::Running,
+                    );
+                    if let Some(summary) =
+                        directive.as_ref().and_then(|value| value.summary.clone())
+                    {
+                        workflow.summary = Some(summary);
+                    }
+                }
                 self.oracle_state.automatic_context_followups += 1;
                 self.oracle_state.last_status = Some(format!(
                     "Oracle requested more context: {}",
@@ -2756,7 +3933,49 @@ impl App {
                 }
                 self.oracle_state.phase = OracleSupervisorPhase::Idle;
                 self.oracle_state.automatic_context_followups = 0;
-                self.oracle_state.last_status = Some(match result.response.action {
+                match action {
+                    OracleAction::AskUser => {
+                        self.update_active_oracle_workflow_status(
+                            Self::oracle_workflow_status_from_hint(
+                                directive.as_ref().and_then(|value| value.status.as_deref()),
+                                OracleWorkflowStatus::NeedsHuman,
+                            ),
+                            directive
+                                .as_ref()
+                                .and_then(|value| value.summary.clone())
+                                .or_else(|| Some(final_message.clone())),
+                            Some(final_message.clone()),
+                        );
+                    }
+                    OracleAction::Finish => {
+                        self.update_active_oracle_workflow_status(
+                            Self::oracle_workflow_status_from_hint(
+                                directive.as_ref().and_then(|value| value.status.as_deref()),
+                                OracleWorkflowStatus::Complete,
+                            ),
+                            directive
+                                .as_ref()
+                                .and_then(|value| value.summary.clone())
+                                .or_else(|| Some(final_message.clone())),
+                            None,
+                        );
+                    }
+                    OracleAction::Reply => {
+                        self.update_active_oracle_workflow_status(
+                            Self::oracle_workflow_status_from_hint(
+                                directive.as_ref().and_then(|value| value.status.as_deref()),
+                                OracleWorkflowStatus::Idle,
+                            ),
+                            directive
+                                .as_ref()
+                                .and_then(|value| value.summary.clone())
+                                .or_else(|| Some(final_message.clone())),
+                            None,
+                        );
+                    }
+                    _ => {}
+                }
+                self.oracle_state.last_status = Some(match action {
                     OracleAction::AskUser => "Oracle is waiting on the human.".to_string(),
                     OracleAction::Finish => "Oracle marked the milestone complete.".to_string(),
                     _ => "Oracle replied.".to_string(),
@@ -2764,11 +3983,14 @@ impl App {
             }
         }
         self.persist_active_oracle_binding();
+        self.maybe_process_pending_oracle_checkpoints(app_server, result.oracle_thread_id)
+            .await?;
         Ok(())
     }
 
     async fn handle_oracle_run_failed(
         &mut self,
+        app_server: &mut AppServerSession,
         visible_thread_id: ThreadId,
         kind: OracleRequestKind,
         error: String,
@@ -2792,6 +4014,8 @@ impl App {
         }
         self.chat_widget.add_error_message(message);
         self.persist_active_oracle_binding();
+        self.maybe_process_pending_oracle_checkpoints(app_server, visible_thread_id)
+            .await?;
         Ok(())
     }
 
@@ -2809,19 +4033,33 @@ impl App {
         &mut self,
         app_server: &mut AppServerSession,
         thread_id: ThreadId,
+        expected_workflow_version: Option<u64>,
     ) -> Result<()> {
-        let Some(oracle_thread_id) = self
-            .oracle_state
-            .orchestrator_owner
-            .get(&thread_id)
-            .copied()
+        let Some(oracle_thread_id) = self.find_oracle_thread_by_orchestrator_thread(thread_id)
         else {
             return Ok(());
         };
         self.activate_oracle_binding(oracle_thread_id);
-        if self.oracle_state.orchestrator_thread_id != Some(thread_id)
-            || self.oracle_state.phase != OracleSupervisorPhase::WaitingForOrchestrator
+        if let Some(binding) = self.oracle_state.bindings.get_mut(&oracle_thread_id) {
+            binding
+                .pending_checkpoint_threads
+                .retain(|pending| *pending != thread_id);
+            binding.pending_checkpoint_versions.remove(&thread_id);
+        }
+        if let Some(expected_workflow_version) = expected_workflow_version
+            && self
+                .oracle_state
+                .workflow
+                .as_ref()
+                .is_some_and(|workflow| workflow.version != expected_workflow_version)
         {
+            tracing::info!(
+                %thread_id,
+                expected_workflow_version,
+                current_workflow_version = self.oracle_state.workflow.as_ref().map(|workflow| workflow.version),
+                "ignoring stale orchestrator checkpoint for superseded workflow version"
+            );
+            self.persist_active_oracle_binding();
             return Ok(());
         }
         let Some(session_slug) = self.oracle_state.session_root_slug.clone() else {
@@ -2849,8 +4087,16 @@ impl App {
         let git_status = Self::run_git_capture(thread.cwd.as_path(), &["status", "--short"]).await;
         let diff_stat =
             Self::run_git_capture(thread.cwd.as_path(), &["diff", "--stat", "--no-ext-diff"]).await;
-        self.oracle_state.last_status =
-            Some("Sending orchestrator checkpoint to Oracle.".to_string());
+        let checkpoint_summary = summarize_thread(&thread);
+        if let Some(workflow) = self.oracle_state.workflow.as_mut() {
+            workflow.status = OracleWorkflowStatus::Running;
+            workflow.last_checkpoint = Some(checkpoint_summary.clone());
+            workflow.summary = Some(checkpoint_summary.clone());
+            workflow.orchestrator_thread_id = Some(thread_id);
+        }
+        self.oracle_state.last_status = Some(format!(
+            "Sending orchestrator checkpoint from thread {thread_id} to Oracle."
+        ));
         if let Err(err) = self.start_oracle_run(OracleRunRequest {
             oracle_thread_id,
             kind: OracleRequestKind::Checkpoint,
@@ -3046,7 +4292,9 @@ impl App {
         }
 
         if let AppCommandView::UserTurn { items, .. } = op.view()
-            && self.handle_oracle_user_turn(thread_id, items).await?
+            && self
+                .handle_oracle_user_turn(app_server, thread_id, items)
+                .await?
         {
             return Ok(());
         }
@@ -3639,15 +4887,9 @@ impl App {
         thread_id: ThreadId,
         notification: ServerNotification,
     ) -> Result<()> {
-        let should_checkpoint_oracle = self
-            .oracle_state
-            .orchestrator_owner
-            .get(&thread_id)
-            .and_then(|visible_thread_id| self.oracle_state.bindings.get(visible_thread_id))
-            .is_some_and(|binding| {
-                binding.phase == OracleSupervisorPhase::WaitingForOrchestrator
-                    && matches!(&notification, ServerNotification::TurnCompleted(_))
-            });
+        let oracle_thread_id = self.find_oracle_thread_by_orchestrator_thread(thread_id);
+        let should_checkpoint_oracle = oracle_thread_id.is_some()
+            && matches!(&notification, ServerNotification::TurnCompleted(_));
         let is_thread_closed = matches!(&notification, ServerNotification::ThreadClosed(_));
         let inferred_session = self
             .infer_session_for_thread_notification(thread_id, &notification)
@@ -3684,32 +4926,75 @@ impl App {
             }
         }
         if should_checkpoint_oracle {
-            self.app_event_tx
-                .send(AppEvent::OracleCheckpoint { thread_id });
+            if let Some(oracle_thread_id) = oracle_thread_id {
+                let workflow_version = self
+                    .oracle_state
+                    .bindings
+                    .get(&oracle_thread_id)
+                    .and_then(|binding| binding.workflow.as_ref().map(|workflow| workflow.version));
+                let should_queue = self
+                    .oracle_state
+                    .bindings
+                    .get(&oracle_thread_id)
+                    .is_some_and(|binding| {
+                        matches!(
+                            binding.phase,
+                            OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::UserTurn)
+                                | OracleSupervisorPhase::WaitingForOracle(
+                                    OracleRequestKind::Checkpoint
+                                )
+                        )
+                    });
+                if should_queue {
+                    if let Some(binding) = self.oracle_state.bindings.get_mut(&oracle_thread_id)
+                        && !binding.pending_checkpoint_threads.contains(&thread_id)
+                    {
+                        binding.pending_checkpoint_threads.push(thread_id);
+                        if let Some(workflow_version) = workflow_version {
+                            binding
+                                .pending_checkpoint_versions
+                                .insert(thread_id, workflow_version);
+                        }
+                    }
+                } else {
+                    self.app_event_tx.send(AppEvent::OracleCheckpoint {
+                        thread_id,
+                        workflow_version,
+                    });
+                }
+            }
         }
         if is_thread_closed {
-            self.handle_hidden_oracle_thread_closed(thread_id).await;
+            self.handle_routed_oracle_thread_closed(thread_id).await;
         }
         self.refresh_pending_thread_approvals().await;
         Ok(())
     }
 
-    async fn handle_hidden_oracle_thread_closed(&mut self, thread_id: ThreadId) {
-        let Some(oracle_thread_id) = self
-            .oracle_state
-            .orchestrator_owner
-            .remove(&thread_id)
-            .or_else(|| {
-                (self.oracle_state.orchestrator_thread_id == Some(thread_id))
-                    .then_some(self.oracle_state.oracle_thread_id)
-                    .flatten()
-            })
+    async fn handle_routed_oracle_thread_closed(&mut self, thread_id: ThreadId) {
+        let Some(oracle_thread_id) = self.find_oracle_thread_by_orchestrator_thread(thread_id)
         else {
             return;
         };
         self.activate_oracle_binding(oracle_thread_id);
         self.mark_agent_picker_thread_closed(thread_id);
         self.thread_event_channels.remove(&thread_id);
+        if let Some(binding) = self.oracle_state.bindings.get_mut(&oracle_thread_id) {
+            binding
+                .pending_checkpoint_threads
+                .retain(|pending| *pending != thread_id);
+            binding.pending_checkpoint_versions.remove(&thread_id);
+            binding.orchestrator_thread_id = None;
+            if let Some(workflow) = binding.workflow.as_mut()
+                && workflow.orchestrator_thread_id == Some(thread_id)
+            {
+                workflow.orchestrator_thread_id = None;
+                workflow.status = OracleWorkflowStatus::Failed;
+                workflow.last_blocker =
+                    Some("The orchestrator thread closed before reporting back.".to_string());
+            }
+            Self::sync_legacy_oracle_binding_fields(binding);
+        }
         self.oracle_state.orchestrator_thread_id = None;
         self.persist_active_oracle_binding();
         if self.oracle_state.phase != OracleSupervisorPhase::WaitingForOrchestrator {
@@ -3718,7 +5003,7 @@ impl App {
         self.oracle_state.phase = OracleSupervisorPhase::Idle;
         self.oracle_state.automatic_context_followups = 0;
         let message = format!(
-            "Oracle orchestrator thread {thread_id} closed before reporting back. Oracle supervision is idle again."
+            "The orchestrator thread {thread_id} closed before reporting back. Oracle supervision is idle again."
         );
         self.oracle_state.last_status = Some(message.clone());
         self.append_oracle_agent_turn(oracle_thread_id, &message)
@@ -4093,6 +5378,7 @@ impl App {
                     initial_selected_idx = Some(idx);
                 }
                 let id = *thread_id;
+                let is_oracle = self.is_visible_oracle_thread(id);
                 let is_primary = self.primary_thread_id == Some(*thread_id);
                 let name = format_agent_picker_item_name(
                     entry.agent_nickname.as_deref(),
@@ -4109,9 +5395,13 @@ impl App {
                     description: Some(description.clone()),
                     is_current: self.active_thread_id == Some(*thread_id),
                     actions: vec![Box::new(move |tx| {
-                        tx.send(AppEvent::SelectAgentThread(id));
+                        if is_oracle {
+                            tx.send(AppEvent::OpenOracleWorkflowPicker(id));
+                        } else {
+                            tx.send(AppEvent::SelectAgentThread(id));
+                        }
                     })],
-                    dismiss_on_select: true,
+                    dismiss_on_select: !is_oracle,
                     search_value: Some(format!("{name} {uuid} {description}")),
                     ..Default::default()
                 }
@@ -4119,8 +5409,9 @@ impl App {
             .collect();
 
         self.chat_widget.show_selection_view(SelectionViewParams {
+            view_id: Some(AGENT_SELECTION_VIEW_ID),
             title: Some("Subagents".to_string()),
-            subtitle: Some(AgentNavigationState::picker_subtitle()),
+            subtitle: Some(self.agent_picker_subtitle()),
             footer_hint: Some(standard_popup_hint_line()),
             items,
             initial_selected_idx,
@@ -4233,6 +5524,7 @@ impl App {
 
     async fn open_oracle_picker(&mut self) -> Result<()> {
         self.persist_active_oracle_binding();
+        self.oracle_picker_show_info = false;
         if self.oracle_browser_is_busy() {
             self.chat_widget.add_info_message(
                 "Oracle is mid-turn; showing attached local Oracle threads only until the current browser step finishes."
@@ -4242,21 +5534,18 @@ impl App {
             self.show_oracle_picker(Vec::new(), /*include_new_thread*/ false);
             return Ok(());
         }
-        let remote_threads = match self.oracle_list_remote_threads().await {
-            Ok(remote_threads) => remote_threads,
+        let (remote_threads, include_new_thread) = match self.oracle_list_remote_threads().await {
+            Ok(remote_threads) => (remote_threads, true),
             Err(err) => {
-                if self.oracle_state.bindings.is_empty() {
-                    return Err(err);
-                }
                 self.chat_widget.add_info_message(
-                    "Oracle remote threads are unavailable; showing attached local Oracle threads only."
+                    "Oracle remote threads are unavailable; showing local Oracle controls and any attached local threads."
                         .to_string(),
                     Some(err.to_string()),
                 );
-                Vec::new()
+                (Vec::new(), false)
             }
         };
-        self.show_oracle_picker(remote_threads, /*include_new_thread*/ true);
+        self.show_oracle_picker(remote_threads, include_new_thread);
         Ok(())
     }
 
@@ -4266,26 +5555,13 @@ impl App {
         include_new_thread: bool,
     ) {
         self.persist_active_oracle_binding();
-        let mut initial_selected_idx = include_new_thread.then_some(0usize);
+        self.oracle_picker_remote_threads = remote_threads;
+        self.oracle_picker_include_new_thread = include_new_thread;
+
+        let mut initial_selected_idx = self
+            .chat_widget
+            .selected_index_for_active_view(ORACLE_SELECTION_VIEW_ID);
         let mut items = Vec::new();
-        if include_new_thread {
-            items.push(SelectionItem {
-                name: "New Oracle Thread".to_string(),
-                description: Some(
-                    "Create a new ChatGPT/Oracle conversation in the hidden browser and attach it here."
-                        .to_string(),
-                ),
-                selected_description: Some(
-                    "Create a new remote Oracle thread and open the attached local Codex thread."
-                        .to_string(),
-                ),
-                actions: vec![Box::new(move |tx| tx.send(AppEvent::OracleCreateThread))],
-                dismiss_on_select: true,
-                search_value: Some("new create oracle thread chatgpt".to_string()),
-                is_default: true,
-                ..Default::default()
-            });
-        }
 
         let mut local_oracle_ids = self
             .oracle_state
@@ -4293,21 +5569,21 @@ impl App {
             .keys()
             .copied()
             .collect::<Vec<_>>();
-        local_oracle_ids.sort_by_key(ThreadId::to_string);
+        local_oracle_ids.sort_by_cached_key(|thread_id| {
+            (
+                self.oracle_picker_thread_title(*thread_id)
+                    .to_ascii_lowercase(),
+                thread_id.to_string(),
+            )
+        });
         for thread_id in local_oracle_ids {
             let is_current = self.active_thread_id == Some(thread_id);
-            if is_current {
+            if initial_selected_idx.is_none() && is_current {
                 initial_selected_idx = Some(items.len());
             }
-            let name = self.oracle_thread_label(thread_id);
-            let description = self
-                .oracle_picker_description(thread_id)
-                .unwrap_or_else(|| "attached Oracle thread".to_string());
             let binding = self.oracle_state.bindings.get(&thread_id);
             items.push(SelectionItem {
-                name: name.clone(),
-                description: Some(description.clone()),
-                selected_description: Some("Switch to this attached Oracle thread.".to_string()),
+                name: format!("Attached: {}", self.oracle_picker_thread_title(thread_id)),
                 is_current,
                 actions: vec![Box::new({
                     let thread_id = thread_id;
@@ -4315,20 +5591,22 @@ impl App {
                 })],
                 dismiss_on_select: true,
                 search_value: Some(format!(
-                    "attached oracle {} {} {}",
+                    "attached oracle {} {} {} {}",
+                    thread_id,
                     binding
                         .and_then(|binding| binding.conversation_id.as_deref())
                         .unwrap_or(""),
                     binding
                         .and_then(|binding| binding.remote_title.as_deref())
                         .unwrap_or(""),
-                    description
+                    self.oracle_thread_label(thread_id),
                 )),
                 ..Default::default()
             });
         }
 
-        for remote in remote_threads {
+        let mut visible_remote_count = 0usize;
+        for remote in &self.oracle_picker_remote_threads {
             if self
                 .find_oracle_thread_by_conversation_id(remote.conversation_id.as_str())
                 .is_some()
@@ -4341,21 +5619,8 @@ impl App {
             } else {
                 title.to_string()
             };
-            let description = if let Some(url) = remote.url.as_deref() {
-                format!(
-                    "Remote Oracle thread | {} | {}",
-                    remote.conversation_id, url
-                )
-            } else {
-                format!("Remote Oracle thread | {}", remote.conversation_id)
-            };
             items.push(SelectionItem {
-                name: display_title.clone(),
-                description: Some(description.clone()),
-                selected_description: Some(
-                    "Attach this existing remote Oracle thread to a visible Codex thread."
-                        .to_string(),
-                ),
+                name: format!("Remote: {display_title}"),
                 is_current: false,
                 actions: vec![Box::new({
                     let conversation_id = remote.conversation_id.clone();
@@ -4372,25 +5637,114 @@ impl App {
                 dismiss_on_select: true,
                 search_value: Some(format!(
                     "remote oracle {} {} {}",
-                    remote.conversation_id, display_title, description
+                    remote.conversation_id,
+                    display_title,
+                    remote.url.as_deref().unwrap_or("")
                 )),
                 ..Default::default()
             });
+            visible_remote_count += 1;
         }
 
-        self.chat_widget.show_selection_view(SelectionViewParams {
-            title: Some("Oracle Threads".to_string()),
-            subtitle: Some(
-                "Browse remote Oracle conversations, attach one here, or create a new thread."
-                    .to_string(),
-            ),
-            footer_hint: Some(standard_popup_hint_line()),
-            items,
-            initial_selected_idx,
-            is_searchable: true,
-            search_placeholder: Some("Type to search Oracle threads".to_string()),
-            ..Default::default()
-        });
+        if initial_selected_idx.is_none() && !items.is_empty() {
+            initial_selected_idx = Some(0);
+        }
+
+        let search_enabled = !items.is_empty();
+
+        let mut shortcuts = vec![
+            SelectionShortcut {
+                shortcuts: vec![key_hint::plain(KeyCode::Char('i'))],
+                active_while_searching: false,
+                action: Box::new(
+                    |_: &mut crate::bottom_pane::ListSelectionView, tx: &AppEventSender| {
+                        tx.send(AppEvent::OraclePickerToggleInfo)
+                    },
+                ),
+            },
+            SelectionShortcut {
+                shortcuts: vec![key_hint::plain(KeyCode::Tab)],
+                active_while_searching: false,
+                action: Box::new(
+                    |_: &mut crate::bottom_pane::ListSelectionView, tx: &AppEventSender| {
+                        tx.send(AppEvent::OraclePickerToggleModel)
+                    },
+                ),
+            },
+        ];
+        if self.oracle_picker_include_new_thread {
+            shortcuts.push(SelectionShortcut {
+                shortcuts: vec![key_hint::plain(KeyCode::Char('n'))],
+                active_while_searching: false,
+                action: Box::new(
+                    |view: &mut crate::bottom_pane::ListSelectionView, tx: &AppEventSender| {
+                        view.dismiss();
+                        tx.send(AppEvent::OracleCreateThread)
+                    },
+                ),
+            });
+        }
+        if search_enabled {
+            shortcuts.push(SelectionShortcut {
+                shortcuts: vec![key_hint::plain(KeyCode::Char('s'))],
+                active_while_searching: false,
+                action: Box::new(
+                    |view: &mut crate::bottom_pane::ListSelectionView, _: &AppEventSender| {
+                        view.begin_search()
+                    },
+                ),
+            });
+        }
+
+        let attached_count = self.oracle_state.bindings.len();
+        let picker_is_active = self
+            .chat_widget
+            .selection_view_is_active(ORACLE_SELECTION_VIEW_ID);
+        if picker_is_active {
+            let _ = self.chat_widget.replace_selection_view_if_active(
+                ORACLE_SELECTION_VIEW_ID,
+                SelectionViewParams {
+                    view_id: Some(ORACLE_SELECTION_VIEW_ID),
+                    title: Some("Oracle".to_string()),
+                    subtitle: Some(
+                        self.oracle_picker_subtitle(attached_count, visible_remote_count),
+                    ),
+                    footer_note: Some(self.oracle_picker_hotkeys_line(
+                        self.oracle_picker_include_new_thread,
+                        search_enabled,
+                    )),
+                    footer_hint: Some(standard_popup_hint_line()),
+                    items,
+                    shortcuts,
+                    initial_selected_idx,
+                    is_searchable: search_enabled,
+                    search_requires_activation: search_enabled,
+                    search_placeholder: search_enabled
+                        .then_some("Search Oracle threads".to_string()),
+                    col_width_mode: ColumnWidthMode::AutoAllRows,
+                    ..Default::default()
+                },
+            );
+        } else {
+            self.chat_widget.show_selection_view(SelectionViewParams {
+                view_id: Some(ORACLE_SELECTION_VIEW_ID),
+                title: Some("Oracle".to_string()),
+                subtitle: Some(self.oracle_picker_subtitle(attached_count, visible_remote_count)),
+                footer_note: Some(self.oracle_picker_hotkeys_line(
+                    self.oracle_picker_include_new_thread,
+                    search_enabled,
+                )),
+                footer_hint: Some(standard_popup_hint_line()),
+                items,
+                shortcuts,
+                initial_selected_idx,
+                is_searchable: search_enabled,
+                search_requires_activation: search_enabled,
+                search_placeholder: search_enabled.then_some("Search Oracle threads".to_string()),
+                col_width_mode: ColumnWidthMode::AutoAllRows,
+                ..Default::default()
+            });
+        }
     }
 
     fn oracle_remote_thread_mutation_blocked_message(&self) -> &'static str {
@@ -4411,6 +5765,7 @@ impl App {
         &mut self,
         remote: OracleBrokerThreadOpenResponse,
     ) -> ThreadId {
+        let session_id = remote.session_id.clone();
         let thread_id = if let Some(existing) = remote
             .conversation_id
             .as_deref()
@@ -4423,6 +5778,10 @@ impl App {
         let conversation_id = remote.conversation_id.clone();
         let title = remote.title.clone();
         self.set_oracle_remote_metadata(thread_id, conversation_id, Some(title));
+        self.set_oracle_thread_session_id(thread_id, session_id.clone());
+        if self.oracle_state.oracle_thread_id == Some(thread_id) {
+            self.oracle_state.current_session_id = session_id;
+        }
         self.activate_oracle_binding(thread_id);
         self.upsert_agent_picker_thread(
             thread_id,
@@ -4579,6 +5938,22 @@ impl App {
         app_server: &mut AppServerSession,
         thread_id: ThreadId,
     ) -> bool {
+        if self.is_visible_oracle_thread(thread_id) {
+            let existing_entry = self.agent_navigation.get(&thread_id).cloned();
+            self.upsert_agent_picker_thread(
+                thread_id,
+                existing_entry
+                    .as_ref()
+                    .and_then(|entry| entry.agent_nickname.clone())
+                    .or_else(|| Some(self.oracle_thread_label(thread_id))),
+                existing_entry
+                    .as_ref()
+                    .and_then(|entry| entry.agent_role.clone())
+                    .or_else(|| Some("supervisor".to_string())),
+                /*is_closed*/ false,
+            );
+            return true;
+        }
         let existing_entry = self.agent_navigation.get(&thread_id).cloned();
         let has_replay_channel = self.thread_event_channels.contains_key(&thread_id);
         match app_server
@@ -5427,6 +6802,9 @@ impl App {
             pending_primary_events: VecDeque::new(),
             pending_app_server_requests: PendingAppServerRequests::default(),
             oracle_state: OracleSupervisorState::default(),
+            oracle_picker_show_info: false,
+            oracle_picker_remote_threads: Vec::new(),
+            oracle_picker_include_new_thread: false,
             oracle_broker: None,
             #[cfg(test)]
             oracle_test_broker_hooks: Arc::new(StdMutex::new(OracleTestBrokerHooks::default())),
@@ -6013,7 +7391,7 @@ impl App {
                     Ok(OracleCommand::Status) => {
                         let status = self.oracle_state.status_message();
                         self.chat_widget
-                            .add_to_history(oracle_history_cell("Oracle Status", &status));
+                            .add_to_history(oracle_history_cell("Oracle Info", &status));
                     }
                     Ok(OracleCommand::Model(model)) => {
                         if let Some(model) = model {
@@ -6032,6 +7410,12 @@ impl App {
                     }
                     Err(error) => self.chat_widget.add_error_message(error),
                 }
+            }
+            AppEvent::OraclePickerToggleInfo => {
+                let _ = self.toggle_oracle_picker_info();
+            }
+            AppEvent::OraclePickerToggleModel => {
+                let _ = self.toggle_oracle_picker_model().await;
             }
             AppEvent::OracleCreateThread => match self.create_oracle_thread_binding().await {
                 Ok(binding) => {
@@ -6119,14 +7503,18 @@ impl App {
                 error,
             } => {
                 self.handle_oracle_run_failed(
+                    app_server,
                     visible_thread_id,
                     kind,
                     format!("{error} (requested slug: {session_slug}, phase: {kind:?})"),
                 )
                 .await?;
             }
-            AppEvent::OracleCheckpoint { thread_id } => {
-                self.handle_orchestrator_checkpoint(app_server, thread_id)
+            AppEvent::OracleCheckpoint {
+                thread_id,
+                workflow_version,
+            } => {
+                self.handle_orchestrator_checkpoint(app_server, thread_id, workflow_version)
                     .await?;
             }
             AppEvent::ThreadHistoryEntryResponse { thread_id, event } => {
@@ -7118,6 +8506,9 @@ impl App {
             }
             AppEvent::OpenAgentPicker => {
                 self.open_agent_picker(app_server).await;
+            }
+            AppEvent::OpenOracleWorkflowPicker(oracle_thread_id) => {
+                self.open_oracle_workflow_picker(oracle_thread_id);
             }
             AppEvent::SelectAgentThread(thread_id) => {
                 self.select_agent_thread(tui, app_server, thread_id).await?;
@@ -9437,6 +10828,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_agent_picker_enter_on_oracle_row_opens_workflow_picker() -> Result<()> {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        let oracle_thread_id = app.ensure_visible_oracle_thread().await;
+
+        app.open_agent_picker(&mut app_server).await;
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_matches!(
+            app_event_rx.try_recv(),
+            Ok(AppEvent::OpenOracleWorkflowPicker(selected_thread_id))
+                if selected_thread_id == oracle_thread_id
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn attach_live_thread_for_selection_rejects_empty_non_ephemeral_fallback_threads()
     -> Result<()> {
         let mut app = make_test_app().await;
@@ -9549,6 +10961,35 @@ mod tests {
         assert!(!is_available);
         assert_eq!(app.agent_navigation.get(&thread_id), None);
         assert!(!app.thread_event_channels.contains_key(&thread_id));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refresh_agent_picker_thread_liveness_keeps_visible_oracle_threads_open() -> Result<()>
+    {
+        let mut app = make_test_app().await;
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.agent_navigation.upsert(
+            thread_id,
+            Some("Oracle".to_string()),
+            Some("supervisor".to_string()),
+            /*is_closed*/ true,
+        );
+
+        let is_available = app
+            .refresh_agent_picker_thread_liveness(&mut app_server, thread_id)
+            .await;
+
+        assert!(is_available);
+        let entry = app
+            .agent_navigation
+            .get(&thread_id)
+            .expect("oracle picker entry");
+        assert!(!entry.is_closed);
         Ok(())
     }
 
@@ -10183,8 +11624,6 @@ guardian_approval = true
 
         app.open_oracle_picker().await?;
         app.chat_widget
-            .handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        app.chat_widget
             .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert_matches!(
@@ -10240,8 +11679,6 @@ guardian_approval = true
         app.chat_widget
             .handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
         app.chat_widget
-            .handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        app.chat_widget
             .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
         assert_matches!(
@@ -10254,6 +11691,72 @@ guardian_approval = true
                 && title == "Fresh Thread"
                 && url.as_deref() == Some("https://chatgpt.com/c/fresh-2")
         );
+    }
+
+    #[tokio::test]
+    async fn show_oracle_picker_keeps_actions_out_of_thread_list_and_surfaces_hotkeys() {
+        let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let attached_thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_remote_metadata(
+            attached_thread_id,
+            Some("attached-1".to_string()),
+            Some("Attached Thread".to_string()),
+        );
+        app.activate_oracle_binding(attached_thread_id);
+        app.sync_oracle_thread_session(attached_thread_id).await;
+
+        app.show_oracle_picker(
+            vec![OracleBrokerThreadEntry {
+                title: "Fresh Thread".to_string(),
+                conversation_id: "fresh-2".to_string(),
+                url: Some("https://chatgpt.com/c/fresh-2".to_string()),
+                is_current: false,
+            }],
+            /*include_new_thread*/ true,
+        );
+
+        let popup = render_bottom_popup(&app, /*width*/ 100);
+
+        assert!(!popup.contains("Action:"));
+        assert!(popup.contains("Hotkeys:"));
+        assert!(popup.contains(" new"));
+        assert!(popup.contains(" search"));
+        assert!(popup.contains("info"));
+        assert!(popup.contains("thinking 5.4"));
+        assert!(!popup.contains("https://chatgpt.com/"));
+        assert!(!popup.contains("session "));
+        assert!(!popup.contains("convo "));
+        assert!(!popup.contains("requested gpt-5.4"));
+        assert!(popup.contains("Attached: Attached Thread"));
+        assert!(popup.contains("Remote: Fresh Thread"));
+    }
+
+    #[tokio::test]
+    async fn oracle_workflow_picker_lists_supervisor_and_hidden_orchestrator() -> Result<()> {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let oracle_thread_id = app.ensure_visible_oracle_thread().await;
+        let orchestrator_thread_id = ThreadId::new();
+        app.oracle_state.orchestrator_thread_id = Some(orchestrator_thread_id);
+        app.persist_active_oracle_binding();
+
+        app.open_oracle_workflow_picker(oracle_thread_id);
+
+        let popup = render_bottom_popup(&app, /*width*/ 100);
+        assert!(popup.contains("Oracle Workflow"));
+        assert!(popup.contains("Oracle [supervisor]"));
+        assert!(popup.contains("Oracle Orchestrator [orchestrator]"));
+
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_matches!(
+            app_event_rx.try_recv(),
+            Ok(AppEvent::SelectAgentThread(selected_thread_id))
+                if selected_thread_id == orchestrator_thread_id
+        );
+        Ok(())
     }
 
     #[tokio::test]
@@ -10291,6 +11794,7 @@ guardian_approval = true
         queue_test_oracle_new_thread_result(
             &app,
             Ok(OracleBrokerThreadOpenResponse {
+                session_id: Some("runtime-3".to_string()),
                 title: "Fresh Thread".to_string(),
                 conversation_id: Some("fresh-3".to_string()),
                 url: Some("https://chatgpt.com/c/fresh-3".to_string()),
@@ -10301,6 +11805,13 @@ guardian_approval = true
 
         assert_eq!(binding.title, "Fresh Thread");
         assert_eq!(app.oracle_state.oracle_thread_id, Some(binding.thread_id));
+        assert_eq!(
+            app.oracle_state
+                .bindings
+                .get(&binding.thread_id)
+                .and_then(|binding| binding.current_session_id.as_deref()),
+            Some("runtime-3")
+        );
         assert_eq!(
             app.oracle_state
                 .bindings
@@ -10420,6 +11931,7 @@ guardian_approval = true
         queue_test_oracle_attach_thread_result(
             &app,
             Ok(OracleBrokerThreadOpenResponse {
+                session_id: Some("runtime-7".to_string()),
                 title: "Remote Thread".to_string(),
                 conversation_id: Some("remote-7".to_string()),
                 url: Some("https://chatgpt.com/c/remote-7".to_string()),
@@ -10443,6 +11955,13 @@ guardian_approval = true
             app.oracle_state
                 .bindings
                 .get(&thread_id)
+                .and_then(|binding| binding.current_session_id.as_deref()),
+            Some("runtime-7")
+        );
+        assert_eq!(
+            app.oracle_state
+                .bindings
+                .get(&thread_id)
                 .and_then(|binding| binding.conversation_id.as_deref()),
             Some("remote-7")
         );
@@ -10458,6 +11977,148 @@ guardian_approval = true
             vec!["remote-7".to_string()]
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_oracle_picker_keeps_local_controls_available_when_remote_threads_fail()
+    -> Result<()> {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        queue_test_oracle_list_threads_result(&app, Err("broker offline".to_string()));
+
+        app.open_oracle_picker().await?;
+
+        assert_matches!(
+            app_event_rx.try_recv(),
+            Ok(AppEvent::InsertHistoryCell(cell))
+                if cell
+                    .display_lines(/*width*/ 120)
+                    .iter()
+                    .any(|line| line.to_string().contains("remote threads are unavailable"))
+        );
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+
+        assert_matches!(
+            app_event_rx.try_recv(),
+            Ok(AppEvent::OraclePickerToggleInfo)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oracle_picker_search_shortcut_filters_threads_by_topic() {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+
+        app.show_oracle_picker(
+            vec![
+                OracleBrokerThreadEntry {
+                    title: "Bug triage".to_string(),
+                    conversation_id: "bug-1".to_string(),
+                    url: Some("https://chatgpt.com/c/bug-1".to_string()),
+                    is_current: false,
+                },
+                OracleBrokerThreadEntry {
+                    title: "Fresh Thread".to_string(),
+                    conversation_id: "fresh-2".to_string(),
+                    url: Some("https://chatgpt.com/c/fresh-2".to_string()),
+                    is_current: false,
+                },
+            ],
+            /*include_new_thread*/ true,
+        );
+
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::NONE));
+        for ch in ['f', 'r', 'e', 's', 'h'] {
+            app.chat_widget
+                .handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_matches!(
+            app_event_rx.try_recv(),
+            Ok(AppEvent::OracleAttachThread {
+                conversation_id,
+                title,
+                url,
+            }) if conversation_id == "fresh-2"
+                && title == "Fresh Thread"
+                && url.as_deref() == Some("https://chatgpt.com/c/fresh-2")
+        );
+    }
+
+    #[tokio::test]
+    async fn oracle_picker_tab_shortcut_toggles_model_preference() {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        app.oracle_state.model = OracleModelPreset::Pro;
+
+        app.show_oracle_picker(Vec::new(), /*include_new_thread*/ true);
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert_matches!(
+            app_event_rx.try_recv(),
+            Ok(AppEvent::OraclePickerToggleModel)
+        );
+    }
+
+    #[tokio::test]
+    async fn oracle_picker_info_toggle_refreshes_popup_in_place() {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_remote_metadata(
+            thread_id,
+            Some("attached-1".to_string()),
+            Some("Attached Thread".to_string()),
+        );
+        app.oracle_state.phase =
+            OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::UserTurn);
+        app.show_oracle_picker(Vec::new(), /*include_new_thread*/ true);
+
+        assert!(!render_bottom_popup(&app, /*width*/ 100).contains("Model:"));
+
+        assert!(app.toggle_oracle_picker_info());
+        let popup = render_bottom_popup(&app, /*width*/ 100);
+        assert!(popup.contains("Model: GPT-5.4 Pro"));
+        assert!(popup.contains("Phase: waiting for Oracle user-turn reply"));
+        assert!(popup.contains("Attached: 1"));
+        assert!(popup.contains("Remote: 0"));
+
+        assert!(app.toggle_oracle_picker_info());
+        assert!(!render_bottom_popup(&app, /*width*/ 100).contains("Model:"));
+    }
+
+    #[tokio::test]
+    async fn oracle_picker_toggle_model_refreshes_popup_in_place() {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.activate_oracle_binding(thread_id);
+        app.show_oracle_picker(Vec::new(), /*include_new_thread*/ true);
+
+        assert_eq!(app.oracle_state.model, OracleModelPreset::Pro);
+        assert!(render_bottom_popup(&app, /*width*/ 100).contains("thinking 5.4"));
+
+        assert!(app.toggle_oracle_picker_model().await);
+        assert_eq!(app.oracle_state.model, OracleModelPreset::Thinking);
+        let popup = render_bottom_popup(&app, /*width*/ 100);
+        assert!(popup.contains("gpt-5.4 pro"));
+        assert!(!popup.contains("thinking 5.4"));
+    }
+
+    #[tokio::test]
+    async fn oracle_picker_new_shortcut_closes_modal_before_creating_thread() {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        app.show_oracle_picker(Vec::new(), /*include_new_thread*/ true);
+
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
+
+        assert_matches!(app_event_rx.try_recv(), Ok(AppEvent::OracleCreateThread));
+        assert!(
+            !app.chat_widget
+                .selection_view_is_active(ORACLE_SELECTION_VIEW_ID)
+        );
     }
 
     #[tokio::test]
@@ -10633,6 +12294,350 @@ guardian_approval = true
     }
 
     #[tokio::test]
+    async fn oracle_handoff_creates_workflow_and_submits_orchestrator_reminder() -> Result<()> {
+        let mut app = make_test_app().await;
+        let oracle_thread_id = app.ensure_visible_oracle_thread().await;
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+
+        app.handle_oracle_run_completed(
+            &mut app_server,
+            OracleRunResult {
+                oracle_thread_id,
+                kind: OracleRequestKind::UserTurn,
+                requested_slug: "oracle-session-a".to_string(),
+                session_id: "oracle-session-a".to_string(),
+                response: parse_oracle_response(
+                    r#"{"op":"handoff","message":"Audit the diff and summarize risks.","message_for_user":"Implementation handoff ready.","workflow_id":"oracle-routing","workflow_version":2,"objective":"Ship the Oracle workflow refactor","summary":"Implementation plan ready"}"#,
+                ),
+            },
+        )
+        .await?;
+
+        let orchestrator_thread_id = app
+            .oracle_state
+            .orchestrator_thread_id
+            .expect("orchestrator thread");
+        let workflow = app.oracle_state.workflow.clone().expect("workflow binding");
+        let binding = app
+            .oracle_state
+            .bindings
+            .get(&oracle_thread_id)
+            .expect("oracle binding");
+
+        assert_eq!(
+            app.oracle_state.phase,
+            OracleSupervisorPhase::WaitingForOrchestrator
+        );
+        assert_eq!(workflow.workflow_id, "oracle-routing");
+        assert_eq!(workflow.version, 2);
+        assert_eq!(
+            workflow.objective.as_deref(),
+            Some("Ship the Oracle workflow refactor")
+        );
+        assert_eq!(
+            workflow.summary.as_deref(),
+            Some("Implementation plan ready")
+        );
+        assert_eq!(workflow.status, OracleWorkflowStatus::Running);
+        assert_eq!(
+            workflow.orchestrator_thread_id,
+            Some(orchestrator_thread_id)
+        );
+        assert!(
+            binding.participants.is_empty(),
+            "workflow handoff should not persist routed worker state"
+        );
+        assert!(app.is_hidden_oracle_thread(orchestrator_thread_id));
+        assert!(app.agent_navigation.get(&orchestrator_thread_id).is_none());
+
+        let routed_op = app
+            .oracle_destination_task_op(
+                oracle_thread_id,
+                orchestrator_thread_id,
+                ORACLE_ORCHESTRATOR_DESTINATION,
+                Some("orchestrator"),
+                "Audit the diff and summarize risks.".to_string(),
+                None,
+            )
+            .await;
+        let AppCommandView::UserTurn { items, .. } = routed_op.view() else {
+            panic!("expected orchestrator op to be a user turn");
+        };
+        let routed_text = items
+            .iter()
+            .filter_map(|item| match item {
+                UserInput::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(routed_text.contains("Oracle workflow contract"));
+        assert!(routed_text.contains("oracle-routing"));
+        assert!(routed_text.contains("version 2"));
+        assert!(routed_text.contains("Audit the diff and summarize risks."));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oracle_destination_task_uses_destination_thread_model_not_oracle_display_label()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        let oracle_thread_id = app.ensure_visible_oracle_thread().await;
+        app.oracle_state.model = OracleModelPreset::Thinking;
+        app.sync_oracle_thread_session(oracle_thread_id).await;
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        let orchestrator_thread_id = app.ensure_orchestrator_thread(&mut app_server).await?;
+        let expected_model = {
+            let channel = app
+                .thread_event_channels
+                .get(&orchestrator_thread_id)
+                .expect("orchestrator thread channel");
+            let store = channel.store.lock().await;
+            store
+                .session
+                .as_ref()
+                .map(|session| session.model.clone())
+                .expect("orchestrator session model")
+        };
+
+        let routed_op = app
+            .oracle_destination_task_op(
+                oracle_thread_id,
+                orchestrator_thread_id,
+                ORACLE_ORCHESTRATOR_DESTINATION,
+                Some("orchestrator"),
+                "Reply with ORCH-OK.".to_string(),
+                Some(orchestrator_developer_instructions()),
+            )
+            .await;
+        let AppCommandView::UserTurn {
+            model,
+            collaboration_mode,
+            ..
+        } = routed_op.view()
+        else {
+            panic!("expected orchestrator op to be a user turn");
+        };
+
+        assert_eq!(*model, expected_model);
+        assert_eq!(
+            collaboration_mode
+                .as_ref()
+                .map(|mode| mode.model().to_string())
+                .as_deref(),
+            Some(expected_model.as_str())
+        );
+        assert_ne!(model, "requested gpt-5.4 (Thinking 5.4)");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn stale_oracle_workflow_handoff_is_ignored_safely() -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.ensure_visible_oracle_thread().await;
+        app.oracle_state.workflow = Some(OracleWorkflowBinding {
+            workflow_id: "oracle-routing".to_string(),
+            mode: OracleWorkflowMode::Supervising,
+            status: OracleWorkflowStatus::Running,
+            version: 4,
+            objective: Some("Ship the Oracle workflow refactor".to_string()),
+            ..Default::default()
+        });
+        app.oracle_state.phase =
+            OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::UserTurn);
+        app.oracle_state.pending_turn_id = Some("oracle-turn-1".to_string());
+        if let Some(channel) = app.thread_event_channels.get(&thread_id) {
+            let mut store = channel.store.lock().await;
+            store.active_turn_id = Some("oracle-turn-1".to_string());
+            store.turns.push(Turn {
+                id: "oracle-turn-1".to_string(),
+                items: vec![ThreadItem::UserMessage {
+                    id: "oracle-user-1".to_string(),
+                    content: vec![codex_app_server_protocol::UserInput::Text {
+                        text: "ship the feature".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                }],
+                status: TurnStatus::InProgress,
+                error: None,
+            });
+        }
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        app.handle_oracle_run_completed(
+            &mut app_server,
+            OracleRunResult {
+                oracle_thread_id: thread_id,
+                kind: OracleRequestKind::UserTurn,
+                requested_slug: "oracle-session-a".to_string(),
+                session_id: "oracle-session-a".to_string(),
+                response: parse_oracle_response(
+                    r#"{"op":"handoff","message":"Outdated plan","workflow_id":"oracle-routing","workflow_version":2}"#,
+                ),
+            },
+        )
+        .await?;
+
+        assert_eq!(app.oracle_state.phase, OracleSupervisorPhase::Idle);
+        assert_eq!(
+            app.oracle_state
+                .workflow
+                .as_ref()
+                .map(|workflow| workflow.version),
+            Some(4)
+        );
+        assert_eq!(app.oracle_state.orchestrator_thread_id, None);
+        let channel = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("oracle thread channel");
+        let store = channel.store.lock().await;
+        let turn = store
+            .turns
+            .iter()
+            .find(|turn| turn.id == "oracle-turn-1")
+            .expect("oracle turn");
+        assert_eq!(turn.status, TurnStatus::Completed);
+        assert!(turn.items.iter().any(|item| {
+            matches!(
+                item,
+                ThreadItem::AgentMessage { text, .. }
+                    if text.contains("stale workflow version")
+            )
+        }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oracle_reply_in_chat_mode_leaves_workflow_unset() -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.ensure_visible_oracle_thread().await;
+        app.oracle_state.phase =
+            OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::UserTurn);
+        app.oracle_state.pending_turn_id = Some("oracle-turn-1".to_string());
+        if let Some(channel) = app.thread_event_channels.get(&thread_id) {
+            let mut store = channel.store.lock().await;
+            store.active_turn_id = Some("oracle-turn-1".to_string());
+            store.turns.push(Turn {
+                id: "oracle-turn-1".to_string(),
+                items: vec![ThreadItem::UserMessage {
+                    id: "oracle-user-1".to_string(),
+                    content: vec![codex_app_server_protocol::UserInput::Text {
+                        text: "hello oracle".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                }],
+                status: TurnStatus::InProgress,
+                error: None,
+            });
+        }
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        app.handle_oracle_run_completed(
+            &mut app_server,
+            OracleRunResult {
+                oracle_thread_id: thread_id,
+                kind: OracleRequestKind::UserTurn,
+                requested_slug: "oracle-session-chat".to_string(),
+                session_id: "oracle-session-chat".to_string(),
+                response: parse_oracle_response("Hello back."),
+            },
+        )
+        .await?;
+
+        assert_eq!(app.oracle_state.phase, OracleSupervisorPhase::Idle);
+        assert_eq!(app.oracle_state.workflow, None);
+        assert_eq!(app.oracle_state.orchestrator_thread_id, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn queued_orchestrator_checkpoint_is_dropped_when_workflow_version_advances() -> Result<()>
+    {
+        let mut app = make_test_app().await;
+        let oracle_thread_id = app.ensure_visible_oracle_thread().await;
+        let orchestrator_thread_id = ThreadId::new();
+        app.oracle_state.workflow = Some(OracleWorkflowBinding {
+            workflow_id: "oracle-routing".to_string(),
+            mode: OracleWorkflowMode::Supervising,
+            status: OracleWorkflowStatus::Running,
+            version: 5,
+            orchestrator_thread_id: Some(orchestrator_thread_id),
+            ..Default::default()
+        });
+        app.oracle_state.orchestrator_thread_id = Some(orchestrator_thread_id);
+        app.oracle_state.phase =
+            OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::UserTurn);
+        app.persist_active_oracle_binding();
+        app.thread_event_channels.insert(
+            orchestrator_thread_id,
+            ThreadEventChannel::new(/*capacity*/ 4),
+        );
+
+        app.enqueue_thread_notification(
+            orchestrator_thread_id,
+            turn_completed_notification(
+                orchestrator_thread_id,
+                "orchestrator-turn-1",
+                TurnStatus::Completed,
+            ),
+        )
+        .await?;
+
+        let binding = app
+            .oracle_state
+            .bindings
+            .get(&oracle_thread_id)
+            .expect("oracle binding");
+        assert_eq!(
+            binding.pending_checkpoint_threads,
+            vec![orchestrator_thread_id]
+        );
+        assert_eq!(
+            binding
+                .pending_checkpoint_versions
+                .get(&orchestrator_thread_id),
+            Some(&5)
+        );
+
+        app.oracle_state.phase = OracleSupervisorPhase::Idle;
+        if let Some(workflow) = app.oracle_state.workflow.as_mut() {
+            workflow.version = 6;
+        }
+        app.persist_active_oracle_binding();
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        app.maybe_process_pending_oracle_checkpoints(&mut app_server, oracle_thread_id)
+            .await?;
+
+        let binding = app
+            .oracle_state
+            .bindings
+            .get(&oracle_thread_id)
+            .expect("oracle binding");
+        assert!(binding.pending_checkpoint_threads.is_empty());
+        assert!(binding.pending_checkpoint_versions.is_empty());
+        assert_eq!(app.oracle_state.phase, OracleSupervisorPhase::Idle);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn malformed_oracle_delegate_completes_the_pending_turn() -> Result<()> {
         let mut app = make_test_app().await;
         let thread_id = app.ensure_visible_oracle_thread().await;
@@ -10672,6 +12677,7 @@ guardian_approval = true
                     message_for_user: String::new(),
                     task_for_orchestrator: None,
                     context_requests: Vec::new(),
+                    directive: None,
                 },
             },
         )
@@ -11528,6 +13534,9 @@ guardian_approval = true
             pending_primary_events: VecDeque::new(),
             pending_app_server_requests: PendingAppServerRequests::default(),
             oracle_state: OracleSupervisorState::default(),
+            oracle_picker_show_info: false,
+            oracle_picker_remote_threads: Vec::new(),
+            oracle_picker_include_new_thread: false,
             oracle_broker: None,
             oracle_test_broker_hooks: Arc::new(StdMutex::new(OracleTestBrokerHooks::default())),
         }
@@ -11585,6 +13594,9 @@ guardian_approval = true
                 pending_primary_events: VecDeque::new(),
                 pending_app_server_requests: PendingAppServerRequests::default(),
                 oracle_state: OracleSupervisorState::default(),
+                oracle_picker_show_info: false,
+                oracle_picker_remote_threads: Vec::new(),
+                oracle_picker_include_new_thread: false,
                 oracle_broker: None,
                 oracle_test_broker_hooks: Arc::new(StdMutex::new(OracleTestBrokerHooks::default())),
             },
@@ -12023,6 +14035,37 @@ guardian_approval = true
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    fn render_bottom_popup(app: &App, width: u16) -> String {
+        let height = app.chat_widget.desired_height(width);
+        let area = ratatui::layout::Rect::new(0, 0, width, height);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        app.chat_widget.render(area, &mut buf);
+
+        let mut lines: Vec<String> = (0..area.height)
+            .map(|row| {
+                let mut line = String::new();
+                for col in 0..area.width {
+                    let symbol = buf[(area.x + col, area.y + row)].symbol();
+                    if symbol.is_empty() {
+                        line.push(' ');
+                    } else {
+                        line.push_str(symbol);
+                    }
+                }
+                line.trim_end().to_string()
+            })
+            .collect();
+
+        while lines.first().is_some_and(|line| line.trim().is_empty()) {
+            lines.remove(0);
+        }
+        while lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.pop();
+        }
+
+        lines.join("\n")
     }
 
     fn test_session_telemetry(config: &Config, model: &str) -> SessionTelemetry {

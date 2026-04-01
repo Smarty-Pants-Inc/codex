@@ -53,10 +53,19 @@ pub(crate) struct OracleBrokerThreadEntry {
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub(crate) struct OracleBrokerThreadOpenResponse {
+    #[serde(rename = "sessionId")]
+    pub(crate) session_id: Option<String>,
     pub(crate) title: String,
     #[serde(rename = "conversationId")]
     pub(crate) conversation_id: Option<String>,
     pub(crate) url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OracleBrokerThreadOpenEnvelope {
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+    thread: OracleBrokerThreadOpenResponse,
 }
 
 #[derive(Debug, Serialize)]
@@ -226,7 +235,9 @@ impl OracleBrokerClient {
         let value = recv
             .await
             .map_err(|_| "Oracle broker closed before replying".to_string())??;
-        parse_success_field_response::<OracleBrokerThreadOpenResponse>(value, "thread")
+        let mut response = parse_success_response::<OracleBrokerThreadOpenEnvelope>(value)?;
+        response.thread.session_id = response.session_id.take();
+        Ok(response.thread)
     }
 
     pub(crate) async fn attach_thread(
@@ -250,7 +261,9 @@ impl OracleBrokerClient {
         let value = recv
             .await
             .map_err(|_| "Oracle broker closed before replying".to_string())??;
-        parse_success_field_response::<OracleBrokerThreadOpenResponse>(value, "thread")
+        let mut response = parse_success_response::<OracleBrokerThreadOpenEnvelope>(value)?;
+        response.thread.session_id = response.session_id.take();
+        Ok(response.thread)
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), String> {

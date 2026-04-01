@@ -1,5 +1,6 @@
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
+use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
 use itertools::Itertools as _;
 use ratatui::buffer::Buffer;
@@ -93,6 +94,13 @@ pub(crate) fn side_by_side_layout_widths(
 /// One selectable item in the generic selection list.
 pub(crate) type SelectionAction = Box<dyn Fn(&AppEventSender) + Send + Sync>;
 
+/// One non-list keyboard shortcut handled by a selection popup.
+pub(crate) struct SelectionShortcut {
+    pub shortcuts: Vec<KeyBinding>,
+    pub active_while_searching: bool,
+    pub action: Box<dyn Fn(&mut ListSelectionView, &AppEventSender) + Send + Sync>,
+}
+
 /// Callback invoked whenever the highlighted item changes (arrow keys, search
 /// filter, number-key jump).  Receives the *actual* index into the unfiltered
 /// `items` list and the event sender.  Used by the theme picker for live preview.
@@ -142,7 +150,9 @@ pub(crate) struct SelectionViewParams {
     pub footer_note: Option<Line<'static>>,
     pub footer_hint: Option<Line<'static>>,
     pub items: Vec<SelectionItem>,
+    pub shortcuts: Vec<SelectionShortcut>,
     pub is_searchable: bool,
+    pub search_requires_activation: bool,
     pub search_placeholder: Option<String>,
     pub col_width_mode: ColumnWidthMode,
     pub header: Box<dyn Renderable>,
@@ -184,7 +194,9 @@ impl Default for SelectionViewParams {
             footer_note: None,
             footer_hint: None,
             items: Vec::new(),
+            shortcuts: Vec::new(),
             is_searchable: false,
+            search_requires_activation: false,
             search_placeholder: None,
             col_width_mode: ColumnWidthMode::AutoVisible,
             header: Box::new(()),
@@ -210,10 +222,13 @@ pub(crate) struct ListSelectionView {
     footer_note: Option<Line<'static>>,
     footer_hint: Option<Line<'static>>,
     items: Vec<SelectionItem>,
+    shortcuts: Vec<SelectionShortcut>,
     state: ScrollState,
     complete: bool,
     app_event_tx: AppEventSender,
     is_searchable: bool,
+    search_requires_activation: bool,
+    search_active: bool,
     search_query: String,
     search_placeholder: Option<String>,
     col_width_mode: ColumnWidthMode,
@@ -258,10 +273,13 @@ impl ListSelectionView {
             footer_note: params.footer_note,
             footer_hint: params.footer_hint,
             items: params.items,
+            shortcuts: params.shortcuts,
             state: ScrollState::new(),
             complete: false,
             app_event_tx,
             is_searchable: params.is_searchable,
+            search_requires_activation: params.search_requires_activation,
+            search_active: params.is_searchable && !params.search_requires_activation,
             search_query: String::new(),
             search_placeholder: if params.is_searchable {
                 params.search_placeholder
@@ -297,6 +315,39 @@ impl ListSelectionView {
         self.state
             .selected_idx
             .and_then(|visible_idx| self.filtered_indices.get(visible_idx).copied())
+    }
+
+    fn search_accepts_text_input(&self) -> bool {
+        self.is_searchable && (!self.search_requires_activation || self.search_active)
+    }
+
+    fn exit_search_mode(&mut self) {
+        self.search_query.clear();
+        self.search_active = false;
+        self.apply_filter();
+    }
+
+    fn try_handle_shortcut(&mut self, key_event: &KeyEvent) -> bool {
+        let searching = self.search_accepts_text_input();
+        if !matches!(key_event.kind, KeyEventKind::Press) {
+            return false;
+        }
+        let matched_idx = self.shortcuts.iter().position(|shortcut| {
+            (shortcut.active_while_searching || !searching)
+                && shortcut
+                    .shortcuts
+                    .iter()
+                    .any(|binding| binding.is_press(*key_event))
+        });
+        if let Some(idx) = matched_idx {
+            let shortcut = self.shortcuts.remove(idx);
+            let app_event_tx = self.app_event_tx.clone();
+            (shortcut.action)(self, &app_event_tx);
+            self.shortcuts.insert(idx, shortcut);
+            true
+        } else {
+            false
+        }
     }
 
     fn apply_filter(&mut self) {
@@ -470,12 +521,28 @@ impl ListSelectionView {
 
     #[cfg(test)]
     pub(crate) fn set_search_query(&mut self, query: String) {
+        if self.is_searchable && self.search_requires_activation && !query.is_empty() {
+            self.search_active = true;
+        }
         self.search_query = query;
+        self.apply_filter();
+    }
+
+    pub(crate) fn begin_search(&mut self) {
+        if !self.is_searchable {
+            return;
+        }
+        self.search_active = true;
+        self.search_query.clear();
         self.apply_filter();
     }
 
     pub(crate) fn take_last_selected_index(&mut self) -> Option<usize> {
         self.last_selected_actual_idx.take()
+    }
+
+    pub(crate) fn dismiss(&mut self) {
+        self.complete = true;
     }
 
     fn rows_width(total_width: u16) -> u16 {
@@ -576,6 +643,9 @@ impl ListSelectionView {
 
 impl BottomPaneView for ListSelectionView {
     fn handle_key_event(&mut self, key_event: KeyEvent) {
+        if self.try_handle_shortcut(&key_event) {
+            return;
+        }
         match key_event {
             // Some terminals (or configurations) send Control key chords as
             // C0 control characters without reporting the CONTROL modifier.
@@ -620,20 +690,28 @@ impl BottomPaneView for ListSelectionView {
             KeyEvent {
                 code: KeyCode::Backspace,
                 ..
-            } if self.is_searchable => {
-                self.search_query.pop();
+            } if self.search_accepts_text_input() => {
+                if self.search_query.is_empty() && self.search_requires_activation {
+                    self.search_active = false;
+                } else {
+                    self.search_query.pop();
+                }
                 self.apply_filter();
             }
             KeyEvent {
                 code: KeyCode::Esc, ..
             } => {
-                self.on_ctrl_c();
+                if self.search_requires_activation && self.search_active {
+                    self.exit_search_mode();
+                } else {
+                    self.on_ctrl_c();
+                }
             }
             KeyEvent {
                 code: KeyCode::Char(c),
                 modifiers,
                 ..
-            } if self.is_searchable
+            } if self.search_accepts_text_input()
                 && !modifiers.contains(KeyModifiers::CONTROL)
                 && !modifiers.contains(KeyModifiers::ALT) =>
             {
@@ -689,6 +767,10 @@ impl BottomPaneView for ListSelectionView {
         }
         self.complete = true;
         CancellationEvent::Handled
+    }
+
+    fn prefer_esc_to_handle_key_event(&self) -> bool {
+        self.search_requires_activation && self.search_active
     }
 }
 
@@ -1272,6 +1354,55 @@ mod tests {
     }
 
     #[test]
+    fn plain_char_shortcut_dispatches_action() {
+        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut view = ListSelectionView::new(
+            SelectionViewParams {
+                shortcuts: vec![SelectionShortcut {
+                    shortcuts: vec![crate::key_hint::plain(KeyCode::Char('i'))],
+                    active_while_searching: false,
+                    action: Box::new(|_: &mut ListSelectionView, tx: &AppEventSender| {
+                        tx.send(AppEvent::NewSession)
+                    }),
+                }],
+                ..Default::default()
+            },
+            tx,
+        );
+
+        view.handle_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+
+        assert!(matches!(rx.try_recv(), Ok(AppEvent::NewSession)));
+    }
+
+    #[test]
+    fn shortcut_ignores_repeat_events() {
+        let (tx_raw, mut rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut view = ListSelectionView::new(
+            SelectionViewParams {
+                shortcuts: vec![SelectionShortcut {
+                    shortcuts: vec![crate::key_hint::plain(KeyCode::Char('i'))],
+                    active_while_searching: false,
+                    action: Box::new(|_: &mut ListSelectionView, tx: &AppEventSender| {
+                        tx.send(AppEvent::NewSession)
+                    }),
+                }],
+                ..Default::default()
+            },
+            tx,
+        );
+
+        view.handle_key_event(KeyEvent {
+            kind: KeyEventKind::Repeat,
+            ..KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)
+        });
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
     fn renders_search_query_line_when_enabled() {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
@@ -1300,6 +1431,34 @@ mod tests {
             lines.contains("filters"),
             "expected search query line to include rendered query, got {lines:?}"
         );
+    }
+
+    #[test]
+    fn esc_exits_search_mode_before_dismissing_picker() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut view = ListSelectionView::new(
+            SelectionViewParams {
+                items: vec![SelectionItem {
+                    name: "Read Only".to_string(),
+                    dismiss_on_select: true,
+                    search_value: Some("read".to_string()),
+                    ..Default::default()
+                }],
+                is_searchable: true,
+                search_requires_activation: true,
+                ..Default::default()
+            },
+            tx,
+        );
+
+        view.begin_search();
+        assert!(view.prefer_esc_to_handle_key_event());
+
+        view.handle_key_event(KeyEvent::from(KeyCode::Esc));
+
+        assert!(!view.prefer_esc_to_handle_key_event());
+        assert!(!view.is_complete());
     }
 
     #[test]
