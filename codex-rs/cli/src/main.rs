@@ -56,10 +56,12 @@ use codex_terminal_detection::TerminalName;
 /// Codex CLI
 ///
 /// If no subcommand is specified, options will be forwarded to the interactive CLI.
+const CODEX_CLI_VERSION: &str = codex_tui::CODEX_CLI_VERSION;
+
 #[derive(Debug, Parser)]
 #[clap(
     author,
-    version,
+    version = CODEX_CLI_VERSION,
     // If a sub‑command is given, ignore requirements of the default args.
     subcommand_negates_reqs = true,
     // The executable is sometimes invoked via a platform‑specific name like
