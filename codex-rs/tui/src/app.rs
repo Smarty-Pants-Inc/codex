@@ -5092,6 +5092,9 @@ impl App {
                     if handled {
                         return Ok(true);
                     }
+                    if self.active_turn_id_for_thread(thread_id).await.is_none() {
+                        return Ok(false);
+                    }
                 }
                 let Some(turn_id) = self.active_turn_id_for_thread(thread_id).await else {
                     return Ok(true);
