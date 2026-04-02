@@ -840,6 +840,7 @@ pub(crate) struct ChatWidget {
     thread_id: Option<ThreadId>,
     thread_name: Option<String>,
     forked_from: Option<ThreadId>,
+    emitted_fork_event_threads: HashSet<ThreadId>,
     frame_requester: FrameRequester,
     // Whether to include the initial welcome banner on session configured
     show_welcome_banner: bool,
@@ -2032,7 +2033,10 @@ impl ChatWidget {
                 self.submit_user_message(user_message);
             }
         }
-        if let Some(forked_from_id) = forked_from_id {
+        if let Some(forked_from_id) = forked_from_id
+            && let Some(thread_id) = self.thread_id
+            && self.emitted_fork_event_threads.insert(thread_id)
+        {
             self.emit_forked_thread_event(forked_from_id);
         }
         if !self.suppress_session_configured_redraw {
@@ -2048,6 +2052,14 @@ impl ChatWidget {
         if let Some(user_message) = self.initial_user_message.take() {
             self.submit_user_message(user_message);
         }
+    }
+
+    pub(crate) fn emitted_fork_event_threads(&self) -> HashSet<ThreadId> {
+        self.emitted_fork_event_threads.clone()
+    }
+
+    pub(crate) fn set_emitted_fork_event_threads(&mut self, thread_ids: HashSet<ThreadId>) {
+        self.emitted_fork_event_threads = thread_ids;
     }
 
     pub(crate) fn handle_thread_session(&mut self, session: ThreadSessionState) {
@@ -4754,6 +4766,7 @@ impl ChatWidget {
             thread_id: None,
             thread_name: None,
             forked_from: None,
+            emitted_fork_event_threads: HashSet::new(),
             queued_user_messages: VecDeque::new(),
             rejected_steers_queue: VecDeque::new(),
             pending_steers: VecDeque::new(),
@@ -5165,7 +5178,7 @@ impl ChatWidget {
                 self.show_rename_prompt();
             }
             SlashCommand::Model => {
-                self.open_model_popup();
+                self.app_event_tx.send(AppEvent::OpenModelPopup);
             }
             SlashCommand::Fast => {
                 let next_tier = if matches!(self.config.service_tier, Some(ServiceTier::Fast)) {

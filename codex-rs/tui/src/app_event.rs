@@ -82,6 +82,8 @@ pub(crate) struct ConnectorsSnapshot {
 pub(crate) enum AppEvent {
     /// Open the agent picker for switching active threads.
     OpenAgentPicker,
+    /// Open the model picker for the current thread context.
+    OpenModelPopup,
     /// Switch the active thread to the selected agent.
     SelectAgentThread(ThreadId),
     /// Open the nested workflow picker for a visible Oracle supervisor thread.
@@ -543,6 +545,7 @@ pub(crate) enum AppEvent {
 
     /// Oracle CLI failed for a visible thread turn or checkpoint.
     OracleRunFailed {
+        run_id: String,
         visible_thread_id: ThreadId,
         kind: OracleRequestKind,
         session_slug: String,

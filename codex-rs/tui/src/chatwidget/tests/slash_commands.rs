@@ -197,6 +197,16 @@ async fn oracle_slash_command_without_args_emits_browse_event() {
 }
 
 #[tokio::test]
+async fn model_slash_command_emits_app_event() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
+
+    chat.dispatch_command(SlashCommand::Model);
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenModelPopup));
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
 async fn slash_copy_state_clears_on_thread_rollback() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
