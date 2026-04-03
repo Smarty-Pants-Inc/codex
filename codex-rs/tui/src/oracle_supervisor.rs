@@ -1555,6 +1555,7 @@ mod tests {
         };
         let thread = Thread {
             id: thread_id.to_string(),
+            forked_from_id: None,
             preview: "preview".to_string(),
             ephemeral: false,
             model_provider: "provider".to_string(),
