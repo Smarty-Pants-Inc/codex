@@ -4,6 +4,7 @@ use crate::app_command::AppCommandView;
 use crate::app_event::AppEvent;
 use crate::app_event::ExitMode;
 use crate::app_event::FeedbackCategory;
+use crate::app_event::RateLimitRefreshOrigin;
 use crate::app_event::RealtimeAudioDeviceKind;
 #[cfg(target_os = "windows")]
 use crate::app_event::WindowsSandboxEnableMode;
@@ -107,6 +108,7 @@ use codex_app_server_protocol::GetAccountRateLimitsResponse;
 use codex_app_server_protocol::ListMcpServerStatusParams;
 use codex_app_server_protocol::ListMcpServerStatusResponse;
 use codex_app_server_protocol::McpServerStatus;
+use codex_app_server_protocol::McpServerStatusDetail;
 use codex_app_server_protocol::PluginInstallParams;
 use codex_app_server_protocol::PluginInstallResponse;
 use codex_app_server_protocol::PluginListParams;
@@ -127,15 +129,17 @@ use codex_app_server_protocol::TurnError as AppServerTurnError;
 use codex_app_server_protocol::TurnStatus;
 use codex_config::types::ApprovalsReviewer;
 use codex_config::types::ModelAvailabilityNuxConfig;
+use codex_core::append_message_history_entry;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::edit::ConfigEdit;
 use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config_loader::ConfigLayerStackOrdering;
-use codex_core::message_history;
+use codex_core::lookup_message_history_entry;
 #[cfg(target_os = "windows")]
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
+use codex_exec_server::EnvironmentManager;
 use codex_features::Feature;
 use codex_models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_models_manager::model_presets::HIDE_GPT_5_1_CODEX_MAX_MIGRATION_PROMPT_CONFIG;
@@ -362,12 +366,13 @@ fn session_summary(
     thread_id: Option<ThreadId>,
     thread_name: Option<String>,
 ) -> Option<SessionSummary> {
-    if token_usage.is_zero() {
+    let usage_line = (!token_usage.is_zero()).then(|| FinalOutput::from(token_usage).to_string());
+    let resume_command = codex_core::util::resume_command(thread_name.as_deref(), thread_id);
+
+    if usage_line.is_none() && resume_command.is_none() {
         return None;
     }
 
-    let usage_line = FinalOutput::from(token_usage).to_string();
-    let resume_command = codex_core::util::resume_command(thread_name.as_deref(), thread_id);
     Some(SessionSummary {
         usage_line,
         resume_command,
@@ -532,7 +537,7 @@ fn emit_system_bwrap_warning(app_event_tx: &AppEventSender, config: &Config) {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionSummary {
-    usage_line: String,
+    usage_line: Option<String>,
     resume_command: Option<String>,
 }
 
@@ -1131,6 +1136,7 @@ pub(crate) struct App {
     pub(crate) backtrack_render_pending: bool,
     pub(crate) feedback: codex_feedback::CodexFeedback,
     feedback_audience: FeedbackAudience,
+    environment_manager: Arc<EnvironmentManager>,
     remote_app_server_url: Option<String>,
     remote_app_server_auth_token: Option<String>,
     /// Set when the user confirms an update; propagated on exit.
@@ -1253,7 +1259,7 @@ fn normalize_harness_overrides_for_cwd(
 
     let mut normalized = Vec::with_capacity(overrides.additional_writable_roots.len());
     for root in overrides.additional_writable_roots.drain(..) {
-        let absolute = AbsolutePathBuf::resolve_path_against_base(root, base_cwd)?;
+        let absolute = AbsolutePathBuf::resolve_path_against_base(root, base_cwd);
         normalized.push(absolute.into_path_buf());
     }
     overrides.additional_writable_roots = normalized;
@@ -1919,6 +1925,21 @@ impl App {
     /// recently began switching.
     fn current_displayed_thread_id(&self) -> Option<ThreadId> {
         self.chat_widget.thread_id().or(self.active_thread_id)
+    }
+
+    fn ignore_same_thread_resume(
+        &mut self,
+        target_session: &crate::resume_picker::SessionTarget,
+    ) -> bool {
+        if self.active_thread_id != Some(target_session.thread_id) {
+            return false;
+        };
+
+        self.chat_widget.add_info_message(
+            format!("Already viewing {}.", target_session.display_label()),
+            /*hint*/ None,
+        );
+        true
     }
 
     /// Mirrors the visible thread into the contextual footer row.
@@ -4419,6 +4440,9 @@ impl App {
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             };
             store.turns.push(turn.clone());
             store.push_turn_replay(turn);
@@ -4430,6 +4454,9 @@ impl App {
                     items: Vec::new(),
                     status: TurnStatus::InProgress,
                     error: None,
+                    started_at: None,
+                    completed_at: None,
+                    duration_ms: None,
                 }],
                 ReplayKind::ThreadSnapshot,
             );
@@ -4453,6 +4480,9 @@ impl App {
                 }],
                 status: TurnStatus::Completed,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             },
         )
         .await;
@@ -4505,6 +4535,9 @@ impl App {
                         items: agent_item.iter().cloned().collect(),
                         status: TurnStatus::Completed,
                         error: None,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: None,
                     };
                     store.turns.push(turn.clone());
                     turn
@@ -6618,8 +6651,8 @@ impl App {
         Ok(())
     }
 
-    /// Spawn a background task that fetches the full MCP server inventory from the
-    /// app-server via paginated RPCs, then delivers the result back through
+    /// Spawn a background task that fetches MCP server status from the app-server
+    /// via paginated RPCs, then delivers the result back through
     /// `AppEvent::McpInventoryLoaded`.
     ///
     /// The spawned task is fire-and-forget: no `JoinHandle` is stored, so a stale
@@ -6638,14 +6671,25 @@ impl App {
         });
     }
 
-    fn refresh_rate_limits(&mut self, app_server: &AppServerSession, request_id: u64) {
+    /// Spawns a background task to fetch account rate limits and deliver the
+    /// result as a `RateLimitsLoaded` event.
+    ///
+    /// The `origin` is forwarded to the completion handler so it can distinguish
+    /// a startup prefetch (which only updates cached snapshots and schedules a
+    /// frame) from a `/status`-triggered refresh (which must finalize the
+    /// corresponding status card).
+    fn refresh_rate_limits(
+        &mut self,
+        app_server: &AppServerSession,
+        origin: RateLimitRefreshOrigin,
+    ) {
         let request_handle = app_server.request_handle();
         let app_event_tx = self.app_event_tx.clone();
         tokio::spawn(async move {
             let result = fetch_account_rate_limits(request_handle)
                 .await
                 .map_err(|err| err.to_string());
-            app_event_tx.send(AppEvent::RateLimitsLoaded { request_id, result });
+            app_event_tx.send(AppEvent::RateLimitsLoaded { origin, result });
         });
     }
 
@@ -6883,7 +6927,9 @@ impl App {
 
         self.chat_widget
             .add_to_history(history_cell::new_mcp_tools_output_from_statuses(
-                &config, &statuses,
+                &config,
+                &statuses,
+                McpServerStatusDetail::ToolsAndAuthOnly,
             ));
     }
 
@@ -6914,8 +6960,7 @@ impl App {
                 let text = text.clone();
                 let config = self.chat_widget.config_ref().clone();
                 tokio::spawn(async move {
-                    if let Err(err) =
-                        message_history::append_entry(&text, &thread_id, &config).await
+                    if let Err(err) = append_message_history_entry(&text, &thread_id, &config).await
                     {
                         tracing::warn!(
                             thread_id = %thread_id,
@@ -6933,7 +6978,7 @@ impl App {
                 let app_event_tx = self.app_event_tx.clone();
                 tokio::spawn(async move {
                     let entry_opt = tokio::task::spawn_blocking(move || {
-                        message_history::lookup(log_id, offset, &config)
+                        lookup_message_history_entry(log_id, offset, &config)
                     })
                     .await
                     .unwrap_or_else(|err| {
@@ -8798,7 +8843,10 @@ impl App {
                         "Failed to attach to fresh app-server thread: {err}"
                     ));
                 } else if let Some(summary) = summary {
-                    let mut lines: Vec<Line<'static>> = vec![summary.usage_line.clone().into()];
+                    let mut lines: Vec<Line<'static>> = Vec::new();
+                    if let Some(usage_line) = summary.usage_line {
+                        lines.push(usage_line.into());
+                    }
                     if let Some(command) = summary.resume_command {
                         let spans = vec!["To continue this session, run ".into(), command.cyan()];
                         lines.push(spans.into());
@@ -9072,13 +9120,17 @@ impl App {
         should_prompt_windows_sandbox_nux_at_startup: bool,
         remote_app_server_url: Option<String>,
         remote_app_server_auth_token: Option<String>,
+        environment_manager: Arc<EnvironmentManager>,
     ) -> Result<AppExitInfo> {
         use tokio_stream::StreamExt;
         let (app_event_tx, mut app_event_rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(app_event_tx);
         emit_project_config_warnings(&app_event_tx, &config);
         emit_system_bwrap_warning(&app_event_tx, &config);
-        tui.set_notification_method(config.tui_notification_method);
+        tui.set_notification_settings(
+            config.tui_notifications.method,
+            config.tui_notifications.condition,
+        );
 
         let harness_overrides =
             normalize_harness_overrides_for_cwd(harness_overrides, &config.cwd)?;
@@ -9117,9 +9169,9 @@ impl App {
         let feedback_audience = bootstrap.feedback_audience;
         let auth_mode = bootstrap.auth_mode;
         let has_chatgpt_account = bootstrap.has_chatgpt_account;
+        let requires_openai_auth = bootstrap.requires_openai_auth;
         let status_account_display = bootstrap.status_account_display.clone();
         let initial_plan_type = bootstrap.plan_type;
-        let startup_rate_limit_snapshots = bootstrap.rate_limit_snapshots;
         let session_telemetry = SessionTelemetry::new(
             ThreadId::new(),
             model.as_str(),
@@ -9253,9 +9305,6 @@ impl App {
             }
         };
 
-        for snapshot in startup_rate_limit_snapshots {
-            chat_widget.on_rate_limit_snapshot(Some(snapshot));
-        }
         chat_widget
             .maybe_prompt_windows_sandbox_enable(should_prompt_windows_sandbox_nux_at_startup);
 
@@ -9287,6 +9336,7 @@ impl App {
             backtrack_render_pending: false,
             feedback: feedback.clone(),
             feedback_audience,
+            environment_manager,
             remote_app_server_url,
             remote_app_server_auth_token,
             pending_update_action: None,
@@ -9351,6 +9401,11 @@ impl App {
         tokio::pin!(tui_events);
 
         tui.frame_requester().schedule_frame();
+        // Kick off a non-blocking rate-limit prefetch so the first `/status`
+        // already has data, without delaying the initial frame render.
+        if requires_openai_auth && has_chatgpt_account {
+            app.refresh_rate_limits(&app_server, RateLimitRefreshOrigin::StartupPrefetch);
+        }
 
         let mut listen_for_app_server_events = true;
         let mut waiting_for_initial_session_configured = wait_for_initial_session_configured;
@@ -9551,6 +9606,7 @@ impl App {
                         },
                         None => crate::AppServerTarget::Embedded,
                     },
+                    self.environment_manager.clone(),
                 )
                 .await
                 {
@@ -9572,6 +9628,10 @@ impl App {
                 .await?
                 {
                     SessionSelection::Resume(target_session) => {
+                        if self.ignore_same_thread_resume(&target_session) {
+                            tui.frame_requester().schedule_frame();
+                            return Ok(AppRunControl::Continue);
+                        }
                         let current_cwd = self.config.cwd.to_path_buf();
                         let resume_cwd = if self.remote_app_server_url.is_some() {
                             current_cwd.clone()
@@ -9619,7 +9679,10 @@ impl App {
                             Ok(resumed) => {
                                 self.shutdown_current_thread(app_server).await;
                                 self.config = resume_config;
-                                tui.set_notification_method(self.config.tui_notification_method);
+                                tui.set_notification_settings(
+                                    self.config.tui_notifications.method,
+                                    self.config.tui_notifications.condition,
+                                );
                                 self.file_search
                                     .update_search_dir(self.config.cwd.to_path_buf());
                                 match self
@@ -9630,8 +9693,10 @@ impl App {
                                 {
                                     Ok(()) => {
                                         if let Some(summary) = summary {
-                                            let mut lines: Vec<Line<'static>> =
-                                                vec![summary.usage_line.clone().into()];
+                                            let mut lines: Vec<Line<'static>> = Vec::new();
+                                            if let Some(usage_line) = summary.usage_line {
+                                                lines.push(usage_line.into());
+                                            }
                                             if let Some(command) = summary.resume_command {
                                                 let spans = vec![
                                                     "To continue this session, run ".into(),
@@ -9690,8 +9755,10 @@ impl App {
                             {
                                 Ok(()) => {
                                     if let Some(summary) = summary {
-                                        let mut lines: Vec<Line<'static>> =
-                                            vec![summary.usage_line.clone().into()];
+                                        let mut lines: Vec<Line<'static>> = Vec::new();
+                                        if let Some(usage_line) = summary.usage_line {
+                                            lines.push(usage_line.into());
+                                        }
                                         if let Some(command) = summary.resume_command {
                                             let spans = vec![
                                                 "To continue this session, run ".into(),
@@ -10055,21 +10122,30 @@ impl App {
             AppEvent::FileSearchResult { query, matches } => {
                 self.chat_widget.apply_file_search_result(query, matches);
             }
-            AppEvent::RefreshRateLimits { request_id } => {
-                self.refresh_rate_limits(app_server, request_id);
+            AppEvent::RefreshRateLimits { origin } => {
+                self.refresh_rate_limits(app_server, origin);
             }
-            AppEvent::RateLimitsLoaded { request_id, result } => match result {
+            AppEvent::RateLimitsLoaded { origin, result } => match result {
                 Ok(snapshots) => {
                     for snapshot in snapshots {
                         self.chat_widget.on_rate_limit_snapshot(Some(snapshot));
                     }
-                    self.chat_widget
-                        .finish_status_rate_limit_refresh(request_id);
+                    match origin {
+                        RateLimitRefreshOrigin::StartupPrefetch => {
+                            tui.frame_requester().schedule_frame();
+                        }
+                        RateLimitRefreshOrigin::StatusCommand { request_id } => {
+                            self.chat_widget
+                                .finish_status_rate_limit_refresh(request_id);
+                        }
+                    }
                 }
                 Err(err) => {
                     tracing::warn!("account/rateLimits/read failed during TUI refresh: {err}");
-                    self.chat_widget
-                        .finish_status_rate_limit_refresh(request_id);
+                    if let RateLimitRefreshOrigin::StatusCommand { request_id } = origin {
+                        self.chat_widget
+                            .finish_status_rate_limit_refresh(request_id);
+                    }
                 }
             },
             AppEvent::ConnectorsLoaded { result, is_final } => {
@@ -10089,6 +10165,15 @@ impl App {
             }
             AppEvent::OpenRealtimeAudioDeviceSelection { kind } => {
                 self.chat_widget.open_realtime_audio_device_selection(kind);
+            }
+            AppEvent::RealtimeWebrtcOfferCreated { result } => {
+                self.chat_widget.on_realtime_webrtc_offer_created(result);
+            }
+            AppEvent::RealtimeWebrtcEvent(event) => {
+                self.chat_widget.on_realtime_webrtc_event(event);
+            }
+            AppEvent::RealtimeWebrtcLocalAudioLevel(peak) => {
+                self.chat_widget.on_realtime_webrtc_local_audio_level(peak);
             }
             AppEvent::OpenReasoningPopup { model } => {
                 self.chat_widget.open_reasoning_popup(model);
@@ -10316,7 +10401,7 @@ impl App {
 
                     tokio::task::spawn_blocking(move || {
                         let requested_path = PathBuf::from(path);
-                        let event = match codex_core::windows_sandbox_read_grants::grant_read_root_non_elevated(
+                        let event = match codex_core::grant_read_root_non_elevated(
                             &policy,
                             policy_cwd.as_path(),
                             command_cwd.as_path(),
@@ -11637,8 +11722,9 @@ impl App {
     }
 }
 
-/// Collect every MCP server status from the app-server by walking the paginated
-/// `mcpServerStatus/list` RPC until no `next_cursor` is returned.
+/// Collect every MCP server status needed for `/mcp` from the app-server by
+/// walking the paginated `mcpServerStatus/list` RPC until no `next_cursor` is
+/// returned.
 ///
 /// All pages are eagerly gathered into a single `Vec` so the caller can render
 /// the inventory atomically. Each page requests up to 100 entries.
@@ -11656,6 +11742,7 @@ async fn fetch_all_mcp_server_statuses(
                 params: ListMcpServerStatusParams {
                     cursor: cursor.clone(),
                     limit: Some(100),
+                    detail: Some(McpServerStatusDetail::ToolsAndAuthOnly),
                 },
             })
             .await
@@ -11842,6 +11929,7 @@ mod tests {
     use crate::chatwidget::create_initial_user_message;
     use crate::chatwidget::tests::make_chatwidget_manual_with_sender;
     use crate::chatwidget::tests::set_chatgpt_auth;
+    use crate::chatwidget::tests::set_fast_mode_test_catalog;
     use crate::file_search::FileSearchManager;
     use crate::history_cell::AgentMessageCell;
     use crate::history_cell::HistoryCell;
@@ -12116,6 +12204,53 @@ mod tests {
             ),
             true
         );
+    }
+
+    #[tokio::test]
+    async fn ignore_same_thread_resume_reports_noop_for_current_thread() {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let thread_id = ThreadId::new();
+        let session = test_thread_session(thread_id, PathBuf::from("/tmp/project"));
+        app.chat_widget.handle_thread_session(session.clone());
+        app.thread_event_channels.insert(
+            thread_id,
+            ThreadEventChannel::new_with_session(
+                THREAD_EVENT_CHANNEL_CAPACITY,
+                session,
+                Vec::new(),
+            ),
+        );
+        app.activate_thread_channel(thread_id).await;
+        while app_event_rx.try_recv().is_ok() {}
+
+        let ignored = app.ignore_same_thread_resume(&crate::resume_picker::SessionTarget {
+            path: Some(PathBuf::from("/tmp/project")),
+            thread_id,
+        });
+
+        assert!(ignored);
+        let cell = match app_event_rx.try_recv() {
+            Ok(AppEvent::InsertHistoryCell(cell)) => cell,
+            other => panic!("expected info message after same-thread resume, saw {other:?}"),
+        };
+        let rendered = lines_to_single_string(&cell.display_lines(/*width*/ 80));
+        assert!(rendered.contains("Already viewing /tmp/project."));
+    }
+
+    #[tokio::test]
+    async fn ignore_same_thread_resume_allows_reattaching_displayed_inactive_thread() {
+        let mut app = make_test_app().await;
+        let thread_id = ThreadId::new();
+        let session = test_thread_session(thread_id, PathBuf::from("/tmp/project"));
+        app.chat_widget.handle_thread_session(session);
+
+        let ignored = app.ignore_same_thread_resume(&crate::resume_picker::SessionTarget {
+            path: Some(PathBuf::from("/tmp/project")),
+            thread_id,
+        });
+
+        assert!(!ignored);
+        assert!(app.transcript_cells.is_empty());
     }
 
     #[tokio::test]
@@ -16211,6 +16346,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
         app.oracle_state.active_run_id = Some("oracle-run-terminal-reply".to_string());
@@ -16277,6 +16415,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
         app.oracle_state.active_run_id = Some("oracle-run-terminal-reply-new-id".to_string());
@@ -16348,6 +16489,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
         app.oracle_state.active_run_id = Some("oracle-run-invalid-replacement".to_string());
@@ -16578,6 +16722,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -16833,6 +16980,9 @@ guardian_approval = true
             ],
             status: TurnStatus::Completed,
             error: None,
+            started_at: None,
+            completed_at: None,
+            duration_ms: None,
         };
 
         app.apply_refreshed_snapshot_thread(
@@ -17000,6 +17150,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -17093,6 +17246,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -17201,6 +17357,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -17292,6 +17451,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
         assert!(app.oracle_state.accept_user_turn_workflow_replacement);
@@ -17407,6 +17569,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
         assert!(app.oracle_state.accept_user_turn_workflow_replacement);
@@ -17474,6 +17639,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -17559,6 +17727,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -17626,6 +17797,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -17705,6 +17879,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -17739,6 +17916,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -18227,6 +18407,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -18918,6 +19101,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
         app.oracle_state.active_run_id = Some("oracle-run-replacement-ask-user".to_string());
@@ -19846,6 +20032,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -20911,15 +21100,17 @@ guardian_approval = true
         target_os = "windows",
         ignore = "snapshot path rendering differs on Windows"
     )]
-    async fn clear_ui_header_shows_fast_status_only_for_gpt54() {
+    async fn clear_ui_header_shows_fast_status_for_fast_capable_models() {
         let mut app = make_test_app().await;
         app.config.cwd = PathBuf::from("/tmp/project").abs();
         app.chat_widget.set_model("gpt-5.4");
+        set_fast_mode_test_catalog(&mut app.chat_widget);
         app.chat_widget
             .set_reasoning_effort(Some(ReasoningEffortConfig::XHigh));
         app.chat_widget
             .set_service_tier(Some(codex_protocol::config_types::ServiceTier::Fast));
         set_chatgpt_auth(&mut app.chat_widget);
+        set_fast_mode_test_catalog(&mut app.chat_widget);
 
         let rendered = app
             .clear_ui_header_lines_with_version(/*width*/ 80, "<VERSION>")
@@ -20933,7 +21124,7 @@ guardian_approval = true
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert_snapshot!("clear_ui_header_fast_status_gpt54_only", rendered);
+        assert_snapshot!("clear_ui_header_fast_status_fast_capable_models", rendered);
     }
 
     fn parse_fenced_oracle_response(json: &str) -> crate::oracle_supervisor::OracleResponse {
@@ -20971,6 +21162,7 @@ guardian_approval = true
             backtrack_render_pending: false,
             feedback: codex_feedback::CodexFeedback::new(),
             feedback_audience: FeedbackAudience::External,
+            environment_manager: Arc::new(EnvironmentManager::new(/*exec_server_url*/ None)),
             remote_app_server_url: None,
             remote_app_server_auth_token: None,
             pending_update_action: None,
@@ -21032,6 +21224,9 @@ guardian_approval = true
                 backtrack_render_pending: false,
                 feedback: codex_feedback::CodexFeedback::new(),
                 feedback_audience: FeedbackAudience::External,
+                environment_manager: Arc::new(EnvironmentManager::new(
+                    /*exec_server_url*/ None,
+                )),
                 remote_app_server_url: None,
                 remote_app_server_auth_token: None,
                 pending_update_action: None,
@@ -21086,13 +21281,19 @@ guardian_approval = true
             items,
             status,
             error: None,
+            started_at: None,
+            completed_at: None,
+            duration_ms: None,
         }
     }
 
     fn turn_started_notification(thread_id: ThreadId, turn_id: &str) -> ServerNotification {
         ServerNotification::TurnStarted(TurnStartedNotification {
             thread_id: thread_id.to_string(),
-            turn: test_turn(turn_id, TurnStatus::InProgress, Vec::new()),
+            turn: Turn {
+                started_at: Some(0),
+                ..test_turn(turn_id, TurnStatus::InProgress, Vec::new())
+            },
         })
     }
 
@@ -21103,7 +21304,11 @@ guardian_approval = true
     ) -> ServerNotification {
         ServerNotification::TurnCompleted(TurnCompletedNotification {
             thread_id: thread_id.to_string(),
-            turn: test_turn(turn_id, status, Vec::new()),
+            turn: Turn {
+                completed_at: Some(0),
+                duration_ms: Some(1),
+                ..test_turn(turn_id, status, Vec::new())
+            },
         })
     }
 
@@ -22429,6 +22634,9 @@ guardian_approval = true
                         }],
                         status: TurnStatus::Completed,
                         error: None,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: None,
                     },
                     Turn {
                         id: "turn-2".to_string(),
@@ -22449,6 +22657,9 @@ guardian_approval = true
                         ],
                         status: TurnStatus::Completed,
                         error: None,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: None,
                     },
                 ],
                 events: Vec::new(),
@@ -22945,7 +23156,7 @@ guardian_approval = true
     }
 
     #[tokio::test]
-    async fn session_summary_skip_zero_usage() {
+    async fn session_summary_skips_when_no_usage_or_resume_hint() {
         assert!(
             session_summary(
                 TokenUsage::default(),
@@ -22970,7 +23181,7 @@ guardian_approval = true
             session_summary(usage, Some(conversation), /*thread_name*/ None).expect("summary");
         assert_eq!(
             summary.usage_line,
-            "Token usage: total=12 input=10 output=2"
+            Some("Token usage: total=12 input=10 output=2".to_string())
         );
         assert_eq!(
             summary.resume_command,

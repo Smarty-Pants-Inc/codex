@@ -111,36 +111,39 @@ pub async fn find_thread_names_by_ids(
     Ok(names)
 }
 
-/// Locate a recorded thread rollout file by thread name, preferring newer entries first
-/// and skipping names that do not yet resolve to saved rollout data.
+/// Locate a recorded thread rollout file by thread name using newest-first ordering.
 /// Returns `Ok(Some(path))` if found, `Ok(None)` if not present.
 pub async fn find_thread_path_by_name_str(
     codex_home: &Path,
     name: &str,
 ) -> std::io::Result<Option<PathBuf>> {
-    let name = name.trim();
-    if name.is_empty() {
+    if name.trim().is_empty() {
         return Ok(None);
     }
-
     let path = session_index_path(codex_home);
     if !path.exists() {
         return Ok(None);
     }
-
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let name = name.to_string();
-    let thread_ids =
-        tokio::task::spawn_blocking(move || scan_index_from_end_thread_ids_by_name(&path, &name))
-            .await
-            .map_err(std::io::Error::other)??;
+    // Stream matching ids newest-first instead of stopping at the first name hit: the newest entry
+    // may point at a thread whose rollout was never materialized.
+    let scan =
+        tokio::task::spawn_blocking(move || stream_thread_ids_from_end_by_name(&path, &name, tx));
 
-    for thread_id in thread_ids {
+    while let Some(thread_id) = rx.recv().await {
+        // Keep walking until a matching id resolves to a loadable rollout so an unsaved or partial
+        // rename cannot shadow an older persisted session with the same name.
         if let Some(path) =
             super::list::find_thread_path_by_id_str(codex_home, &thread_id.to_string()).await?
+            && super::list::read_session_meta_line(&path).await.is_ok()
         {
+            drop(rx);
+            scan.await.map_err(std::io::Error::other)??;
             return Ok(Some(path));
         }
     }
+    scan.await.map_err(std::io::Error::other)??;
 
     Ok(None)
 }
@@ -156,44 +159,22 @@ fn scan_index_from_end_by_id(
     scan_index_from_end(path, |entry| entry.id == *thread_id)
 }
 
-#[cfg(test)]
-fn scan_index_from_end_by_name(
+fn stream_thread_ids_from_end_by_name(
     path: &Path,
     name: &str,
-) -> std::io::Result<Option<SessionIndexEntry>> {
-    scan_index_from_end(path, |entry| entry.thread_name == name)
-}
-
-fn scan_index_from_end_thread_ids_by_name(
-    path: &Path,
-    name: &str,
-) -> std::io::Result<Vec<ThreadId>> {
-    let mut file = File::open(path)?;
-    let mut remaining = file.metadata()?.len();
-    let mut line_rev: Vec<u8> = Vec::new();
-    let mut buf = vec![0u8; READ_CHUNK_SIZE];
-    let mut thread_ids = Vec::new();
+    tx: tokio::sync::mpsc::Sender<ThreadId>,
+) -> std::io::Result<()> {
     let mut seen = HashSet::new();
-
-    while remaining > 0 {
-        let read_size = usize::try_from(remaining.min(READ_CHUNK_SIZE as u64))
-            .map_err(std::io::Error::other)?;
-        remaining -= read_size as u64;
-        file.seek(SeekFrom::Start(remaining))?;
-        file.read_exact(&mut buf[..read_size])?;
-
-        for &byte in buf[..read_size].iter().rev() {
-            if byte == b'\n' {
-                collect_thread_id_from_rev(&mut line_rev, name, &mut seen, &mut thread_ids)?;
-                continue;
-            }
-            line_rev.push(byte);
+    scan_index_from_end_for_each(path, |entry| {
+        // The first row seen for an id is its latest name. Ignore older rows for that id so a
+        // historical name cannot be treated as the current one after the thread is renamed.
+        if seen.insert(entry.id) && entry.thread_name == name && tx.blocking_send(entry.id).is_err()
+        {
+            return Ok(Some(entry.clone()));
         }
-    }
-
-    collect_thread_id_from_rev(&mut line_rev, name, &mut seen, &mut thread_ids)?;
-
-    Ok(thread_ids)
+        Ok(None)
+    })?;
+    Ok(())
 }
 
 fn scan_index_from_end<F>(
@@ -202,6 +183,21 @@ fn scan_index_from_end<F>(
 ) -> std::io::Result<Option<SessionIndexEntry>>
 where
     F: FnMut(&SessionIndexEntry) -> bool,
+{
+    scan_index_from_end_for_each(path, |entry| {
+        if predicate(entry) {
+            return Ok(Some(entry.clone()));
+        }
+        Ok(None)
+    })
+}
+
+fn scan_index_from_end_for_each<F>(
+    path: &Path,
+    mut visit_entry: F,
+) -> std::io::Result<Option<SessionIndexEntry>>
+where
+    F: FnMut(&SessionIndexEntry) -> std::io::Result<Option<SessionIndexEntry>>,
 {
     let mut file = File::open(path)?;
     let mut remaining = file.metadata()?.len();
@@ -217,7 +213,7 @@ where
 
         for &byte in buf[..read_size].iter().rev() {
             if byte == b'\n' {
-                if let Some(entry) = parse_line_from_rev(&mut line_rev, &mut predicate)? {
+                if let Some(entry) = parse_line_from_rev(&mut line_rev, &mut visit_entry)? {
                     return Ok(Some(entry));
                 }
                 continue;
@@ -226,34 +222,19 @@ where
         }
     }
 
-    if let Some(entry) = parse_line_from_rev(&mut line_rev, &mut predicate)? {
+    if let Some(entry) = parse_line_from_rev(&mut line_rev, &mut visit_entry)? {
         return Ok(Some(entry));
     }
 
     Ok(None)
 }
 
-fn collect_thread_id_from_rev(
-    line_rev: &mut Vec<u8>,
-    name: &str,
-    seen: &mut HashSet<ThreadId>,
-    thread_ids: &mut Vec<ThreadId>,
-) -> std::io::Result<()> {
-    let Some(entry) = parse_line_from_rev(line_rev, &mut |entry| entry.thread_name == name)? else {
-        return Ok(());
-    };
-    if seen.insert(entry.id) {
-        thread_ids.push(entry.id);
-    }
-    Ok(())
-}
-
 fn parse_line_from_rev<F>(
     line_rev: &mut Vec<u8>,
-    predicate: &mut F,
+    visit_entry: &mut F,
 ) -> std::io::Result<Option<SessionIndexEntry>>
 where
-    F: FnMut(&SessionIndexEntry) -> bool,
+    F: FnMut(&SessionIndexEntry) -> std::io::Result<Option<SessionIndexEntry>>,
 {
     if line_rev.is_empty() {
         return Ok(None);
@@ -273,10 +254,7 @@ where
     let Ok(entry) = serde_json::from_str::<SessionIndexEntry>(trimmed) else {
         return Ok(None);
     };
-    if predicate(&entry) {
-        return Ok(Some(entry));
-    }
-    Ok(None)
+    visit_entry(&entry)
 }
 
 #[cfg(test)]
