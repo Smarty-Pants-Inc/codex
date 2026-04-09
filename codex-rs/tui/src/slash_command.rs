@@ -134,6 +134,7 @@ impl SlashCommand {
                 | SlashCommand::Rename
                 | SlashCommand::Plan
                 | SlashCommand::Fast
+                | SlashCommand::Oracle
                 | SlashCommand::SandboxReadRoot
         )
     }
