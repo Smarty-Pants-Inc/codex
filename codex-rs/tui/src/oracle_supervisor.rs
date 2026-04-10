@@ -2618,6 +2618,9 @@ mod tests {
                 ],
                 status: codex_app_server_protocol::TurnStatus::Completed,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             }],
         };
 
@@ -2712,6 +2715,9 @@ mod tests {
                 ],
                 status: codex_app_server_protocol::TurnStatus::Completed,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             }],
         };
 

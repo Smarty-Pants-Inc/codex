@@ -88,6 +88,20 @@ pub(crate) fn format_agent_picker_item_name(
     }
 }
 
+pub(crate) fn system_event_cell<T, I>(title: impl Into<String>, details: I) -> PlainHistoryCell
+where
+    I: IntoIterator<Item = T>,
+    T: Into<String>,
+{
+    collab_event(
+        title_text(title.into()),
+        details
+            .into_iter()
+            .map(|detail| Line::from(detail.into()))
+            .collect(),
+    )
+}
+
 pub(crate) fn previous_agent_shortcut() -> crate::key_hint::KeyBinding {
     crate::key_hint::alt(KeyCode::Left)
 }

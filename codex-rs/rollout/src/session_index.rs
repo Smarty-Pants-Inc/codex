@@ -148,6 +148,7 @@ pub async fn find_thread_meta_by_name_str(
 /// Locate a recorded thread rollout file by thread name, preferring newer entries first
 /// and skipping names that do not yet resolve to saved rollout data.
 /// Returns `Ok(Some(path))` if found, `Ok(None)` if not present.
+#[cfg_attr(not(test), allow(dead_code))]
 pub async fn find_thread_path_by_name_str(
     codex_home: &Path,
     name: &str,

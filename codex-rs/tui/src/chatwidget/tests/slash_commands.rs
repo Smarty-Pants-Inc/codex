@@ -319,7 +319,7 @@ async fn slash_copy_state_clears_on_thread_rollback() {
         msg: EventMsg::ThreadRolledBack(ThreadRolledBackEvent { num_turns: 1 }),
     });
 
-    assert_eq!(chat.last_copyable_output, None);
+    assert_eq!(chat.last_agent_markdown_text(), None);
 }
 
 #[tokio::test]

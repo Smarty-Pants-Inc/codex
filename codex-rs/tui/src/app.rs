@@ -45,6 +45,7 @@ use crate::multi_agents::agent_picker_status_dot_spans;
 use crate::multi_agents::format_agent_picker_item_name;
 use crate::multi_agents::next_agent_shortcut_matches;
 use crate::multi_agents::previous_agent_shortcut_matches;
+use crate::multi_agents::system_event_cell;
 use crate::oracle_broker::OracleBrokerClient;
 use crate::oracle_broker::OracleBrokerRequest;
 use crate::oracle_broker::OracleBrokerThreadEntry;
@@ -583,6 +584,7 @@ enum ThreadBufferedEvent {
     Request(ServerRequest),
     HistoryEntryResponse(GetHistoryEntryResponseEvent),
     FeedbackSubmission(FeedbackThreadEvent),
+    OracleWorkflowEvent(OracleWorkflowThreadEvent),
 }
 
 #[derive(Debug, Clone)]
@@ -597,6 +599,12 @@ struct FeedbackThreadEvent {
     include_logs: bool,
     feedback_audience: FeedbackAudience,
     result: Result<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OracleWorkflowThreadEvent {
+    title: String,
+    details: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -620,6 +628,7 @@ impl ThreadEventStore {
                 | ThreadBufferedEvent::Notification(ServerNotification::HookStarted(_))
                 | ThreadBufferedEvent::Notification(ServerNotification::HookCompleted(_))
                 | ThreadBufferedEvent::FeedbackSubmission(_)
+                | ThreadBufferedEvent::OracleWorkflowEvent(_)
         )
     }
 
@@ -717,7 +726,8 @@ impl ThreadEventStore {
                         .should_replay_snapshot_request(request),
                     ThreadBufferedEvent::Notification(_)
                     | ThreadBufferedEvent::HistoryEntryResponse(_)
-                    | ThreadBufferedEvent::FeedbackSubmission(_) => true,
+                    | ThreadBufferedEvent::FeedbackSubmission(_)
+                    | ThreadBufferedEvent::OracleWorkflowEvent(_) => true,
                 })
                 .cloned()
                 .collect(),
@@ -3521,6 +3531,55 @@ impl App {
         }
     }
 
+    fn oracle_status_thread_event(message: &str) -> OracleWorkflowThreadEvent {
+        OracleWorkflowThreadEvent {
+            title: message.trim().to_string(),
+            details: Vec::new(),
+        }
+    }
+
+    fn oracle_delegate_thread_event(
+        workflow: &OracleWorkflowBinding,
+        message_for_user: &str,
+    ) -> OracleWorkflowThreadEvent {
+        let mut details = vec![format!(
+            "Workflow: {} v{}",
+            workflow.workflow_id, workflow.version
+        )];
+        let note = message_for_user.trim();
+        if !note.is_empty()
+            && !note.eq_ignore_ascii_case("Oracle delegated work to the orchestrator.")
+        {
+            details.push(format!("Note: {note}"));
+        }
+        OracleWorkflowThreadEvent {
+            title: "Oracle delegated work to the orchestrator.".to_string(),
+            details,
+        }
+    }
+
+    fn oracle_context_request_thread_event(
+        requested_context: &[String],
+        message_for_user: &str,
+    ) -> OracleWorkflowThreadEvent {
+        let mut details = Vec::new();
+        if !requested_context.is_empty() {
+            details.push(format!("Requested: {}", requested_context.join(", ")));
+        }
+        let note = message_for_user.trim();
+        if !note.is_empty()
+            && !note
+                .to_ascii_lowercase()
+                .starts_with("oracle requested more context")
+        {
+            details.push(format!("Note: {note}"));
+        }
+        OracleWorkflowThreadEvent {
+            title: "Oracle requested more context.".to_string(),
+            details,
+        }
+    }
+
     fn oracle_delegate_user_message(message_for_user: &str) -> String {
         let objective = "Oracle delegated work to the orchestrator.";
         let note = message_for_user.trim();
@@ -4361,6 +4420,9 @@ impl App {
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             };
             store.turns.push(turn.clone());
             store.push_turn_replay(turn);
@@ -4372,6 +4434,9 @@ impl App {
                     items: Vec::new(),
                     status: TurnStatus::InProgress,
                     error: None,
+                    started_at: None,
+                    completed_at: None,
+                    duration_ms: None,
                 }],
                 ReplayKind::ThreadSnapshot,
             );
@@ -4395,6 +4460,9 @@ impl App {
                 }],
                 status: TurnStatus::Completed,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             },
         )
         .await;
@@ -4447,6 +4515,9 @@ impl App {
                         items: agent_item.iter().cloned().collect(),
                         status: TurnStatus::Completed,
                         error: None,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: None,
                     };
                     store.turns.push(turn.clone());
                     turn
@@ -4783,193 +4854,6 @@ impl App {
             .to_string()
     }
 
-    async fn ensure_oracle_destination_thread(
-        &mut self,
-        app_server: &mut AppServerSession,
-        oracle_thread_id: ThreadId,
-        address: &str,
-        directive: &OracleControlDirective,
-        spawn_if_missing: bool,
-    ) -> Result<(ThreadId, String, Option<String>)> {
-        if Self::oracle_is_orchestrator_destination(address) {
-            let thread_id = self.ensure_orchestrator_thread(app_server).await?;
-            return Ok((
-                thread_id,
-                "Oracle Orchestrator".to_string(),
-                Some("orchestrator".to_string()),
-            ));
-        }
-        if let Some(thread_id) = self
-            .oracle_state
-            .bindings
-            .get(&oracle_thread_id)
-            .and_then(|binding| binding.participants.get(address))
-            .and_then(|participant| participant.thread_id)
-        {
-            let title = self
-                .oracle_state
-                .bindings
-                .get(&oracle_thread_id)
-                .and_then(|binding| binding.participants.get(address))
-                .and_then(|participant| participant.title.clone())
-                .unwrap_or_else(|| address.to_string());
-            let role = self
-                .oracle_state
-                .bindings
-                .get(&oracle_thread_id)
-                .and_then(|binding| binding.participants.get(address))
-                .and_then(|participant| participant.role.clone());
-            return Ok((thread_id, title, role));
-        }
-
-        let hint = Self::oracle_destination_hint(directive, address);
-        let kind = hint
-            .and_then(|participant| participant.kind.clone())
-            .or_else(|| {
-                if address.starts_with("worker:") {
-                    Some("worker".to_string())
-                } else if Self::parse_oracle_thread_destination(address).is_some() {
-                    Some("thread".to_string())
-                } else {
-                    None
-                }
-            });
-        let role = hint
-            .and_then(|participant| participant.role.clone())
-            .or_else(|| kind.clone());
-        let visibility = Self::oracle_participant_visibility(
-            hint.and_then(|participant| participant.visibility.as_deref()),
-            if Self::parse_oracle_thread_destination(address).is_some() {
-                OracleParticipantVisibility::Visible
-            } else {
-                OracleParticipantVisibility::Hidden
-            },
-        );
-
-        if let Some(thread_id) = Self::parse_oracle_thread_destination(address) {
-            let title = self
-                .agent_navigation
-                .get(&thread_id)
-                .and_then(|entry| entry.agent_nickname.clone())
-                .unwrap_or_else(|| address.to_string());
-            self.register_oracle_participant_thread(
-                oracle_thread_id,
-                address.to_string(),
-                thread_id,
-                Some(title.clone()),
-                kind.clone(),
-                role.clone(),
-                visibility,
-                /*owned_by_oracle*/ false,
-                /*route_completions*/ true,
-                /*route_closures*/ true,
-            );
-            return Ok((thread_id, title, role));
-        }
-
-        if !spawn_if_missing {
-            return Err(color_eyre::eyre::eyre!(
-                "Oracle destination `{address}` is not registered. Use `spawn` or target `thread:<id>`."
-            ));
-        }
-
-        let started = app_server
-            .start_thread(self.chat_widget.config_ref())
-            .await?;
-        let thread_id = started.session.thread_id;
-        let channel = self.ensure_thread_channel(thread_id);
-        {
-            let mut store = channel.store.lock().await;
-            store.set_session(started.session, started.turns);
-        }
-        let title = Self::oracle_destination_title(address, kind.as_deref(), role.as_deref());
-        if let Err(err) = app_server.thread_set_name(thread_id, title.clone()).await {
-            tracing::warn!(%thread_id, %err, "failed to name oracle destination thread");
-        }
-        self.register_oracle_participant_thread(
-            oracle_thread_id,
-            address.to_string(),
-            thread_id,
-            Some(title.clone()),
-            kind,
-            role.clone(),
-            visibility,
-            /*owned_by_oracle*/ true,
-            /*route_completions*/ true,
-            /*route_closures*/ true,
-        );
-        Ok((thread_id, title, role))
-    }
-
-    fn oracle_followup_limit_exceeded(&self, oracle_thread_id: ThreadId) -> bool {
-        self.oracle_state
-            .bindings
-            .get(&oracle_thread_id)
-            .map(|binding| binding.automatic_context_followups >= 2)
-            .unwrap_or(false)
-    }
-
-    async fn start_oracle_directory_followup(
-        &mut self,
-        result: &OracleRunResult,
-        query: Option<String>,
-    ) -> Result<()> {
-        let Some(oracle_repo) = find_oracle_repo(self.chat_widget.config_ref().cwd.as_path())
-        else {
-            let message = Self::oracle_repo_not_found_message().to_string();
-            self.oracle_state.phase = OracleSupervisorPhase::Idle;
-            self.oracle_state.last_status = Some(message.clone());
-            if matches!(result.kind, OracleRequestKind::UserTurn) {
-                self.complete_pending_oracle_turn(result.oracle_thread_id, &message)
-                    .await;
-            } else {
-                self.append_oracle_agent_turn(result.oracle_thread_id, &message)
-                    .await;
-            }
-            self.chat_widget.add_error_message(message);
-            self.persist_active_oracle_binding();
-            return Ok(());
-        };
-        let directory = self.oracle_directory_snapshot(result.oracle_thread_id, query.as_deref());
-        if let Some(binding) = self.oracle_state.bindings.get_mut(&result.oracle_thread_id) {
-            binding.automatic_context_followups =
-                binding.automatic_context_followups.saturating_add(1);
-        }
-        self.oracle_state.automatic_context_followups = self
-            .oracle_state
-            .automatic_context_followups
-            .saturating_add(1);
-        self.oracle_state.last_status = Some(match &query {
-            Some(query) => format!("Oracle searched destinations for `{query}`."),
-            None => "Oracle listed available destinations.".to_string(),
-        });
-        let context_prompt = build_context_prompt(
-            &self.oracle_state,
-            &[query
-                .map(|value| format!("search_destinations:{value}"))
-                .unwrap_or_else(|| "list_destinations".to_string())],
-            &directory,
-        );
-        self.start_oracle_run(OracleRunRequest {
-            oracle_thread_id: result.oracle_thread_id,
-            kind: result.kind,
-            session_slug: result.requested_slug.clone(),
-            prompt: context_prompt.clone(),
-            requested_prompt: context_prompt,
-            source_user_text: None,
-            files: Vec::new(),
-            workspace_cwd: self.chat_widget.config_ref().cwd.to_path_buf(),
-            oracle_repo,
-            followup_session: self.oracle_followup_session_for_thread(result.oracle_thread_id),
-            model: self.oracle_state.model,
-            browser_model_strategy: self.oracle_browser_model_strategy().to_string(),
-            browser_model_label: Some(self.oracle_state.model.browser_label().to_string()),
-            requires_control: true,
-            repair_attempt: 0,
-            transport_retry_attempt: 0,
-        })?;
-        Ok(())
-    }
     async fn maybe_process_pending_oracle_checkpoints(
         &mut self,
         app_server: &mut AppServerSession,
@@ -7548,6 +7432,10 @@ impl App {
                 }
                 ThreadBufferedEvent::FeedbackSubmission(event) => {
                     self.enqueue_thread_feedback_event(thread_id, event).await;
+                }
+                ThreadBufferedEvent::OracleWorkflowEvent(event) => {
+                    self.enqueue_thread_oracle_workflow_event(thread_id, event)
+                        .await;
                 }
             }
         }
@@ -11334,6 +11222,9 @@ impl App {
             ThreadBufferedEvent::FeedbackSubmission(event) => {
                 self.handle_feedback_thread_event(event);
             }
+            ThreadBufferedEvent::OracleWorkflowEvent(event) => {
+                self.handle_oracle_workflow_thread_event(event);
+            }
         }
         if needs_refresh {
             self.refresh_status_line();
@@ -11353,6 +11244,9 @@ impl App {
             }
             ThreadBufferedEvent::FeedbackSubmission(event) => {
                 self.handle_feedback_thread_event(event);
+            }
+            ThreadBufferedEvent::OracleWorkflowEvent(event) => {
+                self.handle_oracle_workflow_thread_event(event);
             }
         }
     }
@@ -16521,6 +16415,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
         app.oracle_state.active_run_id = Some("oracle-run-terminal-reply".to_string());
@@ -16587,6 +16484,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
         app.oracle_state.active_run_id = Some("oracle-run-terminal-reply-new-id".to_string());
@@ -16658,6 +16558,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
         app.oracle_state.active_run_id = Some("oracle-run-invalid-replacement".to_string());
@@ -16888,6 +16791,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -17143,6 +17049,9 @@ guardian_approval = true
             ],
             status: TurnStatus::Completed,
             error: None,
+            started_at: None,
+            completed_at: None,
+            duration_ms: None,
         };
 
         app.apply_refreshed_snapshot_thread(
@@ -17222,6 +17131,8 @@ guardian_approval = true
             "the resumed oracle reply should render even if active_thread_id lags behind the widget"
         );
     }
+
+    #[tokio::test]
     async fn oracle_destination_task_uses_destination_thread_model_not_oracle_display_label()
     -> Result<()> {
         let mut app = make_test_app().await;
@@ -17307,6 +17218,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -17400,6 +17314,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -17508,6 +17425,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -17599,6 +17519,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
         assert!(app.oracle_state.accept_user_turn_workflow_replacement);
@@ -17714,6 +17637,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
         assert!(app.oracle_state.accept_user_turn_workflow_replacement);
@@ -17781,6 +17707,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -17846,6 +17775,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -17913,6 +17845,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -18005,6 +17940,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -18039,6 +17977,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -18527,6 +18468,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
@@ -19218,6 +19162,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
         app.oracle_state.active_run_id = Some("oracle-run-replacement-ask-user".to_string());
@@ -20283,6 +20230,9 @@ guardian_approval = true
                 }],
                 status: TurnStatus::InProgress,
                 error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
             });
         }
 
