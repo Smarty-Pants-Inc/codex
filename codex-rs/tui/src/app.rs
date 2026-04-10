@@ -10065,7 +10065,11 @@ impl App {
                 if self.active_thread_id.is_some() {
                     self.chat_widget.start_notify_workspace_owner();
                     if let Err(err) = self
-                        .submit_active_thread_op(app_server, Op::SendAddCreditsNudgeEmail.into())
+                        .submit_active_thread_op(
+                            None,
+                            app_server,
+                            Op::SendAddCreditsNudgeEmail.into(),
+                        )
                         .await
                     {
                         self.chat_widget
