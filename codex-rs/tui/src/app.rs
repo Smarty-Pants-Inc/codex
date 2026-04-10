@@ -23190,6 +23190,8 @@ guardian_approval = true
             feedback: app.feedback.clone(),
             is_first_run: false,
             status_account_display: app.chat_widget.status_account_display().cloned(),
+            initial_workspace_role: app.chat_widget.current_workspace_role(),
+            initial_is_workspace_owner: app.chat_widget.current_is_workspace_owner(),
             initial_plan_type: app.chat_widget.current_plan_type(),
             model: Some(app.chat_widget.current_model().to_string()),
             startup_tooltip_override: None,
