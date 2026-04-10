@@ -152,9 +152,30 @@ pub async fn find_thread_path_by_name_str(
     codex_home: &Path,
     name: &str,
 ) -> std::io::Result<Option<PathBuf>> {
-    Ok(find_thread_meta_by_name_str(codex_home, name)
-        .await?
-        .map(|(path, _)| path))
+    let name = name.trim();
+    if name.is_empty() {
+        return Ok(None);
+    }
+    let path = session_index_path(codex_home);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let name = name.to_string();
+    let thread_ids =
+        tokio::task::spawn_blocking(move || scan_index_from_end_thread_ids_by_name(&path, &name))
+            .await
+            .map_err(std::io::Error::other)??;
+
+    for thread_id in thread_ids {
+        if let Some(path) =
+            super::list::find_thread_path_by_id_str(codex_home, &thread_id.to_string()).await?
+        {
+            return Ok(Some(path));
+        }
+    }
+
+    Ok(None)
 }
 
 fn session_index_path(codex_home: &Path) -> PathBuf {
@@ -166,14 +187,6 @@ fn scan_index_from_end_by_id(
     thread_id: &ThreadId,
 ) -> std::io::Result<Option<SessionIndexEntry>> {
     scan_index_from_end(path, |entry| entry.id == *thread_id)
-}
-
-#[cfg(test)]
-fn scan_index_from_end_by_name(
-    path: &Path,
-    name: &str,
-) -> std::io::Result<Option<SessionIndexEntry>> {
-    scan_index_from_end(path, |entry| entry.thread_name == name)
 }
 
 fn scan_index_from_end_thread_ids_by_name(
