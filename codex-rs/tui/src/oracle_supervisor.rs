@@ -1,6 +1,6 @@
+use std::path::Component;
 use std::path::Path;
 use std::path::PathBuf;
-use std::path::Component;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -60,6 +60,8 @@ pub(crate) struct OracleRunRequest {
     pub(crate) kind: OracleRequestKind,
     pub(crate) session_slug: String,
     pub(crate) prompt: String,
+    pub(crate) files: Vec<String>,
+    pub(crate) workspace_cwd: PathBuf,
     pub(crate) oracle_repo: PathBuf,
     pub(crate) followup_session: Option<String>,
 }
@@ -101,7 +103,7 @@ impl OracleSupervisorState {
     pub(crate) fn status_message(&self) -> String {
         let enabled = self
             .enabled_thread_id
-            .map_or("off".to_string(), |id| format!("on for {}", id.to_string()));
+            .map_or("off".to_string(), |id| format!("on for {id}"));
         let owner = self
             .owner_thread_id
             .map(|id| id.to_string())
@@ -218,9 +220,7 @@ fn oracle_sessions_dir() -> Option<PathBuf> {
 
 async fn resolve_oracle_session_id(requested_slug: &str) -> Option<String> {
     let normalized = normalize_oracle_slug(requested_slug)?;
-    let Some(sessions_dir) = oracle_sessions_dir() else {
-        return None;
-    };
+    let sessions_dir = oracle_sessions_dir()?;
 
     let direct_meta_path = sessions_dir.join(&normalized).join("meta.json");
     if fs::try_exists(&direct_meta_path).await.ok()? {
@@ -380,8 +380,12 @@ pub(crate) fn orchestrator_developer_instructions() -> String {
 pub(crate) fn find_oracle_repo(start: &Path) -> Option<PathBuf> {
     start
         .ancestors()
-        .map(|dir| dir.join("external").join("oracle"))
-        .find(|path| path.join("package.json").exists())
+        .find_map(|dir| {
+            ["forks/oracle", "external/oracle"]
+                .into_iter()
+                .map(|suffix| dir.join(suffix))
+                .find(|path| path.join("package.json").exists())
+        })
 }
 
 fn truncate_context(text: &str) -> String {
@@ -444,7 +448,10 @@ async fn read_workspace_file(cwd: &Path, file_spec: &str) -> String {
     let workspace_root = match fs::canonicalize(cwd).await {
         Ok(path) => path,
         Err(error) => {
-            return format!("Workspace root {} could not be resolved: {error}", cwd.display());
+            return format!(
+                "Workspace root {} could not be resolved: {error}",
+                cwd.display()
+            );
         }
     };
     match fs::canonicalize(&path).await {
@@ -577,7 +584,12 @@ pub(crate) async fn run_oracle(request: OracleRunRequest) -> Result<OracleRunRes
     let output_path = std::env::temp_dir().join(format!("{}.md", request.session_slug));
     let use_true_headless = std::env::var("CODEX_ORACLE_TRUE_HEADLESS")
         .ok()
-        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes"
+            )
+        })
         .unwrap_or(false);
     let mut command = Command::new("pnpm");
     command
@@ -600,6 +612,9 @@ pub(crate) async fn run_oracle(request: OracleRunRequest) -> Result<OracleRunRes
         .arg("--prompt")
         .arg(&request.prompt)
         .current_dir(&request.oracle_repo);
+    for file in &request.files {
+        command.arg("--file").arg(file);
+    }
     if use_true_headless {
         command.arg("--browser-headless");
     } else if cfg!(target_os = "macos") {
@@ -638,7 +653,7 @@ pub(crate) async fn run_oracle(request: OracleRunRequest) -> Result<OracleRunRes
     })
 }
 
-fn parse_oracle_response(raw: &str) -> OracleResponse {
+pub(crate) fn parse_oracle_response(raw: &str) -> OracleResponse {
     let candidate = extract_json(raw).unwrap_or_else(|| raw.trim().to_string());
     if let Ok(parsed) = serde_json::from_str::<OracleJson>(&candidate) {
         let action = match parsed
@@ -756,7 +771,7 @@ mod tests {
                 "../secret.txt".to_string(),
                 "glob:../**/*.txt".to_string(),
             ],
-            None,
+            /*orchestrator_summary*/ None,
         )
         .await;
 
@@ -776,7 +791,12 @@ mod tests {
         std::fs::write(&outside_file, "secret\n").expect("write");
         std::os::unix::fs::symlink(&outside_file, &linked).expect("symlink");
 
-        let resolved = resolve_context_requests(temp.path(), &["linked.txt".to_string()], None).await;
+        let resolved = resolve_context_requests(
+            temp.path(),
+            &["linked.txt".to_string()],
+            /*orchestrator_summary*/ None,
+        )
+        .await;
 
         assert!(resolved.contains("resolves outside the workspace"));
     }
@@ -796,5 +816,18 @@ mod tests {
             normalize_oracle_slug("codex-oracle-019d374d-1774749385364").as_deref(),
             Some("codex-oracle-019d374d-1774749385")
         );
+    }
+
+    #[test]
+    fn find_oracle_repo_prefers_forks_checkout() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let forks = temp.path().join("forks").join("oracle");
+        let external = temp.path().join("external").join("oracle");
+        std::fs::create_dir_all(&forks).expect("mkdir forks");
+        std::fs::create_dir_all(&external).expect("mkdir external");
+        std::fs::write(forks.join("package.json"), "{}\n").expect("write forks package");
+        std::fs::write(external.join("package.json"), "{}\n").expect("write external package");
+
+        assert_eq!(find_oracle_repo(temp.path()).as_deref(), Some(forks.as_path()));
     }
 }

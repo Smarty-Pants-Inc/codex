@@ -133,6 +133,7 @@ mod model_migration;
 mod multi_agents;
 mod notifications;
 pub(crate) mod onboarding;
+mod oracle_broker;
 mod oracle_supervisor;
 mod oss_selection;
 mod pager_overlay;
