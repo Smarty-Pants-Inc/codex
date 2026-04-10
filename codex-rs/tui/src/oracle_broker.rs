@@ -26,6 +26,7 @@ use tokio::time::timeout;
 const SUPERVISOR_RECOVERY_GRACE_PERIOD: Duration = Duration::from_secs(10);
 const SUPERVISOR_FOLLOWUP_RECOVERY_GRACE_PERIOD: Duration = Duration::from_secs(90);
 const ORACLE_BROKER_ABORT_GRACE_PERIOD: Duration = Duration::from_secs(2);
+const ORACLE_BROKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 #[cfg(unix)]
 fn terminate_process_group(process_group_id: u32) -> io::Result<()> {
@@ -86,19 +87,26 @@ pub(crate) struct OracleBrokerRequest {
     pub(crate) model: String,
     pub(crate) browser_model_strategy: String,
     pub(crate) browser_model_label: Option<String>,
+    pub(crate) browser_thinking_time: Option<String>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 pub(crate) struct OracleBrokerResponse {
     #[serde(rename = "sessionId")]
     pub(crate) session_id: Option<String>,
+    #[serde(rename = "conversationId")]
+    pub(crate) conversation_id: Option<String>,
+    pub(crate) title: Option<String>,
     pub(crate) output: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct OracleSessionMeta {
     id: String,
+    #[serde(rename = "promptPreview")]
+    prompt_preview: Option<String>,
     status: Option<String>,
+    browser: Option<OracleSessionMetaBrowser>,
     response: Option<OracleSessionMetaResponse>,
 }
 
@@ -106,6 +114,17 @@ struct OracleSessionMeta {
 struct OracleSessionMetaResponse {
     #[serde(rename = "assistantOutput")]
     assistant_output: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OracleSessionMetaBrowser {
+    runtime: Option<OracleSessionMetaBrowserRuntime>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OracleSessionMetaBrowserRuntime {
+    #[serde(rename = "conversationId")]
+    conversation_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -151,6 +170,11 @@ struct OracleBrokerWireRequest {
     browser_model_strategy: String,
     #[serde(rename = "browserModelLabel", skip_serializing_if = "Option::is_none")]
     browser_model_label: Option<String>,
+    #[serde(
+        rename = "browserThinkingTime",
+        skip_serializing_if = "Option::is_none"
+    )]
+    browser_thinking_time: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -261,6 +285,28 @@ impl OracleBrokerClient {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_hanging_test_client() -> Self {
+        let (tx, mut rx) = mpsc::channel(1);
+        let broker_task = tokio::spawn(async move {
+            while let Some(command) = rx.recv().await {
+                match command {
+                    BrokerCommand::Request { .. } => std::future::pending::<()>().await,
+                    BrokerCommand::Shutdown { reply } => {
+                        let _ = reply.send(());
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            tx,
+            abort_handle: broker_task.abort_handle(),
+            transport_alive: Arc::new(AtomicBool::new(true)),
+            process_group_id: None,
+        }
+    }
+
     pub(crate) async fn request(
         &self,
         request: OracleBrokerRequest,
@@ -278,6 +324,7 @@ impl OracleBrokerClient {
             model: request.model,
             browser_model_strategy: request.browser_model_strategy,
             browser_model_label: request.browser_model_label,
+            browser_thinking_time: request.browser_thinking_time,
         })
         .map_err(|error| format!("failed to serialize Oracle broker request: {error}"))?;
         if self
@@ -307,27 +354,41 @@ impl OracleBrokerClient {
         };
         tokio::pin!(recv_result);
         tokio::pin!(recovery_result);
-        tokio::select! {
-            result = &mut recv_result => {
-                prefer_recovered_supervisor_response_with_timeout(
-                    result,
-                    recovery_session_slug.as_str(),
-                    await_recoverable_supervisor_response(
+        let request_result = tokio::time::timeout(oracle_broker_request_timeout(), async {
+            tokio::select! {
+                result = &mut recv_result => {
+                    prefer_recovered_supervisor_response_with_timeout(
+                        result,
                         recovery_session_slug.as_str(),
-                        recovery_followup_session.as_deref(),
-                    ),
-                    recovery_grace_period,
-                )
-                .await
-            },
-            recovered = &mut recovery_result => {
-                tracing::warn!(
-                    session_slug = %recovery_session_slug,
-                    followup_session = recovery_followup_session.as_deref(),
-                    "recovered Oracle broker response from persisted session metadata; resetting broker transport"
-                );
+                        await_recoverable_supervisor_response(
+                            recovery_session_slug.as_str(),
+                            recovery_followup_session.as_deref(),
+                        ),
+                        recovery_grace_period,
+                    )
+                    .await
+                },
+                recovered = &mut recovery_result => {
+                    tracing::warn!(
+                        session_slug = %recovery_session_slug,
+                        followup_session = recovery_followup_session.as_deref(),
+                        "recovered Oracle broker response from persisted session metadata; resetting broker transport"
+                    );
+                    self.abort();
+                    Ok(recovered)
+                }
+            }
+        })
+        .await;
+        match request_result {
+            Ok(result) => result,
+            Err(_) => {
+                let timeout = oracle_broker_request_timeout();
                 self.abort();
-                Ok(recovered)
+                Err(format!(
+                    "Oracle supervisor prompt timed out after {} without a response.",
+                    format_duration(timeout)
+                ))
             }
         }
     }
@@ -662,6 +723,22 @@ fn oracle_session_chain_ordinal(session_id: &str, session_slug: &str) -> Option<
     suffix.parse::<u32>().ok()
 }
 
+fn oracle_broker_request_timeout() -> Duration {
+    if cfg!(test) {
+        Duration::from_millis(50)
+    } else {
+        ORACLE_BROKER_REQUEST_TIMEOUT
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration.as_secs() > 0 {
+        format!("{} seconds", duration.as_secs())
+    } else {
+        format!("{} ms", duration.as_millis())
+    }
+}
+
 async fn read_recoverable_supervisor_response_from_dir(
     sessions_dir: &Path,
     session_slug: &str,
@@ -710,6 +787,11 @@ async fn read_recoverable_supervisor_response_from_dir(
         };
         let response = OracleBrokerResponse {
             session_id: Some(meta.id),
+            conversation_id: meta
+                .browser
+                .and_then(|browser| browser.runtime)
+                .and_then(|runtime| runtime.conversation_id),
+            title: meta.prompt_preview,
             output: Some(output),
         };
         let replace = recovered
@@ -827,12 +909,16 @@ mod tests {
         let recovered = prefer_recovered_supervisor_response_with_timeout(
             Ok(OracleBrokerResponse {
                 session_id: Some("oracle-root-2".to_string()),
+                conversation_id: None,
+                title: None,
                 output: Some("intermediate".to_string()),
             }),
             "oracle-root",
             async {
                 OracleBrokerResponse {
                     session_id: Some("oracle-root-2".to_string()),
+                    conversation_id: None,
+                    title: None,
                     output: Some("final".to_string()),
                 }
             },
@@ -849,6 +935,8 @@ mod tests {
         let recovered = prefer_recovered_supervisor_response_with_timeout(
             Ok(OracleBrokerResponse {
                 session_id: Some("oracle-root-2".to_string()),
+                conversation_id: None,
+                title: None,
                 output: Some("transport".to_string()),
             }),
             "oracle-root",
@@ -856,6 +944,8 @@ mod tests {
                 sleep(Duration::from_millis(20)).await;
                 OracleBrokerResponse {
                     session_id: Some("oracle-root-2".to_string()),
+                    conversation_id: None,
+                    title: None,
                     output: Some("final".to_string()),
                 }
             },
@@ -876,6 +966,8 @@ mod tests {
                 sleep(Duration::from_millis(2)).await;
                 OracleBrokerResponse {
                     session_id: Some("oracle-root-2".to_string()),
+                    conversation_id: None,
+                    title: None,
                     output: Some("final".to_string()),
                 }
             },
@@ -897,6 +989,8 @@ mod tests {
                 sleep(Duration::from_millis(40)).await;
                 OracleBrokerResponse {
                     session_id: Some("oracle-root-6".to_string()),
+                    conversation_id: None,
+                    title: None,
                     output: Some("late-final".to_string()),
                 }
             },
@@ -914,12 +1008,16 @@ mod tests {
         let recovered = prefer_recovered_supervisor_response_with_timeout(
             Ok(OracleBrokerResponse {
                 session_id: Some("oracle-root-3".to_string()),
+                conversation_id: None,
+                title: None,
                 output: Some("transport".to_string()),
             }),
             "oracle-root",
             async {
                 OracleBrokerResponse {
                     session_id: Some("oracle-root-2".to_string()),
+                    conversation_id: None,
+                    title: None,
                     output: Some("older".to_string()),
                 }
             },
@@ -939,6 +1037,29 @@ mod tests {
 
         broker.abort();
 
+        assert!(!broker.is_usable());
+    }
+
+    #[tokio::test]
+    async fn request_times_out_when_supervisor_broker_never_replies() {
+        let broker = OracleBrokerClient::new_hanging_test_client();
+
+        let err = broker
+            .request(super::OracleBrokerRequest {
+                prompt: "hello".to_string(),
+                session_slug: "oracle-root".to_string(),
+                followup_session: None,
+                files: Vec::new(),
+                cwd: std::env::temp_dir(),
+                model: "gpt-5.4".to_string(),
+                browser_model_strategy: "select".to_string(),
+                browser_model_label: Some("Thinking 5.4".to_string()),
+                browser_thinking_time: None,
+            })
+            .await
+            .expect_err("hanging broker should time out");
+
+        assert!(err.contains("timed out"));
         assert!(!broker.is_usable());
     }
 }
