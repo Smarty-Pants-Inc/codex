@@ -54,13 +54,13 @@ impl OracleCommand {
             "off" if parts.len() == 1 => Ok(Self::Off),
             "status" | "info" if parts.len() == 1 => Ok(Self::Status),
             "model" if parts.len() == 1 => Ok(Self::Model(None)),
-            "model" if parts.len() == 2 => OracleModelPreset::parse(parts[1])
+            "model" => OracleModelPreset::parse_parts(&parts[1..])
                 .map(|model| Self::Model(Some(model)))
                 .ok_or_else(|| {
-                    "Usage: /oracle [browse|new|attach <conversation_id>|on|off|info|model [pro|thinking]]".to_string()
+                    "Usage: /oracle [browse|new|attach <conversation_id>|on|off|info|model [pro [standard|extended]|thinking]]".to_string()
                 }),
             _ => Err(
-                "Usage: /oracle [browse|new|attach <conversation_id>|on|off|info|model [pro|thinking]]"
+                "Usage: /oracle [browse|new|attach <conversation_id>|on|off|info|model [pro [standard|extended]|thinking]]"
                     .to_string(),
             ),
         }
@@ -70,36 +70,82 @@ impl OracleCommand {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OracleModelPreset {
     Pro,
+    ProExtended,
     Thinking,
 }
 
 impl OracleModelPreset {
     fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "pro" | "gpt-5.4-pro" => Some(Self::Pro),
+            "pro" | "pro-standard" | "pro_standard" | "gpt-5.4-pro" => Some(Self::Pro),
+            "pro-extended" | "pro_extended" => Some(Self::ProExtended),
             "thinking" | "gpt-5.4" => Some(Self::Thinking),
+            _ => None,
+        }
+    }
+
+    fn parse_parts(parts: &[&str]) -> Option<Self> {
+        match parts {
+            [] => None,
+            [model] => Self::parse(model),
+            [model, level] => match model.trim().to_ascii_lowercase().as_str() {
+                "pro" | "gpt-5.4-pro" => match level.trim().to_ascii_lowercase().as_str() {
+                    "standard" => Some(Self::Pro),
+                    "extended" => Some(Self::ProExtended),
+                    _ => None,
+                },
+                _ => None,
+            },
             _ => None,
         }
     }
 
     pub(crate) fn model_id(self) -> &'static str {
         match self {
-            Self::Pro => "gpt-5.4-pro",
+            Self::Pro | Self::ProExtended => "gpt-5.4-pro",
             Self::Thinking => "gpt-5.4",
         }
     }
 
     pub(crate) fn browser_label(self) -> &'static str {
         match self {
-            Self::Pro => "GPT-5.4 Pro",
+            Self::Pro | Self::ProExtended => "GPT-5.4 Pro",
+            Self::Thinking => "Thinking 5.4",
+        }
+    }
+
+    pub(crate) fn picker_label(self) -> &'static str {
+        match self {
+            Self::Pro => "GPT-5.4 Pro (Standard)",
+            Self::ProExtended => "GPT-5.4 Pro (Extended)",
             Self::Thinking => "Thinking 5.4",
         }
     }
 
     pub(crate) fn display_name(self) -> &'static str {
         match self {
-            Self::Pro => "gpt-5.4-pro",
+            Self::Pro => "gpt-5.4-pro (Standard)",
+            Self::ProExtended => "gpt-5.4-pro (Extended)",
             Self::Thinking => "gpt-5.4 (Thinking 5.4)",
+        }
+    }
+
+    pub(crate) fn browser_thinking_time(self) -> Option<&'static str> {
+        match self {
+            Self::Pro => Some("standard"),
+            Self::ProExtended => Some("extended"),
+            Self::Thinking => None,
+        }
+    }
+
+    pub(crate) fn is_pro(self) -> bool {
+        matches!(self, Self::Pro | Self::ProExtended)
+    }
+
+    pub(crate) fn toggle_family(self) -> Self {
+        match self {
+            Self::Pro | Self::ProExtended => Self::Thinking,
+            Self::Thinking => Self::Pro,
         }
     }
 
@@ -288,15 +334,6 @@ pub(crate) enum OracleParticipantVisibility {
     Hidden,
 }
 
-impl OracleParticipantVisibility {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::Visible => "visible",
-            Self::Hidden => "hidden",
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct OracleRoutingParticipant {
     pub(crate) address: String,
@@ -309,29 +346,6 @@ pub(crate) struct OracleRoutingParticipant {
     pub(crate) route_completions: bool,
     pub(crate) route_closures: bool,
     pub(crate) last_task: Option<String>,
-}
-
-impl OracleRoutingParticipant {
-    pub(crate) fn summary_line(&self) -> String {
-        let thread = self
-            .thread_id
-            .map(|id| id.to_string())
-            .unwrap_or_else(|| "no-thread".to_string());
-        let title = self.title.as_deref().unwrap_or("untitled");
-        let kind = self.kind.as_deref().unwrap_or("destination");
-        let role = self.role.as_deref().unwrap_or(kind);
-        let mut summary = format!(
-            "- {} [{} {}] -> {} ({title})",
-            self.address,
-            kind,
-            self.visibility.label(),
-            thread,
-        );
-        if !role.eq_ignore_ascii_case(kind) {
-            summary.push_str(format!(" role={role}").as_str());
-        }
-        summary
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -410,6 +424,7 @@ pub(crate) struct OracleRunRequest {
     pub(crate) model: OracleModelPreset,
     pub(crate) browser_model_strategy: String,
     pub(crate) browser_model_label: Option<String>,
+    pub(crate) browser_thinking_time: Option<String>,
     pub(crate) requires_control: bool,
     pub(crate) repair_attempt: u8,
     pub(crate) transport_retry_attempt: u8,
@@ -1568,18 +1583,14 @@ fn directive_targets_delegate(directive: &OracleControlDirective) -> bool {
                 && directive
                     .to
                     .as_deref()
-                    .map(|target| {
-                        matches!(
-                            target.to_ascii_lowercase().as_str(),
-                            "orchestrator" | "worker" | "context"
-                        ) || target.to_ascii_lowercase().starts_with("worker:")
-                    })
+                    .map(|target| target.eq_ignore_ascii_case("orchestrator"))
                     .unwrap_or_else(|| {
                         directive.participants.iter().any(|participant| {
-                            matches!(
-                                participant.kind.as_deref(),
-                                Some("orchestrator") | Some("worker") | Some("context")
-                            )
+                            participant.address.eq_ignore_ascii_case("orchestrator")
+                                || matches!(
+                                    participant.kind.as_deref(),
+                                    Some("orchestrator")
+                                )
                         })
                     })
         }
@@ -1674,7 +1685,7 @@ fn legacy_control_rejection_message(directive: &OracleControlDirective) -> Optio
             if !directive_targets_human(directive) && !directive_targets_delegate(directive) =>
         {
             Some(
-                "Legacy Oracle routing is missing a supported destination. Use `handoff` for orchestrator work or `reply` for the human."
+                "Legacy Oracle routing beyond the orchestrator is no longer supported. Use `handoff` for orchestrator work or `reply` for the human."
                     .to_string(),
             )
         }
@@ -1869,6 +1880,14 @@ mod tests {
             Ok(OracleCommand::Model(Some(OracleModelPreset::Pro)))
         );
         assert_eq!(
+            OracleCommand::parse("model pro standard"),
+            Ok(OracleCommand::Model(Some(OracleModelPreset::Pro)))
+        );
+        assert_eq!(
+            OracleCommand::parse("model pro extended"),
+            Ok(OracleCommand::Model(Some(OracleModelPreset::ProExtended)))
+        );
+        assert_eq!(
             OracleCommand::parse("model thinking"),
             Ok(OracleCommand::Model(Some(OracleModelPreset::Thinking)))
         );
@@ -2057,7 +2076,7 @@ mod tests {
         assert!(
             parsed
                 .message_for_user
-                .contains("routing is missing a supported destination")
+                .contains("routing beyond the orchestrator is no longer supported")
         );
     }
 
@@ -2073,6 +2092,36 @@ mod tests {
             parsed
                 .message_for_user
                 .contains("routing discovery is no longer supported")
+        );
+    }
+
+    #[test]
+    fn parse_oracle_response_rejects_worker_send_routing() {
+        let parsed = parse_oracle_response(&fenced_oracle_control(
+            r#"{"op":"send","to":"worker:searcher","message":"Do the work quietly"}"#,
+        ));
+
+        assert_eq!(parsed.action, OracleAction::Reply);
+        assert!(parsed.task_for_orchestrator.is_none());
+        assert!(
+            parsed
+                .message_for_user
+                .contains("routing beyond the orchestrator is no longer supported")
+        );
+    }
+
+    #[test]
+    fn parse_oracle_response_rejects_worker_spawn_routing() {
+        let parsed = parse_oracle_response(&fenced_oracle_control(
+            r#"{"op":"spawn","participants":["worker:searcher"],"message":"Do the work quietly"}"#,
+        ));
+
+        assert_eq!(parsed.action, OracleAction::Reply);
+        assert!(parsed.task_for_orchestrator.is_none());
+        assert!(
+            parsed
+                .message_for_user
+                .contains("routing beyond the orchestrator is no longer supported")
         );
     }
 
@@ -2756,8 +2805,22 @@ mod tests {
     fn oracle_model_preset_maps_to_expected_browser_values() {
         assert_eq!(OracleModelPreset::Pro.model_id(), "gpt-5.4-pro");
         assert_eq!(OracleModelPreset::Pro.browser_label(), "GPT-5.4 Pro");
+        assert_eq!(
+            OracleModelPreset::Pro.browser_thinking_time(),
+            Some("standard")
+        );
+        assert_eq!(OracleModelPreset::ProExtended.model_id(), "gpt-5.4-pro");
+        assert_eq!(
+            OracleModelPreset::ProExtended.browser_label(),
+            "GPT-5.4 Pro"
+        );
+        assert_eq!(
+            OracleModelPreset::ProExtended.browser_thinking_time(),
+            Some("extended")
+        );
         assert_eq!(OracleModelPreset::Thinking.model_id(), "gpt-5.4");
         assert_eq!(OracleModelPreset::Thinking.browser_label(), "Thinking 5.4");
+        assert_eq!(OracleModelPreset::Thinking.browser_thinking_time(), None);
     }
 
     #[test]
@@ -2769,6 +2832,10 @@ mod tests {
         assert_eq!(
             OracleModelPreset::resolve_default(Some("gpt-5.4-pro")),
             OracleModelPreset::Pro
+        );
+        assert_eq!(
+            OracleModelPreset::resolve_default(Some("pro-extended")),
+            OracleModelPreset::ProExtended
         );
         assert_eq!(
             OracleModelPreset::resolve_default(Some("bogus")),

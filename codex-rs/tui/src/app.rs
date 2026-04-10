@@ -55,12 +55,13 @@ use crate::oracle_supervisor::ORACLE_CONTROL_SCHEMA_VERSION;
 use crate::oracle_supervisor::OracleAction;
 use crate::oracle_supervisor::OracleCommand;
 use crate::oracle_supervisor::OracleControlDirective;
+#[cfg(test)]
 use crate::oracle_supervisor::OracleControlOp;
-use crate::oracle_supervisor::OracleControlParticipant;
 use crate::oracle_supervisor::OracleModelPreset;
 use crate::oracle_supervisor::OracleParticipantVisibility;
 use crate::oracle_supervisor::OracleRequestKind;
 use crate::oracle_supervisor::OracleRoutedThreadOwner;
+#[cfg(test)]
 use crate::oracle_supervisor::OracleRoutingParticipant;
 use crate::oracle_supervisor::OracleRunRequest;
 use crate::oracle_supervisor::OracleRunResult;
@@ -185,7 +186,7 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(test)]
+use std::sync::LazyLock;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -216,6 +217,32 @@ use self::pending_interactive_replay::PendingInteractiveReplayState;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
 const THREAD_EVENT_CHANNEL_CAPACITY: usize = 32768;
+static ORACLE_RUN_REMOTE_METADATA: LazyLock<
+    StdMutex<HashMap<String, (Option<String>, Option<String>)>>,
+> = LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+fn remember_oracle_run_remote_metadata(
+    run_id: &str,
+    conversation_id: Option<String>,
+    remote_title: Option<String>,
+) {
+    let remote_title = remote_title.filter(|title| !title.trim().is_empty());
+    if conversation_id.is_none() && remote_title.is_none() {
+        return;
+    }
+    ORACLE_RUN_REMOTE_METADATA
+        .lock()
+        .expect("oracle run remote metadata")
+        .insert(run_id.to_string(), (conversation_id, remote_title));
+}
+
+fn take_oracle_run_remote_metadata(run_id: &str) -> (Option<String>, Option<String>) {
+    ORACLE_RUN_REMOTE_METADATA
+        .lock()
+        .expect("oracle run remote metadata")
+        .remove(run_id)
+        .unwrap_or((None, None))
+}
 
 enum ThreadInteractiveRequest {
     Approval(ApprovalRequest),
@@ -1240,7 +1267,9 @@ struct OracleTestBrokerHooks {
     list_thread_results: VecDeque<Result<Vec<OracleBrokerThreadEntry>, String>>,
     list_thread_delay: Option<Duration>,
     new_thread_results: VecDeque<Result<OracleBrokerThreadOpenResponse, String>>,
+    new_thread_delay: Option<Duration>,
     attach_thread_results: VecDeque<Result<OracleBrokerThreadOpenResponse, String>>,
+    attach_thread_delay: Option<Duration>,
     list_thread_calls: usize,
     list_thread_followup_sessions: Vec<Option<String>>,
     new_thread_calls: usize,
@@ -2095,7 +2124,12 @@ impl App {
         }
     }
 
-    fn clear_oracle_remote_metadata(&mut self, thread_id: ThreadId) {
+    fn merge_oracle_remote_metadata(
+        &mut self,
+        thread_id: ThreadId,
+        conversation_id: Option<String>,
+        remote_title: Option<String>,
+    ) {
         let binding = self
             .oracle_state
             .bindings
@@ -2104,8 +2138,12 @@ impl App {
                 phase: OracleSupervisorPhase::Idle,
                 ..Default::default()
             });
-        binding.conversation_id = None;
-        binding.remote_title = None;
+        if let Some(conversation_id) = conversation_id {
+            binding.conversation_id = Some(conversation_id);
+        }
+        if let Some(title) = remote_title.filter(|title| !title.trim().is_empty()) {
+            binding.remote_title = Some(title);
+        }
     }
 
     fn generate_oracle_workflow_id(thread_id: ThreadId) -> String {
@@ -2810,32 +2848,6 @@ impl App {
         }
     }
 
-    fn ensure_oracle_human_destination(&mut self, thread_id: ThreadId) {
-        let binding = self
-            .oracle_state
-            .bindings
-            .entry(thread_id)
-            .or_insert_with(|| OracleThreadBinding {
-                phase: OracleSupervisorPhase::Idle,
-                ..Default::default()
-            });
-        binding
-            .participants
-            .entry(ORACLE_HUMAN_DESTINATION.to_string())
-            .or_insert_with(|| OracleRoutingParticipant {
-                address: ORACLE_HUMAN_DESTINATION.to_string(),
-                thread_id: Some(thread_id),
-                title: Some("Human".to_string()),
-                kind: Some("human".to_string()),
-                role: Some("human".to_string()),
-                visibility: OracleParticipantVisibility::Visible,
-                owned_by_oracle: false,
-                route_completions: false,
-                route_closures: false,
-                last_task: None,
-            });
-    }
-
     fn refresh_routed_oracle_thread_owners(&mut self, oracle_thread_id: ThreadId) {
         self.oracle_state
             .routed_thread_owner
@@ -2863,121 +2875,6 @@ impl App {
         }
     }
 
-    fn resolve_oracle_routed_thread_owner(
-        &self,
-        thread_id: ThreadId,
-    ) -> Option<OracleRoutedThreadOwner> {
-        if let Some(owner) = self.oracle_state.routed_thread_owner.get(&thread_id) {
-            return Some(owner.clone());
-        }
-        for (oracle_thread_id, binding) in &self.oracle_state.bindings {
-            if let Some((address, _participant)) =
-                binding.participants.iter().find(|(_, participant)| {
-                    participant.thread_id == Some(thread_id)
-                        && (participant.route_completions || participant.route_closures)
-                })
-            {
-                return Some(OracleRoutedThreadOwner {
-                    oracle_thread_id: *oracle_thread_id,
-                    address: address.clone(),
-                });
-            }
-            if binding.orchestrator_thread_id == Some(thread_id) {
-                return Some(OracleRoutedThreadOwner {
-                    oracle_thread_id: *oracle_thread_id,
-                    address: ORACLE_ORCHESTRATOR_DESTINATION.to_string(),
-                });
-            }
-        }
-        if self.oracle_state.orchestrator_thread_id == Some(thread_id) {
-            return self.oracle_state.oracle_thread_id.map(|oracle_thread_id| {
-                OracleRoutedThreadOwner {
-                    oracle_thread_id,
-                    address: ORACLE_ORCHESTRATOR_DESTINATION.to_string(),
-                }
-            });
-        }
-        None
-    }
-
-    fn oracle_participant_visibility(
-        hint: Option<&str>,
-        default: OracleParticipantVisibility,
-    ) -> OracleParticipantVisibility {
-        match hint
-            .map(|value| value.trim().to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("hidden") => OracleParticipantVisibility::Hidden,
-            Some("visible") => OracleParticipantVisibility::Visible,
-            _ => default,
-        }
-    }
-
-    fn register_oracle_participant_thread(
-        &mut self,
-        oracle_thread_id: ThreadId,
-        address: String,
-        thread_id: ThreadId,
-        title: Option<String>,
-        kind: Option<String>,
-        role: Option<String>,
-        visibility: OracleParticipantVisibility,
-        owned_by_oracle: bool,
-        route_completions: bool,
-        route_closures: bool,
-    ) {
-        let binding = self
-            .oracle_state
-            .bindings
-            .entry(oracle_thread_id)
-            .or_insert_with(|| OracleThreadBinding {
-                phase: OracleSupervisorPhase::Idle,
-                ..Default::default()
-            });
-        let participant = binding
-            .participants
-            .entry(address.clone())
-            .or_insert_with(|| OracleRoutingParticipant {
-                address: address.clone(),
-                ..Default::default()
-            });
-        participant.thread_id = Some(thread_id);
-        if let Some(title) = title.clone() {
-            participant.title = Some(title);
-        }
-        if let Some(kind) = kind.clone() {
-            participant.kind = Some(kind);
-        }
-        if let Some(role) = role.clone() {
-            participant.role = Some(role);
-        }
-        participant.visibility = visibility;
-        participant.owned_by_oracle |= owned_by_oracle;
-        participant.route_completions = route_completions;
-        participant.route_closures = route_closures;
-        Self::sync_legacy_oracle_binding_fields(binding);
-        self.refresh_routed_oracle_thread_owners(oracle_thread_id);
-
-        if visibility == OracleParticipantVisibility::Visible && address != ORACLE_HUMAN_DESTINATION
-        {
-            self.upsert_agent_picker_thread(
-                thread_id,
-                title.or_else(|| Some(address.clone())),
-                role.or(kind),
-                /*is_closed*/ false,
-            );
-        } else if visibility == OracleParticipantVisibility::Hidden {
-            self.agent_navigation.remove(thread_id);
-        }
-
-        if self.oracle_state.oracle_thread_id == Some(oracle_thread_id)
-            && address == ORACLE_ORCHESTRATOR_DESTINATION
-        {
-            self.oracle_state.orchestrator_thread_id = Some(thread_id);
-        }
-    }
-
     fn find_oracle_thread_by_conversation_id(&self, conversation_id: &str) -> Option<ThreadId> {
         self.oracle_state
             .bindings
@@ -2997,7 +2894,16 @@ impl App {
             .unwrap_or_else(|| "Oracle".to_string())
     }
 
-    fn oracle_followup_session_candidate_thread_ids(&self) -> Vec<ThreadId> {
+    fn oracle_followup_session_anchor_thread_id(&self) -> Option<ThreadId> {
+        self.current_displayed_thread_id()
+            .filter(|thread_id| self.is_visible_oracle_thread(*thread_id))
+            .or(self.oracle_state.oracle_thread_id)
+    }
+
+    fn oracle_followup_session_candidate_thread_ids(
+        &self,
+        anchor_thread_id: Option<ThreadId>,
+    ) -> Vec<ThreadId> {
         let mut candidates = Vec::new();
         let mut seen = HashSet::new();
         let mut push_candidate = |thread_id: ThreadId| {
@@ -3006,6 +2912,9 @@ impl App {
             }
         };
 
+        if let Some(thread_id) = anchor_thread_id {
+            push_candidate(thread_id);
+        }
         if let Some(thread_id) = self.current_displayed_thread_id() {
             push_candidate(thread_id);
         }
@@ -3029,14 +2938,27 @@ impl App {
         candidates
     }
 
-    fn preferred_oracle_followup_session(&self) -> Option<String> {
-        self.oracle_followup_session_candidate_thread_ids()
+    fn preferred_oracle_followup_session_for_anchor(
+        &self,
+        anchor_thread_id: Option<ThreadId>,
+    ) -> Option<String> {
+        self.oracle_followup_session_candidate_thread_ids(anchor_thread_id)
             .into_iter()
             .find_map(|thread_id| self.oracle_followup_session_for_thread(thread_id))
     }
 
-    fn require_oracle_followup_session(&self) -> Result<String> {
-        self.preferred_oracle_followup_session().ok_or_else(|| {
+    fn preferred_oracle_followup_session(&self) -> Option<String> {
+        self.preferred_oracle_followup_session_for_anchor(
+            self.oracle_followup_session_anchor_thread_id(),
+        )
+    }
+
+    fn require_oracle_followup_session_for_anchor(
+        &self,
+        anchor_thread_id: Option<ThreadId>,
+    ) -> Result<String> {
+        self.preferred_oracle_followup_session_for_anchor(anchor_thread_id)
+            .ok_or_else(|| {
             color_eyre::eyre::eyre!(
                 "Oracle needs an attached local browser session before remote thread controls are available."
             )
@@ -3443,20 +3365,28 @@ impl App {
                     model: request.model.model_id().to_string(),
                     browser_model_strategy: request.browser_model_strategy.clone(),
                     browser_model_label: request.browser_model_label.clone(),
+                    browser_thinking_time: request.browser_thinking_time.clone(),
                 })
                 .await;
-            let result = broker_result.map(|response| OracleRunResult {
-                run_id: run_id.clone(),
-                oracle_thread_id,
-                kind,
-                requested_slug: session_slug.clone(),
-                session_id: response.session_id.unwrap_or(session_slug.clone()),
-                requested_prompt,
-                source_user_text,
-                files,
-                requires_control,
-                repair_attempt,
-                response: parse_oracle_response(response.output.as_deref().unwrap_or("")),
+            let result = broker_result.map(|response| {
+                remember_oracle_run_remote_metadata(
+                    run_id.as_str(),
+                    response.conversation_id,
+                    response.title,
+                );
+                OracleRunResult {
+                    run_id: run_id.clone(),
+                    oracle_thread_id,
+                    kind,
+                    requested_slug: session_slug.clone(),
+                    session_id: response.session_id.unwrap_or(session_slug.clone()),
+                    requested_prompt,
+                    source_user_text,
+                    files,
+                    requires_control,
+                    repair_attempt,
+                    response: parse_oracle_response(response.output.as_deref().unwrap_or("")),
+                }
             });
             match result {
                 Ok(result) => tx.send(AppEvent::OracleRunCompleted { result }),
@@ -3787,14 +3717,13 @@ impl App {
                     crate::session_log::log_oracle_run_interrupted(thread_id, &run_id, kind);
                     self.oracle_state.aborted_runs.insert(run_id);
                 }
-                // An interrupted browser run can leave the remote follow-up
-                // session in an unusable state. Force the next Oracle turn on
-                // this thread to start a fresh browser session, session slug
-                // family, and remote ChatGPT conversation binding instead of
-                // recovering against the aborted run.
+                // An interrupted browser run can leave the hidden follow-up
+                // session unusable. Drop the local session chain so the next
+                // Oracle turn reattaches cleanly, but preserve the remote
+                // conversation binding so restart/resume stays on the same
+                // ChatGPT thread.
                 self.set_oracle_thread_session_state(thread_id, None, None);
                 self.clear_oracle_thread_session_root_slug(thread_id);
-                self.clear_oracle_remote_metadata(thread_id);
                 self.oracle_state.automatic_context_followups = 0;
                 self.oracle_state.last_status = Some(message.clone());
                 if matches!(kind, OracleRequestKind::Checkpoint) {
@@ -4257,7 +4186,7 @@ impl App {
         if self.oracle_picker_show_info {
             format!(
                 "Model: {}  Phase: {}  Attached: {}  Remote: {}",
-                self.oracle_state.model.browser_label(),
+                self.oracle_state.model.picker_label(),
                 self.oracle_state.phase.description(),
                 attached_count,
                 remote_count,
@@ -4274,10 +4203,7 @@ impl App {
         include_new_thread: bool,
         search_enabled: bool,
     ) -> Line<'static> {
-        let next_model = match self.oracle_state.model {
-            OracleModelPreset::Pro => OracleModelPreset::Thinking,
-            OracleModelPreset::Thinking => OracleModelPreset::Pro,
-        };
+        let next_model = self.oracle_state.model.toggle_family();
         let mut spans = vec!["Hotkeys: ".dim().into()];
         if include_new_thread {
             spans.push(key_hint::plain(KeyCode::Char('n')).into());
@@ -4330,10 +4256,7 @@ impl App {
         {
             return false;
         }
-        let next_model = match self.oracle_state.model {
-            OracleModelPreset::Pro => OracleModelPreset::Thinking,
-            OracleModelPreset::Thinking => OracleModelPreset::Pro,
-        };
+        let next_model = self.oracle_state.model.toggle_family();
         let _ = self.set_oracle_model_preference(next_model).await;
         self.refresh_oracle_picker_if_open()
     }
@@ -4341,14 +4264,62 @@ impl App {
     fn open_oracle_model_popup(&mut self) {
         let items = [
             (
-                OracleModelPreset::Pro,
+                true,
                 "GPT-5.4 Pro",
-                "Best Oracle reasoning quality for slow, expensive supervisor turns.",
+                "Best Oracle reasoning quality. Press enter to choose Standard or Extended.",
             ),
             (
-                OracleModelPreset::Thinking,
+                false,
                 "Thinking 5.4",
                 "Faster, cheaper Oracle turns when you want a lighter pass.",
+            ),
+        ]
+        .into_iter()
+        .map(|(is_pro, name, description)| SelectionItem {
+            name: name.to_string(),
+            description: Some(description.to_string()),
+            is_current: if is_pro {
+                self.oracle_state.model.is_pro()
+            } else {
+                self.oracle_state.model == OracleModelPreset::Thinking
+            },
+            actions: vec![Box::new(move |tx| {
+                if is_pro {
+                    tx.send(AppEvent::OpenOracleProReasoningPopup);
+                } else {
+                    tx.send(AppEvent::ConfigureOracleMode {
+                        raw_command: "model thinking".to_string(),
+                    });
+                }
+            })],
+            dismiss_on_select: !is_pro,
+            ..Default::default()
+        })
+        .collect();
+
+        self.chat_widget.show_selection_view(SelectionViewParams {
+            title: Some("Oracle Model".to_string()),
+            subtitle: Some(format!(
+                "Current Oracle model: {}",
+                self.oracle_state.model.picker_label()
+            )),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            ..Default::default()
+        });
+    }
+
+    fn open_oracle_pro_reasoning_popup(&mut self) {
+        let items = [
+            (
+                OracleModelPreset::Pro,
+                "Standard",
+                "Use standard Pro thinking for the normal high-quality Oracle path.",
+            ),
+            (
+                OracleModelPreset::ProExtended,
+                "Extended",
+                "Use extended Pro thinking when Oracle should spend more time reasoning.",
             ),
         ]
         .into_iter()
@@ -4358,7 +4329,8 @@ impl App {
             is_current: self.oracle_state.model == model,
             actions: vec![Box::new(move |tx| {
                 let raw_command = match model {
-                    OracleModelPreset::Pro => "model pro",
+                    OracleModelPreset::Pro => "model pro standard",
+                    OracleModelPreset::ProExtended => "model pro extended",
                     OracleModelPreset::Thinking => "model thinking",
                 };
                 tx.send(AppEvent::ConfigureOracleMode {
@@ -4371,10 +4343,10 @@ impl App {
         .collect();
 
         self.chat_widget.show_selection_view(SelectionViewParams {
-            title: Some("Oracle Model".to_string()),
+            title: Some("Oracle Pro Thinking".to_string()),
             subtitle: Some(format!(
                 "Current Oracle model: {}",
-                self.oracle_state.model.display_name()
+                self.oracle_state.model.picker_label()
             )),
             footer_hint: Some(standard_popup_hint_line()),
             items,
@@ -4696,6 +4668,11 @@ impl App {
             model: self.oracle_state.model,
             browser_model_strategy: self.oracle_browser_model_strategy().to_string(),
             browser_model_label: Some(self.oracle_state.model.browser_label().to_string()),
+            browser_thinking_time: self
+                .oracle_state
+                .model
+                .browser_thinking_time()
+                .map(str::to_string),
             requires_control,
             repair_attempt: 0,
             transport_retry_attempt: 0,
@@ -4765,134 +4742,6 @@ impl App {
         }
         self.persist_active_oracle_binding();
         Ok(thread_id)
-    }
-
-    fn oracle_is_human_destination(address: &str) -> bool {
-        matches!(
-            address.trim().to_ascii_lowercase().as_str(),
-            "human" | "user"
-        )
-    }
-
-    fn oracle_is_orchestrator_destination(address: &str) -> bool {
-        address
-            .trim()
-            .eq_ignore_ascii_case(ORACLE_ORCHESTRATOR_DESTINATION)
-    }
-
-    fn parse_oracle_thread_destination(address: &str) -> Option<ThreadId> {
-        let raw = address.trim().strip_prefix("thread:")?;
-        ThreadId::from_string(raw).ok()
-    }
-
-    fn oracle_destination_hint<'a>(
-        directive: &'a OracleControlDirective,
-        address: &str,
-    ) -> Option<&'a OracleControlParticipant> {
-        directive.participants.iter().find(|participant| {
-            participant.address.eq_ignore_ascii_case(address)
-                || participant
-                    .kind
-                    .as_deref()
-                    .is_some_and(|kind| kind.eq_ignore_ascii_case(address))
-        })
-    }
-
-    fn oracle_next_generated_worker_address(&self, oracle_thread_id: ThreadId) -> String {
-        let next = self
-            .oracle_state
-            .bindings
-            .get(&oracle_thread_id)
-            .map(|binding| {
-                binding
-                    .participants
-                    .keys()
-                    .filter(|address| address.starts_with("worker:"))
-                    .count()
-                    + 1
-            })
-            .unwrap_or(1);
-        format!("worker:{next}")
-    }
-
-    fn oracle_directive_destination_address(
-        &self,
-        oracle_thread_id: ThreadId,
-        directive: &OracleControlDirective,
-    ) -> String {
-        directive
-            .to
-            .clone()
-            .or_else(|| {
-                directive
-                    .participants
-                    .first()
-                    .map(|participant| participant.address.clone())
-            })
-            .unwrap_or_else(|| match directive.op {
-                Some(OracleControlOp::Spawn) => {
-                    self.oracle_next_generated_worker_address(oracle_thread_id)
-                }
-                _ => ORACLE_ORCHESTRATOR_DESTINATION.to_string(),
-            })
-    }
-
-    fn oracle_destination_title(address: &str, kind: Option<&str>, role: Option<&str>) -> String {
-        if Self::oracle_is_orchestrator_destination(address) {
-            return "Oracle Orchestrator".to_string();
-        }
-        if let Some(raw_thread) = Self::parse_oracle_thread_destination(address) {
-            return format!("Oracle Routed {}", raw_thread);
-        }
-        let base = address.replace(':', " ");
-        let label = role.or(kind).unwrap_or("agent");
-        format!("Oracle {label} {base}").trim().to_string()
-    }
-
-    fn oracle_directory_snapshot(&self, oracle_thread_id: ThreadId, query: Option<&str>) -> String {
-        let query = query.map(|value| value.trim().to_ascii_lowercase());
-        let matches_query = |text: &str| {
-            query
-                .as_ref()
-                .is_none_or(|query| text.to_ascii_lowercase().contains(query))
-        };
-        let mut lines = Vec::new();
-        if let Some(binding) = self.oracle_state.bindings.get(&oracle_thread_id) {
-            let mut participants = binding.participants.values().cloned().collect::<Vec<_>>();
-            participants.sort_by_key(|participant| participant.address.to_ascii_lowercase());
-            for participant in participants {
-                let summary = participant.summary_line();
-                if matches_query(summary.as_str()) {
-                    lines.push(summary);
-                }
-            }
-        }
-        for (thread_id, entry) in self.agent_navigation.ordered_threads() {
-            if thread_id == oracle_thread_id || self.is_hidden_oracle_thread(thread_id) {
-                continue;
-            }
-            let name = format_agent_picker_item_name(
-                entry.agent_nickname.as_deref(),
-                entry.agent_role.as_deref(),
-                self.primary_thread_id == Some(thread_id),
-            );
-            let summary = format!(
-                "- thread:{thread_id} [thread visible] -> {name} ({})",
-                if entry.is_closed { "closed" } else { "open" }
-            );
-            if matches_query(summary.as_str()) {
-                lines.push(summary);
-            }
-        }
-        if lines.is_empty() {
-            if let Some(query) = query {
-                format!("No Oracle destinations matched query `{query}`.")
-            } else {
-                "No additional Oracle destinations are registered.".to_string()
-            }
-        } else {
-            lines.join("\n")
-        }
     }
 
     async fn oracle_destination_task_op(
@@ -4998,193 +4847,6 @@ impl App {
             .to_string()
     }
 
-    async fn ensure_oracle_destination_thread(
-        &mut self,
-        app_server: &mut AppServerSession,
-        oracle_thread_id: ThreadId,
-        address: &str,
-        directive: &OracleControlDirective,
-        spawn_if_missing: bool,
-    ) -> Result<(ThreadId, String, Option<String>)> {
-        if Self::oracle_is_orchestrator_destination(address) {
-            let thread_id = self.ensure_orchestrator_thread(app_server).await?;
-            return Ok((
-                thread_id,
-                "Oracle Orchestrator".to_string(),
-                Some("orchestrator".to_string()),
-            ));
-        }
-        if let Some(thread_id) = self
-            .oracle_state
-            .bindings
-            .get(&oracle_thread_id)
-            .and_then(|binding| binding.participants.get(address))
-            .and_then(|participant| participant.thread_id)
-        {
-            let title = self
-                .oracle_state
-                .bindings
-                .get(&oracle_thread_id)
-                .and_then(|binding| binding.participants.get(address))
-                .and_then(|participant| participant.title.clone())
-                .unwrap_or_else(|| address.to_string());
-            let role = self
-                .oracle_state
-                .bindings
-                .get(&oracle_thread_id)
-                .and_then(|binding| binding.participants.get(address))
-                .and_then(|participant| participant.role.clone());
-            return Ok((thread_id, title, role));
-        }
-
-        let hint = Self::oracle_destination_hint(directive, address);
-        let kind = hint
-            .and_then(|participant| participant.kind.clone())
-            .or_else(|| {
-                if address.starts_with("worker:") {
-                    Some("worker".to_string())
-                } else if Self::parse_oracle_thread_destination(address).is_some() {
-                    Some("thread".to_string())
-                } else {
-                    None
-                }
-            });
-        let role = hint
-            .and_then(|participant| participant.role.clone())
-            .or_else(|| kind.clone());
-        let visibility = Self::oracle_participant_visibility(
-            hint.and_then(|participant| participant.visibility.as_deref()),
-            if Self::parse_oracle_thread_destination(address).is_some() {
-                OracleParticipantVisibility::Visible
-            } else {
-                OracleParticipantVisibility::Hidden
-            },
-        );
-
-        if let Some(thread_id) = Self::parse_oracle_thread_destination(address) {
-            let title = self
-                .agent_navigation
-                .get(&thread_id)
-                .and_then(|entry| entry.agent_nickname.clone())
-                .unwrap_or_else(|| address.to_string());
-            self.register_oracle_participant_thread(
-                oracle_thread_id,
-                address.to_string(),
-                thread_id,
-                Some(title.clone()),
-                kind.clone(),
-                role.clone(),
-                visibility,
-                /*owned_by_oracle*/ false,
-                /*route_completions*/ true,
-                /*route_closures*/ true,
-            );
-            return Ok((thread_id, title, role));
-        }
-
-        if !spawn_if_missing {
-            return Err(color_eyre::eyre::eyre!(
-                "Oracle destination `{address}` is not registered. Use `spawn` or target `thread:<id>`."
-            ));
-        }
-
-        let started = app_server
-            .start_thread(self.chat_widget.config_ref())
-            .await?;
-        let thread_id = started.session.thread_id;
-        let channel = self.ensure_thread_channel(thread_id);
-        {
-            let mut store = channel.store.lock().await;
-            store.set_session(started.session, started.turns);
-        }
-        let title = Self::oracle_destination_title(address, kind.as_deref(), role.as_deref());
-        if let Err(err) = app_server.thread_set_name(thread_id, title.clone()).await {
-            tracing::warn!(%thread_id, %err, "failed to name oracle destination thread");
-        }
-        self.register_oracle_participant_thread(
-            oracle_thread_id,
-            address.to_string(),
-            thread_id,
-            Some(title.clone()),
-            kind,
-            role.clone(),
-            visibility,
-            /*owned_by_oracle*/ true,
-            /*route_completions*/ true,
-            /*route_closures*/ true,
-        );
-        Ok((thread_id, title, role))
-    }
-
-    fn oracle_followup_limit_exceeded(&self, oracle_thread_id: ThreadId) -> bool {
-        self.oracle_state
-            .bindings
-            .get(&oracle_thread_id)
-            .map(|binding| binding.automatic_context_followups >= 2)
-            .unwrap_or(false)
-    }
-
-    async fn start_oracle_directory_followup(
-        &mut self,
-        result: &OracleRunResult,
-        query: Option<String>,
-    ) -> Result<()> {
-        let Some(oracle_repo) = find_oracle_repo(self.chat_widget.config_ref().cwd.as_path())
-        else {
-            let message = Self::oracle_repo_not_found_message().to_string();
-            self.oracle_state.phase = OracleSupervisorPhase::Idle;
-            self.oracle_state.last_status = Some(message.clone());
-            self.record_oracle_status_event_for_run_kind(
-                result.oracle_thread_id,
-                result.kind,
-                &message,
-            )
-            .await;
-            self.chat_widget.add_error_message(message);
-            self.persist_active_oracle_binding();
-            return Ok(());
-        };
-        let directory = self.oracle_directory_snapshot(result.oracle_thread_id, query.as_deref());
-        if let Some(binding) = self.oracle_state.bindings.get_mut(&result.oracle_thread_id) {
-            binding.automatic_context_followups =
-                binding.automatic_context_followups.saturating_add(1);
-        }
-        self.oracle_state.automatic_context_followups = self
-            .oracle_state
-            .automatic_context_followups
-            .saturating_add(1);
-        self.oracle_state.last_status = Some(match &query {
-            Some(query) => format!("Oracle searched destinations for `{query}`."),
-            None => "Oracle listed available destinations.".to_string(),
-        });
-        let context_prompt = build_context_prompt(
-            &self.oracle_state,
-            &[query
-                .map(|value| format!("search_destinations:{value}"))
-                .unwrap_or_else(|| "list_destinations".to_string())],
-            &directory,
-        );
-        self.start_oracle_run(OracleRunRequest {
-            oracle_thread_id: result.oracle_thread_id,
-            kind: result.kind,
-            session_slug: result.requested_slug.clone(),
-            prompt: context_prompt.clone(),
-            requested_prompt: context_prompt,
-            source_user_text: None,
-            files: Vec::new(),
-            workspace_cwd: self.chat_widget.config_ref().cwd.to_path_buf(),
-            oracle_repo,
-            followup_session: self.oracle_followup_session_for_thread(result.oracle_thread_id),
-            model: self.oracle_state.model,
-            browser_model_strategy: self.oracle_browser_model_strategy().to_string(),
-            browser_model_label: Some(self.oracle_state.model.browser_label().to_string()),
-            requires_control: true,
-            repair_attempt: 0,
-            transport_retry_attempt: 0,
-        })?;
-        Ok(())
-    }
-
     async fn maybe_process_pending_oracle_checkpoints(
         &mut self,
         app_server: &mut AppServerSession,
@@ -5228,22 +4890,51 @@ impl App {
         }
     }
 
+    async fn handle_oracle_run_completed_with_remote_metadata(
+        &mut self,
+        app_server: &mut AppServerSession,
+        result: OracleRunResult,
+    ) -> Result<()> {
+        let (conversation_id, remote_title) = take_oracle_run_remote_metadata(&result.run_id);
+        if !self.oracle_state.intercepts(result.oracle_thread_id) {
+            return Ok(());
+        }
+        self.activate_oracle_binding(result.oracle_thread_id);
+        let was_aborted = self.consume_aborted_oracle_run(&result.run_id);
+        let is_active = self.is_active_oracle_run(result.oracle_thread_id, &result.run_id);
+        if (was_aborted || is_active) && (conversation_id.is_some() || remote_title.is_some()) {
+            self.merge_oracle_remote_metadata(
+                result.oracle_thread_id,
+                conversation_id,
+                remote_title,
+            );
+        }
+        if was_aborted {
+            self.persist_active_oracle_binding();
+            return Ok(());
+        }
+        if !is_active {
+            return Ok(());
+        }
+        self.handle_oracle_run_completed_active(app_server, result)
+            .await
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
     async fn handle_oracle_run_completed(
         &mut self,
         app_server: &mut AppServerSession,
         result: OracleRunResult,
     ) -> Result<()> {
-        if !self.oracle_state.intercepts(result.oracle_thread_id) {
-            return Ok(());
-        }
-        self.activate_oracle_binding(result.oracle_thread_id);
-        if self.consume_aborted_oracle_run(&result.run_id) {
-            self.persist_active_oracle_binding();
-            return Ok(());
-        }
-        if !self.is_active_oracle_run(result.oracle_thread_id, &result.run_id) {
-            return Ok(());
-        }
+        self.handle_oracle_run_completed_with_remote_metadata(app_server, result)
+            .await
+    }
+
+    async fn handle_oracle_run_completed_active(
+        &mut self,
+        app_server: &mut AppServerSession,
+        result: OracleRunResult,
+    ) -> Result<()> {
         self.oracle_state
             .inflight_runs
             .remove(&result.oracle_thread_id);
@@ -5411,6 +5102,11 @@ impl App {
                 model: self.oracle_state.model,
                 browser_model_strategy: self.oracle_browser_model_strategy().to_string(),
                 browser_model_label: Some(self.oracle_state.model.browser_label().to_string()),
+                browser_thinking_time: self
+                    .oracle_state
+                    .model
+                    .browser_thinking_time()
+                    .map(str::to_string),
                 requires_control: true,
                 repair_attempt: result.repair_attempt.saturating_add(1),
                 transport_retry_attempt: 0,
@@ -5527,6 +5223,9 @@ impl App {
                 let thread_id = match self.ensure_orchestrator_thread(app_server).await {
                     Ok(thread_id) => thread_id,
                     Err(err) => {
+                        if matches!(result.kind, OracleRequestKind::Checkpoint) {
+                            self.commit_active_oracle_checkpoint(result.oracle_thread_id);
+                        }
                         let message = format!(
                             "Oracle delegated a task, but Codex failed before the orchestrator thread was ready: {err}"
                         );
@@ -5538,8 +5237,16 @@ impl App {
                             &message,
                         )
                         .await;
+                        self.chat_widget.add_error_message(message);
                         self.persist_active_oracle_binding();
-                        return Err(err);
+                        if matches!(result.kind, OracleRequestKind::Checkpoint) {
+                            self.maybe_process_pending_oracle_checkpoints(
+                                app_server,
+                                result.oracle_thread_id,
+                            )
+                            .await?;
+                        }
+                        return Ok(());
                     }
                 };
                 if let Some(active_workflow) = self.oracle_state.workflow.as_mut() {
@@ -5582,6 +5289,9 @@ impl App {
                     if let Some(directive) = directive.as_ref() {
                         self.release_pending_oracle_control(directive);
                     }
+                    if matches!(result.kind, OracleRequestKind::Checkpoint) {
+                        self.commit_active_oracle_checkpoint(result.oracle_thread_id);
+                    }
                     self.oracle_state.phase = OracleSupervisorPhase::Idle;
                     self.update_active_oracle_workflow_status(
                         OracleWorkflowStatus::Failed,
@@ -5595,11 +5305,19 @@ impl App {
                     self.record_oracle_status_event_for_run_kind(
                         result.oracle_thread_id,
                         result.kind,
-                        &message,
-                    )
-                    .await;
+                            &message,
+                        )
+                        .await;
+                    self.chat_widget.add_error_message(message);
                     self.persist_active_oracle_binding();
-                    return Err(err);
+                    if matches!(result.kind, OracleRequestKind::Checkpoint) {
+                        self.maybe_process_pending_oracle_checkpoints(
+                            app_server,
+                            result.oracle_thread_id,
+                        )
+                        .await?;
+                    }
+                    return Ok(());
                 }
                 if matches!(result.kind, OracleRequestKind::UserTurn) {
                     self.complete_pending_oracle_turn_without_reply(result.oracle_thread_id)
@@ -5699,7 +5417,35 @@ impl App {
                 };
                 let orchestrator = if let Some(thread_id) = self.oracle_state.orchestrator_thread_id
                 {
-                    Some(app_server.read_thread_with_turns(thread_id).await?)
+                    match app_server.read_thread_with_turns(thread_id).await {
+                        Ok(thread) => Some(thread),
+                        Err(err) => {
+                            let message = format!(
+                                "Oracle requested more context, but Codex could not read orchestrator thread {thread_id}: {err}"
+                            );
+                            if matches!(result.kind, OracleRequestKind::Checkpoint) {
+                                self.commit_active_oracle_checkpoint(result.oracle_thread_id);
+                            }
+                            self.oracle_state.phase = OracleSupervisorPhase::Idle;
+                            self.oracle_state.last_status = Some(message.clone());
+                            self.record_oracle_status_event_for_run_kind(
+                                result.oracle_thread_id,
+                                result.kind,
+                                &message,
+                            )
+                            .await;
+                            self.chat_widget.add_error_message(message);
+                            self.persist_active_oracle_binding();
+                            if matches!(result.kind, OracleRequestKind::Checkpoint) {
+                                self.maybe_process_pending_oracle_checkpoints(
+                                    app_server,
+                                    result.oracle_thread_id,
+                                )
+                                .await?;
+                            }
+                            return Ok(());
+                        }
+                    }
                 } else {
                     None
                 };
@@ -5756,6 +5502,11 @@ impl App {
                     model: self.oracle_state.model,
                     browser_model_strategy: self.oracle_browser_model_strategy().to_string(),
                     browser_model_label: Some(self.oracle_state.model.browser_label().to_string()),
+                    browser_thinking_time: self
+                        .oracle_state
+                        .model
+                        .browser_thinking_time()
+                        .map(str::to_string),
                     requires_control: true,
                     repair_attempt: 0,
                     transport_retry_attempt: 0,
@@ -6258,6 +6009,11 @@ impl App {
             model: self.oracle_state.model,
             browser_model_strategy: self.oracle_browser_model_strategy().to_string(),
             browser_model_label: Some(self.oracle_state.model.browser_label().to_string()),
+            browser_thinking_time: self
+                .oracle_state
+                .model
+                .browser_thinking_time()
+                .map(str::to_string),
             requires_control: true,
             repair_attempt: 0,
             transport_retry_attempt: 0,
@@ -7923,7 +7679,9 @@ impl App {
         };
         let broker = self.ensure_oracle_broker(oracle_repo.as_path())?;
         let mut remote_threads = broker
-            .list_threads(self.preferred_oracle_followup_session())
+            .list_threads(self.preferred_oracle_followup_session_for_anchor(
+                self.oracle_followup_session_anchor_thread_id(),
+            ))
             .await
             .map_err(|err| color_eyre::eyre::eyre!(err))?;
         remote_threads.sort_by(|a, b| {
@@ -7942,70 +7700,141 @@ impl App {
         }
     }
 
+    fn oracle_remote_thread_mutation_timeout(&self) -> Duration {
+        if cfg!(test) {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_secs(20)
+        }
+    }
+
+    fn oracle_timeout_message(duration: Duration) -> String {
+        if duration.as_secs() > 0 {
+            format!("{} seconds", duration.as_secs())
+        } else {
+            format!("{} ms", duration.as_millis())
+        }
+    }
+
     async fn oracle_new_remote_thread(&mut self) -> Result<OracleBrokerThreadOpenResponse> {
-        #[cfg(test)]
-        if let Some(result) = {
-            let followup_session = self.preferred_oracle_followup_session();
-            let mut hooks = self
+        let timeout = self.oracle_remote_thread_mutation_timeout();
+        match tokio::time::timeout(timeout, async {
+            #[cfg(test)]
+            if let Some(delay) = self
                 .oracle_test_broker_hooks
                 .lock()
-                .expect("oracle test broker hooks");
-            hooks.new_thread_results.pop_front().map(|result| {
-                hooks.new_thread_calls += 1;
-                hooks.new_thread_followup_sessions.push(followup_session);
-                result
-            })
-        } {
-            return result.map_err(|err| color_eyre::eyre::eyre!(err));
+                .expect("oracle test broker hooks")
+                .new_thread_delay
+                .take()
+            {
+                tokio::time::sleep(delay).await;
+            }
+            #[cfg(test)]
+            if let Some(result) = {
+                let followup_session = self.preferred_oracle_followup_session_for_anchor(
+                    self.oracle_followup_session_anchor_thread_id(),
+                );
+                let mut hooks = self
+                    .oracle_test_broker_hooks
+                    .lock()
+                    .expect("oracle test broker hooks");
+                hooks.new_thread_results.pop_front().map(|result| {
+                    hooks.new_thread_calls += 1;
+                    hooks.new_thread_followup_sessions.push(followup_session);
+                    result
+                })
+            } {
+                return result.map_err(|err| color_eyre::eyre::eyre!(err));
+            }
+            let Some(oracle_repo) = find_oracle_repo(self.chat_widget.config_ref().cwd.as_path())
+            else {
+                return Err(color_eyre::eyre::eyre!(
+                    "{}",
+                    Self::oracle_repo_not_found_message()
+                ));
+            };
+            let broker = self.ensure_oracle_broker(oracle_repo.as_path())?;
+            let followup_session = self.require_oracle_followup_session_for_anchor(
+                self.oracle_followup_session_anchor_thread_id(),
+            )?;
+            broker
+                .new_thread(Some(followup_session))
+                .await
+                .map_err(|err| color_eyre::eyre::eyre!(err))
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                self.shutdown_oracle_broker(true);
+                Err(color_eyre::eyre::eyre!(
+                    "Timed out after {} while creating a remote Oracle thread.",
+                    Self::oracle_timeout_message(timeout)
+                ))
+            }
         }
-        let Some(oracle_repo) = find_oracle_repo(self.chat_widget.config_ref().cwd.as_path())
-        else {
-            return Err(color_eyre::eyre::eyre!(
-                "{}",
-                Self::oracle_repo_not_found_message()
-            ));
-        };
-        let broker = self.ensure_oracle_broker(oracle_repo.as_path())?;
-        let followup_session = self.require_oracle_followup_session()?;
-        broker
-            .new_thread(Some(followup_session))
-            .await
-            .map_err(|err| color_eyre::eyre::eyre!(err))
     }
 
     async fn oracle_attach_remote_thread(
         &mut self,
         conversation_id: String,
+        anchor_thread_id: Option<ThreadId>,
     ) -> Result<OracleBrokerThreadOpenResponse> {
-        #[cfg(test)]
-        if let Some(result) = {
-            let followup_session = self.preferred_oracle_followup_session();
-            let mut hooks = self
+        let timeout = self.oracle_remote_thread_mutation_timeout();
+        match tokio::time::timeout(timeout, async {
+            #[cfg(test)]
+            if let Some(delay) = self
                 .oracle_test_broker_hooks
                 .lock()
-                .expect("oracle test broker hooks");
-            let conversation_id_for_log = conversation_id.clone();
-            hooks.attach_thread_results.pop_front().map(|result| {
-                hooks.attach_thread_calls.push(conversation_id_for_log);
-                hooks.attach_thread_followup_sessions.push(followup_session);
-                result
-            })
-        } {
-            return result.map_err(|err| color_eyre::eyre::eyre!(err));
+                .expect("oracle test broker hooks")
+                .attach_thread_delay
+                .take()
+            {
+                tokio::time::sleep(delay).await;
+            }
+            #[cfg(test)]
+            if let Some(result) = {
+                let followup_session =
+                    self.preferred_oracle_followup_session_for_anchor(anchor_thread_id);
+                let mut hooks = self
+                    .oracle_test_broker_hooks
+                    .lock()
+                    .expect("oracle test broker hooks");
+                let conversation_id_for_log = conversation_id.clone();
+                hooks.attach_thread_results.pop_front().map(|result| {
+                    hooks.attach_thread_calls.push(conversation_id_for_log);
+                    hooks.attach_thread_followup_sessions.push(followup_session);
+                    result
+                })
+            } {
+                return result.map_err(|err| color_eyre::eyre::eyre!(err));
+            }
+            let Some(oracle_repo) = find_oracle_repo(self.chat_widget.config_ref().cwd.as_path())
+            else {
+                return Err(color_eyre::eyre::eyre!(
+                    "{}",
+                    Self::oracle_repo_not_found_message()
+                ));
+            };
+            let broker = self.ensure_oracle_broker(oracle_repo.as_path())?;
+            let followup_session =
+                self.preferred_oracle_followup_session_for_anchor(anchor_thread_id);
+            broker
+                .attach_thread(conversation_id, followup_session)
+                .await
+                .map_err(|err| color_eyre::eyre::eyre!(err))
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                self.shutdown_oracle_broker(true);
+                Err(color_eyre::eyre::eyre!(
+                    "Timed out after {} while attaching a remote Oracle thread.",
+                    Self::oracle_timeout_message(timeout)
+                ))
+            }
         }
-        let Some(oracle_repo) = find_oracle_repo(self.chat_widget.config_ref().cwd.as_path())
-        else {
-            return Err(color_eyre::eyre::eyre!(
-                "{}",
-                Self::oracle_repo_not_found_message()
-            ));
-        };
-        let broker = self.ensure_oracle_broker(oracle_repo.as_path())?;
-        let followup_session = self.preferred_oracle_followup_session();
-        broker
-            .attach_thread(conversation_id, followup_session)
-            .await
-            .map_err(|err| color_eyre::eyre::eyre!(err))
     }
 
     async fn open_oracle_picker(&mut self) -> Result<()> {
@@ -8340,6 +8169,7 @@ impl App {
         title_hint: Option<String>,
     ) -> Result<OracleAttachThreadBinding> {
         self.ensure_oracle_remote_thread_mutation_allowed()?;
+        let mut anchor_thread_id = self.oracle_followup_session_anchor_thread_id();
         if let Some(thread_id) =
             self.find_oracle_thread_by_conversation_id(conversation_id.as_str())
         {
@@ -8366,10 +8196,11 @@ impl App {
                 });
             }
             self.activate_oracle_binding(thread_id);
+            anchor_thread_id = Some(thread_id);
         }
 
         let remote = self
-            .oracle_attach_remote_thread(conversation_id.clone())
+            .oracle_attach_remote_thread(conversation_id.clone(), anchor_thread_id)
             .await?;
         let title = remote.title.clone();
         let thread_id = self.bind_oracle_remote_thread(remote).await;
@@ -9857,6 +9688,9 @@ impl App {
                 self.handle_configure_oracle_command(Some(tui), app_server, &raw_command)
                     .await?;
             }
+            AppEvent::OpenOracleProReasoningPopup => {
+                self.open_oracle_pro_reasoning_popup();
+            }
             AppEvent::OraclePickerToggleInfo => {
                 let _ = self.toggle_oracle_picker_info();
             }
@@ -9938,7 +9772,8 @@ impl App {
                     .await?;
             }
             AppEvent::OracleRunCompleted { result } => {
-                self.handle_oracle_run_completed(app_server, result).await?;
+                self.handle_oracle_run_completed_with_remote_metadata(app_server, result)
+                    .await?;
             }
             AppEvent::OracleRunFailed {
                 run_id,
@@ -14133,6 +13968,13 @@ guardian_approval = true
             .list_thread_delay = Some(delay);
     }
 
+    fn queue_test_oracle_new_thread_delay(app: &App, delay: Duration) {
+        app.oracle_test_broker_hooks
+            .lock()
+            .expect("oracle test broker hooks")
+            .new_thread_delay = Some(delay);
+    }
+
     fn queue_test_oracle_new_thread_result(
         app: &App,
         result: Result<OracleBrokerThreadOpenResponse, String>,
@@ -14142,6 +13984,13 @@ guardian_approval = true
             .expect("oracle test broker hooks")
             .new_thread_results
             .push_back(result);
+    }
+
+    fn queue_test_oracle_attach_thread_delay(app: &App, delay: Duration) {
+        app.oracle_test_broker_hooks
+            .lock()
+            .expect("oracle test broker hooks")
+            .attach_thread_delay = Some(delay);
     }
 
     fn queue_test_oracle_attach_thread_result(
@@ -14441,7 +14290,7 @@ guardian_approval = true
         let store = channel.store.lock().await;
         assert_eq!(
             store.session.as_ref().map(|session| session.model.as_str()),
-            Some("requested gpt-5.4-pro")
+            Some("requested gpt-5.4-pro (Standard)")
         );
         assert_eq!(
             app.oracle_test_broker_hooks
@@ -14514,6 +14363,32 @@ guardian_approval = true
             Some("runtime-fallback")
         );
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_oracle_thread_binding_times_out_remote_thread_creation() {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_thread_broker_session_id(thread_id, Some("runtime-root".to_string()));
+        app.activate_oracle_binding(thread_id);
+        queue_test_oracle_new_thread_delay(&app, Duration::from_millis(75));
+
+        let err = app
+            .create_oracle_thread_binding()
+            .await
+            .expect_err("slow remote thread creation should time out");
+
+        assert_eq!(
+            err.to_string(),
+            "Timed out after 50 ms while creating a remote Oracle thread."
+        );
+        assert_eq!(
+            app.oracle_test_broker_hooks
+                .lock()
+                .expect("oracle test broker hooks")
+                .new_thread_calls,
+            0
+        );
     }
 
     #[tokio::test]
@@ -14843,6 +14718,65 @@ guardian_approval = true
     }
 
     #[tokio::test]
+    async fn attach_oracle_thread_binding_prefers_current_local_binding_session_for_remote_attach()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        let first_thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_thread_broker_session_id(first_thread_id, Some("runtime-a".to_string()));
+        let current_thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_thread_broker_session_id(current_thread_id, Some("runtime-b".to_string()));
+        app.activate_oracle_binding(current_thread_id);
+        queue_test_oracle_attach_thread_result(
+            &app,
+            Ok(OracleBrokerThreadOpenResponse {
+                session_id: Some("runtime-c".to_string()),
+                title: "Remote Thread".to_string(),
+                conversation_id: Some("remote-7".to_string()),
+                url: Some("https://chatgpt.com/c/remote-7".to_string()),
+            }),
+        );
+
+        let _ = app
+            .attach_oracle_thread_binding("remote-7".to_string(), None)
+            .await?;
+
+        assert_eq!(
+            app.oracle_test_broker_hooks
+                .lock()
+                .expect("oracle test broker hooks")
+                .attach_thread_followup_sessions,
+            vec![Some("runtime-b".to_string())]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attach_oracle_thread_binding_times_out_remote_attach() {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_thread_broker_session_id(thread_id, Some("runtime-root".to_string()));
+        app.activate_oracle_binding(thread_id);
+        queue_test_oracle_attach_thread_delay(&app, Duration::from_millis(75));
+
+        let err = app
+            .attach_oracle_thread_binding("remote-7".to_string(), None)
+            .await
+            .expect_err("slow remote attach should time out");
+
+        assert_eq!(
+            err.to_string(),
+            "Timed out after 50 ms while attaching a remote Oracle thread."
+        );
+        assert!(
+            app.oracle_test_broker_hooks
+                .lock()
+                .expect("oracle test broker hooks")
+                .attach_thread_calls
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn ensure_oracle_followup_session_for_run_reattaches_lost_remote_thread() -> Result<()> {
         let mut app = make_test_app().await;
         let thread_id = app.create_visible_oracle_thread().await;
@@ -15024,6 +14958,28 @@ guardian_approval = true
     }
 
     #[tokio::test]
+    async fn open_oracle_picker_prefers_current_local_binding_for_remote_browse() -> Result<()> {
+        let mut app = make_test_app().await;
+        let first_thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_thread_broker_session_id(first_thread_id, Some("runtime-a".to_string()));
+        let current_thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_thread_broker_session_id(current_thread_id, Some("runtime-b".to_string()));
+        app.activate_oracle_binding(current_thread_id);
+        queue_test_oracle_list_threads_result(&app, Ok(Vec::new()));
+
+        app.open_oracle_picker().await?;
+
+        assert_eq!(
+            app.oracle_test_broker_hooks
+                .lock()
+                .expect("oracle test broker hooks")
+                .list_thread_followup_sessions,
+            vec![Some("runtime-b".to_string())]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn open_oracle_picker_without_attached_session_keeps_new_thread_hotkey_available()
     -> Result<()> {
         let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
@@ -15157,6 +15113,39 @@ guardian_approval = true
     }
 
     #[tokio::test]
+    async fn contextual_model_popup_selecting_pro_opens_oracle_pro_reasoning_popup() {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let thread_id = app.ensure_visible_oracle_thread().await;
+        let session = app.oracle_thread_session(thread_id);
+        app.activate_thread_channel(thread_id).await;
+        app.chat_widget.handle_thread_session(session);
+        while app_event_rx.try_recv().is_ok() {}
+
+        app.open_contextual_model_popup();
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_matches!(
+            app_event_rx.try_recv(),
+            Ok(AppEvent::OpenOracleProReasoningPopup)
+        );
+    }
+
+    #[tokio::test]
+    async fn oracle_pro_reasoning_popup_shows_standard_and_extended_options() {
+        let mut app = make_test_app().await;
+        app.oracle_state.model = OracleModelPreset::ProExtended;
+
+        app.open_oracle_pro_reasoning_popup();
+
+        let popup = render_bottom_popup(&app, /*width*/ 100);
+        assert!(popup.contains("Oracle Pro Thinking"));
+        assert!(popup.contains("Standard"));
+        assert!(popup.contains("Extended"));
+        assert!(popup.contains("GPT-5.4 Pro (Extended)"));
+    }
+
+    #[tokio::test]
     async fn oracle_picker_new_shortcut_closes_modal_before_creating_thread() {
         let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
         app.show_oracle_picker(Vec::new(), /*include_new_thread*/ true);
@@ -15199,6 +15188,31 @@ guardian_approval = true
                 Some("requested gpt-5.4 (Thinking 5.4)")
             );
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn set_oracle_model_preference_pro_extended_updates_visible_oracle_thread_sessions()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.activate_oracle_binding(thread_id);
+
+        let status = app
+            .set_oracle_model_preference(OracleModelPreset::ProExtended)
+            .await;
+
+        assert_eq!(app.oracle_state.model, OracleModelPreset::ProExtended);
+        assert!(status.contains("gpt-5.4-pro (Extended)"));
+        let channel = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("oracle thread channel");
+        let store = channel.store.lock().await;
+        assert_eq!(
+            store.session.as_ref().map(|session| session.model.as_str()),
+            Some("requested gpt-5.4-pro (Extended)")
+        );
         Ok(())
     }
 
@@ -17808,6 +17822,11 @@ guardian_approval = true
         if let Some(binding) = app.oracle_state.bindings.get_mut(&thread_id) {
             binding.active_run_id = None;
         }
+        remember_oracle_run_remote_metadata(
+            "oracle-run-drift",
+            Some("remote-drift".to_string()),
+            Some("Remote Drift".to_string()),
+        );
 
         let mut app_server =
             crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
@@ -17849,6 +17868,14 @@ guardian_approval = true
             item,
             ThreadItem::AgentMessage { text, .. } if text == "Hello back."
         )));
+        drop(store);
+        let binding = app
+            .oracle_state
+            .bindings
+            .get(&thread_id)
+            .expect("oracle binding");
+        assert_eq!(binding.conversation_id.as_deref(), Some("remote-drift"));
+        assert_eq!(binding.remote_title.as_deref(), Some("Remote Drift"));
         Ok(())
     }
 
@@ -19213,6 +19240,7 @@ guardian_approval = true
                 model: OracleModelPreset::Thinking,
                 browser_model_strategy: "select".to_string(),
                 browser_model_label: Some("Thinking 5.4".to_string()),
+                browser_thinking_time: None,
                 requires_control: false,
                 repair_attempt: 0,
                 transport_retry_attempt: 0,
@@ -19407,6 +19435,74 @@ guardian_approval = true
                 .last_status
                 .as_deref()
                 .is_some_and(|message| message.contains("Ignored duplicate Oracle control retry"))
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oracle_handoff_submit_failure_does_not_crash_tui() -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.ensure_visible_oracle_thread().await;
+        let bogus_orchestrator_thread_id = ThreadId::new();
+        app.oracle_state.orchestrator_thread_id = Some(bogus_orchestrator_thread_id);
+        app.oracle_state.phase =
+            OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::UserTurn);
+        app.oracle_state.active_run_id = Some("oracle-run-handoff-fail".to_string());
+        app.persist_active_oracle_binding();
+        app.begin_oracle_user_turn(
+            thread_id,
+            &[UserInput::Text {
+                text: "Please do the work".to_string(),
+                text_elements: Vec::new(),
+            }],
+        )
+        .await;
+        app.ensure_thread_channel(bogus_orchestrator_thread_id);
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        app.handle_oracle_run_completed(
+            &mut app_server,
+            OracleRunResult {
+                run_id: "oracle-run-handoff-fail".to_string(),
+                oracle_thread_id: thread_id,
+                kind: OracleRequestKind::UserTurn,
+                requested_slug: "oracle-session-handoff".to_string(),
+                session_id: "oracle-session-handoff".to_string(),
+                requested_prompt: "Please do the work".to_string(),
+                source_user_text: Some("Please do the work".to_string()),
+                files: Vec::new(),
+                requires_control: true,
+                repair_attempt: 0,
+                response: crate::oracle_supervisor::OracleResponse {
+                    action: OracleAction::Delegate,
+                    message_for_user: "Starting orchestrator work.".to_string(),
+                    task_for_orchestrator: Some("Do the work".to_string()),
+                    context_requests: Vec::new(),
+                    directive: Some(OracleControlDirective {
+                        schema_version: Some(ORACLE_CONTROL_SCHEMA_VERSION),
+                        op_id: Some("op-handoff-fail".to_string()),
+                        idempotency_key: Some("idem-handoff-fail".to_string()),
+                        op: Some(OracleControlOp::Handoff),
+                        workflow_id: Some("oracle-routing".to_string()),
+                        workflow_version: Some(1),
+                        ..Default::default()
+                    }),
+                    control_issue: None,
+                    raw_output: String::new(),
+                },
+            },
+        )
+        .await?;
+
+        assert_eq!(app.oracle_state.phase, OracleSupervisorPhase::Idle);
+        assert!(
+            app.oracle_state
+                .last_status
+                .as_deref()
+                .is_some_and(|message| message.contains("failed to start the orchestrator turn"))
         );
         Ok(())
     }
@@ -19620,6 +19716,73 @@ guardian_approval = true
                 )
             }),
             "exhausted checkpoint repair should not reschedule the same checkpoint",
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oracle_request_context_read_failure_does_not_crash_tui() -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.ensure_visible_oracle_thread().await;
+        let bogus_orchestrator_thread_id = ThreadId::new();
+        app.oracle_state.orchestrator_thread_id = Some(bogus_orchestrator_thread_id);
+        app.oracle_state.phase =
+            OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::UserTurn);
+        app.oracle_state.active_run_id = Some("oracle-run-context-fail".to_string());
+        app.persist_active_oracle_binding();
+        app.begin_oracle_user_turn(
+            thread_id,
+            &[UserInput::Text {
+                text: "Need more context".to_string(),
+                text_elements: Vec::new(),
+            }],
+        )
+        .await;
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        app.handle_oracle_run_completed(
+            &mut app_server,
+            OracleRunResult {
+                run_id: "oracle-run-context-fail".to_string(),
+                oracle_thread_id: thread_id,
+                kind: OracleRequestKind::UserTurn,
+                requested_slug: "oracle-session-context".to_string(),
+                session_id: "oracle-session-context".to_string(),
+                requested_prompt: "Need more context".to_string(),
+                source_user_text: Some("Need more context".to_string()),
+                files: Vec::new(),
+                requires_control: true,
+                repair_attempt: 0,
+                response: crate::oracle_supervisor::OracleResponse {
+                    action: OracleAction::RequestContext,
+                    message_for_user: "Need the latest diff.".to_string(),
+                    task_for_orchestrator: None,
+                    context_requests: vec!["git_diff".to_string()],
+                    directive: Some(OracleControlDirective {
+                        schema_version: Some(ORACLE_CONTROL_SCHEMA_VERSION),
+                        op_id: Some("op-context-fail".to_string()),
+                        idempotency_key: Some("idem-context-fail".to_string()),
+                        op: Some(OracleControlOp::RequestContext),
+                        workflow_id: Some("oracle-routing".to_string()),
+                        workflow_version: Some(1),
+                        ..Default::default()
+                    }),
+                    control_issue: None,
+                    raw_output: String::new(),
+                },
+            },
+        )
+        .await?;
+
+        assert_eq!(app.oracle_state.phase, OracleSupervisorPhase::Idle);
+        assert!(
+            app.oracle_state
+                .last_status
+                .as_deref()
+                .is_some_and(|message| message.contains("could not read orchestrator thread"))
         );
         Ok(())
     }
@@ -20001,6 +20164,7 @@ guardian_approval = true
                 model: OracleModelPreset::Pro,
                 browser_model_strategy: "select".to_string(),
                 browser_model_label: Some("GPT-5.4 Pro".to_string()),
+                browser_thinking_time: Some("standard".to_string()),
                 requires_control: false,
                 repair_attempt: 0,
                 transport_retry_attempt: 0,
@@ -20068,8 +20232,11 @@ guardian_approval = true
         assert_eq!(binding.current_session_id, None);
         assert_eq!(binding.current_session_ownership, None);
         assert_eq!(binding.session_root_slug, None);
-        assert_eq!(binding.conversation_id, None);
-        assert_eq!(binding.remote_title, None);
+        assert_eq!(
+            binding.conversation_id.as_deref(),
+            Some("conversation-before-interrupt")
+        );
+        assert_eq!(binding.remote_title.as_deref(), Some("Oracle Thread"));
         let channel = app
             .thread_event_channels
             .get(&thread_id)
@@ -20102,6 +20269,128 @@ guardian_approval = true
         assert_eq!(app.oracle_state.aborted_run_id, None);
         assert!(app.oracle_state.aborted_runs.is_empty());
         assert!(app.oracle_state.inflight_run_requests.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oracle_restart_after_interrupt_reattaches_the_same_remote_conversation() -> Result<()>
+    {
+        let mut app = make_test_app().await;
+        let thread_id = app.ensure_visible_oracle_thread().await;
+        let oracle_repo =
+            find_oracle_repo(app.chat_widget.config_ref().cwd.as_path()).expect("oracle repo");
+        app.oracle_state.phase =
+            OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::UserTurn);
+        app.oracle_state.active_run_id = Some("oracle-run-interrupt-resume".to_string());
+        app.oracle_state
+            .inflight_runs
+            .insert(thread_id, "oracle-run-interrupt-resume".to_string());
+        app.oracle_state.inflight_run_requests.insert(
+            "oracle-run-interrupt-resume".to_string(),
+            OracleRunRequest {
+                oracle_thread_id: thread_id,
+                kind: OracleRequestKind::UserTurn,
+                session_slug: "oracle-session-root".to_string(),
+                prompt: "resume me".to_string(),
+                requested_prompt: "resume me".to_string(),
+                source_user_text: Some("resume me".to_string()),
+                files: Vec::new(),
+                workspace_cwd: app.chat_widget.config_ref().cwd.to_path_buf(),
+                oracle_repo,
+                followup_session: Some("oracle-session-a".to_string()),
+                model: OracleModelPreset::Pro,
+                browser_model_strategy: "select".to_string(),
+                browser_model_label: Some("GPT-5.4 Pro".to_string()),
+                browser_thinking_time: Some("standard".to_string()),
+                requires_control: false,
+                repair_attempt: 0,
+                transport_retry_attempt: 0,
+            },
+        );
+        app.oracle_state.pending_turn_id = Some("oracle-turn-resume".to_string());
+        app.oracle_state.session_root_slug = Some("oracle-session-root".to_string());
+        app.oracle_state.current_session_id = Some("oracle-session-a".to_string());
+        app.oracle_state.current_session_ownership = Some(OracleSessionOwnership::SessionRootSlug(
+            "oracle-session-root".to_string(),
+        ));
+        app.set_oracle_remote_metadata(
+            thread_id,
+            Some("conversation-before-interrupt".to_string()),
+            Some("Oracle Thread".to_string()),
+        );
+        app.persist_active_oracle_binding();
+        if let Some(channel) = app.thread_event_channels.get(&thread_id) {
+            let mut store = channel.store.lock().await;
+            store.active_turn_id = Some("oracle-turn-resume".to_string());
+            store.turns.push(Turn {
+                id: "oracle-turn-resume".to_string(),
+                items: vec![ThreadItem::UserMessage {
+                    id: "oracle-user-resume".to_string(),
+                    content: vec![codex_app_server_protocol::UserInput::Text {
+                        text: "resume me".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                }],
+                status: TurnStatus::InProgress,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+            });
+        }
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        let handled = app
+            .try_submit_active_thread_op_via_app_server(
+                &mut app_server,
+                thread_id,
+                &AppCommand::interrupt(),
+            )
+            .await?;
+        assert!(handled);
+        assert_eq!(
+            app.oracle_state
+                .bindings
+                .get(&thread_id)
+                .and_then(|binding| binding.conversation_id.as_deref()),
+            Some("conversation-before-interrupt")
+        );
+
+        queue_test_oracle_attach_thread_result(
+            &app,
+            Ok(OracleBrokerThreadOpenResponse {
+                session_id: Some("oracle-session-b".to_string()),
+                title: "Oracle Thread".to_string(),
+                conversation_id: Some("conversation-before-interrupt".to_string()),
+                url: Some("https://chatgpt.com/c/conversation-before-interrupt".to_string()),
+            }),
+        );
+
+        let (_, followup_session) = app.ensure_oracle_session_continuity_for_run(thread_id).await?;
+
+        assert_eq!(followup_session.as_deref(), Some("oracle-session-b"));
+        let hooks = app
+            .oracle_test_broker_hooks
+            .lock()
+            .expect("oracle test broker hooks");
+        assert_eq!(
+            hooks.attach_thread_calls,
+            vec!["conversation-before-interrupt".to_string()]
+        );
+        drop(hooks);
+        let binding = app
+            .oracle_state
+            .bindings
+            .get(&thread_id)
+            .expect("oracle binding");
+        assert_eq!(
+            binding.conversation_id.as_deref(),
+            Some("conversation-before-interrupt")
+        );
+        assert_eq!(binding.current_session_id.as_deref(), Some("oracle-session-b"));
         Ok(())
     }
 

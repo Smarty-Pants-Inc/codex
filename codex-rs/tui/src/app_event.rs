@@ -365,6 +365,9 @@ pub(crate) enum AppEvent {
         model: ModelPreset,
     },
 
+    /// Open the Oracle Pro thinking-mode picker after selecting Pro on an Oracle thread.
+    OpenOracleProReasoningPopup,
+
     /// Open the Plan-mode reasoning scope prompt for the selected model/effort.
     OpenPlanReasoningScopePrompt {
         model: String,
