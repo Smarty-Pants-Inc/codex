@@ -5321,7 +5321,9 @@ impl ChatWidget {
                 self.open_skills_menu();
             }
             SlashCommand::Oracle => {
-                self.add_error_message("Usage: /oracle [on|off|status]".to_string());
+                self.add_error_message(
+                    "Usage: /oracle [on|off|status|model [pro|thinking]]".to_string(),
+                );
             }
             SlashCommand::Status => {
                 if self.should_prefetch_rate_limits() {

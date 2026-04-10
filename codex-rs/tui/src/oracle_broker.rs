@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -12,10 +13,12 @@ use tokio::process::ChildStdin;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio::time::timeout;
 
 #[derive(Debug, Clone)]
 pub(crate) struct OracleBrokerClient {
     tx: mpsc::Sender<BrokerCommand>,
+    abort_handle: tokio::task::AbortHandle,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +28,9 @@ pub(crate) struct OracleBrokerRequest {
     pub(crate) followup_session: Option<String>,
     pub(crate) files: Vec<String>,
     pub(crate) cwd: PathBuf,
+    pub(crate) model: String,
+    pub(crate) browser_model_strategy: String,
+    pub(crate) browser_model_label: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,11 +52,21 @@ struct OracleBrokerWireRequest {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     files: Vec<String>,
     cwd: String,
+    model: String,
+    #[serde(rename = "browserModelStrategy")]
+    browser_model_strategy: String,
+    #[serde(rename = "browserModelLabel", skip_serializing_if = "Option::is_none")]
+    browser_model_label: Option<String>,
 }
 
-struct BrokerCommand {
-    request: OracleBrokerRequest,
-    reply: oneshot::Sender<Result<OracleBrokerResponse, String>>,
+enum BrokerCommand {
+    Request {
+        request: OracleBrokerRequest,
+        reply: oneshot::Sender<Result<OracleBrokerResponse, String>>,
+    },
+    Shutdown {
+        reply: oneshot::Sender<()>,
+    },
 }
 
 pub(crate) fn spawn_oracle_broker(oracle_repo: &Path) -> Result<OracleBrokerClient, String> {
@@ -63,6 +79,7 @@ pub(crate) fn spawn_oracle_broker(oracle_repo: &Path) -> Result<OracleBrokerClie
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    child.kill_on_drop(true);
     let mut child = child
         .spawn()
         .map_err(|error| format!("failed to start Oracle broker: {error}"))?;
@@ -86,14 +103,17 @@ pub(crate) fn spawn_oracle_broker(oracle_repo: &Path) -> Result<OracleBrokerClie
             tracing::debug!(target: "codex_tui::oracle_broker", %line, "oracle broker stderr");
         }
     });
-    tokio::spawn(run_broker_loop(
+    let broker_task = tokio::spawn(run_broker_loop(
         child,
         stdin,
         BufReader::new(stdout).lines(),
         rx,
         stderr_task,
     ));
-    Ok(OracleBrokerClient { tx })
+    Ok(OracleBrokerClient {
+        tx,
+        abort_handle: broker_task.abort_handle(),
+    })
 }
 
 impl OracleBrokerClient {
@@ -103,11 +123,30 @@ impl OracleBrokerClient {
     ) -> Result<OracleBrokerResponse, String> {
         let (reply, recv) = oneshot::channel();
         self.tx
-            .send(BrokerCommand { request, reply })
+            .send(BrokerCommand::Request { request, reply })
             .await
             .map_err(|_| "Oracle broker is unavailable".to_string())?;
         recv.await
             .map_err(|_| "Oracle broker closed before replying".to_string())?
+    }
+
+    pub(crate) async fn shutdown(&self) -> Result<(), String> {
+        let (reply, recv) = oneshot::channel();
+        if self
+            .tx
+            .send(BrokerCommand::Shutdown { reply })
+            .await
+            .is_err()
+        {
+            self.abort_handle.abort();
+            return Ok(());
+        }
+        let _ = recv.await;
+        Ok(())
+    }
+
+    pub(crate) fn abort(&self) {
+        self.abort_handle.abort();
     }
 }
 
@@ -119,12 +158,23 @@ async fn run_broker_loop(
     stderr_task: tokio::task::JoinHandle<()>,
 ) {
     while let Some(command) = rx.recv().await {
-        let result = send_and_read(&mut stdin, &mut stdout_lines, command.request).await;
-        let _ = command.reply.send(result);
+        match command {
+            BrokerCommand::Request { request, reply } => {
+                let result = send_and_read(&mut stdin, &mut stdout_lines, request).await;
+                let _ = reply.send(result);
+            }
+            BrokerCommand::Shutdown { reply } => {
+                let _ = send_shutdown(&mut stdin).await;
+                let _ = reply.send(());
+                break;
+            }
+        }
     }
     let _ = stdin.shutdown().await;
-    let _ = child.kill().await;
-    let _ = child.wait().await;
+    if timeout(Duration::from_secs(5), child.wait()).await.is_err() {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+    }
     stderr_task.abort();
 }
 
@@ -139,6 +189,9 @@ async fn send_and_read(
         followup_session: request.followup_session,
         files: request.files,
         cwd: request.cwd.display().to_string(),
+        model: request.model,
+        browser_model_strategy: request.browser_model_strategy,
+        browser_model_label: request.browser_model_label,
     })
     .map_err(|error| format!("failed to serialize Oracle broker request: {error}"))?;
     stdin
@@ -164,9 +217,32 @@ async fn send_and_read(
     if response.ok {
         Ok(response)
     } else {
-        Err(response
+        let error = response
             .error
             .clone()
-            .unwrap_or_else(|| "Oracle broker returned an unknown error".to_string()))
+            .unwrap_or_else(|| "Oracle broker returned an unknown error".to_string());
+        if let Some(session_id) = response.session_id.clone() {
+            Err(format!("{error} (session: {session_id})"))
+        } else {
+            Err(error)
+        }
     }
+}
+
+async fn send_shutdown(stdin: &mut ChildStdin) -> Result<(), String> {
+    let payload = serde_json::to_string(&serde_json::json!({ "shutdown": true }))
+        .map_err(|error| format!("failed to serialize Oracle broker shutdown request: {error}"))?;
+    stdin
+        .write_all(payload.as_bytes())
+        .await
+        .map_err(|error| format!("failed to write Oracle broker shutdown request: {error}"))?;
+    stdin
+        .write_all(b"\n")
+        .await
+        .map_err(|error| format!("failed to finalize Oracle broker shutdown request: {error}"))?;
+    stdin
+        .flush()
+        .await
+        .map_err(|error| format!("failed to flush Oracle broker shutdown request: {error}"))?;
+    Ok(())
 }
