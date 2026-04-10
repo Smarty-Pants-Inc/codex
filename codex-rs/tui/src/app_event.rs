@@ -548,6 +548,16 @@ pub(crate) enum AppEvent {
         raw_command: String,
     },
 
+    /// Create a new Oracle remote thread from the `/oracle` picker.
+    OracleCreateThread,
+
+    /// Attach a visible Codex Oracle thread to an existing remote conversation.
+    OracleAttachThread {
+        conversation_id: String,
+        title: String,
+        url: Option<String>,
+    },
+
     /// Oracle CLI finished and returned a parsed control response.
     OracleRunCompleted {
         result: OracleRunResult,
