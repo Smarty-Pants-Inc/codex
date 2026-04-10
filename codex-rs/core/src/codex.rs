@@ -51,6 +51,8 @@ use chrono::Local;
 use chrono::Utc;
 use codex_analytics::AnalyticsEventsClient;
 use codex_analytics::AppInvocation;
+use codex_analytics::CompactionPhase;
+use codex_analytics::CompactionReason;
 use codex_analytics::InvocationType;
 use codex_analytics::SubAgentThreadStartedInput;
 use codex_analytics::build_track_events_context;
@@ -434,6 +436,7 @@ pub(crate) struct CodexSpawnArgs {
     pub(crate) inherited_exec_policy: Option<Arc<ExecPolicyManager>>,
     pub(crate) user_shell_override: Option<shell::Shell>,
     pub(crate) parent_trace: Option<W3cTraceContext>,
+    pub(crate) analytics_events_client: Option<AnalyticsEventsClient>,
 }
 
 pub(crate) const INITIAL_SUBMIT_ID: &str = "";
@@ -486,6 +489,7 @@ impl Codex {
             user_shell_override,
             inherited_exec_policy,
             parent_trace: _,
+            analytics_events_client,
         } = args;
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
@@ -676,6 +680,7 @@ impl Codex {
             skills_watcher,
             agent_control,
             environment,
+            analytics_events_client,
         )
         .await
         .map_err(|e| {
@@ -1604,6 +1609,7 @@ impl Session {
         skills_watcher: Arc<SkillsWatcher>,
         agent_control: AgentControl,
         environment: Option<Arc<Environment>>,
+        analytics_events_client: Option<AnalyticsEventsClient>,
     ) -> anyhow::Result<Arc<Self>> {
         debug!(
             "Configuring session: model={}; provider={:?}",
@@ -1984,6 +1990,13 @@ impl Session {
         }
 
         let installation_id = resolve_installation_id(&config.codex_home).await?;
+        let analytics_events_client = analytics_events_client.unwrap_or_else(|| {
+            AnalyticsEventsClient::new(
+                Arc::clone(&auth_manager),
+                config.chatgpt_base_url.trim_end_matches('/').to_string(),
+                config.analytics_enabled,
+            )
+        });
         let services = SessionServices {
             // Initialize the MCP connection manager with an uninitialized
             // instance. It will be replaced with one created via
@@ -2002,11 +2015,7 @@ impl Session {
             ),
             shell_zsh_path: config.zsh_path.clone(),
             main_execve_wrapper_exe: config.main_execve_wrapper_exe.clone(),
-            analytics_events_client: AnalyticsEventsClient::new(
-                Arc::clone(&auth_manager),
-                config.chatgpt_base_url.trim_end_matches('/').to_string(),
-                config.analytics_enabled,
-            ),
+            analytics_events_client,
             hooks,
             rollout: Mutex::new(rollout_recorder),
             user_shell: Arc::new(default_shell),
@@ -2216,16 +2225,16 @@ impl Session {
         self.services.state_db.clone()
     }
 
-    /// Ensure rollout file writes are durably flushed.
-    pub(crate) async fn flush_rollout(&self) {
+    /// Flush rollout writes and return the final durability-barrier result.
+    pub(crate) async fn flush_rollout(&self) -> std::io::Result<()> {
         let recorder = {
             let guard = self.services.rollout.lock().await;
             guard.clone()
         };
-        if let Some(rec) = recorder
-            && let Err(e) = rec.flush().await
-        {
-            warn!("failed to flush rollout recorder: {e}");
+        if let Some(recorder) = recorder {
+            recorder.flush().await
+        } else {
+            Ok(())
         }
     }
 
@@ -2372,7 +2381,7 @@ impl Session {
                 // Defer seeding the session's initial context until the first turn starts so
                 // turn/start overrides can be merged before we write to the rollout.
                 if !is_subagent {
-                    self.flush_rollout().await;
+                    let _ = self.flush_rollout().await;
                 }
             }
             InitialHistory::Forked(rollout_items) => {
@@ -2396,7 +2405,7 @@ impl Session {
 
                 // Flush after seeding history and any persisted rollout copy.
                 if !is_subagent {
-                    self.flush_rollout().await;
+                    let _ = self.flush_rollout().await;
                 }
             }
         }
@@ -5600,12 +5609,23 @@ mod handlers {
             .into_iter()
             .chain(std::iter::once(RolloutItem::EventMsg(rollback_msg.clone())))
             .collect::<Vec<_>>();
-        sess.persist_rollout_items(&[RolloutItem::EventMsg(rollback_msg.clone())])
-            .await;
-        sess.flush_rollout().await;
         sess.apply_rollout_reconstruction(turn_context.as_ref(), replay_items.as_slice())
             .await;
         sess.recompute_token_usage(turn_context.as_ref()).await;
+
+        sess.persist_rollout_items(&[RolloutItem::EventMsg(rollback_msg.clone())])
+            .await;
+        if let Err(err) = sess.flush_rollout().await {
+            sess.send_event(
+                turn_context.as_ref(),
+                EventMsg::Warning(WarningEvent {
+                    message: format!(
+                        "Rolled the thread back, but failed to save the rollback marker. Codex will continue retrying. Error: {err}"
+                    ),
+                }),
+            )
+            .await;
+        }
 
         sess.deliver_event_raw(Event {
             id: turn_context.sub_id.clone(),
@@ -6350,6 +6370,8 @@ pub(crate) async fn run_turn(
                         &sess,
                         &turn_context,
                         InitialContextInjection::BeforeLastUserMessage,
+                        CompactionReason::ContextLimit,
+                        CompactionPhase::MidTurn,
                     )
                     .await
                     .is_err()
@@ -6533,7 +6555,14 @@ async fn run_pre_sampling_compact(
         .unwrap_or(i64::MAX);
     // Compact if the total usage tokens are greater than the auto compact limit
     if total_usage_tokens >= auto_compact_limit {
-        run_auto_compact(sess, turn_context, InitialContextInjection::DoNotInject).await?;
+        run_auto_compact(
+            sess,
+            turn_context,
+            InitialContextInjection::DoNotInject,
+            CompactionReason::ContextLimit,
+            CompactionPhase::PreTurn,
+        )
+        .await?;
         pre_sampling_compacted = true;
     }
     Ok(pre_sampling_compacted)
@@ -6577,6 +6606,8 @@ async fn maybe_run_previous_model_inline_compact(
             sess,
             &previous_model_turn_context,
             InitialContextInjection::DoNotInject,
+            CompactionReason::ModelDownshift,
+            CompactionPhase::PreTurn,
         )
         .await?;
         return Ok(true);
@@ -6588,12 +6619,16 @@ async fn run_auto_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     initial_context_injection: InitialContextInjection,
+    reason: CompactionReason,
+    phase: CompactionPhase,
 ) -> CodexResult<()> {
     if should_use_remote_compact_task(&turn_context.provider) {
         run_inline_remote_auto_compact_task(
             Arc::clone(sess),
             Arc::clone(turn_context),
             initial_context_injection,
+            reason,
+            phase,
         )
         .await?;
     } else {
@@ -6601,6 +6636,8 @@ async fn run_auto_compact(
             Arc::clone(sess),
             Arc::clone(turn_context),
             initial_context_injection,
+            reason,
+            phase,
         )
         .await?;
     }
