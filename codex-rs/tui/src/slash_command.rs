@@ -22,6 +22,7 @@ pub enum SlashCommand {
     SandboxReadRoot,
     Experimental,
     Skills,
+    Oracle,
     Review,
     Rename,
     New,
@@ -85,6 +86,7 @@ impl SlashCommand {
             SlashCommand::Diff => "show git diff (including untracked files)",
             SlashCommand::Mention => "mention a file",
             SlashCommand::Skills => "use skills to improve how Codex performs specific tasks",
+            SlashCommand::Oracle => "toggle Oracle supervisor mode",
             SlashCommand::Status => "show current session configuration and token usage",
             SlashCommand::DebugConfig => "show config layers and requirement sources for debugging",
             SlashCommand::Title => "configure which items appear in the terminal title",
@@ -133,6 +135,7 @@ impl SlashCommand {
                 | SlashCommand::Plan
                 | SlashCommand::Fast
                 | SlashCommand::Resume
+                | SlashCommand::Oracle
                 | SlashCommand::SandboxReadRoot
         )
     }
@@ -172,6 +175,7 @@ impl SlashCommand {
             | SlashCommand::Mcp
             | SlashCommand::Apps
             | SlashCommand::Plugins
+            | SlashCommand::Oracle
             | SlashCommand::Feedback
             | SlashCommand::Quit
             | SlashCommand::Exit => true,
