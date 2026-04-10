@@ -266,6 +266,105 @@ async fn slash_copy_tracks_replayed_legacy_agent_message_when_turn_complete_omit
 }
 
 #[tokio::test]
+async fn oracle_slash_command_with_inline_args_emits_raw_command() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
+
+    chat.dispatch_command_with_args(SlashCommand::Oracle, "status".to_string(), Vec::new());
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::ConfigureOracleMode { raw_command }) if raw_command == "status"
+    );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn oracle_slash_command_without_args_emits_browse_event() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
+
+    chat.dispatch_command(SlashCommand::Oracle);
+
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::ConfigureOracleMode { raw_command }) if raw_command.is_empty()
+    );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn model_slash_command_emits_app_event() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
+
+    chat.dispatch_command(SlashCommand::Model);
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenModelPopup));
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
+async fn slash_copy_state_clears_on_thread_rollback() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.handle_codex_event(Event {
+        id: "turn-1".into(),
+        msg: EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn-1".to_string(),
+            last_agent_message: Some("Reply that will be rolled back".to_string()),
+            completed_at: None,
+            duration_ms: None,
+        }),
+    });
+    chat.handle_codex_event(Event {
+        id: "rollback-1".into(),
+        msg: EventMsg::ThreadRolledBack(ThreadRolledBackEvent { num_turns: 1 }),
+    });
+
+    assert_eq!(chat.last_copyable_output, None);
+}
+
+#[tokio::test]
+async fn slash_copy_is_unavailable_when_legacy_agent_message_is_not_repeated_on_turn_complete() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+
+    chat.handle_codex_event_replay(Event {
+        id: "turn-1".into(),
+        msg: EventMsg::AgentMessage(AgentMessageEvent {
+            message: "Legacy final message".into(),
+            phase: None,
+            memory_citation: None,
+        }),
+    });
+    let _ = drain_insert_history(&mut rx);
+    chat.handle_codex_event(Event {
+        id: "turn-1".into(),
+        msg: EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn-1".to_string(),
+            last_agent_message: None,
+            completed_at: None,
+            duration_ms: None,
+        }),
+    });
+    let _ = drain_insert_history(&mut rx);
+
+    chat.dispatch_command(SlashCommand::Copy);
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1, "expected one info message");
+    let rendered = lines_to_single_string(&cells[0]);
+    assert!(
+        rendered.contains(
+            "`/copy` is unavailable before the first Codex output or right after a rollback."
+        ),
+        "expected unavailable message, got {rendered:?}"
+    );
+
+    assert_eq!(
+        chat.last_agent_markdown_text(),
+        Some("Legacy final message")
+    );
+}
+
+#[tokio::test]
 async fn slash_copy_uses_agent_message_item_when_turn_complete_omits_final_text() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

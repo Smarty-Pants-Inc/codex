@@ -86,9 +86,7 @@ impl SlashCommand {
             SlashCommand::Diff => "show git diff (including untracked files)",
             SlashCommand::Mention => "mention a file",
             SlashCommand::Skills => "use skills to improve how Codex performs specific tasks",
-            SlashCommand::Oracle => {
-                "browse/create/attach Oracle threads and manage Oracle model preferences"
-            }
+            SlashCommand::Oracle => "open the Oracle control panel",
             SlashCommand::Status => "show current session configuration and token usage",
             SlashCommand::DebugConfig => "show config layers and requirement sources for debugging",
             SlashCommand::Title => "configure which items appear in the terminal title",

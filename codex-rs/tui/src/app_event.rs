@@ -103,6 +103,8 @@ pub(crate) enum AppEvent {
     OpenAgentPicker,
     /// Switch the active thread to the selected agent.
     SelectAgentThread(ThreadId),
+    /// Open the nested workflow picker for a visible Oracle supervisor thread.
+    OpenOracleWorkflowPicker(ThreadId),
 
     /// Submit an op to the specified thread, regardless of current focus.
     SubmitThreadOp {
@@ -543,10 +545,16 @@ pub(crate) enum AppEvent {
         collaboration_mode: CollaborationModeMask,
     },
 
-    /// Configure the Oracle supervisor thread from `/oracle ...`.
+    /// Run an Oracle picker action.
     ConfigureOracleMode {
         raw_command: String,
     },
+
+    /// Toggle compact Oracle picker info/status details in place.
+    OraclePickerToggleInfo,
+
+    /// Toggle the Oracle picker model preference in place.
+    OraclePickerToggleModel,
 
     /// Create a new Oracle remote thread from the `/oracle` picker.
     OracleCreateThread,
@@ -574,6 +582,7 @@ pub(crate) enum AppEvent {
     /// Hidden orchestrator thread finished a milestone and should checkpoint back to Oracle.
     OracleCheckpoint {
         thread_id: ThreadId,
+        workflow_version: Option<u64>,
     },
 
     /// Open the approval popup.
