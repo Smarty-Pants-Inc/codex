@@ -391,6 +391,7 @@ pub(crate) struct OracleRunRequest {
 
 #[derive(Debug, Clone)]
 pub(crate) struct OracleRunResult {
+    pub(crate) run_id: String,
     pub(crate) oracle_thread_id: ThreadId,
     pub(crate) kind: OracleRequestKind,
     pub(crate) requested_slug: String,
@@ -414,6 +415,8 @@ pub(crate) struct OracleThreadBinding {
     pub(crate) orchestrator_thread_id: Option<ThreadId>,
     pub(crate) workflow: Option<OracleWorkflowBinding>,
     pub(crate) phase: OracleSupervisorPhase,
+    pub(crate) active_run_id: Option<String>,
+    pub(crate) aborted_run_id: Option<String>,
     pub(crate) last_status: Option<String>,
     pub(crate) last_orchestrator_task: Option<String>,
     pub(crate) pending_turn_id: Option<String>,
@@ -435,6 +438,8 @@ pub(crate) struct OracleSupervisorState {
     pub(crate) orchestrator_thread_id: Option<ThreadId>,
     pub(crate) workflow: Option<OracleWorkflowBinding>,
     pub(crate) phase: OracleSupervisorPhase,
+    pub(crate) active_run_id: Option<String>,
+    pub(crate) aborted_run_id: Option<String>,
     pub(crate) model: OracleModelPreset,
     pub(crate) last_status: Option<String>,
     pub(crate) last_orchestrator_task: Option<String>,
@@ -657,7 +662,7 @@ pub(crate) fn build_checkpoint_prompt(
 ) -> String {
     build_oracle_prompt(
         "checkpoint_review",
-        "You are continuing the same long-lived collaboration. Review the orchestrator workflow checkpoint, keep Oracle turns sparse, and only escalate when the milestone needs new direction, more context, or completion.",
+        "You are continuing the same long-lived collaboration. Review the orchestrator workflow checkpoint, keep Oracle turns sparse, and only escalate when the milestone needs new direction, more context, or completion. If you reply to the human, include the concrete orchestrator result inline in `message_for_user`; do not say the result is \"above\" or \"below\", and do not rely on transcript position.",
         state,
         vec![
             ("Orchestrator thread", thread.id.to_string()),
@@ -1574,11 +1579,13 @@ mod tests {
             "src/app.rs contents",
         );
 
-        for prompt in [checkpoint_prompt, context_prompt] {
+        for prompt in [&checkpoint_prompt, &context_prompt] {
             assert!(prompt.contains("workflow_id: oracle-routing"));
             assert!(prompt.contains("version: 5"));
             assert!(prompt.contains("Ship the workflow refactor"));
         }
+        assert!(checkpoint_prompt.contains("include the concrete orchestrator result inline"));
+        assert!(checkpoint_prompt.contains("do not say the result is \"above\" or \"below\""));
     }
 
     #[tokio::test]

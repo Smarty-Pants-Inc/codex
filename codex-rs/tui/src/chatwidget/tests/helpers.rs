@@ -245,6 +245,7 @@ pub(super) async fn make_chatwidget_manual(
         thread_id: None,
         thread_name: None,
         forked_from: None,
+        emitted_fork_event_threads: HashSet::new(),
         frame_requester: FrameRequester::test_dummy(),
         show_welcome_banner: true,
         startup_tooltip_override: None,
