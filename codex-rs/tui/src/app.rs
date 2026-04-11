@@ -6558,6 +6558,7 @@ impl App {
         app_server: &AppServerSession,
         category: FeedbackCategory,
         reason: Option<String>,
+        turn_id: Option<String>,
         include_logs: bool,
     ) {
         let request_handle = app_server.request_handle();
@@ -6573,6 +6574,7 @@ impl App {
             rollout_path,
             category,
             reason,
+            turn_id,
             include_logs,
         );
         tokio::spawn(async move {
@@ -10125,9 +10127,10 @@ impl App {
             AppEvent::SubmitFeedback {
                 category,
                 reason,
+                turn_id,
                 include_logs,
             } => {
-                self.submit_feedback(app_server, category, reason, include_logs);
+                self.submit_feedback(app_server, category, reason, turn_id, include_logs);
             }
             AppEvent::FeedbackSubmitted {
                 origin_thread_id,
@@ -11753,6 +11756,7 @@ fn build_feedback_upload_params(
     rollout_path: Option<PathBuf>,
     category: FeedbackCategory,
     reason: Option<String>,
+    turn_id: Option<String>,
     include_logs: bool,
 ) -> FeedbackUploadParams {
     let extra_log_files = if include_logs {
@@ -11760,12 +11764,14 @@ fn build_feedback_upload_params(
     } else {
         None
     };
+    let tags = turn_id.map(|turn_id| BTreeMap::from([(String::from("turn_id"), turn_id)]));
     FeedbackUploadParams {
         classification: crate::bottom_pane::feedback_classification(category).to_string(),
         reason,
         thread_id: origin_thread_id.map(|thread_id| thread_id.to_string()),
         include_logs,
         extra_log_files,
+        tags,
     }
 }
 
@@ -21969,12 +21975,21 @@ guardian_approval = true
             Some(rollout_path.clone()),
             FeedbackCategory::SafetyCheck,
             Some("needs follow-up".to_string()),
+            Some("turn-123".to_string()),
             /*include_logs*/ true,
         );
 
         assert_eq!(params.classification, "safety_check");
         assert_eq!(params.reason, Some("needs follow-up".to_string()));
         assert_eq!(params.thread_id, Some(thread_id.to_string()));
+        assert_eq!(
+            params
+                .tags
+                .as_ref()
+                .and_then(|tags| tags.get("turn_id"))
+                .map(String::as_str),
+            Some("turn-123")
+        );
         assert_eq!(params.include_logs, true);
         assert_eq!(params.extra_log_files, Some(vec![rollout_path]));
     }
@@ -21986,12 +22001,14 @@ guardian_approval = true
             Some(PathBuf::from("/tmp/rollout.jsonl")),
             FeedbackCategory::GoodResult,
             /*reason*/ None,
+            /*turn_id*/ None,
             /*include_logs*/ false,
         );
 
         assert_eq!(params.classification, "good_result");
         assert_eq!(params.reason, None);
         assert_eq!(params.thread_id, None);
+        assert_eq!(params.tags, None);
         assert_eq!(params.include_logs, false);
         assert_eq!(params.extra_log_files, None);
     }
