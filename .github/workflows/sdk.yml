@@ -1,12 +1,12 @@
 name: sdk
 
 on:
-  push:
-    branches: [main]
+  workflow_dispatch: {}
   pull_request: {}
 
 jobs:
   sdks:
+    if: ${{ github.repository == 'openai/codex' || github.event_name == 'workflow_dispatch' }}
     runs-on:
       group: codex-runners
       labels: codex-linux-x64
