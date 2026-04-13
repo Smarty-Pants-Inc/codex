@@ -98,6 +98,20 @@ See `codex-rs/tui/styles.md`.
 - If you need to indent wrapped lines, use the initial_indent / subsequent_indent options from RtOptions if you can, rather than writing custom logic.
 - If you have a list of lines and you need to prefix them all with some prefix (optionally different on the first vs subsequent lines), use the `prefix_lines` helper from line_utils.
 
+## Oracle Integration In This Fork
+
+- This fork carries Oracle harness behavior; treat ChatGPT UI drift as expected and design Codex-side integration to survive it.
+- Prefer explicit remote identity over inference. For thread attach/history/model actions, use explicit conversation ids or broker-provided metadata and fail closed on mismatches.
+- Keep prior-thread replay bounded to recent useful context unless the user explicitly requests broader replay.
+- When an Oracle flake exposes a brittle path, improve the shared abstraction or fallback chain instead of hardcoding another page-shape-specific case.
+- Prefer repairable flows:
+  - reuse existing Oracle bindings when safe
+  - repair stale broker session metadata
+  - retry boundedly after reattach when the remote browser session disappeared
+- Keep browser-shape assumptions isolated to broker/protocol seams rather than spreading them through general TUI state code.
+- Add targeted tests for alternate payload shapes, stale-session repair, mismatched conversation ids, and other drift-related failure modes when changing Oracle integration behavior.
+- For live Oracle/Codex framework testing on this machine, stay in the Oracle project scope and keep the browser hidden/backgrounded. A visible Chrome launch is a regression unless explicitly debugging.
+
 ## Tests
 
 ### Snapshot tests

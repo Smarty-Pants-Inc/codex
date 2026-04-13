@@ -145,6 +145,8 @@ pub(crate) struct OracleBrokerThreadOpenResponse {
     #[serde(rename = "conversationId")]
     pub(crate) conversation_id: Option<String>,
     pub(crate) url: Option<String>,
+    #[serde(default)]
+    pub(crate) history: Vec<OracleBrokerThreadHistoryEntry>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,6 +154,49 @@ struct OracleBrokerThreadOpenEnvelope {
     #[serde(rename = "sessionId")]
     session_id: Option<String>,
     thread: OracleBrokerThreadOpenResponse,
+    #[serde(default)]
+    history: Vec<OracleBrokerThreadHistoryEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub(crate) struct OracleBrokerThreadHistoryEntry {
+    pub(crate) role: String,
+    pub(crate) text: String,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub(crate) struct OracleBrokerThreadHistoryWindow {
+    pub(crate) limit: usize,
+    #[serde(rename = "returnedCount")]
+    pub(crate) returned_count: usize,
+    #[serde(rename = "totalCount")]
+    pub(crate) total_count: usize,
+    pub(crate) truncated: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub(crate) struct OracleBrokerThreadHistoryResponse {
+    #[serde(rename = "sessionId")]
+    pub(crate) session_id: Option<String>,
+    pub(crate) title: String,
+    #[serde(rename = "conversationId")]
+    pub(crate) conversation_id: Option<String>,
+    pub(crate) url: Option<String>,
+    #[serde(default)]
+    pub(crate) history: Vec<OracleBrokerThreadHistoryEntry>,
+    #[serde(rename = "historyWindow")]
+    pub(crate) history_window: Option<OracleBrokerThreadHistoryWindow>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OracleBrokerThreadHistoryEnvelope {
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+    thread: OracleBrokerThreadOpenResponse,
+    #[serde(default)]
+    history: Vec<OracleBrokerThreadHistoryEntry>,
+    #[serde(rename = "historyWindow")]
+    history_window: Option<OracleBrokerThreadHistoryWindow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -198,6 +243,17 @@ struct OracleBrokerThreadAttachWireRequest {
     followup_session: Option<String>,
     #[serde(rename = "conversationId")]
     conversation_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct OracleBrokerThreadHistoryWireRequest {
+    action: &'static str,
+    #[serde(rename = "followupSession", skip_serializing_if = "Option::is_none")]
+    followup_session: Option<String>,
+    #[serde(rename = "conversationId")]
+    conversation_id: String,
+    #[serde(rename = "historyLimit", skip_serializing_if = "Option::is_none")]
+    history_limit: Option<usize>,
 }
 
 enum BrokerCommand {
@@ -446,9 +502,7 @@ impl OracleBrokerClient {
             self.mark_transport_unavailable();
             "Oracle broker closed before replying".to_string()
         })??;
-        let mut response = parse_success_response::<OracleBrokerThreadOpenEnvelope>(value)?;
-        response.thread.session_id = response.session_id.take();
-        Ok(response.thread)
+        Ok(decode_thread_open_envelope(value)?)
     }
 
     pub(crate) async fn attach_thread(
@@ -478,9 +532,39 @@ impl OracleBrokerClient {
             self.mark_transport_unavailable();
             "Oracle broker closed before replying".to_string()
         })??;
-        let mut response = parse_success_response::<OracleBrokerThreadOpenEnvelope>(value)?;
-        response.thread.session_id = response.session_id.take();
-        Ok(response.thread)
+        Ok(decode_thread_open_envelope(value)?)
+    }
+
+    pub(crate) async fn thread_history(
+        &self,
+        followup_session: Option<String>,
+        conversation_id: String,
+        history_limit: Option<usize>,
+    ) -> Result<OracleBrokerThreadHistoryResponse, String> {
+        let (reply, recv) = oneshot::channel();
+        let payload = serde_json::to_value(OracleBrokerThreadHistoryWireRequest {
+            action: "thread_history",
+            followup_session,
+            conversation_id,
+            history_limit,
+        })
+        .map_err(|error| {
+            format!("failed to serialize Oracle broker thread history request: {error}")
+        })?;
+        if self
+            .tx
+            .send(BrokerCommand::Request { payload, reply })
+            .await
+            .is_err()
+        {
+            self.mark_transport_unavailable();
+            return Err("Oracle broker is unavailable".to_string());
+        }
+        let value = recv.await.map_err(|_| {
+            self.mark_transport_unavailable();
+            "Oracle broker closed before replying".to_string()
+        })??;
+        Ok(decode_thread_history_envelope(value)?)
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), String> {
@@ -524,6 +608,34 @@ impl OracleBrokerClient {
             abort_handle.abort();
         });
     }
+}
+
+fn decode_thread_open_envelope(value: Value) -> Result<OracleBrokerThreadOpenResponse, String> {
+    let mut response = parse_success_response::<OracleBrokerThreadOpenEnvelope>(value)?;
+    response.thread.session_id = response.session_id.take();
+    if response.thread.history.is_empty() && !response.history.is_empty() {
+        response.thread.history = response.history;
+    }
+    Ok(response.thread)
+}
+
+fn decode_thread_history_envelope(
+    value: Value,
+) -> Result<OracleBrokerThreadHistoryResponse, String> {
+    let response = parse_success_response::<OracleBrokerThreadHistoryEnvelope>(value)?;
+    let history = if response.history.is_empty() {
+        response.thread.history
+    } else {
+        response.history
+    };
+    Ok(OracleBrokerThreadHistoryResponse {
+        session_id: response.session_id,
+        title: response.thread.title,
+        conversation_id: response.thread.conversation_id,
+        url: response.thread.url,
+        history,
+        history_window: response.history_window,
+    })
 }
 
 async fn prefer_recovered_supervisor_response_with_timeout<F>(
@@ -827,9 +939,15 @@ async fn await_recoverable_supervisor_response(
 mod tests {
     use super::OracleBrokerClient;
     use super::OracleBrokerResponse;
+    use super::OracleBrokerThreadHistoryEntry;
+    use super::OracleBrokerThreadHistoryWindow;
+    use super::OracleBrokerThreadOpenResponse;
+    use super::decode_thread_history_envelope;
+    use super::decode_thread_open_envelope;
     use super::oracle_session_chain_ordinal;
     use super::prefer_recovered_supervisor_response_with_timeout;
     use super::read_recoverable_supervisor_response_from_dir;
+    use serde_json::json;
     use tempfile::tempdir;
     use tokio::time::Duration;
     use tokio::time::sleep;
@@ -857,6 +975,132 @@ mod tests {
         assert_eq!(
             oracle_session_chain_ordinal("oracle-root-bad", "oracle-root"),
             None
+        );
+    }
+
+    #[test]
+    fn decode_thread_open_envelope_accepts_top_level_history() {
+        let response = decode_thread_open_envelope(json!({
+            "ok": true,
+            "sessionId": "runtime-1",
+            "thread": {
+                "title": "Attached Thread",
+                "conversationId": "attached-1",
+                "url": "https://chatgpt.com/c/attached-1"
+            },
+            "history": [
+                { "role": "user", "text": "hello" },
+                { "role": "assistant", "text": "world" }
+            ]
+        }))
+        .expect("thread open envelope");
+
+        assert_eq!(
+            response,
+            OracleBrokerThreadOpenResponse {
+                session_id: Some("runtime-1".to_string()),
+                title: "Attached Thread".to_string(),
+                conversation_id: Some("attached-1".to_string()),
+                url: Some("https://chatgpt.com/c/attached-1".to_string()),
+                history: vec![
+                    OracleBrokerThreadHistoryEntry {
+                        role: "user".to_string(),
+                        text: "hello".to_string(),
+                    },
+                    OracleBrokerThreadHistoryEntry {
+                        role: "assistant".to_string(),
+                        text: "world".to_string(),
+                    },
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn decode_thread_open_envelope_preserves_nested_history() {
+        let response = decode_thread_open_envelope(json!({
+            "ok": true,
+            "sessionId": "runtime-1",
+            "thread": {
+                "title": "Attached Thread",
+                "conversationId": "attached-1",
+                "url": "https://chatgpt.com/c/attached-1",
+                "history": [
+                    { "role": "assistant", "text": "already nested" }
+                ]
+            },
+            "history": [
+                { "role": "user", "text": "should not overwrite nested" }
+            ]
+        }))
+        .expect("thread open envelope");
+
+        assert_eq!(
+            response.history,
+            vec![OracleBrokerThreadHistoryEntry {
+                role: "assistant".to_string(),
+                text: "already nested".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn decode_thread_history_envelope_accepts_nested_history() {
+        let response = decode_thread_history_envelope(json!({
+            "ok": true,
+            "sessionId": "runtime-1",
+            "thread": {
+                "title": "Attached Thread",
+                "conversationId": "attached-1",
+                "url": "https://chatgpt.com/c/attached-1",
+                "history": [
+                    { "role": "assistant", "text": "already nested" }
+                ]
+            },
+            "history": []
+        }))
+        .expect("thread history envelope");
+
+        assert_eq!(
+            response.history,
+            vec![OracleBrokerThreadHistoryEntry {
+                role: "assistant".to_string(),
+                text: "already nested".to_string(),
+            }]
+        );
+        assert_eq!(response.history_window, None);
+    }
+
+    #[test]
+    fn decode_thread_history_envelope_preserves_history_window_metadata() {
+        let response = decode_thread_history_envelope(json!({
+            "ok": true,
+            "sessionId": "runtime-1",
+            "thread": {
+                "title": "Attached Thread",
+                "conversationId": "attached-1",
+                "url": "https://chatgpt.com/c/attached-1"
+            },
+            "history": [
+                { "role": "assistant", "text": "latest" }
+            ],
+            "historyWindow": {
+                "limit": 100,
+                "returnedCount": 1,
+                "totalCount": 135,
+                "truncated": true
+            }
+        }))
+        .expect("thread history envelope");
+
+        assert_eq!(
+            response.history_window,
+            Some(OracleBrokerThreadHistoryWindow {
+                limit: 100,
+                returned_count: 1,
+                total_count: 135,
+                truncated: true,
+            })
         );
     }
 

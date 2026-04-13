@@ -84,7 +84,9 @@ fn directive_value(line: &str, prefix: &str, label: &str) -> Result<Option<Strin
         return Ok(Some(quoted.to_string()));
     }
     if value.starts_with('"') || value.starts_with('\'') {
-        return Err(format!("{label}: quoted paths must end with the same quote."));
+        return Err(format!(
+            "{label}: quoted paths must end with the same quote."
+        ));
     }
     if value.chars().any(char::is_whitespace) {
         return if looks_like_spaced_attachment_spec(value) {
@@ -133,7 +135,10 @@ async fn canonical_workspace_root(workspace_cwd: &Path) -> Result<PathBuf, Strin
         )
     })?;
     let metadata = fs::metadata(&workspace_root).await.map_err(|error| {
-        format!("workspace {} could not be read: {error}", workspace_root.display())
+        format!(
+            "workspace {} could not be read: {error}",
+            workspace_root.display()
+        )
     })?;
     if !metadata.is_dir() {
         return Err(format!(
@@ -156,7 +161,10 @@ async fn resolve_workspace_file(workspace_root: &Path, spec: &str) -> Result<Str
     Ok(real_path.display().to_string())
 }
 
-async fn expand_workspace_glob(workspace_root: &Path, pattern: &str) -> Result<Vec<String>, String> {
+async fn expand_workspace_glob(
+    workspace_root: &Path,
+    pattern: &str,
+) -> Result<Vec<String>, String> {
     let pattern = workspace_spec(pattern, "glob")?;
     let matcher = GlobBuilder::new(&pattern)
         .literal_separator(true)
@@ -205,7 +213,11 @@ fn strip_quoted(value: &str) -> Option<&str> {
     value
         .strip_prefix('"')
         .and_then(|inner| inner.strip_suffix('"'))
-        .or_else(|| value.strip_prefix('\'').and_then(|inner| inner.strip_suffix('\'')))
+        .or_else(|| {
+            value
+                .strip_prefix('\'')
+                .and_then(|inner| inner.strip_suffix('\''))
+        })
 }
 
 fn workspace_glob_root(workspace_root: &Path, pattern: &str) -> PathBuf {
@@ -279,7 +291,9 @@ async fn canonical_file_path(candidate: &Path, label: &str, spec: &str) -> Resul
         .await
         .map_err(|error| format!("{label} {spec} could not be read: {error}"))?;
     if !metadata.is_file() {
-        return Err(format!("{label} {spec} was rejected because it is not a file."));
+        return Err(format!(
+            "{label} {spec} was rejected because it is not a file."
+        ));
     }
     fs::canonicalize(candidate)
         .await
@@ -348,7 +362,9 @@ mod tests {
                 UserInput::LocalImage {
                     path: PathBuf::from("image.png"),
                 },
-                UserInput::LocalImage { path: image.clone() },
+                UserInput::LocalImage {
+                    path: image.clone(),
+                },
             ],
             temp.path(),
         )
@@ -460,8 +476,8 @@ mod tests {
             std::fs::write(many.join(format!("file-{index}.txt")), "x").expect("write");
         }
         let error = resolve_oracle_attachments("glob: many/*.txt", &[], temp.path())
-        .await
-        .expect_err("expected limit rejection");
+            .await
+            .expect_err("expected limit rejection");
         assert!(error.contains("matched more than"));
     }
 

@@ -60,6 +60,9 @@ use crate::oracle_attachments::resolve_oracle_attachments;
 use crate::oracle_broker::OracleBrokerClient;
 use crate::oracle_broker::OracleBrokerRequest;
 use crate::oracle_broker::OracleBrokerThreadEntry;
+use crate::oracle_broker::OracleBrokerThreadHistoryEntry;
+use crate::oracle_broker::OracleBrokerThreadHistoryResponse;
+use crate::oracle_broker::OracleBrokerThreadHistoryWindow;
 use crate::oracle_broker::OracleBrokerThreadOpenResponse;
 use crate::oracle_broker::spawn_oracle_broker;
 use crate::oracle_supervisor::ORACLE_CONTROL_SCHEMA_VERSION;
@@ -1230,7 +1233,15 @@ enum OracleAttachThreadBinding {
         thread_id: ThreadId,
         title: String,
         conversation_id: String,
+        history: Vec<OracleBrokerThreadHistoryEntry>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OracleHistoryImportOutcome {
+    Imported { message_count: usize },
+    NoNewMessages,
+    SkippedToAvoidConflict,
 }
 
 const ORACLE_HUMAN_DESTINATION: &str = "human";
@@ -1274,12 +1285,14 @@ struct OracleTestBrokerHooks {
     new_thread_delay: Option<Duration>,
     attach_thread_results: VecDeque<Result<OracleBrokerThreadOpenResponse, String>>,
     attach_thread_delay: Option<Duration>,
+    thread_history_results: VecDeque<Result<OracleBrokerThreadHistoryResponse, String>>,
     list_thread_calls: usize,
     list_thread_followup_sessions: Vec<Option<String>>,
     new_thread_calls: usize,
     new_thread_followup_sessions: Vec<Option<String>>,
     attach_thread_calls: Vec<String>,
     attach_thread_followup_sessions: Vec<Option<String>>,
+    thread_history_followup_sessions: Vec<Option<String>>,
 }
 
 fn normalize_harness_overrides_for_cwd(
@@ -2108,14 +2121,15 @@ impl App {
         conversation_id: Option<String>,
         remote_title: Option<String>,
     ) {
-        self.oracle_state
+        let binding = self
+            .oracle_state
             .bindings
             .entry(thread_id)
             .or_insert_with(|| OracleThreadBinding {
                 phase: OracleSupervisorPhase::Idle,
                 ..Default::default()
-            })
-            .conversation_id = conversation_id;
+            });
+        binding.conversation_id = conversation_id;
         if let Some(title) = remote_title {
             self.oracle_state
                 .bindings
@@ -2879,13 +2893,31 @@ impl App {
         }
     }
 
-    fn find_oracle_thread_by_conversation_id(&self, conversation_id: &str) -> Option<ThreadId> {
-        self.oracle_state
+    fn oracle_thread_ids_by_conversation_id(&self, conversation_id: &str) -> Vec<ThreadId> {
+        let mut matches = self
+            .oracle_state
             .bindings
             .iter()
-            .find_map(|(thread_id, binding)| {
+            .filter_map(|(thread_id, binding)| {
                 (binding.conversation_id.as_deref() == Some(conversation_id)).then_some(*thread_id)
             })
+            .collect::<Vec<_>>();
+        matches.sort_by_key(|thread_id| thread_id.to_string());
+        matches
+    }
+
+    fn find_unique_oracle_thread_by_conversation_id(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<ThreadId>> {
+        let matches = self.oracle_thread_ids_by_conversation_id(conversation_id);
+        match matches.as_slice() {
+            [] => Ok(None),
+            [thread_id] => Ok(Some(*thread_id)),
+            [first, second, ..] => Err(color_eyre::eyre::eyre!(
+                "Oracle conversation {conversation_id} is already bound to multiple local threads ({first}, {second}); refusing to guess which local binding owns it."
+            )),
+        }
     }
 
     fn oracle_thread_label(&self, thread_id: ThreadId) -> String {
@@ -3089,26 +3121,20 @@ impl App {
                     "[image: {}]",
                     Self::sanitize_user_input_marker(image_url)
                 )),
-                UserInput::LocalImage { path } => {
-                    parts.push(format!(
-                        "[local_image: {}]",
-                        Self::sanitize_user_input_marker(&path.display().to_string())
-                    ))
-                }
-                UserInput::Mention { name, path } => {
-                    parts.push(format!(
-                        "[mention: {} -> {}]",
-                        Self::sanitize_user_input_marker(name),
-                        Self::sanitize_user_input_marker(path)
-                    ))
-                }
-                UserInput::Skill { name, path } => {
-                    parts.push(format!(
-                        "[skill: {} -> {}]",
-                        Self::sanitize_user_input_marker(name),
-                        Self::sanitize_user_input_marker(&path.display().to_string())
-                    ))
-                }
+                UserInput::LocalImage { path } => parts.push(format!(
+                    "[local_image: {}]",
+                    Self::sanitize_user_input_marker(&path.display().to_string())
+                )),
+                UserInput::Mention { name, path } => parts.push(format!(
+                    "[mention: {} -> {}]",
+                    Self::sanitize_user_input_marker(name),
+                    Self::sanitize_user_input_marker(path)
+                )),
+                UserInput::Skill { name, path } => parts.push(format!(
+                    "[skill: {} -> {}]",
+                    Self::sanitize_user_input_marker(name),
+                    Self::sanitize_user_input_marker(&path.display().to_string())
+                )),
                 _ => {}
             }
         }
@@ -4141,9 +4167,7 @@ impl App {
                     tx.send(AppEvent::SelectAgentThread(orchestrator_thread_id));
                 })],
                 dismiss_on_select: true,
-                search_value: Some(format!(
-                    "{name} {orchestrator_thread_id} {description}"
-                )),
+                search_value: Some(format!("{name} {orchestrator_thread_id} {description}")),
                 ..Default::default()
             });
         }
@@ -4175,8 +4199,11 @@ impl App {
             } else {
                 "linked workflow thread"
             };
-            let description =
-                self.oracle_workflow_picker_thread_description(thread_id, "Workflow thread", detail);
+            let description = self.oracle_workflow_picker_thread_description(
+                thread_id,
+                "Workflow thread",
+                detail,
+            );
             if self.active_thread_id == Some(thread_id) {
                 initial_selected_idx = Some(items.len());
             }
@@ -4400,6 +4427,78 @@ impl App {
         self.current_displayed_thread_id() == Some(thread_id)
     }
 
+    fn oracle_thread_history_limit(&self) -> Option<usize> {
+        Some(100)
+    }
+
+    fn oracle_thread_history_requires_reattach(error: &str) -> bool {
+        let normalized = error.to_ascii_lowercase();
+        (normalized.contains("session") || normalized.contains("runtime"))
+            && (normalized.contains("was not found")
+                || normalized.contains("could not be found")
+                || normalized.contains("not reusable yet")
+                || normalized.contains("missing browser metadata"))
+    }
+
+    fn oracle_attach_history_message(
+        binding: &OracleAttachThreadBinding,
+        outcome: OracleHistoryImportOutcome,
+        history_window: Option<&OracleBrokerThreadHistoryWindow>,
+    ) -> String {
+        let base = match binding {
+            OracleAttachThreadBinding::ReattachedLocal {
+                thread_id, title, ..
+            } => {
+                format!("Reattached existing local Oracle thread {thread_id}: {title}")
+            }
+            OracleAttachThreadBinding::AttachedRemote {
+                thread_id,
+                title,
+                conversation_id,
+                ..
+            } => {
+                format!("Attached Oracle thread on {thread_id}: {title} ({conversation_id})")
+            }
+        };
+        let note = Self::oracle_history_window_note(history_window);
+        match outcome {
+            OracleHistoryImportOutcome::Imported { message_count } => {
+                format!("{base}. Imported {message_count} prior message(s).{note}")
+            }
+            OracleHistoryImportOutcome::NoNewMessages => {
+                format!("{base}. No new remote history needed importing.{note}")
+            }
+            OracleHistoryImportOutcome::SkippedToAvoidConflict => {
+                format!(
+                    "{base}. Skipped remote history import because the local transcript already diverged.{note}"
+                )
+            }
+        }
+    }
+
+    fn oracle_history_window_note(
+        history_window: Option<&OracleBrokerThreadHistoryWindow>,
+    ) -> String {
+        let Some(history_window) = history_window else {
+            return String::new();
+        };
+        if !history_window.truncated || history_window.total_count <= history_window.returned_count
+        {
+            return String::new();
+        }
+        format!(
+            " Remote history was limited to the newest {} text message(s) out of at least {} available.",
+            history_window.returned_count, history_window.total_count
+        )
+    }
+
+    fn oracle_history_import_requires_snapshot_refresh(
+        has_buffered_events: bool,
+        merged_into_existing_local_turn: bool,
+    ) -> bool {
+        has_buffered_events || merged_into_existing_local_turn
+    }
+
     async fn push_oracle_turn(&mut self, thread_id: ThreadId, turn: Turn) {
         let should_render = self.oracle_thread_is_displayed(thread_id);
         let channel = self.ensure_thread_channel(thread_id);
@@ -4417,6 +4516,267 @@ impl App {
             self.chat_widget
                 .replay_thread_turns(vec![turn], ReplayKind::ThreadSnapshot);
         }
+    }
+
+    fn normalize_oracle_history_entries(
+        history: Vec<OracleBrokerThreadHistoryEntry>,
+    ) -> Vec<OracleBrokerThreadHistoryEntry> {
+        history
+            .into_iter()
+            .filter_map(|entry| {
+                let role = entry.role.trim().to_ascii_lowercase();
+                let text = entry.text.trim();
+                if !matches!(role.as_str(), "user" | "assistant") || text.is_empty() {
+                    return None;
+                }
+                Some(OracleBrokerThreadHistoryEntry {
+                    role,
+                    text: text.to_string(),
+                })
+            })
+            .collect()
+    }
+
+    fn oracle_turns_to_history_entries(turns: &[Turn]) -> Vec<OracleBrokerThreadHistoryEntry> {
+        let mut history = Vec::new();
+        for turn in turns {
+            for item in &turn.items {
+                match item {
+                    ThreadItem::UserMessage { content, .. } => {
+                        let text = content
+                            .iter()
+                            .filter_map(|item| match item {
+                                codex_app_server_protocol::UserInput::Text { text, .. } => {
+                                    Some(text.trim())
+                                }
+                                _ => None,
+                            })
+                            .filter(|text| !text.is_empty())
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        if !text.is_empty() {
+                            history.push(OracleBrokerThreadHistoryEntry {
+                                role: "user".to_string(),
+                                text,
+                            });
+                        }
+                    }
+                    ThreadItem::AgentMessage { text, .. } => {
+                        let text = text.trim();
+                        if !text.is_empty() {
+                            history.push(OracleBrokerThreadHistoryEntry {
+                                role: "assistant".to_string(),
+                                text: text.to_string(),
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        history
+    }
+
+    fn oracle_turns_have_nontext_user_inputs(turns: &[Turn]) -> bool {
+        turns.iter().any(|turn| {
+            turn.items.iter().any(|item| {
+                matches!(
+                    item,
+                    ThreadItem::UserMessage { content, .. }
+                        if content.iter().any(|input| {
+                            !matches!(
+                                input,
+                                codex_app_server_protocol::UserInput::Text { .. }
+                            )
+                        })
+                )
+            })
+        })
+    }
+
+    fn oracle_missing_history_suffix<'a>(
+        existing: &[OracleBrokerThreadHistoryEntry],
+        remote: &'a [OracleBrokerThreadHistoryEntry],
+    ) -> Option<&'a [OracleBrokerThreadHistoryEntry]> {
+        if existing.is_empty() {
+            return Some(remote);
+        }
+        if remote.is_empty() {
+            return Some(&[]);
+        }
+        let max_overlap = existing.len().min(remote.len());
+        for overlap in (1..=max_overlap).rev() {
+            if existing[existing.len() - overlap..] == remote[..overlap] {
+                if overlap == 1
+                    && (existing.len() != 1
+                        || existing[0].role != "user"
+                        || remote[0].role != "user")
+                {
+                    continue;
+                }
+                return Some(&remote[overlap..]);
+            }
+        }
+        None
+    }
+
+    fn oracle_history_entries_to_turns(history: &[OracleBrokerThreadHistoryEntry]) -> Vec<Turn> {
+        let mut turns = Vec::new();
+        let mut pending_user_turn: Option<Turn> = None;
+        for entry in history {
+            match entry.role.as_str() {
+                "user" => {
+                    if let Some(turn) = pending_user_turn.take() {
+                        turns.push(turn);
+                    }
+                    pending_user_turn = Some(Turn {
+                        id: format!("oracle-turn-import-{}", Uuid::new_v4()),
+                        items: vec![ThreadItem::UserMessage {
+                            id: format!("oracle-user-import-{}", Uuid::new_v4()),
+                            content: vec![codex_app_server_protocol::UserInput::Text {
+                                text: entry.text.clone(),
+                                text_elements: Vec::new(),
+                            }],
+                        }],
+                        status: TurnStatus::Completed,
+                        error: None,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: None,
+                    });
+                }
+                "assistant" => {
+                    let agent_item = ThreadItem::AgentMessage {
+                        id: format!("oracle-assistant-import-{}", Uuid::new_v4()),
+                        text: entry.text.clone(),
+                        phase: None,
+                        memory_citation: None,
+                    };
+                    if let Some(mut turn) = pending_user_turn.take() {
+                        turn.items.push(agent_item);
+                        turns.push(turn);
+                    } else {
+                        turns.push(Turn {
+                            id: format!("oracle-turn-import-{}", Uuid::new_v4()),
+                            items: vec![agent_item],
+                            status: TurnStatus::Completed,
+                            error: None,
+                            started_at: None,
+                            completed_at: None,
+                            duration_ms: None,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(turn) = pending_user_turn.take() {
+            turns.push(turn);
+        }
+        turns
+    }
+
+    async fn replay_oracle_thread_snapshot(
+        &mut self,
+        tui: &mut tui::Tui,
+        thread_id: ThreadId,
+    ) -> Result<()> {
+        let snapshot = {
+            let Some(channel) = self.thread_event_channels.get(&thread_id) else {
+                return Ok(());
+            };
+            let store = channel.store.lock().await;
+            store.snapshot()
+        };
+        let init = self.chatwidget_init_for_forked_or_resumed_thread(tui, self.config.clone());
+        self.replace_chat_widget(ChatWidget::new_with_app_event(init));
+        self.reset_for_thread_switch(tui)?;
+        self.replay_thread_snapshot(snapshot, /*resume_restored_queue*/ false);
+        Ok(())
+    }
+
+    async fn import_oracle_thread_history(
+        &mut self,
+        tui: Option<&mut tui::Tui>,
+        thread_id: ThreadId,
+        _conversation_id: &str,
+        history: Vec<OracleBrokerThreadHistoryEntry>,
+    ) -> Result<OracleHistoryImportOutcome> {
+        let remote_history = Self::normalize_oracle_history_entries(history);
+        let (existing_history, has_buffered_events) =
+            if let Some(channel) = self.thread_event_channels.get(&thread_id) {
+                let store = channel.store.lock().await;
+                if Self::oracle_turns_have_nontext_user_inputs(&store.turns) {
+                    return Ok(OracleHistoryImportOutcome::SkippedToAvoidConflict);
+                }
+                (
+                    Self::oracle_turns_to_history_entries(&store.turns),
+                    !store.buffer.is_empty(),
+                )
+            } else {
+                (Vec::new(), false)
+            };
+        let Some(missing_history) =
+            Self::oracle_missing_history_suffix(&existing_history, &remote_history)
+        else {
+            return Ok(OracleHistoryImportOutcome::SkippedToAvoidConflict);
+        };
+        if missing_history.is_empty() {
+            self.persist_active_oracle_binding();
+            return Ok(OracleHistoryImportOutcome::NoNewMessages);
+        }
+        let mut imported_turns = Self::oracle_history_entries_to_turns(missing_history);
+        let message_count = missing_history.len();
+        let mut merged_into_existing_local_turn = false;
+        {
+            let channel = self.ensure_thread_channel(thread_id);
+            let mut store = channel.store.lock().await;
+            let mut merged_turns = store.turns.clone();
+            if missing_history
+                .first()
+                .is_some_and(|entry| entry.role == "assistant")
+                && merged_turns.last().is_some_and(|turn| {
+                    turn.items
+                        .iter()
+                        .any(|item| matches!(item, ThreadItem::UserMessage { .. }))
+                        && !turn
+                            .items
+                            .iter()
+                            .any(|item| matches!(item, ThreadItem::AgentMessage { .. }))
+                })
+                && imported_turns.first().is_some_and(|turn| {
+                    turn.items
+                        .iter()
+                        .all(|item| matches!(item, ThreadItem::AgentMessage { .. }))
+                })
+            {
+                if let Some(first_imported_turn) = imported_turns.first() {
+                    if let Some(last_turn) = merged_turns.last_mut() {
+                        last_turn.items.extend(first_imported_turn.items.clone());
+                        merged_into_existing_local_turn = true;
+                    }
+                }
+                imported_turns.remove(0);
+            }
+            merged_turns.extend(imported_turns.clone());
+            store.set_turns(merged_turns);
+            store.reseed_replay_entries_from_state();
+        }
+        self.persist_active_oracle_binding();
+        if self.oracle_thread_is_displayed(thread_id) {
+            if Self::oracle_history_import_requires_snapshot_refresh(
+                has_buffered_events,
+                merged_into_existing_local_turn,
+            ) {
+                if let Some(tui) = tui {
+                    self.replay_oracle_thread_snapshot(tui, thread_id).await?;
+                }
+            } else {
+                self.chat_widget
+                    .replay_thread_turns(imported_turns, ReplayKind::ThreadSnapshot);
+            }
+        }
+        Ok(OracleHistoryImportOutcome::Imported { message_count })
     }
 
     async fn begin_oracle_user_turn(&mut self, thread_id: ThreadId, items: &[UserInput]) {
@@ -4633,14 +4993,11 @@ impl App {
         let prompt_seed = Self::flatten_user_turn_text(items);
         let workspace_cwd = self.chat_widget.config_ref().cwd.to_path_buf();
         let attachment_resolution =
-            match resolve_oracle_attachments(&prompt_seed, items, workspace_cwd.as_path())
-                .await
-            {
+            match resolve_oracle_attachments(&prompt_seed, items, workspace_cwd.as_path()).await {
                 Ok(resolved) => resolved,
                 Err(err) => {
-                    self.chat_widget.add_error_message(format!(
-                        "Oracle attachment setup failed: {err}"
-                    ));
+                    self.chat_widget
+                        .add_error_message(format!("Oracle attachment setup failed: {err}"));
                     self.persist_active_oracle_binding();
                     return Ok(true);
                 }
@@ -6289,31 +6646,93 @@ impl App {
                     .chat_widget
                     .add_error_message(format!("Failed to create a new Oracle thread: {err}")),
             },
-            Ok(OracleCommand::AttachThread(conversation_id)) => {
+            Ok(OracleCommand::AttachThread {
+                conversation_id,
+                import_history,
+            }) => {
                 match self
                     .attach_oracle_thread_binding(conversation_id.clone(), /*title_hint*/ None)
                     .await
                 {
                     Ok(binding) => {
                         let thread_id = binding.thread_id();
+                        if import_history {
+                            let history_response = match &binding {
+                                OracleAttachThreadBinding::AttachedRemote { history, .. }
+                                    if !history.is_empty() =>
+                                {
+                                    Some(OracleBrokerThreadHistoryResponse {
+                                        session_id: None,
+                                        title: String::new(),
+                                        conversation_id: Some(conversation_id.clone()),
+                                        url: None,
+                                        history: history.clone(),
+                                        history_window: None,
+                                    })
+                                }
+                                _ => match self.oracle_fetch_remote_thread_history(thread_id).await
+                                {
+                                    Ok(history) => Some(history),
+                                    Err(err) => {
+                                        self.chat_widget.add_error_message(format!(
+                                            "Attached Oracle thread on {thread_id}, but failed to fetch remote history: {err}"
+                                        ));
+                                        None
+                                    }
+                                },
+                            };
+                            if let Some(history_response) = history_response {
+                                match self
+                                    .import_oracle_thread_history(
+                                        tui.as_deref_mut(),
+                                        thread_id,
+                                        conversation_id.as_str(),
+                                        history_response.history.clone(),
+                                    )
+                                    .await
+                                {
+                                    Ok(outcome) => {
+                                        let status = Self::oracle_attach_history_message(
+                                            &binding,
+                                            outcome,
+                                            history_response.history_window.as_ref(),
+                                        );
+                                        self.oracle_state.last_status = Some(status);
+                                        self.persist_active_oracle_binding();
+                                    }
+                                    Err(err) => {
+                                        self.chat_widget.add_error_message(format!(
+                                            "Attached Oracle thread on {thread_id}, but failed to import remote history: {err}"
+                                        ));
+                                    }
+                                }
+                            }
+                        }
                         if self.active_thread_id != Some(thread_id)
                             && let Some(tui) = tui.as_deref_mut()
                         {
                             self.select_agent_thread(tui, app_server, thread_id).await?;
                         }
-                        if let OracleAttachThreadBinding::AttachedRemote {
-                            title,
-                            conversation_id,
-                            ..
-                        } = binding
-                        {
-                            self.chat_widget.add_to_history(oracle_history_cell(
-                                "Oracle",
-                                &format!(
-                                    "Attached Oracle thread on {thread_id}: {title} ({conversation_id})"
-                                ),
-                            ));
-                        }
+                        let message = self.oracle_state.last_status.clone().unwrap_or_else(|| {
+                            match binding {
+                                OracleAttachThreadBinding::ReattachedLocal { title, .. } => {
+                                    format!(
+                                        "Reattached existing local Oracle thread {thread_id}: {title}"
+                                    )
+                                }
+                                OracleAttachThreadBinding::AttachedRemote {
+                                    title,
+                                    conversation_id,
+                                    ..
+                                } => {
+                                    format!(
+                                        "Attached Oracle thread on {thread_id}: {title} ({conversation_id})"
+                                    )
+                                }
+                            }
+                        });
+                        self.chat_widget
+                            .add_to_history(oracle_history_cell("Oracle", &message));
                     }
                     Err(err)
                         if err.to_string()
@@ -7896,6 +8315,104 @@ impl App {
         }
     }
 
+    async fn oracle_fetch_remote_thread_history(
+        &mut self,
+        thread_id: ThreadId,
+    ) -> Result<OracleBrokerThreadHistoryResponse> {
+        let conversation_id = self
+            .oracle_state
+            .bindings
+            .get(&thread_id)
+            .and_then(|binding| binding.conversation_id.clone())
+            .ok_or_else(|| {
+                color_eyre::eyre::eyre!(
+                    "Oracle thread {thread_id} is not attached to a remote conversation."
+                )
+            })?;
+        #[cfg(test)]
+        if let Some(result) = {
+            let followup_session = self.oracle_followup_session_for_thread(thread_id);
+            let mut hooks = self
+                .oracle_test_broker_hooks
+                .lock()
+                .expect("oracle test broker hooks");
+            hooks.thread_history_results.pop_front().map(|result| {
+                hooks
+                    .thread_history_followup_sessions
+                    .push(followup_session);
+                result
+            })
+        } {
+            let response = result.map_err(|err| color_eyre::eyre::eyre!(err))?;
+            if response.conversation_id.as_deref() != Some(conversation_id.as_str()) {
+                return Err(color_eyre::eyre::eyre!(
+                    "Oracle returned history for conversation {} while {} was requested.",
+                    response.conversation_id.as_deref().unwrap_or("unknown"),
+                    conversation_id
+                ));
+            }
+            if let Some(session_id) = response.session_id.clone() {
+                self.set_oracle_thread_broker_session_id(thread_id, Some(session_id));
+            }
+            return Ok(response);
+        }
+        let Some(oracle_repo) = find_oracle_repo(self.chat_widget.config_ref().cwd.as_path())
+        else {
+            return Err(color_eyre::eyre::eyre!(
+                "{}",
+                Self::oracle_repo_not_found_message()
+            ));
+        };
+        let broker = self.ensure_oracle_broker(oracle_repo.as_path())?;
+        let followup_session = self
+            .ensure_oracle_followup_session_for_run(thread_id)
+            .await?
+            .ok_or_else(|| {
+                color_eyre::eyre::eyre!(
+                    "Oracle needs an attached local browser session before remote thread history is available."
+                )
+            })?;
+        let history_limit = self.oracle_thread_history_limit();
+        let fetch_history = |followup_session: String| async {
+            broker
+                .thread_history(
+                    Some(followup_session),
+                    conversation_id.clone(),
+                    history_limit,
+                )
+                .await
+        };
+        let response = match fetch_history(followup_session.clone()).await {
+            Ok(response) => response,
+            Err(err) if Self::oracle_thread_history_requires_reattach(err.as_str()) => {
+                self.set_oracle_thread_broker_session_id(thread_id, None);
+                let retry_session = self
+                    .ensure_oracle_followup_session_for_run(thread_id)
+                    .await?
+                    .ok_or_else(|| {
+                        color_eyre::eyre::eyre!(
+                            "Oracle needs an attached local browser session before remote thread history is available."
+                        )
+                    })?;
+                fetch_history(retry_session)
+                    .await
+                    .map_err(|retry_err| color_eyre::eyre::eyre!(retry_err))?
+            }
+            Err(err) => return Err(color_eyre::eyre::eyre!(err)),
+        };
+        if response.conversation_id.as_deref() != Some(conversation_id.as_str()) {
+            return Err(color_eyre::eyre::eyre!(
+                "Oracle returned history for conversation {} while {} was requested.",
+                response.conversation_id.as_deref().unwrap_or("unknown"),
+                conversation_id
+            ));
+        }
+        if let Some(session_id) = response.session_id.clone() {
+            self.set_oracle_thread_broker_session_id(thread_id, Some(session_id));
+        }
+        Ok(response)
+    }
+
     async fn open_oracle_picker(&mut self) -> Result<()> {
         self.persist_active_oracle_binding();
         self.oracle_picker_show_info = false;
@@ -8000,7 +8517,9 @@ impl App {
         let mut visible_remote_count = 0usize;
         for remote in &self.oracle_picker_remote_threads {
             if self
-                .find_oracle_thread_by_conversation_id(remote.conversation_id.as_str())
+                .find_unique_oracle_thread_by_conversation_id(remote.conversation_id.as_str())
+                .ok()
+                .flatten()
                 .is_some()
             {
                 continue;
@@ -8156,12 +8675,16 @@ impl App {
     async fn bind_oracle_remote_thread(
         &mut self,
         remote: OracleBrokerThreadOpenResponse,
-    ) -> ThreadId {
+    ) -> Result<ThreadId> {
         let session_id = remote.session_id.clone();
         let thread_id = if let Some(existing) = remote
             .conversation_id
             .as_deref()
-            .and_then(|conversation_id| self.find_oracle_thread_by_conversation_id(conversation_id))
+            .map(|conversation_id| {
+                self.find_unique_oracle_thread_by_conversation_id(conversation_id)
+            })
+            .transpose()?
+            .flatten()
         {
             existing
         } else {
@@ -8179,7 +8702,7 @@ impl App {
             /*is_closed*/ false,
         );
         self.sync_oracle_thread_session(thread_id).await;
-        thread_id
+        Ok(thread_id)
     }
 
     async fn create_oracle_thread_binding(&mut self) -> Result<OracleNewThreadBinding> {
@@ -8198,7 +8721,7 @@ impl App {
         }
         let remote = self.oracle_new_remote_thread().await?;
         let title = remote.title.clone();
-        let thread_id = self.bind_oracle_remote_thread(remote).await;
+        let thread_id = self.bind_oracle_remote_thread(remote).await?;
         self.oracle_state.last_status = Some(format!("Attached new Oracle thread on {thread_id}."));
         self.persist_active_oracle_binding();
         Ok(OracleNewThreadBinding {
@@ -8230,7 +8753,7 @@ impl App {
         self.ensure_oracle_remote_thread_mutation_allowed()?;
         let mut anchor_thread_id = self.oracle_followup_session_anchor_thread_id();
         if let Some(thread_id) =
-            self.find_oracle_thread_by_conversation_id(conversation_id.as_str())
+            self.find_unique_oracle_thread_by_conversation_id(conversation_id.as_str())?
         {
             if self.oracle_followup_session_for_thread(thread_id).is_some() {
                 self.activate_oracle_binding(thread_id);
@@ -8261,14 +8784,23 @@ impl App {
         let remote = self
             .oracle_attach_remote_thread(conversation_id.clone(), anchor_thread_id)
             .await?;
+        if remote.conversation_id.as_deref() != Some(conversation_id.as_str()) {
+            return Err(color_eyre::eyre::eyre!(
+                "Oracle attached conversation {} while {} was requested.",
+                remote.conversation_id.as_deref().unwrap_or("unknown"),
+                conversation_id
+            ));
+        }
         let title = remote.title.clone();
-        let thread_id = self.bind_oracle_remote_thread(remote).await;
+        let history = remote.history.clone();
+        let thread_id = self.bind_oracle_remote_thread(remote).await?;
         self.oracle_state.last_status = Some(format!("Attached Oracle thread on {thread_id}."));
         self.persist_active_oracle_binding();
         Ok(OracleAttachThreadBinding::AttachedRemote {
             thread_id,
             title,
             conversation_id,
+            history,
         })
     }
 
@@ -14124,6 +14656,31 @@ guardian_approval = true
             .push_back(result);
     }
 
+    fn queue_test_oracle_thread_history_result(
+        app: &App,
+        result: Result<OracleBrokerThreadHistoryResponse, String>,
+    ) {
+        app.oracle_test_broker_hooks
+            .lock()
+            .expect("oracle test broker hooks")
+            .thread_history_results
+            .push_back(result);
+    }
+
+    fn test_oracle_thread_open_response(
+        session_id: &str,
+        title: &str,
+        conversation_id: &str,
+    ) -> OracleBrokerThreadOpenResponse {
+        OracleBrokerThreadOpenResponse {
+            session_id: Some(session_id.to_string()),
+            title: title.to_string(),
+            conversation_id: Some(conversation_id.to_string()),
+            url: Some(format!("https://chatgpt.com/c/{conversation_id}")),
+            history: Vec::new(),
+        }
+    }
+
     #[tokio::test]
     async fn cached_oracle_broker_match_requires_live_transport() {
         let repo = PathBuf::from("/tmp/oracle");
@@ -14296,6 +14853,38 @@ guardian_approval = true
     }
 
     #[tokio::test]
+    async fn show_oracle_picker_keeps_remote_row_when_duplicate_local_bindings_exist() {
+        let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let first_thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_remote_metadata(
+            first_thread_id,
+            Some("attached-1".to_string()),
+            Some("Attached Thread A".to_string()),
+        );
+        let second_thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_remote_metadata(
+            second_thread_id,
+            Some("attached-1".to_string()),
+            Some("Attached Thread B".to_string()),
+        );
+
+        app.show_oracle_picker(
+            vec![OracleBrokerThreadEntry {
+                title: "Attached Thread".to_string(),
+                conversation_id: "attached-1".to_string(),
+                url: Some("https://chatgpt.com/c/attached-1".to_string()),
+                is_current: false,
+            }],
+            /*include_new_thread*/ false,
+        );
+
+        let popup = render_bottom_popup(&app, /*width*/ 100);
+        assert!(popup.contains("Attached: Attached Thread A"));
+        assert!(popup.contains("Attached: Attached Thread B"));
+        assert!(popup.contains("Remote: Attached Thread"));
+    }
+
+    #[tokio::test]
     async fn oracle_workflow_picker_lists_supervisor_and_hidden_orchestrator() -> Result<()> {
         let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
         let oracle_thread_id = app.ensure_visible_oracle_thread().await;
@@ -14364,6 +14953,7 @@ guardian_approval = true
                 title: "Fresh Thread".to_string(),
                 conversation_id: Some("fresh-3".to_string()),
                 url: Some("https://chatgpt.com/c/fresh-3".to_string()),
+                history: Vec::new(),
             }),
         );
 
@@ -14460,6 +15050,7 @@ guardian_approval = true
                 title: "Fallback Thread".to_string(),
                 conversation_id: Some("fallback-1".to_string()),
                 url: Some("https://chatgpt.com/c/fallback-1".to_string()),
+                history: Vec::new(),
             }),
         );
 
@@ -14524,6 +15115,7 @@ guardian_approval = true
                 title: "Blank Thread".to_string(),
                 conversation_id: None,
                 url: Some("https://chatgpt.com/".to_string()),
+                history: Vec::new(),
             }),
         );
 
@@ -14720,6 +15312,78 @@ guardian_approval = true
     }
 
     #[tokio::test]
+    async fn oracle_attach_command_with_import_history_reuses_existing_local_thread_and_fetches_history()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_thread_broker_session_id(thread_id, Some("runtime-root".to_string()));
+        app.set_oracle_remote_metadata(
+            thread_id,
+            Some("attached-1".to_string()),
+            Some("Attached Thread".to_string()),
+        );
+        app.sync_oracle_thread_session(thread_id).await;
+        queue_test_oracle_thread_history_result(
+            &app,
+            Ok(OracleBrokerThreadHistoryResponse {
+                session_id: Some("runtime-root".to_string()),
+                title: "Attached Thread".to_string(),
+                conversation_id: Some("attached-1".to_string()),
+                url: Some("https://chatgpt.com/c/attached-1".to_string()),
+                history_window: None,
+                history: vec![
+                    OracleBrokerThreadHistoryEntry {
+                        role: "user".to_string(),
+                        text: "Earlier question".to_string(),
+                    },
+                    OracleBrokerThreadHistoryEntry {
+                        role: "assistant".to_string(),
+                        text: "Earlier answer".to_string(),
+                    },
+                ],
+            }),
+        );
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        app.handle_configure_oracle_command(
+            None,
+            &mut app_server,
+            "attach attached-1 --import-history",
+        )
+        .await?;
+
+        let hooks = app
+            .oracle_test_broker_hooks
+            .lock()
+            .expect("oracle test broker hooks");
+        assert!(hooks.attach_thread_calls.is_empty());
+        assert_eq!(
+            hooks.thread_history_followup_sessions,
+            vec![Some("runtime-root".to_string())]
+        );
+        drop(hooks);
+
+        assert_eq!(app.oracle_state.oracle_thread_id, Some(thread_id));
+        let channel = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("oracle thread channel");
+        let store = channel.store.lock().await;
+        assert_eq!(store.turns.len(), 1);
+        assert!(matches!(
+            store.turns[0].items.as_slice(),
+            [
+                ThreadItem::UserMessage { .. },
+                ThreadItem::AgentMessage { text, .. }
+            ] if text == "Earlier answer"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn attach_oracle_thread_binding_reattaches_remote_when_local_binding_lost_session()
     -> Result<()> {
         let mut app = make_test_app().await;
@@ -14733,12 +15397,11 @@ guardian_approval = true
         );
         queue_test_oracle_attach_thread_result(
             &app,
-            Ok(OracleBrokerThreadOpenResponse {
-                session_id: Some("runtime-reattached".to_string()),
-                title: "Attached Thread".to_string(),
-                conversation_id: Some("attached-1".to_string()),
-                url: Some("https://chatgpt.com/c/attached-1".to_string()),
-            }),
+            Ok(test_oracle_thread_open_response(
+                "runtime-reattached",
+                "Attached Thread",
+                "attached-1",
+            )),
         );
 
         let binding = app
@@ -14758,6 +15421,7 @@ guardian_approval = true
                 thread_id: stale_thread_id,
                 title: "Attached Thread".to_string(),
                 conversation_id: "attached-1".to_string(),
+                history: Vec::new(),
             }
         );
         assert_eq!(hooks.attach_thread_calls, vec!["attached-1".to_string()]);
@@ -14781,12 +15445,11 @@ guardian_approval = true
         let mut app = make_test_app().await;
         queue_test_oracle_attach_thread_result(
             &app,
-            Ok(OracleBrokerThreadOpenResponse {
-                session_id: Some("runtime-7".to_string()),
-                title: "Remote Thread".to_string(),
-                conversation_id: Some("remote-7".to_string()),
-                url: Some("https://chatgpt.com/c/remote-7".to_string()),
-            }),
+            Ok(test_oracle_thread_open_response(
+                "runtime-7",
+                "Remote Thread",
+                "remote-7",
+            )),
         );
 
         let binding = app
@@ -14800,6 +15463,7 @@ guardian_approval = true
                 thread_id,
                 title: "Remote Thread".to_string(),
                 conversation_id: "remote-7".to_string(),
+                history: Vec::new(),
             }
         );
         assert_eq!(
@@ -14838,6 +15502,667 @@ guardian_approval = true
     }
 
     #[tokio::test]
+    async fn attach_oracle_thread_binding_rejects_mismatched_remote_conversation_response()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        queue_test_oracle_attach_thread_result(
+            &app,
+            Ok(test_oracle_thread_open_response(
+                "runtime-7",
+                "Remote Thread",
+                "wrong-9",
+            )),
+        );
+
+        let err = app
+            .attach_oracle_thread_binding("remote-7".to_string(), None)
+            .await
+            .expect_err("mismatched conversation id should fail");
+
+        assert!(err.to_string().contains("wrong-9"));
+        assert!(app.oracle_state.bindings.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oracle_attach_command_with_import_history_seeds_empty_local_transcript() -> Result<()>
+    {
+        let mut app = make_test_app().await;
+        let remote_history = vec![
+            OracleBrokerThreadHistoryEntry {
+                role: "user".to_string(),
+                text: "Earlier question".to_string(),
+            },
+            OracleBrokerThreadHistoryEntry {
+                role: "assistant".to_string(),
+                text: "Earlier answer".to_string(),
+            },
+            OracleBrokerThreadHistoryEntry {
+                role: "user".to_string(),
+                text: "Later question".to_string(),
+            },
+        ];
+        queue_test_oracle_attach_thread_result(
+            &app,
+            Ok(OracleBrokerThreadOpenResponse {
+                history: remote_history.clone(),
+                ..test_oracle_thread_open_response("runtime-7", "Remote Thread", "remote-7")
+            }),
+        );
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        app.handle_configure_oracle_command(
+            None,
+            &mut app_server,
+            "attach remote-7 --import-history",
+        )
+        .await?;
+
+        let thread_id = app.oracle_state.oracle_thread_id.expect("oracle thread");
+        let binding = app
+            .oracle_state
+            .bindings
+            .get(&thread_id)
+            .expect("oracle binding");
+        assert_eq!(binding.conversation_id.as_deref(), Some("remote-7"));
+        let hooks = app
+            .oracle_test_broker_hooks
+            .lock()
+            .expect("oracle test broker hooks");
+        assert_eq!(hooks.attach_thread_calls, vec!["remote-7".to_string()]);
+        assert!(hooks.thread_history_followup_sessions.is_empty());
+        drop(hooks);
+
+        let channel = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("oracle thread channel");
+        let store = channel.store.lock().await;
+        assert_eq!(store.turns.len(), 2);
+        assert!(matches!(
+            store.turns[0].items.as_slice(),
+            [
+                ThreadItem::UserMessage { .. },
+                ThreadItem::AgentMessage { text, .. }
+            ] if text == "Earlier answer"
+        ));
+        assert!(matches!(
+            store.turns[1].items.as_slice(),
+            [ThreadItem::UserMessage { .. }]
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oracle_attach_command_with_import_history_falls_back_to_thread_history_fetch()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        queue_test_oracle_attach_thread_result(
+            &app,
+            Ok(test_oracle_thread_open_response(
+                "runtime-7",
+                "Remote Thread",
+                "remote-7",
+            )),
+        );
+        queue_test_oracle_thread_history_result(
+            &app,
+            Ok(OracleBrokerThreadHistoryResponse {
+                session_id: Some("runtime-7".to_string()),
+                title: "Remote Thread".to_string(),
+                conversation_id: Some("remote-7".to_string()),
+                url: Some("https://chatgpt.com/c/remote-7".to_string()),
+                history_window: None,
+                history: vec![OracleBrokerThreadHistoryEntry {
+                    role: "assistant".to_string(),
+                    text: "Imported from fallback".to_string(),
+                }],
+            }),
+        );
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        app.handle_configure_oracle_command(
+            None,
+            &mut app_server,
+            "attach remote-7 --import-history",
+        )
+        .await?;
+
+        let thread_id = app.oracle_state.oracle_thread_id.expect("oracle thread");
+        let hooks = app
+            .oracle_test_broker_hooks
+            .lock()
+            .expect("oracle test broker hooks");
+        assert_eq!(hooks.attach_thread_calls, vec!["remote-7".to_string()]);
+        assert_eq!(
+            hooks.thread_history_followup_sessions,
+            vec![Some("runtime-7".to_string())]
+        );
+        drop(hooks);
+        let channel = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("oracle thread channel");
+        let store = channel.store.lock().await;
+        assert!(matches!(
+            store.turns[0].items.as_slice(),
+            [ThreadItem::AgentMessage { text, .. }] if text == "Imported from fallback"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oracle_fetch_remote_thread_history_rejects_mismatched_conversation_response()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_thread_broker_session_id(thread_id, Some("runtime-7".to_string()));
+        app.set_oracle_remote_metadata(
+            thread_id,
+            Some("remote-7".to_string()),
+            Some("Remote Thread".to_string()),
+        );
+        queue_test_oracle_thread_history_result(
+            &app,
+            Ok(OracleBrokerThreadHistoryResponse {
+                session_id: Some("runtime-7".to_string()),
+                title: "Wrong Thread".to_string(),
+                conversation_id: Some("wrong-9".to_string()),
+                url: Some("https://chatgpt.com/c/wrong-9".to_string()),
+                history_window: None,
+                history: Vec::new(),
+            }),
+        );
+
+        let err = app
+            .oracle_fetch_remote_thread_history(thread_id)
+            .await
+            .expect_err("mismatched conversation id should fail");
+
+        assert!(err.to_string().contains("wrong-9"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn import_oracle_thread_history_appends_only_missing_suffix_without_duplication()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_remote_metadata(
+            thread_id,
+            Some("remote-7".to_string()),
+            Some("Remote Thread".to_string()),
+        );
+        app.push_oracle_turn(
+            thread_id,
+            Turn {
+                id: "local-turn-1".to_string(),
+                items: vec![
+                    ThreadItem::UserMessage {
+                        id: "user-1".to_string(),
+                        content: vec![codex_app_server_protocol::UserInput::Text {
+                            text: "Earlier question".to_string(),
+                            text_elements: Vec::new(),
+                        }],
+                    },
+                    ThreadItem::AgentMessage {
+                        id: "assistant-1".to_string(),
+                        text: "Earlier answer".to_string(),
+                        phase: None,
+                        memory_citation: None,
+                    },
+                ],
+                status: TurnStatus::Completed,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+            },
+        )
+        .await;
+
+        let outcome = app
+            .import_oracle_thread_history(
+                None,
+                thread_id,
+                "remote-7",
+                vec![
+                    OracleBrokerThreadHistoryEntry {
+                        role: "user".to_string(),
+                        text: "Earlier question".to_string(),
+                    },
+                    OracleBrokerThreadHistoryEntry {
+                        role: "assistant".to_string(),
+                        text: "Earlier answer".to_string(),
+                    },
+                    OracleBrokerThreadHistoryEntry {
+                        role: "user".to_string(),
+                        text: "Later question".to_string(),
+                    },
+                ],
+            )
+            .await?;
+        assert_eq!(
+            outcome,
+            OracleHistoryImportOutcome::Imported { message_count: 1 }
+        );
+
+        let outcome = app
+            .import_oracle_thread_history(
+                None,
+                thread_id,
+                "remote-7",
+                vec![
+                    OracleBrokerThreadHistoryEntry {
+                        role: "user".to_string(),
+                        text: "Earlier question".to_string(),
+                    },
+                    OracleBrokerThreadHistoryEntry {
+                        role: "assistant".to_string(),
+                        text: "Earlier answer".to_string(),
+                    },
+                    OracleBrokerThreadHistoryEntry {
+                        role: "user".to_string(),
+                        text: "Later question".to_string(),
+                    },
+                ],
+            )
+            .await?;
+        assert_eq!(outcome, OracleHistoryImportOutcome::NoNewMessages);
+
+        let channel = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("oracle thread channel");
+        let store = channel.store.lock().await;
+        assert_eq!(store.turns.len(), 2);
+        assert!(matches!(
+            store.turns[1].items.as_slice(),
+            [ThreadItem::UserMessage { .. }]
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn import_oracle_thread_history_accepts_bounded_remote_history_windows() -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_remote_metadata(
+            thread_id,
+            Some("remote-7".to_string()),
+            Some("Remote Thread".to_string()),
+        );
+        app.push_oracle_turn(
+            thread_id,
+            Turn {
+                id: "local-turn-1".to_string(),
+                items: vec![
+                    ThreadItem::UserMessage {
+                        id: "user-1".to_string(),
+                        content: vec![codex_app_server_protocol::UserInput::Text {
+                            text: "Earlier question".to_string(),
+                            text_elements: Vec::new(),
+                        }],
+                    },
+                    ThreadItem::AgentMessage {
+                        id: "assistant-1".to_string(),
+                        text: "Earlier answer".to_string(),
+                        phase: None,
+                        memory_citation: None,
+                    },
+                ],
+                status: TurnStatus::Completed,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+            },
+        )
+        .await;
+        app.push_oracle_turn(
+            thread_id,
+            Turn {
+                id: "local-turn-2".to_string(),
+                items: vec![ThreadItem::UserMessage {
+                    id: "user-2".to_string(),
+                    content: vec![codex_app_server_protocol::UserInput::Text {
+                        text: "Later question".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                }],
+                status: TurnStatus::Completed,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+            },
+        )
+        .await;
+
+        let outcome = app
+            .import_oracle_thread_history(
+                None,
+                thread_id,
+                "remote-7",
+                vec![
+                    OracleBrokerThreadHistoryEntry {
+                        role: "assistant".to_string(),
+                        text: "Earlier answer".to_string(),
+                    },
+                    OracleBrokerThreadHistoryEntry {
+                        role: "user".to_string(),
+                        text: "Later question".to_string(),
+                    },
+                    OracleBrokerThreadHistoryEntry {
+                        role: "assistant".to_string(),
+                        text: "New remote answer".to_string(),
+                    },
+                ],
+            )
+            .await?;
+
+        assert_eq!(
+            outcome,
+            OracleHistoryImportOutcome::Imported { message_count: 1 }
+        );
+        let channel = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("oracle thread channel");
+        let store = channel.store.lock().await;
+        assert_eq!(store.turns.len(), 2);
+        assert!(matches!(
+            store.turns[1].items.as_slice(),
+            [
+                ThreadItem::UserMessage { .. },
+                ThreadItem::AgentMessage { text, .. }
+            ] if text == "New remote answer"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn import_oracle_thread_history_accepts_single_user_overlap_for_pending_local_turn()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_remote_metadata(
+            thread_id,
+            Some("remote-7".to_string()),
+            Some("Remote Thread".to_string()),
+        );
+        app.push_oracle_turn(
+            thread_id,
+            Turn {
+                id: "local-turn-1".to_string(),
+                items: vec![ThreadItem::UserMessage {
+                    id: "user-1".to_string(),
+                    content: vec![codex_app_server_protocol::UserInput::Text {
+                        text: "Later question".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                }],
+                status: TurnStatus::Completed,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+            },
+        )
+        .await;
+
+        let outcome = app
+            .import_oracle_thread_history(
+                None,
+                thread_id,
+                "remote-7",
+                vec![
+                    OracleBrokerThreadHistoryEntry {
+                        role: "user".to_string(),
+                        text: "Later question".to_string(),
+                    },
+                    OracleBrokerThreadHistoryEntry {
+                        role: "assistant".to_string(),
+                        text: "New remote answer".to_string(),
+                    },
+                ],
+            )
+            .await?;
+
+        assert_eq!(
+            outcome,
+            OracleHistoryImportOutcome::Imported { message_count: 1 }
+        );
+        let channel = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("oracle thread channel");
+        let store = channel.store.lock().await;
+        assert_eq!(store.turns.len(), 1);
+        assert!(matches!(
+            store.turns[0].items.as_slice(),
+            [
+                ThreadItem::UserMessage { .. },
+                ThreadItem::AgentMessage { text, .. }
+            ] if text == "New remote answer"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn import_oracle_thread_history_rejects_single_message_overlap_on_long_diverged_history()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_remote_metadata(
+            thread_id,
+            Some("remote-7".to_string()),
+            Some("Remote Thread".to_string()),
+        );
+        app.push_oracle_turn(
+            thread_id,
+            Turn {
+                id: "local-turn-1".to_string(),
+                items: vec![
+                    ThreadItem::UserMessage {
+                        id: "user-1".to_string(),
+                        content: vec![codex_app_server_protocol::UserInput::Text {
+                            text: "Different question".to_string(),
+                            text_elements: Vec::new(),
+                        }],
+                    },
+                    ThreadItem::AgentMessage {
+                        id: "assistant-1".to_string(),
+                        text: "Different answer".to_string(),
+                        phase: None,
+                        memory_citation: None,
+                    },
+                ],
+                status: TurnStatus::Completed,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+            },
+        )
+        .await;
+        app.push_oracle_turn(
+            thread_id,
+            Turn {
+                id: "local-turn-2".to_string(),
+                items: vec![ThreadItem::UserMessage {
+                    id: "user-2".to_string(),
+                    content: vec![codex_app_server_protocol::UserInput::Text {
+                        text: "ok".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                }],
+                status: TurnStatus::Completed,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+            },
+        )
+        .await;
+
+        let outcome = app
+            .import_oracle_thread_history(
+                None,
+                thread_id,
+                "remote-7",
+                vec![
+                    OracleBrokerThreadHistoryEntry {
+                        role: "user".to_string(),
+                        text: "ok".to_string(),
+                    },
+                    OracleBrokerThreadHistoryEntry {
+                        role: "assistant".to_string(),
+                        text: "Wrong remote answer".to_string(),
+                    },
+                ],
+            )
+            .await?;
+
+        assert_eq!(outcome, OracleHistoryImportOutcome::SkippedToAvoidConflict);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn import_oracle_thread_history_skips_diverged_local_transcript() -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.push_oracle_turn(
+            thread_id,
+            Turn {
+                id: "local-turn-1".to_string(),
+                items: vec![ThreadItem::AgentMessage {
+                    id: "assistant-1".to_string(),
+                    text: "Local only reply".to_string(),
+                    phase: None,
+                    memory_citation: None,
+                }],
+                status: TurnStatus::Completed,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+            },
+        )
+        .await;
+
+        let outcome = app
+            .import_oracle_thread_history(
+                None,
+                thread_id,
+                "remote-7",
+                vec![OracleBrokerThreadHistoryEntry {
+                    role: "assistant".to_string(),
+                    text: "Different remote reply".to_string(),
+                }],
+            )
+            .await?;
+
+        assert_eq!(outcome, OracleHistoryImportOutcome::SkippedToAvoidConflict);
+        let channel = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("oracle thread channel");
+        let store = channel.store.lock().await;
+        assert_eq!(store.turns.len(), 1);
+        assert!(matches!(
+            store.turns[0].items.as_slice(),
+            [ThreadItem::AgentMessage { text, .. }] if text == "Local only reply"
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attach_oracle_thread_binding_rejects_duplicate_local_conversation_bindings()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        let first_thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_remote_metadata(
+            first_thread_id,
+            Some("attached-1".to_string()),
+            Some("Thread A".to_string()),
+        );
+        let second_thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_remote_metadata(
+            second_thread_id,
+            Some("attached-1".to_string()),
+            Some("Thread B".to_string()),
+        );
+
+        let err = app
+            .attach_oracle_thread_binding("attached-1".to_string(), None)
+            .await
+            .expect_err("duplicate local bindings should fail closed");
+
+        assert!(err.to_string().contains("multiple local threads"));
+        assert!(
+            app.oracle_test_broker_hooks
+                .lock()
+                .expect("oracle test broker hooks")
+                .attach_thread_calls
+                .is_empty()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn oracle_thread_history_requires_reattach_accepts_repaired_followup_errors() {
+        assert!(App::oracle_thread_history_requires_reattach(
+            "Browser follow-up parent session abc could not be found."
+        ));
+        assert!(App::oracle_thread_history_requires_reattach(
+            "Session abc is missing browser metadata."
+        ));
+    }
+
+    #[test]
+    fn oracle_attach_history_message_mentions_bounded_remote_window() {
+        let thread_id = ThreadId::new();
+        let message = App::oracle_attach_history_message(
+            &OracleAttachThreadBinding::AttachedRemote {
+                thread_id,
+                title: "Attached Thread".to_string(),
+                conversation_id: "attached-1".to_string(),
+                history: Vec::new(),
+            },
+            OracleHistoryImportOutcome::Imported { message_count: 2 },
+            Some(&OracleBrokerThreadHistoryWindow {
+                limit: 100,
+                returned_count: 100,
+                total_count: 135,
+                truncated: true,
+            }),
+        );
+
+        assert!(message.contains("Imported 2 prior message(s)."));
+        assert!(message.contains("Remote history was limited to the newest 100 text message(s) out of at least 135 available."));
+    }
+
+    #[test]
+    fn oracle_history_import_snapshot_refresh_required_for_buffered_or_merged_transcript() {
+        assert!(App::oracle_history_import_requires_snapshot_refresh(
+            true, false
+        ));
+        assert!(App::oracle_history_import_requires_snapshot_refresh(
+            false, true
+        ));
+        assert!(!App::oracle_history_import_requires_snapshot_refresh(
+            false, false
+        ));
+    }
+
+    #[tokio::test]
     async fn attach_oracle_thread_binding_prefers_current_local_binding_session_for_remote_attach()
     -> Result<()> {
         let mut app = make_test_app().await;
@@ -14848,12 +16173,11 @@ guardian_approval = true
         app.activate_oracle_binding(current_thread_id);
         queue_test_oracle_attach_thread_result(
             &app,
-            Ok(OracleBrokerThreadOpenResponse {
-                session_id: Some("runtime-c".to_string()),
-                title: "Remote Thread".to_string(),
-                conversation_id: Some("remote-7".to_string()),
-                url: Some("https://chatgpt.com/c/remote-7".to_string()),
-            }),
+            Ok(test_oracle_thread_open_response(
+                "runtime-c",
+                "Remote Thread",
+                "remote-7",
+            )),
         );
 
         let _ = app
@@ -14907,12 +16231,11 @@ guardian_approval = true
         );
         queue_test_oracle_attach_thread_result(
             &app,
-            Ok(OracleBrokerThreadOpenResponse {
-                session_id: Some("runtime-reattached".to_string()),
-                title: "Attached Thread".to_string(),
-                conversation_id: Some("attached-1".to_string()),
-                url: Some("https://chatgpt.com/c/attached-1".to_string()),
-            }),
+            Ok(test_oracle_thread_open_response(
+                "runtime-reattached",
+                "Attached Thread",
+                "attached-1",
+            )),
         );
 
         let followup_session = app
@@ -14993,6 +16316,7 @@ guardian_approval = true
                 title: "Attached Thread".to_string(),
                 conversation_id: Some("attached-1".to_string()),
                 url: Some("https://chatgpt.com/c/attached-1".to_string()),
+                history: Vec::new(),
             }),
         );
 
@@ -20202,15 +21526,26 @@ guardian_approval = true
             .values()
             .next()
             .expect("oracle request");
-        let actual_files = request.files.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+        let actual_files = request
+            .files
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
         let expected_files = [
-            std::fs::canonicalize(src.join("a.rs"))?.display().to_string(),
-            std::fs::canonicalize(src.join("b.rs"))?.display().to_string(),
+            std::fs::canonicalize(src.join("a.rs"))?
+                .display()
+                .to_string(),
+            std::fs::canonicalize(src.join("b.rs"))?
+                .display()
+                .to_string(),
         ]
         .into_iter()
         .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(actual_files, expected_files);
-        let source = request.source_user_text.as_deref().expect("source user text");
+        let source = request
+            .source_user_text
+            .as_deref()
+            .expect("source user text");
         assert!(source.contains("file: src/a.rs"));
         assert!(source.contains("glob: src/**/*.rs"));
         assert!(!source.contains("[local_image: src/a.rs]"));
@@ -20218,7 +21553,11 @@ guardian_approval = true
         assert!(!source.contains("[local_glob: src/**/*.rs]"));
         assert!(request.requested_prompt.contains("[local_image: src/a.rs]"));
         assert!(request.requested_prompt.contains("[local_file: src/a.rs]"));
-        assert!(request.requested_prompt.contains("[local_glob: src/**/*.rs]"));
+        assert!(
+            request
+                .requested_prompt
+                .contains("[local_glob: src/**/*.rs]")
+        );
         app.shutdown_oracle_broker(true);
         Ok(())
     }
@@ -20566,10 +21905,13 @@ guardian_approval = true
                 title: "Oracle Thread".to_string(),
                 conversation_id: Some("conversation-before-interrupt".to_string()),
                 url: Some("https://chatgpt.com/c/conversation-before-interrupt".to_string()),
+                history: Vec::new(),
             }),
         );
 
-        let (_, followup_session) = app.ensure_oracle_session_continuity_for_run(thread_id).await?;
+        let (_, followup_session) = app
+            .ensure_oracle_session_continuity_for_run(thread_id)
+            .await?;
 
         assert_eq!(followup_session.as_deref(), Some("oracle-session-b"));
         let hooks = app
@@ -20590,7 +21932,10 @@ guardian_approval = true
             binding.conversation_id.as_deref(),
             Some("conversation-before-interrupt")
         );
-        assert_eq!(binding.current_session_id.as_deref(), Some("oracle-session-b"));
+        assert_eq!(
+            binding.current_session_id.as_deref(),
+            Some("oracle-session-b")
+        );
         Ok(())
     }
 

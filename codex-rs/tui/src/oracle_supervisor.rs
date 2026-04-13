@@ -15,6 +15,7 @@ use ratatui::text::Line;
 use serde::Deserialize;
 use tokio::fs;
 use tokio::process::Command;
+use url::Url;
 
 use crate::history_cell::PlainHistoryCell;
 
@@ -26,7 +27,10 @@ pub(crate) const ORACLE_CONTROL_SCHEMA_VERSION: u64 = 1;
 pub(crate) enum OracleCommand {
     Browse,
     NewThread,
-    AttachThread(String),
+    AttachThread {
+        conversation_id: String,
+        import_history: bool,
+    },
     On,
     Off,
     Status,
@@ -35,6 +39,7 @@ pub(crate) enum OracleCommand {
 
 impl OracleCommand {
     pub(crate) fn parse(raw: &str) -> Result<Self, String> {
+        const USAGE: &str = "Usage: /oracle [browse|new|attach <conversation_id|chatgpt_thread_url> [history|--import-history]|on|off|info|model [pro [standard|extended]|thinking]]";
         let trimmed = raw.trim();
         if trimmed.is_empty() {
             return Ok(Self::Browse);
@@ -47,8 +52,27 @@ impl OracleCommand {
         match command.as_str() {
             "browse" | "threads" if parts.len() == 1 => Ok(Self::Browse),
             "new" if parts.len() == 1 => Ok(Self::NewThread),
-            "attach" if parts.len() == 2 && !parts[1].trim().is_empty() => {
-                Ok(Self::AttachThread(parts[1].to_string()))
+            "attach" if parts.len() >= 2 && !parts[1].trim().is_empty() => {
+                let import_history =
+                    match parts.get(2).map(|value| value.trim().to_ascii_lowercase()) {
+                        None => false,
+                        Some(flag)
+                            if flag == "--import-history"
+                                || flag == "import-history"
+                                || flag == "history" =>
+                        {
+                            true
+                        }
+                        _ => return Err(USAGE.to_string()),
+                    };
+                if parts.len() > 3 {
+                    return Err(USAGE.to_string());
+                }
+                Ok(Self::AttachThread {
+                    conversation_id: normalize_oracle_conversation_target(parts[1])
+                        .ok_or_else(|| USAGE.to_string())?,
+                    import_history,
+                })
             }
             "on" if parts.len() == 1 => Ok(Self::On),
             "off" if parts.len() == 1 => Ok(Self::Off),
@@ -56,15 +80,47 @@ impl OracleCommand {
             "model" if parts.len() == 1 => Ok(Self::Model(None)),
             "model" => OracleModelPreset::parse_parts(&parts[1..])
                 .map(|model| Self::Model(Some(model)))
-                .ok_or_else(|| {
-                    "Usage: /oracle [browse|new|attach <conversation_id>|on|off|info|model [pro [standard|extended]|thinking]]".to_string()
-                }),
-            _ => Err(
-                "Usage: /oracle [browse|new|attach <conversation_id>|on|off|info|model [pro [standard|extended]|thinking]]"
-                    .to_string(),
-            ),
+                .ok_or_else(|| USAGE.to_string()),
+            _ => Err(USAGE.to_string()),
         }
     }
+}
+
+fn normalize_oracle_conversation_target(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if is_oracle_conversation_id(trimmed) {
+        return Some(trimmed.to_string());
+    }
+    let parsed = Url::parse(trimmed).ok()?;
+    if parsed.scheme() != "https" {
+        return None;
+    }
+    let host = parsed.host_str()?.to_ascii_lowercase();
+    if host != "chatgpt.com" && host != "chat.openai.com" {
+        return None;
+    }
+    let segments = parsed
+        .path()
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let conversation_id = match segments.as_slice() {
+        ["c", conversation_id]
+        | ["g", _, "c", conversation_id]
+        | ["g", _, "project", "c", conversation_id] => conversation_id,
+        _ => return None,
+    };
+    is_oracle_conversation_id(conversation_id).then(|| conversation_id.to_string())
+}
+
+fn is_oracle_conversation_id(raw: &str) -> bool {
+    !raw.is_empty()
+        && raw
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1587,10 +1643,7 @@ fn directive_targets_delegate(directive: &OracleControlDirective) -> bool {
                     .unwrap_or_else(|| {
                         directive.participants.iter().any(|participant| {
                             participant.address.eq_ignore_ascii_case("orchestrator")
-                                || matches!(
-                                    participant.kind.as_deref(),
-                                    Some("orchestrator")
-                                )
+                                || matches!(participant.kind.as_deref(), Some("orchestrator"))
                         })
                     })
         }
@@ -1865,8 +1918,51 @@ mod tests {
         assert_eq!(OracleCommand::parse("new"), Ok(OracleCommand::NewThread));
         assert_eq!(
             OracleCommand::parse("attach abc-123"),
-            Ok(OracleCommand::AttachThread("abc-123".to_string()))
+            Ok(OracleCommand::AttachThread {
+                conversation_id: "abc-123".to_string(),
+                import_history: false,
+            })
         );
+        assert_eq!(
+            OracleCommand::parse("attach abc-123 --import-history"),
+            Ok(OracleCommand::AttachThread {
+                conversation_id: "abc-123".to_string(),
+                import_history: true,
+            })
+        );
+        assert_eq!(
+            OracleCommand::parse("attach abc-123 history"),
+            Ok(OracleCommand::AttachThread {
+                conversation_id: "abc-123".to_string(),
+                import_history: true,
+            })
+        );
+        assert_eq!(
+            OracleCommand::parse("attach https://chatgpt.com/c/abc-123"),
+            Ok(OracleCommand::AttachThread {
+                conversation_id: "abc-123".to_string(),
+                import_history: false,
+            })
+        );
+        assert_eq!(
+            OracleCommand::parse("attach https://chat.openai.com/c/abc-123/"),
+            Ok(OracleCommand::AttachThread {
+                conversation_id: "abc-123".to_string(),
+                import_history: false,
+            })
+        );
+        assert_eq!(
+            OracleCommand::parse(
+                "attach https://chatgpt.com/g/g-p-example/project/c/abc-123?foo=bar#frag"
+            ),
+            Ok(OracleCommand::AttachThread {
+                conversation_id: "abc-123".to_string(),
+                import_history: false,
+            })
+        );
+        assert!(OracleCommand::parse("attach https://chatgpt.com/c/").is_err());
+        assert!(OracleCommand::parse("attach https://example.com/c/abc-123").is_err());
+        assert!(OracleCommand::parse("attach https://chatgpt.com/share/abc-123").is_err());
         assert_eq!(OracleCommand::parse("on"), Ok(OracleCommand::On));
         assert_eq!(OracleCommand::parse("off"), Ok(OracleCommand::Off));
         assert_eq!(OracleCommand::parse("status"), Ok(OracleCommand::Status));
