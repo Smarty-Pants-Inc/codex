@@ -3855,6 +3855,7 @@ impl App {
                 approvals_reviewer: config.approvals_reviewer,
                 sandbox_policy: config.permissions.sandbox_policy.get().clone(),
                 cwd: config.cwd.to_path_buf(),
+                instruction_source_paths: Vec::new(),
                 reasoning_effort: None,
                 history_log_id: 0,
                 history_entry_count: 0,
@@ -3867,6 +3868,7 @@ impl App {
         session.model = format!("requested {}", self.oracle_state.model.display_name());
         session.model_provider_id = "oracle-browser".to_string();
         session.cwd = config.cwd.to_path_buf();
+        session.instruction_source_paths = Vec::new();
         session.history_log_id = 0;
         session.history_entry_count = 0;
         session.network_proxy = None;
