@@ -135,6 +135,7 @@ mod model_catalog;
 mod model_migration;
 mod multi_agents;
 mod notifications;
+mod oracle_attachments;
 pub(crate) mod onboarding;
 mod oracle_broker;
 mod oracle_supervisor;

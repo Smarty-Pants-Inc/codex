@@ -56,6 +56,7 @@ use crate::multi_agents::format_agent_picker_item_name;
 use crate::multi_agents::next_agent_shortcut_matches;
 use crate::multi_agents::previous_agent_shortcut_matches;
 use crate::multi_agents::system_event_cell;
+use crate::oracle_attachments::resolve_oracle_attachments;
 use crate::oracle_broker::OracleBrokerClient;
 use crate::oracle_broker::OracleBrokerRequest;
 use crate::oracle_broker::OracleBrokerThreadEntry;
@@ -3084,15 +3085,29 @@ impl App {
         for item in items {
             match item {
                 UserInput::Text { text, .. } => parts.push(text.clone()),
-                UserInput::Image { image_url } => parts.push(format!("[image: {image_url}]")),
+                UserInput::Image { image_url } => parts.push(format!(
+                    "[image: {}]",
+                    Self::sanitize_user_input_marker(image_url)
+                )),
                 UserInput::LocalImage { path } => {
-                    parts.push(format!("[local_image: {}]", path.display()))
+                    parts.push(format!(
+                        "[local_image: {}]",
+                        Self::sanitize_user_input_marker(&path.display().to_string())
+                    ))
                 }
                 UserInput::Mention { name, path } => {
-                    parts.push(format!("[mention: {name} -> {path}]"))
+                    parts.push(format!(
+                        "[mention: {} -> {}]",
+                        Self::sanitize_user_input_marker(name),
+                        Self::sanitize_user_input_marker(path)
+                    ))
                 }
                 UserInput::Skill { name, path } => {
-                    parts.push(format!("[skill: {name} -> {}]", path.display()))
+                    parts.push(format!(
+                        "[skill: {} -> {}]",
+                        Self::sanitize_user_input_marker(name),
+                        Self::sanitize_user_input_marker(&path.display().to_string())
+                    ))
                 }
                 _ => {}
             }
@@ -3100,21 +3115,21 @@ impl App {
         parts.join("\n")
     }
 
-    fn oracle_user_turn_files(items: &[UserInput], base_cwd: &Path) -> Vec<String> {
+    fn flatten_user_turn_source_text(items: &[UserInput]) -> String {
         items
             .iter()
             .filter_map(|item| match item {
-                UserInput::LocalImage { path } => Some(
-                    if path.is_absolute() {
-                        path.clone()
-                    } else {
-                        base_cwd.join(path)
-                    }
-                    .display()
-                    .to_string(),
-                ),
+                UserInput::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn sanitize_user_input_marker(value: &str) -> String {
+        value
+            .chars()
+            .map(|ch| if matches!(ch, '\r' | '\n') { ' ' } else { ch })
             .collect()
     }
 
@@ -4612,18 +4627,34 @@ impl App {
             self.persist_active_oracle_binding();
             return Ok(true);
         }
+        let source_user_text = Self::flatten_user_turn_source_text(items);
+        let prompt_seed = Self::flatten_user_turn_text(items);
+        let workspace_cwd = self.chat_widget.config_ref().cwd.to_path_buf();
+        let attachment_resolution =
+            match resolve_oracle_attachments(&prompt_seed, items, workspace_cwd.as_path())
+                .await
+            {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    self.chat_widget.add_error_message(format!(
+                        "Oracle attachment setup failed: {err}"
+                    ));
+                    self.persist_active_oracle_binding();
+                    return Ok(true);
+                }
+            };
         let unsupported = Self::oracle_unsupported_user_inputs(items);
         if !unsupported.is_empty() {
             self.chat_widget.add_info_message(
                 format!(
-                    "Oracle currently forwards {} as text markers. Only local images are sent as files.",
+                    "Oracle currently forwards {} as text markers. Local images and explicit file:/glob: lines are sent as files.",
                     unsupported.join(", ")
                 ),
                 /*hint*/ None,
             );
         }
-        let prompt_text = Self::flatten_user_turn_text(items);
-        if prompt_text.trim().is_empty() {
+        let prompt_text = attachment_resolution.prompt;
+        if source_user_text.trim().is_empty() {
             self.chat_widget.add_error_message(
                 "Oracle mode currently supports text-first turns only.".to_string(),
             );
@@ -4659,9 +4690,8 @@ impl App {
         self.oracle_state.automatic_context_followups = 0;
         self.reopen_active_oracle_workflow_for_user_turn();
         self.begin_oracle_user_turn(thread_id, items).await;
-        let workspace_cwd = self.chat_widget.config_ref().cwd.to_path_buf();
         let requires_control = self.oracle_workflow_requires_control()
-            || user_turn_requires_orchestrator_control(&prompt_text);
+            || user_turn_requires_orchestrator_control(&source_user_text);
         let oracle_prompt =
             build_user_turn_prompt(&self.oracle_state, &prompt_text, requires_control);
         if let Err(err) = self.start_oracle_run(OracleRunRequest {
@@ -4670,8 +4700,8 @@ impl App {
             session_slug,
             prompt: oracle_prompt.clone(),
             requested_prompt: oracle_prompt,
-            source_user_text: Some(prompt_text.clone()),
-            files: Self::oracle_user_turn_files(items, workspace_cwd.as_path()),
+            source_user_text: Some(source_user_text),
+            files: attachment_resolution.files,
             workspace_cwd,
             oracle_repo,
             followup_session,
@@ -20124,6 +20154,112 @@ guardian_approval = true
             OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::UserTurn)
         );
         assert!(app.oracle_state.pending_turn_id.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oracle_user_turn_rewrites_requested_prompt_but_preserves_original_source_text()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        let oracle_repo =
+            find_oracle_repo(app.chat_widget.config_ref().cwd.as_path()).expect("oracle repo");
+        app.oracle_broker = Some((oracle_repo, OracleBrokerClient::new_test_client()));
+        let thread_id = app.ensure_visible_oracle_thread().await;
+        let workspace = app.chat_widget.config_ref().cwd.to_path_buf();
+        let src = workspace.join("src");
+        std::fs::create_dir_all(&src)?;
+        std::fs::write(src.join("a.rs"), "fn a() {}\n")?;
+        std::fs::write(src.join("b.rs"), "fn b() {}\n")?;
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        let handled = app
+            .handle_oracle_user_turn(
+                &mut app_server,
+                thread_id,
+                &[
+                    UserInput::Text {
+                        text: "Review these files\nfile: src/a.rs\nglob: src/**/*.rs".to_string(),
+                        text_elements: Vec::new(),
+                    },
+                    UserInput::LocalImage {
+                        path: PathBuf::from("src/a.rs"),
+                    },
+                ],
+            )
+            .await?;
+
+        assert!(handled);
+        let request = app
+            .oracle_state
+            .inflight_run_requests
+            .values()
+            .next()
+            .expect("oracle request");
+        let actual_files = request.files.iter().cloned().collect::<std::collections::BTreeSet<_>>();
+        let expected_files = [
+            std::fs::canonicalize(src.join("a.rs"))?.display().to_string(),
+            std::fs::canonicalize(src.join("b.rs"))?.display().to_string(),
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(actual_files, expected_files);
+        let source = request.source_user_text.as_deref().expect("source user text");
+        assert!(source.contains("file: src/a.rs"));
+        assert!(source.contains("glob: src/**/*.rs"));
+        assert!(!source.contains("[local_image: src/a.rs]"));
+        assert!(!source.contains("[local_file: src/a.rs]"));
+        assert!(!source.contains("[local_glob: src/**/*.rs]"));
+        assert!(request.requested_prompt.contains("[local_image: src/a.rs]"));
+        assert!(request.requested_prompt.contains("[local_file: src/a.rs]"));
+        assert!(request.requested_prompt.contains("[local_glob: src/**/*.rs]"));
+        app.shutdown_oracle_broker(true);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oracle_user_turn_attachment_resolution_failure_surfaces_error_without_starting_run()
+    -> Result<()> {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let oracle_repo =
+            find_oracle_repo(app.chat_widget.config_ref().cwd.as_path()).expect("oracle repo");
+        app.oracle_broker = Some((oracle_repo, OracleBrokerClient::new_test_client()));
+        let thread_id = app.ensure_visible_oracle_thread().await;
+        while app_event_rx.try_recv().is_ok() {}
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        let handled = app
+            .handle_oracle_user_turn(
+                &mut app_server,
+                thread_id,
+                &[UserInput::Text {
+                    text: "Review this\nfile: src/missing.rs".to_string(),
+                    text_elements: Vec::new(),
+                }],
+            )
+            .await?;
+
+        assert!(handled);
+        assert_eq!(app.oracle_state.phase, OracleSupervisorPhase::Idle);
+        assert!(app.oracle_state.active_run_id.is_none());
+        assert!(app.oracle_state.inflight_run_requests.is_empty());
+        let history = std::iter::from_fn(|| app_event_rx.try_recv().ok())
+            .filter_map(|event| match event {
+                AppEvent::InsertHistoryCell(cell) => {
+                    Some(lines_to_single_string(&cell.display_lines(/*width*/ 120)))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(history.iter().any(|cell| {
+            cell.contains("Oracle attachment setup failed:")
+                && cell.contains("file src/missing.rs could not be read")
+        }));
         Ok(())
     }
 
