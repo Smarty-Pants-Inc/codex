@@ -30,6 +30,7 @@ use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::StatusLineItem;
 use crate::bottom_pane::TerminalTitleItem;
 use crate::history_cell::HistoryCell;
+use crate::legacy_core::plugins::PluginCapabilitySummary;
 use crate::oracle_supervisor::OracleRequestKind;
 use crate::oracle_supervisor::OracleRunResult;
 
@@ -274,6 +275,14 @@ pub(crate) enum AppEvent {
         plugin_id: String,
         plugin_display_name: String,
         result: Result<PluginUninstallResponse, String>,
+    },
+
+    /// Refresh plugin mention bindings from the current config.
+    RefreshPluginMentions,
+
+    /// Result of refreshing plugin mention bindings.
+    PluginMentionsLoaded {
+        plugins: Option<Vec<PluginCapabilitySummary>>,
     },
 
     /// Advance the post-install plugin app-auth flow.
