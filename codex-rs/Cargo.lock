@@ -2817,7 +2817,7 @@ dependencies = [
 
 [[package]]
 name = "codex-test-binary-support"
-version = "0.0.0"
+version = "0.120.0"
 dependencies = [
  "codex-arg0",
  "tempfile",
