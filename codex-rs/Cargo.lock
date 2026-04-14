@@ -1669,6 +1669,7 @@ dependencies = [
  "assert_matches",
  "clap",
  "clap_complete",
+ "codex-api",
  "codex-app-server",
  "codex-app-server-protocol",
  "codex-app-server-test-client",
@@ -2821,6 +2822,17 @@ version = "0.120.0"
 dependencies = [
  "codex-arg0",
  "tempfile",
+]
+
+[[package]]
+name = "codex-thread-store"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "codex-protocol",
+ "serde",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
