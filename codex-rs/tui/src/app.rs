@@ -2159,11 +2159,40 @@ impl App {
                 phase: OracleSupervisorPhase::Idle,
                 ..Default::default()
             });
-        if let Some(conversation_id) = conversation_id {
+        let conversation_matches = conversation_id.as_deref().is_none_or(|incoming| {
+            binding
+                .conversation_id
+                .as_deref()
+                .is_none_or(|existing| existing == incoming)
+        });
+        if conversation_matches && let Some(conversation_id) = conversation_id {
             binding.conversation_id = Some(conversation_id);
         }
-        if let Some(title) = remote_title.filter(|title| !title.trim().is_empty()) {
+        if conversation_matches
+            && let Some(title) = remote_title.filter(|title| !title.trim().is_empty())
+        {
             binding.remote_title = Some(title);
+        }
+    }
+
+    fn oracle_remote_metadata_identity_error(
+        &self,
+        thread_id: ThreadId,
+        conversation_id: Option<&str>,
+    ) -> Option<String> {
+        let incoming = conversation_id?.trim();
+        let existing = self
+            .oracle_state
+            .bindings
+            .get(&thread_id)
+            .and_then(|binding| binding.conversation_id.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        match (existing, incoming) {
+            (Some(expected), observed) if expected != observed => Some(format!(
+                "Oracle thread identity violation: local thread {thread_id} is bound to remote conversation {expected}, but Oracle reported {observed}. Refusing to continue on the wrong Oracle thread."
+            )),
+            _ => None,
         }
     }
 
@@ -3032,6 +3061,19 @@ impl App {
         }
     }
 
+    fn oracle_broker_thread_session_requires_rebind(&self, thread_id: ThreadId) -> bool {
+        self.oracle_state
+            .bindings
+            .get(&thread_id)
+            .is_some_and(|binding| {
+                matches!(
+                    binding.current_session_ownership,
+                    Some(OracleSessionOwnership::BrokerThread)
+                ) && binding.current_session_id.is_some()
+                    && binding.conversation_id.is_some()
+            })
+    }
+
     fn ensure_oracle_session_slug_for_thread(&mut self, thread_id: ThreadId) -> String {
         if let Some(slug) = self.oracle_state.session_root_slug.clone() {
             return slug;
@@ -3048,7 +3090,9 @@ impl App {
         &mut self,
         thread_id: ThreadId,
     ) -> Result<Option<String>> {
-        if let Some(session_id) = self.oracle_followup_session_for_thread(thread_id) {
+        if let Some(session_id) = self.oracle_followup_session_for_thread(thread_id)
+            && !self.oracle_broker_thread_session_requires_rebind(thread_id)
+        {
             return Ok(Some(session_id));
         }
         let Some(binding) = self.oracle_state.bindings.get(&thread_id).cloned() else {
@@ -3541,6 +3585,12 @@ impl App {
             .as_ref()
             .map(|_| OracleSessionOwnership::BrokerThread);
         self.set_oracle_thread_session_state(thread_id, session_id, ownership);
+        if let Some(binding) = self.oracle_state.bindings.get_mut(&thread_id) {
+            binding.session_root_slug = None;
+        }
+        if self.oracle_state.oracle_thread_id == Some(thread_id) {
+            self.oracle_state.session_root_slug = None;
+        }
     }
 
     fn set_oracle_thread_run_session_id(
@@ -4702,9 +4752,21 @@ impl App {
         &mut self,
         tui: Option<&mut tui::Tui>,
         thread_id: ThreadId,
-        _conversation_id: &str,
+        conversation_id: &str,
         history: Vec<OracleBrokerThreadHistoryEntry>,
     ) -> Result<OracleHistoryImportOutcome> {
+        let bound_conversation_id = self
+            .oracle_state
+            .bindings
+            .get(&thread_id)
+            .and_then(|binding| binding.conversation_id.as_deref());
+        if let Some(bound_conversation_id) = bound_conversation_id
+            && bound_conversation_id != conversation_id
+        {
+            return Err(color_eyre::eyre::eyre!(
+                "Oracle thread {thread_id} is bound to remote conversation {bound_conversation_id}, so importing history for {conversation_id} would cross streams."
+            ));
+        }
         let remote_history = Self::normalize_oracle_history_entries(history);
         let (existing_history, has_buffered_events) =
             if let Some(channel) = self.thread_event_channels.get(&thread_id) {
@@ -5303,6 +5365,27 @@ impl App {
         self.activate_oracle_binding(result.oracle_thread_id);
         let was_aborted = self.consume_aborted_oracle_run(&result.run_id);
         let is_active = self.is_active_oracle_run(result.oracle_thread_id, &result.run_id);
+        if let Some(message) = (was_aborted || is_active)
+            .then(|| {
+                self.oracle_remote_metadata_identity_error(
+                    result.oracle_thread_id,
+                    conversation_id.as_deref(),
+                )
+            })
+            .flatten()
+        {
+            self.set_oracle_thread_session_state(result.oracle_thread_id, None, None);
+            return self
+                .handle_oracle_run_failed(
+                    app_server,
+                    result.run_id,
+                    result.oracle_thread_id,
+                    result.kind,
+                    result.requested_slug,
+                    message,
+                )
+                .await;
+        }
         if (was_aborted || is_active) && (conversation_id.is_some() || remote_title.is_some()) {
             self.merge_oracle_remote_metadata(
                 result.oracle_thread_id,
@@ -8778,7 +8861,9 @@ impl App {
         if let Some(thread_id) =
             self.find_unique_oracle_thread_by_conversation_id(conversation_id.as_str())?
         {
-            if self.oracle_followup_session_for_thread(thread_id).is_some() {
+            if self.oracle_followup_session_for_thread(thread_id).is_some()
+                && !self.oracle_broker_thread_session_requires_rebind(thread_id)
+            {
                 self.activate_oracle_binding(thread_id);
                 self.sync_oracle_thread_session(thread_id).await;
                 self.oracle_state.last_status = Some(format!(
@@ -15339,6 +15424,62 @@ guardian_approval = true
     }
 
     #[tokio::test]
+    async fn attach_oracle_thread_binding_rebinds_existing_broker_thread_session_before_reuse()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_thread_broker_session_id(thread_id, Some("runtime-root".to_string()));
+        app.set_oracle_remote_metadata(
+            thread_id,
+            Some("attached-1".to_string()),
+            Some("Attached Thread".to_string()),
+        );
+        queue_test_oracle_attach_thread_result(
+            &app,
+            Ok(test_oracle_thread_open_response(
+                "runtime-verified",
+                "Attached Thread",
+                "attached-1",
+            )),
+        );
+
+        let binding = app
+            .attach_oracle_thread_binding(
+                "attached-1".to_string(),
+                Some("Attached Thread".to_string()),
+            )
+            .await?;
+
+        assert_eq!(
+            binding,
+            OracleAttachThreadBinding::AttachedRemote {
+                thread_id,
+                title: "Attached Thread".to_string(),
+                conversation_id: "attached-1".to_string(),
+                history: Vec::new(),
+            }
+        );
+        let hooks = app
+            .oracle_test_broker_hooks
+            .lock()
+            .expect("oracle test broker hooks");
+        assert_eq!(hooks.attach_thread_calls, vec!["attached-1".to_string()]);
+        assert_eq!(
+            hooks.attach_thread_followup_sessions,
+            vec![Some("runtime-root".to_string())]
+        );
+        drop(hooks);
+        assert_eq!(
+            app.oracle_state
+                .bindings
+                .get(&thread_id)
+                .and_then(|binding| binding.current_session_id.as_deref()),
+            Some("runtime-verified")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn oracle_attach_command_with_import_history_reuses_existing_local_thread_and_fetches_history()
     -> Result<()> {
         let mut app = make_test_app().await;
@@ -16176,6 +16317,35 @@ guardian_approval = true
         assert!(message.contains("Remote history was limited to the newest 100 text message(s) out of at least 135 available."));
     }
 
+    #[tokio::test]
+    async fn import_oracle_thread_history_rejects_mismatched_bound_conversation() {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_remote_metadata(
+            thread_id,
+            Some("remote-7".to_string()),
+            Some("Remote Thread".to_string()),
+        );
+
+        let err = app
+            .import_oracle_thread_history(
+                None,
+                thread_id,
+                "wrong-9",
+                vec![OracleBrokerThreadHistoryEntry {
+                    role: "assistant".to_string(),
+                    text: "Wrong thread answer".to_string(),
+                }],
+            )
+            .await
+            .expect_err("history import should fail closed on conversation mismatch");
+
+        assert!(
+            err.to_string()
+                .contains("importing history for wrong-9 would cross streams")
+        );
+    }
+
     #[test]
     fn oracle_history_import_snapshot_refresh_required_for_buffered_or_merged_transcript() {
         assert!(App::oracle_history_import_requires_snapshot_refresh(
@@ -16283,6 +16453,43 @@ guardian_approval = true
                 .get(&thread_id)
                 .and_then(|binding| binding.current_session_id.as_deref()),
             Some("runtime-reattached")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ensure_oracle_followup_session_for_run_rebinds_broker_owned_thread_session()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_thread_broker_session_id(thread_id, Some("runtime-stale".to_string()));
+        app.set_oracle_remote_metadata(
+            thread_id,
+            Some("attached-1".to_string()),
+            Some("Attached Thread".to_string()),
+        );
+        queue_test_oracle_attach_thread_result(
+            &app,
+            Ok(test_oracle_thread_open_response(
+                "runtime-verified",
+                "Attached Thread",
+                "attached-1",
+            )),
+        );
+
+        let followup_session = app
+            .ensure_oracle_followup_session_for_run(thread_id)
+            .await?;
+
+        assert_eq!(followup_session.as_deref(), Some("runtime-verified"));
+        let hooks = app
+            .oracle_test_broker_hooks
+            .lock()
+            .expect("oracle test broker hooks");
+        assert_eq!(hooks.attach_thread_calls, vec!["attached-1".to_string()]);
+        assert_eq!(
+            hooks.attach_thread_followup_sessions,
+            vec![Some("runtime-stale".to_string())]
         );
         Ok(())
     }
@@ -19321,6 +19528,101 @@ guardian_approval = true
             .expect("oracle binding");
         assert_eq!(binding.conversation_id.as_deref(), Some("remote-drift"));
         assert_eq!(binding.remote_title.as_deref(), Some("Remote Drift"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oracle_run_completion_rejects_conversation_identity_drift() -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.ensure_visible_oracle_thread().await;
+        app.set_oracle_remote_metadata(
+            thread_id,
+            Some("attached-1".to_string()),
+            Some("Attached Thread".to_string()),
+        );
+        app.set_oracle_thread_broker_session_id(thread_id, Some("runtime-root".to_string()));
+        app.oracle_state.phase =
+            OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::UserTurn);
+        app.oracle_state.active_run_id = Some("oracle-run-drift".to_string());
+        app.oracle_state
+            .inflight_runs
+            .insert(thread_id, "oracle-run-drift".to_string());
+        app.oracle_state.pending_turn_id = Some("oracle-turn-1".to_string());
+        app.persist_active_oracle_binding();
+        if let Some(channel) = app.thread_event_channels.get(&thread_id) {
+            let mut store = channel.store.lock().await;
+            store.active_turn_id = Some("oracle-turn-1".to_string());
+            store.turns.push(Turn {
+                id: "oracle-turn-1".to_string(),
+                items: vec![ThreadItem::UserMessage {
+                    id: "oracle-user-1".to_string(),
+                    content: vec![codex_app_server_protocol::UserInput::Text {
+                        text: "hello oracle".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                }],
+                status: TurnStatus::InProgress,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+            });
+        }
+        remember_oracle_run_remote_metadata(
+            "oracle-run-drift",
+            Some("wrong-9".to_string()),
+            Some("Wrong Thread".to_string()),
+        );
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        app.handle_oracle_run_completed(
+            &mut app_server,
+            OracleRunResult {
+                run_id: "oracle-run-drift".to_string(),
+                oracle_thread_id: thread_id,
+                kind: OracleRequestKind::UserTurn,
+                requested_slug: "oracle-session-chat".to_string(),
+                session_id: "oracle-session-chat-2".to_string(),
+                requested_prompt: "hello oracle".to_string(),
+                source_user_text: None,
+                files: Vec::new(),
+                requires_control: false,
+                repair_attempt: 0,
+                response: parse_oracle_response("Hello back."),
+            },
+        )
+        .await?;
+
+        let binding = app
+            .oracle_state
+            .bindings
+            .get(&thread_id)
+            .expect("oracle binding");
+        assert_eq!(binding.conversation_id.as_deref(), Some("attached-1"));
+        assert_eq!(binding.current_session_id, None);
+        let channel = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("oracle thread channel");
+        let store = channel.store.lock().await;
+        let turn = store
+            .turns
+            .iter()
+            .find(|turn| turn.id == "oracle-turn-1")
+            .expect("oracle turn");
+        assert_eq!(turn.status, TurnStatus::Completed);
+        assert!(turn.items.iter().any(|item| matches!(
+            item,
+            ThreadItem::AgentMessage { text, .. }
+                if text.contains("Oracle failed: Oracle thread identity violation")
+        )));
+        assert!(!turn.items.iter().any(|item| matches!(
+            item,
+            ThreadItem::AgentMessage { text, .. } if text == "Hello back."
+        )));
         Ok(())
     }
 

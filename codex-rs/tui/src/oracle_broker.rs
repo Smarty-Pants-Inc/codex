@@ -679,6 +679,12 @@ fn should_prefer_recovered_supervisor_response(
     recovered: &OracleBrokerResponse,
     session_slug: &str,
 ) -> bool {
+    if !oracle_conversations_compatible(
+        transport.conversation_id.as_deref(),
+        recovered.conversation_id.as_deref(),
+    ) {
+        return false;
+    }
     if transport.session_id == recovered.session_id {
         return true;
     }
@@ -696,6 +702,16 @@ fn should_prefer_recovered_supervisor_response(
             recovered_ordinal >= transport_ordinal
         }
         _ => false,
+    }
+}
+
+fn oracle_conversations_compatible(
+    transport_conversation_id: Option<&str>,
+    recovered_conversation_id: Option<&str>,
+) -> bool {
+    match (transport_conversation_id, recovered_conversation_id) {
+        (Some(transport), Some(recovered)) => transport == recovered,
+        _ => true,
     }
 }
 
@@ -856,6 +872,8 @@ async fn read_recoverable_supervisor_response_from_dir(
     session_slug: &str,
     followup_session: Option<&str>,
 ) -> Option<OracleBrokerResponse> {
+    let expected_followup_conversation_id =
+        read_followup_session_conversation_id(sessions_dir, followup_session).await;
     let minimum_ordinal = followup_session
         .and_then(|session_id| oracle_session_chain_ordinal(session_id, session_slug))
         .unwrap_or(0);
@@ -897,12 +915,20 @@ async fn read_recoverable_supervisor_response_from_dir(
         else {
             continue;
         };
+        let conversation_id = meta
+            .browser
+            .as_ref()
+            .and_then(|browser| browser.runtime.as_ref())
+            .and_then(|runtime| runtime.conversation_id.as_deref());
+        if let Some(expected_followup_conversation_id) =
+            expected_followup_conversation_id.as_deref()
+            && conversation_id != Some(expected_followup_conversation_id)
+        {
+            continue;
+        }
         let response = OracleBrokerResponse {
             session_id: Some(meta.id),
-            conversation_id: meta
-                .browser
-                .and_then(|browser| browser.runtime)
-                .and_then(|runtime| runtime.conversation_id),
+            conversation_id: conversation_id.map(str::to_owned),
             title: meta.prompt_preview,
             output: Some(output),
         };
@@ -914,6 +940,20 @@ async fn read_recoverable_supervisor_response_from_dir(
         }
     }
     recovered.map(|(_, response)| response)
+}
+
+async fn read_followup_session_conversation_id(
+    sessions_dir: &Path,
+    followup_session: Option<&str>,
+) -> Option<String> {
+    let followup_session = followup_session?;
+    let meta_path = sessions_dir.join(followup_session).join("meta.json");
+    let meta_raw = fs::read_to_string(meta_path).await.ok()?;
+    let meta = serde_json::from_str::<OracleSessionMeta>(&meta_raw).ok()?;
+    meta.browser
+        .and_then(|browser| browser.runtime)
+        .and_then(|runtime| runtime.conversation_id)
+        .filter(|conversation_id| !conversation_id.trim().is_empty())
 }
 
 async fn await_recoverable_supervisor_response(
@@ -1149,6 +1189,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recoverable_supervisor_response_requires_matching_followup_conversation() {
+        let temp = tempdir().expect("tempdir");
+        write_meta(
+            temp.path(),
+            "oracle-root-2",
+            r#"{"id":"oracle-root-2","status":"completed","browser":{"runtime":{"conversationId":"attached-1"}},"response":{"assistantOutput":"old"}} "#,
+        );
+        write_meta(
+            temp.path(),
+            "oracle-root-3",
+            r#"{"id":"oracle-root-3","status":"completed","browser":{"runtime":{"conversationId":"wrong-9"}},"response":{"assistantOutput":"new"}} "#,
+        );
+
+        let recovered = read_recoverable_supervisor_response_from_dir(
+            temp.path(),
+            "oracle-root",
+            Some("oracle-root-2"),
+        )
+        .await;
+
+        assert!(recovered.is_none());
+    }
+
+    #[tokio::test]
+    async fn recoverable_supervisor_response_prefers_latest_matching_followup_conversation() {
+        let temp = tempdir().expect("tempdir");
+        write_meta(
+            temp.path(),
+            "oracle-root-2",
+            r#"{"id":"oracle-root-2","status":"completed","browser":{"runtime":{"conversationId":"attached-1"}},"response":{"assistantOutput":"old"}} "#,
+        );
+        write_meta(
+            temp.path(),
+            "oracle-root-3",
+            r#"{"id":"oracle-root-3","status":"completed","browser":{"runtime":{"conversationId":"wrong-9"}},"response":{"assistantOutput":"wrong"}} "#,
+        );
+        write_meta(
+            temp.path(),
+            "oracle-root-4",
+            r#"{"id":"oracle-root-4","status":"completed","browser":{"runtime":{"conversationId":"attached-1"}},"response":{"assistantOutput":"correct"}} "#,
+        );
+
+        let recovered = read_recoverable_supervisor_response_from_dir(
+            temp.path(),
+            "oracle-root",
+            Some("oracle-root-2"),
+        )
+        .await
+        .expect("expected recovered response");
+
+        assert_eq!(recovered.session_id.as_deref(), Some("oracle-root-4"));
+        assert_eq!(recovered.output.as_deref(), Some("correct"));
+    }
+
+    #[tokio::test]
     async fn prefer_recovered_supervisor_response_replaces_transport_reply_with_completed_output() {
         let recovered = prefer_recovered_supervisor_response_with_timeout(
             Ok(OracleBrokerResponse {
@@ -1271,6 +1366,34 @@ mod tests {
         .expect("response");
 
         assert_eq!(recovered.session_id.as_deref(), Some("oracle-root-3"));
+        assert_eq!(recovered.output.as_deref(), Some("transport"));
+    }
+
+    #[tokio::test]
+    async fn prefer_recovered_supervisor_response_rejects_conversation_identity_drift() {
+        let recovered = prefer_recovered_supervisor_response_with_timeout(
+            Ok(OracleBrokerResponse {
+                session_id: Some("oracle-root-2".to_string()),
+                conversation_id: Some("attached-1".to_string()),
+                title: None,
+                output: Some("transport".to_string()),
+            }),
+            "oracle-root",
+            async {
+                OracleBrokerResponse {
+                    session_id: Some("oracle-root-3".to_string()),
+                    conversation_id: Some("wrong-9".to_string()),
+                    title: None,
+                    output: Some("drifted".to_string()),
+                }
+            },
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("response");
+
+        assert_eq!(recovered.session_id.as_deref(), Some("oracle-root-2"));
+        assert_eq!(recovered.conversation_id.as_deref(), Some("attached-1"));
         assert_eq!(recovered.output.as_deref(), Some("transport"));
     }
 
