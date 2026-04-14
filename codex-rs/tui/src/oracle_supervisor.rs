@@ -523,6 +523,7 @@ pub(crate) struct OracleThreadBinding {
     pub(crate) session_root_slug: Option<String>,
     pub(crate) current_session_id: Option<String>,
     pub(crate) current_session_ownership: Option<OracleSessionOwnership>,
+    pub(crate) current_session_verified: bool,
     pub(crate) orchestrator_thread_id: Option<ThreadId>,
     pub(crate) workflow: Option<OracleWorkflowBinding>,
     pub(crate) phase: OracleSupervisorPhase,

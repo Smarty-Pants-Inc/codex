@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::future::Future;
 use std::io;
 use std::path::Path;
@@ -711,6 +712,7 @@ fn oracle_conversations_compatible(
 ) -> bool {
     match (transport_conversation_id, recovered_conversation_id) {
         (Some(transport), Some(recovered)) => transport == recovered,
+        (Some(_), None) => false,
         _ => true,
     }
 }
@@ -878,7 +880,7 @@ async fn read_recoverable_supervisor_response_from_dir(
         .and_then(|session_id| oracle_session_chain_ordinal(session_id, session_slug))
         .unwrap_or(0);
     let mut entries = fs::read_dir(sessions_dir).await.ok()?;
-    let mut recovered: Option<(u32, OracleBrokerResponse)> = None;
+    let mut recovered: Vec<(u32, Option<String>, OracleBrokerResponse)> = Vec::new();
     loop {
         let entry = match entries.next_entry().await {
             Ok(Some(entry)) => entry,
@@ -919,27 +921,41 @@ async fn read_recoverable_supervisor_response_from_dir(
             .browser
             .as_ref()
             .and_then(|browser| browser.runtime.as_ref())
-            .and_then(|runtime| runtime.conversation_id.as_deref());
+            .and_then(|runtime| runtime.conversation_id.as_deref())
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned);
         if let Some(expected_followup_conversation_id) =
             expected_followup_conversation_id.as_deref()
-            && conversation_id != Some(expected_followup_conversation_id)
+            && conversation_id.as_deref() != Some(expected_followup_conversation_id)
         {
             continue;
         }
         let response = OracleBrokerResponse {
             session_id: Some(meta.id),
-            conversation_id: conversation_id.map(str::to_owned),
+            conversation_id: conversation_id.clone(),
             title: meta.prompt_preview,
             output: Some(output),
         };
-        let replace = recovered
-            .as_ref()
-            .is_none_or(|(best_ordinal, _)| ordinal > *best_ordinal);
-        if replace {
-            recovered = Some((ordinal, response));
+        recovered.push((ordinal, conversation_id, response));
+    }
+    if followup_session.is_some() && expected_followup_conversation_id.is_none() {
+        let recovered_conversation_ids = recovered
+            .iter()
+            .filter_map(|(_, conversation_id, _)| conversation_id.clone())
+            .collect::<BTreeSet<_>>();
+        if recovered_conversation_ids.len() > 1 {
+            return None;
+        }
+        if let Some(required_conversation_id) = recovered_conversation_ids.iter().next() {
+            recovered.retain(|(_, conversation_id, _)| {
+                conversation_id.as_deref() == Some(required_conversation_id.as_str())
+            });
         }
     }
-    recovered.map(|(_, response)| response)
+    recovered
+        .into_iter()
+        .max_by_key(|(ordinal, _, _)| *ordinal)
+        .map(|(_, _, response)| response)
 }
 
 async fn read_followup_session_conversation_id(
@@ -1213,6 +1229,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recoverable_supervisor_response_recovers_unique_descendant_conversation_when_followup_metadata_is_missing()
+    {
+        let temp = tempdir().expect("tempdir");
+        write_meta(
+            temp.path(),
+            "oracle-root-2",
+            r#"{"id":"oracle-root-2","status":"completed","browser":{"runtime":{"tabUrl":"https://chatgpt.com/g/g-p-example/project"}},"response":{"assistantOutput":"old"}} "#,
+        );
+        write_meta(
+            temp.path(),
+            "oracle-root-3",
+            r#"{"id":"oracle-root-3","status":"completed","browser":{"runtime":{"conversationId":"attached-1"}},"response":{"assistantOutput":"new"}} "#,
+        );
+
+        let recovered = read_recoverable_supervisor_response_from_dir(
+            temp.path(),
+            "oracle-root",
+            Some("oracle-root-2"),
+        )
+        .await
+        .expect("expected recovered response");
+
+        assert_eq!(recovered.session_id.as_deref(), Some("oracle-root-3"));
+        assert_eq!(recovered.conversation_id.as_deref(), Some("attached-1"));
+        assert_eq!(recovered.output.as_deref(), Some("new"));
+    }
+
+    #[tokio::test]
+    async fn recoverable_supervisor_response_rejects_ambiguous_descendant_conversations_when_followup_metadata_is_missing()
+    {
+        let temp = tempdir().expect("tempdir");
+        write_meta(
+            temp.path(),
+            "oracle-root-2",
+            r#"{"id":"oracle-root-2","status":"completed","browser":{"runtime":{"tabUrl":"https://chatgpt.com/g/g-p-example/project"}},"response":{"assistantOutput":"old"}} "#,
+        );
+        write_meta(
+            temp.path(),
+            "oracle-root-3",
+            r#"{"id":"oracle-root-3","status":"completed","browser":{"runtime":{"conversationId":"attached-1"}},"response":{"assistantOutput":"new"}} "#,
+        );
+        write_meta(
+            temp.path(),
+            "oracle-root-4",
+            r#"{"id":"oracle-root-4","status":"completed","browser":{"runtime":{"conversationId":"attached-2"}},"response":{"assistantOutput":"other"}} "#,
+        );
+
+        let recovered = read_recoverable_supervisor_response_from_dir(
+            temp.path(),
+            "oracle-root",
+            Some("oracle-root-2"),
+        )
+        .await;
+
+        assert!(recovered.is_none());
+    }
+
+    #[tokio::test]
     async fn recoverable_supervisor_response_prefers_latest_matching_followup_conversation() {
         let temp = tempdir().expect("tempdir");
         write_meta(
@@ -1395,6 +1469,62 @@ mod tests {
         assert_eq!(recovered.session_id.as_deref(), Some("oracle-root-2"));
         assert_eq!(recovered.conversation_id.as_deref(), Some("attached-1"));
         assert_eq!(recovered.output.as_deref(), Some("transport"));
+    }
+
+    #[tokio::test]
+    async fn prefer_recovered_supervisor_response_rejects_missing_conversation_identity() {
+        let recovered = prefer_recovered_supervisor_response_with_timeout(
+            Ok(OracleBrokerResponse {
+                session_id: Some("oracle-root-2".to_string()),
+                conversation_id: Some("attached-1".to_string()),
+                title: None,
+                output: Some("transport".to_string()),
+            }),
+            "oracle-root",
+            async {
+                OracleBrokerResponse {
+                    session_id: Some("oracle-root-3".to_string()),
+                    conversation_id: None,
+                    title: None,
+                    output: Some("missing".to_string()),
+                }
+            },
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("response");
+
+        assert_eq!(recovered.session_id.as_deref(), Some("oracle-root-2"));
+        assert_eq!(recovered.conversation_id.as_deref(), Some("attached-1"));
+        assert_eq!(recovered.output.as_deref(), Some("transport"));
+    }
+
+    #[tokio::test]
+    async fn prefer_recovered_supervisor_response_accepts_recovered_conversation_identity() {
+        let recovered = prefer_recovered_supervisor_response_with_timeout(
+            Ok(OracleBrokerResponse {
+                session_id: Some("oracle-root-2".to_string()),
+                conversation_id: None,
+                title: None,
+                output: Some("transport".to_string()),
+            }),
+            "oracle-root",
+            async {
+                OracleBrokerResponse {
+                    session_id: Some("oracle-root-3".to_string()),
+                    conversation_id: Some("attached-1".to_string()),
+                    title: None,
+                    output: Some("recovered".to_string()),
+                }
+            },
+            Duration::from_millis(10),
+        )
+        .await
+        .expect("response");
+
+        assert_eq!(recovered.session_id.as_deref(), Some("oracle-root-3"));
+        assert_eq!(recovered.conversation_id.as_deref(), Some("attached-1"));
+        assert_eq!(recovered.output.as_deref(), Some("recovered"));
     }
 
     #[tokio::test]

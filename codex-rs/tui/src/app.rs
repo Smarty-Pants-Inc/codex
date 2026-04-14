@@ -2019,6 +2019,9 @@ impl App {
             session_root_slug: self.oracle_state.session_root_slug.clone(),
             current_session_id: self.oracle_state.current_session_id.clone(),
             current_session_ownership: self.oracle_state.current_session_ownership.clone(),
+            current_session_verified: existing
+                .as_ref()
+                .is_some_and(|existing| existing.current_session_verified),
             orchestrator_thread_id: self.oracle_state.orchestrator_thread_id,
             workflow: self.oracle_state.workflow.clone(),
             phase: self.oracle_state.phase,
@@ -2180,7 +2183,9 @@ impl App {
         thread_id: ThreadId,
         conversation_id: Option<&str>,
     ) -> Option<String> {
-        let incoming = conversation_id?.trim();
+        let incoming = conversation_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
         let existing = self
             .oracle_state
             .bindings
@@ -2189,8 +2194,11 @@ impl App {
             .map(str::trim)
             .filter(|value| !value.is_empty());
         match (existing, incoming) {
-            (Some(expected), observed) if expected != observed => Some(format!(
+            (Some(expected), Some(observed)) if expected != observed => Some(format!(
                 "Oracle thread identity violation: local thread {thread_id} is bound to remote conversation {expected}, but Oracle reported {observed}. Refusing to continue on the wrong Oracle thread."
+            )),
+            (Some(expected), None) => Some(format!(
+                "Oracle thread identity violation: local thread {thread_id} is bound to remote conversation {expected}, but Oracle omitted conversation metadata. Refusing to continue on an unverified Oracle thread."
             )),
             _ => None,
         }
@@ -3071,6 +3079,7 @@ impl App {
                     Some(OracleSessionOwnership::BrokerThread)
                 ) && binding.current_session_id.is_some()
                     && binding.conversation_id.is_some()
+                    && !binding.current_session_verified
             })
     }
 
@@ -3561,6 +3570,10 @@ impl App {
             });
         binding.current_session_id = session_id.clone();
         binding.current_session_ownership = ownership.clone();
+        if session_id.is_none() || !matches!(ownership, Some(OracleSessionOwnership::BrokerThread))
+        {
+            binding.current_session_verified = false;
+        }
         if self.oracle_state.oracle_thread_id == Some(thread_id) {
             self.oracle_state.current_session_id = session_id;
             self.oracle_state.current_session_ownership = ownership;
@@ -3576,21 +3589,28 @@ impl App {
         }
     }
 
+    fn set_oracle_thread_broker_session(
+        &mut self,
+        thread_id: ThreadId,
+        session_id: Option<String>,
+        verified: bool,
+    ) {
+        let ownership = session_id
+            .as_ref()
+            .map(|_| OracleSessionOwnership::BrokerThread);
+        self.set_oracle_thread_session_state(thread_id, session_id.clone(), ownership);
+        if let Some(binding) = self.oracle_state.bindings.get_mut(&thread_id) {
+            binding.current_session_verified = verified && session_id.is_some();
+        }
+        self.clear_oracle_thread_session_root_slug(thread_id);
+    }
+
     fn set_oracle_thread_broker_session_id(
         &mut self,
         thread_id: ThreadId,
         session_id: Option<String>,
     ) {
-        let ownership = session_id
-            .as_ref()
-            .map(|_| OracleSessionOwnership::BrokerThread);
-        self.set_oracle_thread_session_state(thread_id, session_id, ownership);
-        if let Some(binding) = self.oracle_state.bindings.get_mut(&thread_id) {
-            binding.session_root_slug = None;
-        }
-        if self.oracle_state.oracle_thread_id == Some(thread_id) {
-            self.oracle_state.session_root_slug = None;
-        }
+        self.set_oracle_thread_broker_session(thread_id, session_id, false);
     }
 
     fn set_oracle_thread_run_session_id(
@@ -5374,7 +5394,9 @@ impl App {
             })
             .flatten()
         {
-            self.set_oracle_thread_session_state(result.oracle_thread_id, None, None);
+            if is_active {
+                self.set_oracle_thread_session_state(result.oracle_thread_id, None, None);
+            }
             return self
                 .handle_oracle_run_failed(
                     app_server,
@@ -8458,7 +8480,7 @@ impl App {
                 ));
             }
             if let Some(session_id) = response.session_id.clone() {
-                self.set_oracle_thread_broker_session_id(thread_id, Some(session_id));
+                self.set_oracle_thread_broker_session(thread_id, Some(session_id), true);
             }
             return Ok(response);
         }
@@ -8514,7 +8536,7 @@ impl App {
             ));
         }
         if let Some(session_id) = response.session_id.clone() {
-            self.set_oracle_thread_broker_session_id(thread_id, Some(session_id));
+            self.set_oracle_thread_broker_session(thread_id, Some(session_id), true);
         }
         Ok(response)
     }
@@ -8799,7 +8821,7 @@ impl App {
         let conversation_id = remote.conversation_id.clone();
         let title = remote.title.clone();
         self.set_oracle_remote_metadata(thread_id, conversation_id, Some(title));
-        self.set_oracle_thread_broker_session_id(thread_id, session_id);
+        self.set_oracle_thread_broker_session(thread_id, session_id, true);
         self.activate_oracle_binding(thread_id);
         self.upsert_agent_picker_thread(
             thread_id,
@@ -16495,6 +16517,32 @@ guardian_approval = true
     }
 
     #[tokio::test]
+    async fn ensure_oracle_followup_session_for_run_reuses_verified_broker_thread_session()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_thread_broker_session(thread_id, Some("runtime-verified".to_string()), true);
+        app.set_oracle_remote_metadata(
+            thread_id,
+            Some("attached-1".to_string()),
+            Some("Attached Thread".to_string()),
+        );
+
+        let followup_session = app
+            .ensure_oracle_followup_session_for_run(thread_id)
+            .await?;
+
+        assert_eq!(followup_session.as_deref(), Some("runtime-verified"));
+        let hooks = app
+            .oracle_test_broker_hooks
+            .lock()
+            .expect("oracle test broker hooks");
+        assert!(hooks.attach_thread_calls.is_empty());
+        assert!(hooks.attach_thread_followup_sessions.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn ensure_oracle_followup_session_for_run_rejects_duplicate_conversation_binding()
     -> Result<()> {
         let mut app = make_test_app().await;
@@ -19623,6 +19671,176 @@ guardian_approval = true
             item,
             ThreadItem::AgentMessage { text, .. } if text == "Hello back."
         )));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oracle_run_completion_rejects_missing_conversation_metadata_for_bound_thread()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.ensure_visible_oracle_thread().await;
+        app.set_oracle_remote_metadata(
+            thread_id,
+            Some("attached-1".to_string()),
+            Some("Attached Thread".to_string()),
+        );
+        app.set_oracle_thread_broker_session_id(thread_id, Some("runtime-root".to_string()));
+        app.oracle_state.phase =
+            OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::UserTurn);
+        app.oracle_state.active_run_id = Some("oracle-run-missing-meta".to_string());
+        app.oracle_state
+            .inflight_runs
+            .insert(thread_id, "oracle-run-missing-meta".to_string());
+        app.oracle_state.pending_turn_id = Some("oracle-turn-1".to_string());
+        app.persist_active_oracle_binding();
+        if let Some(channel) = app.thread_event_channels.get(&thread_id) {
+            let mut store = channel.store.lock().await;
+            store.active_turn_id = Some("oracle-turn-1".to_string());
+            store.turns.push(Turn {
+                id: "oracle-turn-1".to_string(),
+                items: vec![ThreadItem::UserMessage {
+                    id: "oracle-user-1".to_string(),
+                    content: vec![codex_app_server_protocol::UserInput::Text {
+                        text: "hello oracle".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                }],
+                status: TurnStatus::InProgress,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+            });
+        }
+        remember_oracle_run_remote_metadata(
+            "oracle-run-missing-meta",
+            None,
+            Some("Attached Thread".to_string()),
+        );
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        app.handle_oracle_run_completed(
+            &mut app_server,
+            OracleRunResult {
+                run_id: "oracle-run-missing-meta".to_string(),
+                oracle_thread_id: thread_id,
+                kind: OracleRequestKind::UserTurn,
+                requested_slug: "oracle-session-chat".to_string(),
+                session_id: "oracle-session-chat-2".to_string(),
+                requested_prompt: "hello oracle".to_string(),
+                source_user_text: None,
+                files: Vec::new(),
+                requires_control: false,
+                repair_attempt: 0,
+                response: parse_oracle_response("Hello back."),
+            },
+        )
+        .await?;
+
+        let channel = app
+            .thread_event_channels
+            .get(&thread_id)
+            .expect("oracle thread channel");
+        let store = channel.store.lock().await;
+        let turn = store
+            .turns
+            .iter()
+            .find(|turn| turn.id == "oracle-turn-1")
+            .expect("oracle turn");
+        assert_eq!(turn.status, TurnStatus::Completed);
+        assert!(turn.items.iter().any(|item| matches!(
+            item,
+            ThreadItem::AgentMessage { text, .. }
+                if text.contains("Oracle failed: Oracle thread identity violation")
+                    && text.contains("omitted conversation metadata")
+        )));
+        assert!(!turn.items.iter().any(|item| matches!(
+            item,
+            ThreadItem::AgentMessage { text, .. } if text == "Hello back."
+        )));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn late_aborted_missing_metadata_does_not_clear_newer_oracle_thread_session_state()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        let thread_id = app.ensure_visible_oracle_thread().await;
+        app.set_oracle_remote_metadata(
+            thread_id,
+            Some("attached-1".to_string()),
+            Some("Attached Thread".to_string()),
+        );
+        app.oracle_state.phase =
+            OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::UserTurn);
+        app.oracle_state.active_run_id = Some("oracle-run-old".to_string());
+        app.oracle_state
+            .inflight_runs
+            .insert(thread_id, "oracle-run-old".to_string());
+        app.oracle_state.pending_turn_id = Some("oracle-turn-old".to_string());
+        app.persist_active_oracle_binding();
+        if let Some(channel) = app.thread_event_channels.get(&thread_id) {
+            let mut store = channel.store.lock().await;
+            store.active_turn_id = Some("oracle-turn-old".to_string());
+        }
+
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        let handled = app
+            .interrupt_oracle_thread(&mut app_server, thread_id)
+            .await?;
+        assert!(handled);
+
+        app.set_oracle_thread_broker_session_id(thread_id, Some("runtime-new".to_string()));
+        app.oracle_state.phase =
+            OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::UserTurn);
+        app.oracle_state.active_run_id = Some("oracle-run-new".to_string());
+        app.oracle_state
+            .inflight_runs
+            .insert(thread_id, "oracle-run-new".to_string());
+        app.oracle_state.pending_turn_id = Some("oracle-turn-new".to_string());
+        app.persist_active_oracle_binding();
+        if let Some(channel) = app.thread_event_channels.get(&thread_id) {
+            let mut store = channel.store.lock().await;
+            store.active_turn_id = Some("oracle-turn-new".to_string());
+        }
+
+        remember_oracle_run_remote_metadata(
+            "oracle-run-old",
+            None,
+            Some("Attached Thread".to_string()),
+        );
+
+        app.handle_oracle_run_completed(
+            &mut app_server,
+            OracleRunResult {
+                run_id: "oracle-run-old".to_string(),
+                oracle_thread_id: thread_id,
+                kind: OracleRequestKind::UserTurn,
+                requested_slug: "oracle-session-old".to_string(),
+                session_id: "oracle-session-old".to_string(),
+                requested_prompt: "old oracle turn".to_string(),
+                source_user_text: None,
+                files: Vec::new(),
+                requires_control: false,
+                repair_attempt: 0,
+                response: parse_oracle_response("stale"),
+            },
+        )
+        .await?;
+
+        let binding = app
+            .oracle_state
+            .bindings
+            .get(&thread_id)
+            .expect("oracle binding");
+        assert_eq!(binding.current_session_id.as_deref(), Some("runtime-new"));
+        assert_eq!(binding.active_run_id.as_deref(), Some("oracle-run-new"));
         Ok(())
     }
 
