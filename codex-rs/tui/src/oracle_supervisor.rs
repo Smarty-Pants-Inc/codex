@@ -29,6 +29,7 @@ pub(crate) enum OracleCommand {
     NewThread,
     AttachThread {
         conversation_id: String,
+        conversation_url: Option<String>,
         import_history: bool,
     },
     On,
@@ -53,6 +54,9 @@ impl OracleCommand {
             "browse" | "threads" if parts.len() == 1 => Ok(Self::Browse),
             "new" if parts.len() == 1 => Ok(Self::NewThread),
             "attach" if parts.len() >= 2 && !parts[1].trim().is_empty() => {
+                let (conversation_id, conversation_url) =
+                    normalize_oracle_conversation_target(parts[1])
+                        .ok_or_else(|| USAGE.to_string())?;
                 let import_history =
                     match parts.get(2).map(|value| value.trim().to_ascii_lowercase()) {
                         None => false,
@@ -69,8 +73,8 @@ impl OracleCommand {
                     return Err(USAGE.to_string());
                 }
                 Ok(Self::AttachThread {
-                    conversation_id: normalize_oracle_conversation_target(parts[1])
-                        .ok_or_else(|| USAGE.to_string())?,
+                    conversation_id,
+                    conversation_url,
                     import_history,
                 })
             }
@@ -86,13 +90,13 @@ impl OracleCommand {
     }
 }
 
-fn normalize_oracle_conversation_target(raw: &str) -> Option<String> {
+fn normalize_oracle_conversation_target(raw: &str) -> Option<(String, Option<String>)> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
     }
     if is_oracle_conversation_id(trimmed) {
-        return Some(trimmed.to_string());
+        return Some((trimmed.to_string(), None));
     }
     let parsed = Url::parse(trimmed).ok()?;
     if parsed.scheme() != "https" {
@@ -113,7 +117,8 @@ fn normalize_oracle_conversation_target(raw: &str) -> Option<String> {
         | ["g", _, "project", "c", conversation_id] => conversation_id,
         _ => return None,
     };
-    is_oracle_conversation_id(conversation_id).then(|| conversation_id.to_string())
+    is_oracle_conversation_id(conversation_id)
+        .then(|| (conversation_id.to_string(), Some(trimmed.to_string())))
 }
 
 fn is_oracle_conversation_id(raw: &str) -> bool {
@@ -1921,6 +1926,7 @@ mod tests {
             OracleCommand::parse("attach abc-123"),
             Ok(OracleCommand::AttachThread {
                 conversation_id: "abc-123".to_string(),
+                conversation_url: None,
                 import_history: false,
             })
         );
@@ -1928,6 +1934,7 @@ mod tests {
             OracleCommand::parse("attach abc-123 --import-history"),
             Ok(OracleCommand::AttachThread {
                 conversation_id: "abc-123".to_string(),
+                conversation_url: None,
                 import_history: true,
             })
         );
@@ -1935,6 +1942,7 @@ mod tests {
             OracleCommand::parse("attach abc-123 history"),
             Ok(OracleCommand::AttachThread {
                 conversation_id: "abc-123".to_string(),
+                conversation_url: None,
                 import_history: true,
             })
         );
@@ -1942,6 +1950,7 @@ mod tests {
             OracleCommand::parse("attach https://chatgpt.com/c/abc-123"),
             Ok(OracleCommand::AttachThread {
                 conversation_id: "abc-123".to_string(),
+                conversation_url: Some("https://chatgpt.com/c/abc-123".to_string()),
                 import_history: false,
             })
         );
@@ -1949,6 +1958,7 @@ mod tests {
             OracleCommand::parse("attach https://chat.openai.com/c/abc-123/"),
             Ok(OracleCommand::AttachThread {
                 conversation_id: "abc-123".to_string(),
+                conversation_url: Some("https://chat.openai.com/c/abc-123/".to_string()),
                 import_history: false,
             })
         );
@@ -1958,6 +1968,9 @@ mod tests {
             ),
             Ok(OracleCommand::AttachThread {
                 conversation_id: "abc-123".to_string(),
+                conversation_url: Some(
+                    "https://chatgpt.com/g/g-p-example/project/c/abc-123?foo=bar#frag".to_string()
+                ),
                 import_history: false,
             })
         );

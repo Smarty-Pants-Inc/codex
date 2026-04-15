@@ -47,11 +47,18 @@ where
     for (line_index, line) in textwrap::wrap(text, &opts).iter().enumerate() {
         match line {
             std::borrow::Cow::Borrowed(slice) => {
-                let start = unsafe { slice.as_ptr().offset_from(text.as_ptr()) as usize };
-                let end = start + slice.len();
-                let trailing_spaces = text[end..].chars().take_while(|c| *c == ' ').count();
-                lines.push(start..end + trailing_spaces + 1);
-                cursor = end + trailing_spaces;
+                let mapped = clamp_source_range(
+                    borrowed_wrapped_line_to_range(text, cursor, slice),
+                    text.len(),
+                );
+                let trailing_spaces = text[mapped.end..].chars().take_while(|c| *c == ' ').count();
+                let end = mapped
+                    .end
+                    .saturating_add(trailing_spaces)
+                    .saturating_add(1)
+                    .min(text.len().saturating_add(1));
+                lines.push(mapped.start..end);
+                cursor = mapped.end.saturating_add(trailing_spaces).min(text.len());
             }
             std::borrow::Cow::Owned(slice) => {
                 let synthetic_prefix = if line_index == 0 {
@@ -59,10 +66,18 @@ where
                 } else {
                     opts.subsequent_indent
                 };
-                let mapped = map_owned_wrapped_line_to_range(text, cursor, slice, synthetic_prefix);
+                let mapped = clamp_source_range(
+                    map_owned_wrapped_line_to_range(text, cursor, slice, synthetic_prefix),
+                    text.len(),
+                );
                 let trailing_spaces = text[mapped.end..].chars().take_while(|c| *c == ' ').count();
-                lines.push(mapped.start..mapped.end + trailing_spaces + 1);
-                cursor = mapped.end + trailing_spaces;
+                let end = mapped
+                    .end
+                    .saturating_add(trailing_spaces)
+                    .saturating_add(1)
+                    .min(text.len().saturating_add(1));
+                lines.push(mapped.start..end);
+                cursor = mapped.end.saturating_add(trailing_spaces).min(text.len());
             }
         }
     }
@@ -82,10 +97,12 @@ where
     for (line_index, line) in textwrap::wrap(text, &opts).iter().enumerate() {
         match line {
             std::borrow::Cow::Borrowed(slice) => {
-                let start = unsafe { slice.as_ptr().offset_from(text.as_ptr()) as usize };
-                let end = start + slice.len();
-                lines.push(start..end);
-                cursor = end;
+                let mapped = clamp_source_range(
+                    borrowed_wrapped_line_to_range(text, cursor, slice),
+                    text.len(),
+                );
+                lines.push(mapped.clone());
+                cursor = mapped.end;
             }
             std::borrow::Cow::Owned(slice) => {
                 let synthetic_prefix = if line_index == 0 {
@@ -93,13 +110,41 @@ where
                 } else {
                     opts.subsequent_indent
                 };
-                let mapped = map_owned_wrapped_line_to_range(text, cursor, slice, synthetic_prefix);
+                let mapped = clamp_source_range(
+                    map_owned_wrapped_line_to_range(text, cursor, slice, synthetic_prefix),
+                    text.len(),
+                );
                 lines.push(mapped.clone());
                 cursor = mapped.end;
             }
         }
     }
     lines
+}
+
+/// Maps a borrowed wrapped line back to a source range when possible.
+///
+/// `textwrap` can return `Cow::Borrowed` values that are not direct slices of
+/// the source text (for example synthesized empty tail lines). In that case we
+/// fall back to the owned-line mapper instead of using pointer offsets.
+fn borrowed_wrapped_line_to_range(text: &str, cursor: usize, wrapped: &str) -> Range<usize> {
+    let text_start = text.as_ptr() as usize;
+    let text_end = text_start.saturating_add(text.len());
+    let wrapped_start = wrapped.as_ptr() as usize;
+    let wrapped_end = wrapped_start.saturating_add(wrapped.len());
+
+    if wrapped_start >= text_start && wrapped_end <= text_end {
+        let start = wrapped_start - text_start;
+        return start..start.saturating_add(wrapped.len());
+    }
+
+    map_owned_wrapped_line_to_range(text, cursor, wrapped, "")
+}
+
+fn clamp_source_range(range: Range<usize>, text_len: usize) -> Range<usize> {
+    let start = range.start.min(text_len);
+    let end = range.end.min(text_len);
+    start..end.max(start)
 }
 
 /// Maps an owned (materialized) wrapped line back to a byte range in `text`.
@@ -1403,5 +1448,30 @@ them."#
 
         assert_eq!(rebuilt, text);
         assert!(ranges.len() > 1, "expected wrapped ranges, got: {ranges:?}");
+    }
+
+    #[test]
+    fn wrap_ranges_handles_trailing_newline_without_panicking() {
+        let text = "/oracle info\n";
+        let ranges = wrap_ranges(text, Options::new(80));
+        assert!(!ranges.is_empty());
+        assert!(ranges.iter().all(|range| {
+            range.start <= text.len() && range.end <= text.len().saturating_add(1)
+        }));
+
+        let trimmed = wrap_ranges_trim(text, Options::new(80));
+        assert!(!trimmed.is_empty());
+        assert!(
+            trimmed
+                .iter()
+                .all(|range| range.start <= text.len() && range.end <= text.len())
+        );
+    }
+
+    #[test]
+    fn borrowed_wrapped_line_to_range_handles_non_source_empty_slice() {
+        let text = "/oracle info\n";
+        let mapped = borrowed_wrapped_line_to_range(text, text.len(), "");
+        assert_eq!(mapped, text.len()..text.len());
     }
 }

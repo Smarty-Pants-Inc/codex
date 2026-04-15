@@ -397,6 +397,27 @@ async fn oracle_slash_command_with_inline_args_emits_raw_command() {
 }
 
 #[tokio::test]
+async fn oracle_inline_model_command_clears_composer_after_dispatch() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
+
+    submit_composer_text(&mut chat, "/oracle model pro extended");
+
+    assert_eq!(chat.bottom_pane.composer_text(), "");
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| {
+            matches!(
+                event,
+                AppEvent::ConfigureOracleMode { raw_command }
+                    if raw_command == "model pro extended"
+            )
+        }),
+        "expected ConfigureOracleMode(model pro extended), got {events:?}"
+    );
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+}
+
+#[tokio::test]
 async fn oracle_slash_command_without_args_emits_browse_event() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
 

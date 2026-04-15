@@ -819,6 +819,7 @@ impl ChatComposer {
     /// remote images). Cursor is placed at the end after rebuilding elements.
     pub(crate) fn apply_external_edit(&mut self, text: String) {
         self.pending_pastes.clear();
+        self.paste_burst.clear_after_explicit_paste();
 
         // Count placeholder occurrences in the new text.
         let mut placeholder_counts: HashMap<String, usize> = HashMap::new();
@@ -988,6 +989,7 @@ impl ChatComposer {
         // Clear any existing content, placeholders, and attachments first.
         self.textarea.set_text_clearing_elements("");
         self.pending_pastes.clear();
+        self.paste_burst.clear_after_explicit_paste();
         self.attached_images.clear();
         self.mention_bindings.clear();
 
@@ -1083,6 +1085,14 @@ impl ChatComposer {
             pending_pastes,
         });
         Some(previous)
+    }
+
+    pub(crate) fn clear_pending_submission_draft(&mut self) {
+        self.pending_pastes.clear();
+        self.recent_submission_mention_bindings.clear();
+        self.paste_burst.clear_after_explicit_paste();
+        self.textarea.set_text_clearing_elements("");
+        self.sync_popups();
     }
 
     /// Get the current composer text.
@@ -2283,29 +2293,21 @@ impl ChatComposer {
         should_queue: bool,
         now: Instant,
     ) -> (InputResult, bool) {
-        // If the first line is a bare built-in slash command (no args),
-        // dispatch it even when the slash popup isn't visible. This preserves
-        // the workflow: type a prefix ("/di"), press Tab to complete to
-        // "/diff ", then press Enter/Ctrl+Shift+Q to run it. Tab moves the cursor beyond
-        // the '/name' token and our caret-based heuristic hides the popup,
-        // but Enter/Ctrl+Shift+Q should still dispatch the command rather than submit
-        // literal text.
-        if let Some(result) = self.try_dispatch_bare_slash_command() {
-            return (result, true);
-        }
-
         // If we're in a paste-like burst capture, treat Enter/Ctrl+Shift+Q as part of the burst
         // and accumulate it rather than submitting or inserting immediately.
         // Do not treat as paste inside a slash-command context.
+        let pending_burst_preview = (!self.disable_paste_burst)
+            .then(|| self.paste_burst.pending_input_preview())
+            .flatten();
+        let pending_burst_first_line = pending_burst_preview
+            .as_deref()
+            .and_then(|text| text.lines().next());
+        let first_line = self.textarea.text().lines().next().unwrap_or("");
         let in_slash_context = self.slash_commands_enabled()
             && (matches!(self.active_popup, ActivePopup::Command(_))
-                || self
-                    .textarea
-                    .text()
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .starts_with('/'));
+                || self.is_slash_command_enter_context(first_line)
+                || pending_burst_first_line
+                    .is_some_and(|line| self.is_slash_command_enter_context(line)));
         if !self.disable_paste_burst
             && self.paste_burst.is_active()
             && !in_slash_context
@@ -2324,6 +2326,27 @@ impl ChatComposer {
             self.textarea.insert_str("\n");
             self.paste_burst.extend_window(now);
             return (InputResult::None, true);
+        }
+
+        // Submission should see the full draft, including any buffered rapid-input burst.
+        // Without this flush, a long inline slash command can be parsed against an incomplete
+        // textarea snapshot while the rest of the command is still held in the burst buffer.
+        if !self.disable_paste_burst {
+            if let Some(pasted) = self.paste_burst.flush_before_modified_input() {
+                self.handle_paste(pasted);
+            }
+            self.paste_burst.clear_window_after_non_char();
+        }
+
+        // If the first line is a bare built-in slash command (no args),
+        // dispatch it even when the slash popup isn't visible. This preserves
+        // the workflow: type a prefix ("/di"), press Tab to complete to
+        // "/diff ", then press Enter/Ctrl+Shift+Q to run it. Tab moves the cursor beyond
+        // the '/name' token and our caret-based heuristic hides the popup,
+        // but Enter/Ctrl+Shift+Q should still dispatch the command rather than submit
+        // literal text.
+        if let Some(result) = self.try_dispatch_bare_slash_command() {
+            return (result, true);
         }
 
         let original_input = self.textarea.text().to_string();
@@ -2371,6 +2394,32 @@ impl ChatComposer {
             self.pending_pastes = original_pending_pastes;
             (InputResult::None, true)
         }
+    }
+
+    /// Return whether Enter should bypass paste-burst newline behavior because the first line
+    /// looks like slash-command input.
+    fn is_slash_command_enter_context(&self, first_line: &str) -> bool {
+        if !first_line.starts_with('/') {
+            return false;
+        }
+
+        if first_line == "/" {
+            return true;
+        }
+
+        let Some((name, rest, _rest_offset)) = parse_slash_name(first_line) else {
+            return false;
+        };
+
+        if name.contains('/') {
+            return false;
+        }
+
+        if rest.is_empty() {
+            return self.looks_like_slash_prefix(name, rest);
+        }
+
+        slash_commands::find_builtin_command(name, self.builtin_command_flags()).is_some()
     }
 
     /// Check if the first line is a bare slash command (no args) and dispatch it.
@@ -2431,6 +2480,12 @@ impl ChatComposer {
             Self::slash_command_args_elements(rest, rest_offset, &self.textarea.text_elements());
         let trimmed_rest = rest.trim();
         args_elements = Self::trim_text_elements(rest, trimmed_rest, args_elements);
+        if matches!(cmd, SlashCommand::Oracle) {
+            // Oracle inline commands can trigger follow-up redraws after model/session updates.
+            // Clear the draft here so later UI sync cannot resurrect the slash prefix ahead of
+            // the user's next plain-text prompt.
+            self.clear_pending_submission_draft();
+        }
         Some(InputResult::CommandWithArgs(
             cmd,
             trimmed_rest.to_string(),
@@ -5819,6 +5874,249 @@ mod tests {
         let (result, _) =
             composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(result, InputResult::Command(SlashCommand::Diff)));
+    }
+
+    #[test]
+    fn bare_slash_command_dispatches_after_buffered_burst_flush() {
+        use crate::slash_command::SlashCommand;
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ false,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ false,
+        );
+
+        composer
+            .paste_burst
+            .begin_with_retro_grabbed("/diff".to_string(), Instant::now());
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(result, InputResult::Command(SlashCommand::Diff)));
+    }
+
+    #[test]
+    fn pending_burst_path_like_text_is_not_treated_as_slash_context() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ false,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ false,
+        );
+        composer
+            .paste_burst
+            .begin_with_retro_grabbed("/Users/example/project".to_string(), Instant::now());
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(result, InputResult::None));
+        assert!(composer.textarea.text().is_empty());
+        let buffered = composer
+            .paste_burst
+            .flush_before_modified_input()
+            .expect("burst content should still be buffered");
+        assert_eq!(buffered, "/Users/example/project\n");
+    }
+
+    #[test]
+    fn rapid_long_inline_oracle_slash_command_preserves_full_args() {
+        use crate::slash_command::SlashCommand;
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ false,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ false,
+        );
+        let command = "/oracle attach https://chatgpt.com/g/g-p-69ccbf70cff08191bd2a7e61d8962644-oracle/c/69ded724-8bc4-83ea-a905-7133ecb18d38";
+
+        for ch in command.chars() {
+            let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+        }
+
+        let (result, _) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        match result {
+            InputResult::CommandWithArgs(SlashCommand::Oracle, args, _) => {
+                assert_eq!(
+                    args,
+                    "attach https://chatgpt.com/g/g-p-69ccbf70cff08191bd2a7e61d8962644-oracle/c/69ded724-8bc4-83ea-a905-7133ecb18d38"
+                );
+            }
+            other => panic!("expected inline oracle slash command dispatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clearing_pending_submission_draft_defuses_inline_oracle_burst_state() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ false,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ false,
+        );
+
+        composer
+            .paste_burst
+            .begin_with_retro_grabbed("/oracle model pro extended".to_string(), Instant::now());
+        assert!(composer.is_in_paste_burst());
+
+        composer.clear_pending_submission_draft();
+        assert!(!composer.is_in_paste_burst());
+
+        let prompt = "Reply with exactly TOKEN and nothing else.";
+        let mut now = Instant::now();
+        for ch in prompt.chars() {
+            let _ = composer.handle_input_basic_with_time(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                now,
+            );
+            now += Duration::from_millis(20);
+        }
+        assert!(
+            composer.handle_paste_burst_flush(now + ChatComposer::recommended_paste_flush_delay())
+        );
+
+        let (prompt_result, _) = composer.handle_submission_with_time(
+            /*should_queue*/ false,
+            now + Duration::from_millis(350),
+        );
+        match prompt_result {
+            InputResult::Submitted { text, .. } => assert_eq!(text, prompt),
+            other => {
+                panic!("expected plain-text submission after clearing burst state, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn inline_oracle_command_dispatch_clears_draft_before_followup_prompt() {
+        use crate::slash_command::SlashCommand;
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ false,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ false,
+        );
+
+        let mut now = Instant::now();
+        for ch in "/oracle model pro extended".chars() {
+            let _ = composer.handle_input_basic_with_time(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                now,
+            );
+            now += Duration::from_millis(35);
+        }
+
+        let (result, _) = composer.handle_submission_with_time(
+            /*should_queue*/ false,
+            now + Duration::from_millis(350),
+        );
+        match result {
+            InputResult::CommandWithArgs(SlashCommand::Oracle, args, _) => {
+                assert_eq!(args, "model pro extended");
+            }
+            other => panic!("expected inline oracle slash command dispatch, got {other:?}"),
+        }
+        assert_eq!(composer.textarea.text(), "");
+        assert!(!composer.is_in_paste_burst());
+        composer.sync_popups();
+        assert!(matches!(composer.active_popup, ActivePopup::None));
+
+        now += Duration::from_millis(500);
+        let prompt = "Reply with exactly TOKEN and nothing else.";
+        for ch in prompt.chars() {
+            let _ = composer.handle_input_basic_with_time(
+                KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE),
+                now,
+            );
+            now += Duration::from_millis(35);
+        }
+        assert!(
+            composer.handle_paste_burst_flush(now + ChatComposer::recommended_paste_flush_delay())
+        );
+
+        let (prompt_result, _) = composer.handle_submission_with_time(
+            /*should_queue*/ false,
+            now + Duration::from_millis(350),
+        );
+        match prompt_result {
+            InputResult::Submitted { text, .. } => assert_eq!(text, prompt),
+            other => panic!(
+                "expected plain-text submission after inline oracle command dispatch, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn set_text_content_with_mention_bindings_defuses_stale_burst_state() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            /*has_input_focus*/ true,
+            sender,
+            /*enhanced_keys_supported*/ false,
+            "Ask Codex to do anything".to_string(),
+            /*disable_paste_burst*/ false,
+        );
+
+        composer
+            .paste_burst
+            .begin_with_retro_grabbed("/oracle model pro extended".to_string(), Instant::now());
+        assert!(composer.is_in_paste_burst());
+
+        composer.set_text_content_with_mention_bindings(
+            "Reply".to_string(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert!(!composer.is_in_paste_burst());
+        assert_eq!(composer.textarea.text(), "Reply");
+        assert!(
+            !composer.handle_paste_burst_flush(
+                Instant::now() + ChatComposer::recommended_paste_flush_delay()
+            ),
+            "rewriting the draft should clear any stale burst buffer"
+        );
+        assert_eq!(composer.textarea.text(), "Reply");
     }
 
     /// Behavior: if a burst is buffering text and the user presses a non-char key, flush the

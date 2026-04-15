@@ -438,6 +438,18 @@ impl PasteBurst {
         self.is_active_internal() || self.pending_first_char.is_some()
     }
 
+    /// Preview the buffered burst contents exactly as they would flush into the textarea.
+    pub fn pending_input_preview(&self) -> Option<String> {
+        if !self.is_active() {
+            return None;
+        }
+        let mut out = self.buffer.clone();
+        if let Some((ch, _at)) = self.pending_first_char {
+            out.push(ch);
+        }
+        Some(out)
+    }
+
     fn is_active_internal(&self) -> bool {
         self.active || !self.buffer.is_empty()
     }

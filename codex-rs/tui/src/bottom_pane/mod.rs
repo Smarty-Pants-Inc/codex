@@ -290,12 +290,14 @@ impl BottomPane {
         self.composer.record_pending_slash_command_history();
     }
 
-    /// Clear pending attachments and mention bindings e.g. when a slash command doesn't submit text.
+    /// Clear draft submission state e.g. when a slash command doesn't submit text.
     pub(crate) fn drain_pending_submission_state(&mut self) {
         let _ = self.take_recent_submission_images_with_placeholders();
         let _ = self.take_remote_image_urls();
         let _ = self.take_recent_submission_mention_bindings();
         let _ = self.take_mention_bindings();
+        self.composer.clear_pending_submission_draft();
+        self.request_redraw();
     }
 
     pub fn set_collaboration_modes_enabled(&mut self, enabled: bool) {
@@ -1703,10 +1705,14 @@ mod tests {
 
         pane.set_remote_image_urls(vec!["https://example.com/one.png".to_string()]);
         assert_eq!(pane.remote_image_urls().len(), 1);
+        pane.set_composer_text("draft".to_string(), Vec::new(), Vec::new());
+        pane.set_composer_pending_pastes(vec![("p1".to_string(), "pending".to_string())]);
 
         pane.drain_pending_submission_state();
 
         assert!(pane.remote_image_urls().is_empty());
+        assert_eq!(pane.composer_text(), "");
+        assert!(pane.composer_pending_pastes().is_empty());
     }
 
     #[test]

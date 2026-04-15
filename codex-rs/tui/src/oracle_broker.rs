@@ -1,10 +1,15 @@
 use std::collections::BTreeSet;
+use std::collections::VecDeque;
+use std::env;
 use std::future::Future;
 use std::io;
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -28,6 +33,72 @@ const SUPERVISOR_RECOVERY_GRACE_PERIOD: Duration = Duration::from_secs(10);
 const SUPERVISOR_FOLLOWUP_RECOVERY_GRACE_PERIOD: Duration = Duration::from_secs(90);
 const ORACLE_BROKER_ABORT_GRACE_PERIOD: Duration = Duration::from_secs(2);
 const ORACLE_BROKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const ORACLE_BROKER_STDERR_TAIL_LIMIT: usize = 20;
+#[cfg(not(windows))]
+const NODE_FALLBACK_PATHS: &[&str] = &[
+    "/opt/homebrew/bin/node",
+    "/usr/local/bin/node",
+    "/usr/bin/node",
+];
+#[cfg(windows)]
+const NODE_FALLBACK_PATHS: &[&str] = &[];
+#[cfg(not(windows))]
+const PNPM_FALLBACK_PATHS: &[&str] = &["/opt/homebrew/bin/pnpm", "/usr/local/bin/pnpm"];
+#[cfg(windows)]
+const PNPM_FALLBACK_PATHS: &[&str] = &[];
+
+fn resolve_executable(program: &str, fallbacks: &[&str]) -> PathBuf {
+    if let Some(path) = env::var_os("PATH").and_then(|search_path| {
+        env::split_paths(&search_path).find_map(|dir| {
+            let candidate = dir.join(program);
+            candidate.is_file().then_some(candidate)
+        })
+    }) {
+        return path;
+    }
+    fallbacks
+        .iter()
+        .map(PathBuf::from)
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| PathBuf::from(program))
+}
+
+fn oracle_broker_command(oracle_repo: &Path) -> (PathBuf, Vec<String>) {
+    let dist_broker = oracle_repo
+        .join("dist")
+        .join("bin")
+        .join("oracle-supervisor-broker.js");
+    if dist_broker.is_file() {
+        return (
+            resolve_executable("node", NODE_FALLBACK_PATHS),
+            vec![dist_broker.display().to_string()],
+        );
+    }
+
+    let tsx_cli = oracle_repo
+        .join("node_modules")
+        .join("tsx")
+        .join("dist")
+        .join("cli.mjs");
+    if tsx_cli.is_file() {
+        return (
+            resolve_executable("node", NODE_FALLBACK_PATHS),
+            vec![
+                tsx_cli.display().to_string(),
+                "bin/oracle-supervisor-broker.ts".to_string(),
+            ],
+        );
+    }
+
+    (
+        resolve_executable("pnpm", PNPM_FALLBACK_PATHS),
+        vec![
+            "exec".to_string(),
+            "tsx".to_string(),
+            "bin/oracle-supervisor-broker.ts".to_string(),
+        ],
+    )
+}
 
 #[cfg(unix)]
 fn terminate_process_group(process_group_id: u32) -> io::Result<()> {
@@ -244,6 +315,8 @@ struct OracleBrokerThreadAttachWireRequest {
     followup_session: Option<String>,
     #[serde(rename = "conversationId")]
     conversation_id: String,
+    #[serde(rename = "threadUrl", skip_serializing_if = "Option::is_none")]
+    thread_url: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -268,11 +341,10 @@ enum BrokerCommand {
 }
 
 pub(crate) fn spawn_oracle_broker(oracle_repo: &Path) -> Result<OracleBrokerClient, String> {
-    let mut child = Command::new("pnpm");
+    let (program, args) = oracle_broker_command(oracle_repo);
+    let mut child = Command::new(program);
+    child.args(args);
     child
-        .arg("exec")
-        .arg("tsx")
-        .arg("bin/oracle-supervisor-broker.ts")
         .current_dir(oracle_repo)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -297,11 +369,21 @@ pub(crate) fn spawn_oracle_broker(oracle_repo: &Path) -> Result<OracleBrokerClie
         .take()
         .ok_or_else(|| "Oracle broker stderr was unavailable".to_string())?;
 
+    let stderr_tail = Arc::new(Mutex::new(VecDeque::with_capacity(
+        ORACLE_BROKER_STDERR_TAIL_LIMIT,
+    )));
+    let stderr_tail_for_task = Arc::clone(&stderr_tail);
     let (tx, rx) = mpsc::channel(8);
     let stderr_task = tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             tracing::debug!(target: "codex_tui::oracle_broker", %line, "oracle broker stderr");
+            if let Ok(mut tail) = stderr_tail_for_task.lock() {
+                if tail.len() == ORACLE_BROKER_STDERR_TAIL_LIMIT {
+                    tail.pop_front();
+                }
+                tail.push_back(line);
+            }
         }
     });
     let broker_task = tokio::spawn(run_broker_loop(
@@ -310,6 +392,7 @@ pub(crate) fn spawn_oracle_broker(oracle_repo: &Path) -> Result<OracleBrokerClie
         BufReader::new(stdout).lines(),
         rx,
         stderr_task,
+        stderr_tail,
     ));
     Ok(OracleBrokerClient {
         tx,
@@ -364,6 +447,31 @@ impl OracleBrokerClient {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn new_error_test_client(error: &str) -> Self {
+        let (tx, mut rx) = mpsc::channel(1);
+        let error = error.to_string();
+        let broker_task = tokio::spawn(async move {
+            while let Some(command) = rx.recv().await {
+                match command {
+                    BrokerCommand::Request { reply, .. } => {
+                        let _ = reply.send(Err(error.clone()));
+                    }
+                    BrokerCommand::Shutdown { reply } => {
+                        let _ = reply.send(());
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            tx,
+            abort_handle: broker_task.abort_handle(),
+            transport_alive: Arc::new(AtomicBool::new(true)),
+            process_group_id: None,
+        }
+    }
+
     pub(crate) async fn request(
         &self,
         request: OracleBrokerRequest,
@@ -394,11 +502,21 @@ impl OracleBrokerClient {
             return Err("Oracle broker is unavailable".to_string());
         }
         let recv_result = async {
-            let value = recv.await.map_err(|_| {
+            let value = match recv.await {
+                Ok(Ok(value)) => value,
+                Ok(Err(error)) => {
+                    self.mark_transport_unavailable();
+                    return Err(error);
+                }
+                Err(_) => {
+                    self.mark_transport_unavailable();
+                    return Err("Oracle broker closed before replying".to_string());
+                }
+            };
+            parse_success_response::<OracleBrokerResponse>(value).map_err(|error| {
                 self.mark_transport_unavailable();
-                "Oracle broker closed before replying".to_string()
-            })??;
-            parse_success_response::<OracleBrokerResponse>(value)
+                error
+            })
         };
         let recovery_result = await_recoverable_supervisor_response(
             recovery_session_slug.as_str(),
@@ -471,11 +589,23 @@ impl OracleBrokerClient {
             self.mark_transport_unavailable();
             return Err("Oracle broker is unavailable".to_string());
         }
-        let value = recv.await.map_err(|_| {
-            self.mark_transport_unavailable();
-            "Oracle broker closed before replying".to_string()
-        })??;
-        parse_success_field_response::<Vec<OracleBrokerThreadEntry>>(value, "threads")
+        let value = match recv.await {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => {
+                self.mark_transport_unavailable();
+                return Err(error);
+            }
+            Err(_) => {
+                self.mark_transport_unavailable();
+                return Err("Oracle broker closed before replying".to_string());
+            }
+        };
+        parse_success_field_response::<Vec<OracleBrokerThreadEntry>>(value, "threads").map_err(
+            |error| {
+                self.mark_transport_unavailable();
+                error
+            },
+        )
     }
 
     pub(crate) async fn new_thread(
@@ -499,16 +629,27 @@ impl OracleBrokerClient {
             self.mark_transport_unavailable();
             return Err("Oracle broker is unavailable".to_string());
         }
-        let value = recv.await.map_err(|_| {
+        let value = match recv.await {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => {
+                self.mark_transport_unavailable();
+                return Err(error);
+            }
+            Err(_) => {
+                self.mark_transport_unavailable();
+                return Err("Oracle broker closed before replying".to_string());
+            }
+        };
+        decode_thread_open_envelope(value).map_err(|error| {
             self.mark_transport_unavailable();
-            "Oracle broker closed before replying".to_string()
-        })??;
-        Ok(decode_thread_open_envelope(value)?)
+            error
+        })
     }
 
     pub(crate) async fn attach_thread(
         &self,
         conversation_id: impl Into<String>,
+        thread_url: Option<String>,
         followup_session: Option<String>,
     ) -> Result<OracleBrokerThreadOpenResponse, String> {
         let (reply, recv) = oneshot::channel();
@@ -516,6 +657,7 @@ impl OracleBrokerClient {
             action: "attach_thread",
             followup_session,
             conversation_id: conversation_id.into(),
+            thread_url,
         })
         .map_err(|error| {
             format!("failed to serialize Oracle broker thread attach request: {error}")
@@ -529,11 +671,21 @@ impl OracleBrokerClient {
             self.mark_transport_unavailable();
             return Err("Oracle broker is unavailable".to_string());
         }
-        let value = recv.await.map_err(|_| {
+        let value = match recv.await {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => {
+                self.mark_transport_unavailable();
+                return Err(error);
+            }
+            Err(_) => {
+                self.mark_transport_unavailable();
+                return Err("Oracle broker closed before replying".to_string());
+            }
+        };
+        decode_thread_open_envelope(value).map_err(|error| {
             self.mark_transport_unavailable();
-            "Oracle broker closed before replying".to_string()
-        })??;
-        Ok(decode_thread_open_envelope(value)?)
+            error
+        })
     }
 
     pub(crate) async fn thread_history(
@@ -561,11 +713,21 @@ impl OracleBrokerClient {
             self.mark_transport_unavailable();
             return Err("Oracle broker is unavailable".to_string());
         }
-        let value = recv.await.map_err(|_| {
+        let value = match recv.await {
+            Ok(Ok(value)) => value,
+            Ok(Err(error)) => {
+                self.mark_transport_unavailable();
+                return Err(error);
+            }
+            Err(_) => {
+                self.mark_transport_unavailable();
+                return Err("Oracle broker closed before replying".to_string());
+            }
+        };
+        decode_thread_history_envelope(value).map_err(|error| {
             self.mark_transport_unavailable();
-            "Oracle broker closed before replying".to_string()
-        })??;
-        Ok(decode_thread_history_envelope(value)?)
+            error
+        })
     }
 
     pub(crate) async fn shutdown(&self) -> Result<(), String> {
@@ -723,12 +885,35 @@ async fn run_broker_loop(
     mut stdout_lines: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
     mut rx: mpsc::Receiver<BrokerCommand>,
     stderr_task: tokio::task::JoinHandle<()>,
+    stderr_tail: Arc<Mutex<VecDeque<String>>>,
 ) {
     while let Some(command) = rx.recv().await {
         match command {
             BrokerCommand::Request { payload, reply } => {
-                let result = send_and_read(&mut stdin, &mut stdout_lines, payload).await;
+                let result = send_and_read(
+                    &mut child,
+                    &mut stdin,
+                    &mut stdout_lines,
+                    &stderr_tail,
+                    payload,
+                )
+                .await;
+                let fatal_error = result.as_ref().err().cloned();
                 let _ = reply.send(result);
+                if let Some(error) = fatal_error {
+                    while let Some(queued) = rx.recv().await {
+                        match queued {
+                            BrokerCommand::Request { reply, .. } => {
+                                let _ = reply.send(Err(error.clone()));
+                            }
+                            BrokerCommand::Shutdown { reply } => {
+                                let _ = reply.send(());
+                                break;
+                            }
+                        }
+                    }
+                    break;
+                }
             }
             BrokerCommand::Shutdown { reply } => {
                 let _ = send_shutdown(&mut stdin).await;
@@ -747,8 +932,10 @@ async fn run_broker_loop(
 }
 
 async fn send_and_read(
+    child: &mut Child,
     stdin: &mut ChildStdin,
     stdout_lines: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    stderr_tail: &Arc<Mutex<VecDeque<String>>>,
     payload: Value,
 ) -> Result<Value, String> {
     let payload = serde_json::to_string(&payload)
@@ -770,9 +957,58 @@ async fn send_and_read(
         .next_line()
         .await
         .map_err(|error| format!("failed to read Oracle broker response: {error}"))?
-        .ok_or_else(|| "Oracle broker exited without replying".to_string())?;
+        .ok_or_else(|| format_oracle_broker_unexpected_exit_message(child, stderr_tail))?;
     serde_json::from_str(&line)
         .map_err(|error| format!("failed to parse Oracle broker response: {error}"))
+}
+
+fn format_oracle_broker_unexpected_exit_message(
+    child: &mut Child,
+    stderr_tail: &Arc<Mutex<VecDeque<String>>>,
+) -> String {
+    let exit_status = child
+        .try_wait()
+        .ok()
+        .flatten()
+        .map(|status| format_oracle_broker_exit_status(&status));
+    let stderr_excerpt = stderr_tail
+        .lock()
+        .ok()
+        .map(|lines| lines.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    format_oracle_broker_unexpected_exit_message_parts(exit_status, &stderr_excerpt)
+}
+
+fn format_oracle_broker_exit_status(status: &std::process::ExitStatus) -> String {
+    if let Some(code) = status.code() {
+        return format!("exit code {code}");
+    }
+    #[cfg(unix)]
+    if let Some(signal) = status.signal() {
+        return format!("signal {signal}");
+    }
+    "unknown status".to_string()
+}
+
+fn format_oracle_broker_unexpected_exit_message_parts(
+    exit_status: Option<String>,
+    stderr_tail: &[String],
+) -> String {
+    let mut details = Vec::new();
+    if let Some(status) = exit_status.filter(|status| !status.is_empty()) {
+        details.push(status);
+    }
+    if !stderr_tail.is_empty() {
+        details.push(format!("stderr tail: {}", stderr_tail.join(" | ")));
+    }
+    if details.is_empty() {
+        "Oracle broker exited without replying".to_string()
+    } else {
+        format!(
+            "Oracle broker exited without replying ({})",
+            details.join("; ")
+        )
+    }
 }
 
 async fn send_shutdown(stdin: &mut ChildStdin) -> Result<(), String> {
@@ -1000,6 +1236,8 @@ mod tests {
     use super::OracleBrokerThreadOpenResponse;
     use super::decode_thread_history_envelope;
     use super::decode_thread_open_envelope;
+    use super::format_oracle_broker_unexpected_exit_message_parts;
+    use super::oracle_broker_command;
     use super::oracle_session_chain_ordinal;
     use super::prefer_recovered_supervisor_response_with_timeout;
     use super::read_recoverable_supervisor_response_from_dir;
@@ -1230,7 +1468,7 @@ mod tests {
 
     #[tokio::test]
     async fn recoverable_supervisor_response_recovers_unique_descendant_conversation_when_followup_metadata_is_missing()
-    {
+     {
         let temp = tempdir().expect("tempdir");
         write_meta(
             temp.path(),
@@ -1258,7 +1496,7 @@ mod tests {
 
     #[tokio::test]
     async fn recoverable_supervisor_response_rejects_ambiguous_descendant_conversations_when_followup_metadata_is_missing()
-    {
+     {
         let temp = tempdir().expect("tempdir");
         write_meta(
             temp.path(),
@@ -1557,6 +1795,83 @@ mod tests {
             .expect_err("hanging broker should time out");
 
         assert!(err.contains("timed out"));
+        assert!(!broker.is_usable());
+    }
+
+    #[test]
+    fn broker_unexpected_exit_message_includes_exit_status_and_stderr_tail() {
+        let message = format_oracle_broker_unexpected_exit_message_parts(
+            Some("exit code 2".to_string()),
+            &["fatal: boom".to_string(), "second line".to_string()],
+        );
+
+        assert!(message.contains("Oracle broker exited without replying"));
+        assert!(message.contains("exit code 2"));
+        assert!(message.contains("fatal: boom | second line"));
+    }
+
+    #[test]
+    fn oracle_broker_command_prefers_built_js_broker() {
+        let temp = tempdir().expect("tempdir");
+        let dist_bin = temp.path().join("dist").join("bin");
+        std::fs::create_dir_all(&dist_bin).expect("dist/bin");
+        std::fs::write(
+            dist_bin.join("oracle-supervisor-broker.js"),
+            "console.log('broker');",
+        )
+        .expect("built broker");
+
+        let (program, args) = oracle_broker_command(temp.path());
+
+        assert_eq!(
+            program.file_name().and_then(|name| name.to_str()),
+            Some("node")
+        );
+        assert_eq!(args.len(), 1);
+        assert!(args[0].ends_with("dist/bin/oracle-supervisor-broker.js"));
+    }
+
+    #[test]
+    fn oracle_broker_command_falls_back_to_local_tsx_cli_when_no_build_exists() {
+        let temp = tempdir().expect("tempdir");
+        let tsx_dir = temp.path().join("node_modules").join("tsx").join("dist");
+        std::fs::create_dir_all(&tsx_dir).expect("tsx dir");
+        std::fs::write(tsx_dir.join("cli.mjs"), "console.log('tsx');").expect("tsx cli");
+
+        let (program, args) = oracle_broker_command(temp.path());
+
+        assert_eq!(
+            program.file_name().and_then(|name| name.to_str()),
+            Some("node")
+        );
+        assert_eq!(args.len(), 2);
+        assert!(args[0].ends_with("node_modules/tsx/dist/cli.mjs"));
+        assert_eq!(args[1], "bin/oracle-supervisor-broker.ts");
+    }
+
+    #[test]
+    fn oracle_broker_command_falls_back_to_pnpm_exec_tsx_without_local_assets() {
+        let temp = tempdir().expect("tempdir");
+
+        let (program, args) = oracle_broker_command(temp.path());
+
+        assert_eq!(
+            program.file_name().and_then(|name| name.to_str()),
+            Some("pnpm")
+        );
+        assert_eq!(args, vec!["exec", "tsx", "bin/oracle-supervisor-broker.ts"]);
+    }
+
+    #[tokio::test]
+    async fn broker_declared_error_marks_client_unusable() {
+        let broker = OracleBrokerClient::new_error_test_client("Oracle broker exploded");
+
+        let err = broker
+            .list_threads(None)
+            .await
+            .expect_err("broker error should bubble up");
+
+        assert!(err.contains("Oracle broker exploded"));
         assert!(!broker.is_usable());
     }
 }
