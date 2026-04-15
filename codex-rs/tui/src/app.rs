@@ -4021,7 +4021,7 @@ impl App {
                 approval_policy: config.permissions.approval_policy.value(),
                 approvals_reviewer: config.approvals_reviewer,
                 sandbox_policy: config.permissions.sandbox_policy.get().clone(),
-                cwd: config.cwd.to_path_buf(),
+                cwd: config.cwd.clone(),
                 instruction_source_paths: Vec::new(),
                 reasoning_effort: None,
                 history_log_id: 0,
@@ -4034,7 +4034,7 @@ impl App {
         session.thread_name = Some(thread_label);
         session.model = format!("requested {}", self.oracle_state.model.display_name());
         session.model_provider_id = "oracle-browser".to_string();
-        session.cwd = config.cwd.to_path_buf();
+        session.cwd = config.cwd.clone();
         session.instruction_source_paths = Vec::new();
         session.history_log_id = 0;
         session.history_entry_count = 0;
@@ -6037,7 +6037,7 @@ impl App {
                 let cwd = orchestrator
                     .as_ref()
                     .map(|thread| thread.cwd.clone())
-                    .unwrap_or_else(|| self.chat_widget.config_ref().cwd.to_path_buf());
+                    .unwrap_or_else(|| self.chat_widget.config_ref().cwd.clone());
                 let orchestrator_summary = orchestrator.as_ref().map(summarize_thread);
                 let context = resolve_context_requests(
                     cwd.as_path(),
@@ -6080,7 +6080,7 @@ impl App {
                     requested_prompt: context_prompt,
                     source_user_text: None,
                     files: Vec::new(),
-                    workspace_cwd: cwd,
+                    workspace_cwd: cwd.to_path_buf(),
                     oracle_repo,
                     followup_session: self
                         .oracle_followup_session_for_thread(result.oracle_thread_id),
@@ -6613,7 +6613,7 @@ impl App {
             requested_prompt: checkpoint_prompt,
             source_user_text: None,
             files: Vec::new(),
-            workspace_cwd: thread.cwd.clone(),
+            workspace_cwd: thread.cwd.to_path_buf(),
             oracle_repo,
             followup_session,
             model: self.oracle_state.model,
@@ -18104,7 +18104,7 @@ guardian_approval = true
             updated_at: 1,
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: None,
-            cwd: PathBuf::from("/tmp/orchestrator"),
+            cwd: test_absolute_path("/tmp/orchestrator"),
             cli_version: "0.0.0".to_string(),
             source: codex_app_server_protocol::SessionSource::Unknown,
             agent_nickname: None,
