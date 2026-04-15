@@ -92,6 +92,7 @@ use codex_app_server_protocol::McpServerStatus;
 use codex_app_server_protocol::McpServerStatusDetail;
 use codex_app_server_protocol::McpServerToolCallParams;
 use codex_app_server_protocol::McpServerToolCallResponse;
+use codex_app_server_protocol::MemoryResetResponse;
 use codex_app_server_protocol::MockExperimentalMethodParams;
 use codex_app_server_protocol::MockExperimentalMethodResponse;
 use codex_app_server_protocol::ModelListParams;
@@ -202,7 +203,6 @@ use codex_chatgpt::connectors;
 use codex_cloud_requirements::cloud_requirements_loader;
 use codex_config::types::McpServerTransportConfig;
 use codex_core::CodexThread;
-use codex_core::Cursor as RolloutCursor;
 use codex_core::ForkSnapshot;
 use codex_core::NewThread;
 use codex_core::RolloutRecorder;
@@ -210,7 +210,6 @@ use codex_core::SessionMeta;
 use codex_core::SteerInputError;
 use codex_core::ThreadConfigSnapshot;
 use codex_core::ThreadManager;
-use codex_core::ThreadSortKey as CoreThreadSortKey;
 use codex_core::append_thread_name;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
@@ -231,7 +230,6 @@ use codex_core::find_archived_thread_path_by_id_str;
 use codex_core::find_thread_name_by_id;
 use codex_core::find_thread_names_by_ids;
 use codex_core::find_thread_path_by_id_str;
-use codex_core::parse_cursor;
 use codex_core::path_utils;
 use codex_core::plugins::MarketplaceAddError;
 use codex_core::plugins::MarketplaceError;
@@ -321,6 +319,12 @@ use codex_state::StateRuntime;
 use codex_state::ThreadMetadata;
 use codex_state::ThreadMetadataBuilder;
 use codex_state::log_db::LogDbLayer;
+use codex_thread_store::ListThreadsParams as StoreListThreadsParams;
+use codex_thread_store::LocalThreadStore;
+use codex_thread_store::StoredThread;
+use codex_thread_store::ThreadSortKey as StoreThreadSortKey;
+use codex_thread_store::ThreadStore;
+use codex_thread_store::ThreadStoreError;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_json_to_toml::json_to_toml;
 use codex_utils_pty::DEFAULT_OUTPUT_BYTES_CAP;
@@ -612,15 +616,12 @@ pub(crate) struct CodexMessageProcessorArgs {
 }
 
 impl CodexMessageProcessor {
-    async fn instruction_sources_from_config(config: &Config) -> Vec<PathBuf> {
-        let mut paths: Vec<PathBuf> = config.user_instructions_path.iter().cloned().collect();
+    async fn instruction_sources_from_config(config: &Config) -> Vec<AbsolutePathBuf> {
+        let mut paths: Vec<AbsolutePathBuf> =
+            config.user_instructions_path.iter().cloned().collect();
         match codex_core::discover_project_doc_paths(config, LOCAL_FS.as_ref()).await {
             Ok(project_doc_paths) => {
-                paths.extend(
-                    project_doc_paths
-                        .into_iter()
-                        .map(|path| path.as_path().to_path_buf()),
-                );
+                paths.extend(project_doc_paths);
             }
             Err(err) => {
                 tracing::warn!(error = %err, "failed to discover project docs for thread response");
@@ -910,6 +911,10 @@ impl CodexMessageProcessor {
             }
             ClientRequest::ThreadMemoryModeSet { request_id, params } => {
                 self.thread_memory_mode_set(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::MemoryReset { request_id, params } => {
+                self.memory_reset(to_connection_request_id(request_id), params)
                     .await;
             }
             ClientRequest::ThreadUnarchive { request_id, params } => {
@@ -2163,7 +2168,7 @@ impl CodexMessageProcessor {
             &effective_policy,
             &effective_file_system_sandbox_policy,
             effective_network_sandbox_policy,
-            sandbox_cwd.as_path(),
+            &sandbox_cwd,
             &codex_linux_sandbox_exe,
             use_legacy_landlock,
         ) {
@@ -3050,6 +3055,86 @@ impl CodexMessageProcessor {
             .await;
     }
 
+    async fn memory_reset(&self, request_id: ConnectionRequestId, _params: Option<()>) {
+        let state_db = match StateRuntime::init(
+            self.config.sqlite_home.clone(),
+            self.config.model_provider_id.clone(),
+        )
+        .await
+        {
+            Ok(state_db) => state_db,
+            Err(err) => {
+                self.send_internal_error(
+                    request_id,
+                    format!("failed to open state db for memory reset: {err}"),
+                )
+                .await;
+                return;
+            }
+        };
+
+        if let Err(err) = state_db.clear_memory_data().await {
+            self.send_internal_error(
+                request_id,
+                format!("failed to clear memory rows in state db: {err}"),
+            )
+            .await;
+            return;
+        }
+
+        let memory_root = self.config.codex_home.join("memories");
+        let memory_extensions_root = self.config.codex_home.join("memories_extensions");
+        let clear_memory_root_result: std::io::Result<()> = async {
+            for directory in [memory_root.as_path(), memory_extensions_root.as_path()] {
+                match tokio::fs::symlink_metadata(directory).await {
+                    Ok(metadata) if metadata.file_type().is_symlink() => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!(
+                                "refusing to clear symlinked memory root {}",
+                                directory.display()
+                            ),
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(err) => return Err(err),
+                }
+
+                tokio::fs::create_dir_all(directory).await?;
+                let mut entries = tokio::fs::read_dir(directory).await?;
+                while let Some(entry) = entries.next_entry().await? {
+                    let path = entry.path();
+                    let file_type = entry.file_type().await?;
+                    if file_type.is_dir() {
+                        tokio::fs::remove_dir_all(path).await?;
+                    } else {
+                        tokio::fs::remove_file(path).await?;
+                    }
+                }
+            }
+
+            Ok(())
+        }
+        .await;
+
+        if let Err(err) = clear_memory_root_result {
+            self.send_internal_error(
+                request_id,
+                format!(
+                    "failed to clear memory directory {}: {err}",
+                    memory_root.display()
+                ),
+            )
+            .await;
+            return;
+        }
+
+        self.outgoing
+            .send_response(request_id, MemoryResetResponse {})
+            .await;
+    }
+
     async fn thread_metadata_update(
         &self,
         request_id: ConnectionRequestId,
@@ -3202,7 +3287,7 @@ impl CodexMessageProcessor {
             return;
         };
 
-        let mut thread = summary_to_thread(summary);
+        let mut thread = summary_to_thread(summary, &self.config.cwd);
         self.attach_thread_name(thread_uuid, &mut thread).await;
         thread.status = resolve_thread_status(
             self.thread_watch_manager
@@ -3285,7 +3370,7 @@ impl CodexMessageProcessor {
                 config_snapshot.session_source.clone(),
             );
             builder.model_provider = Some(model_provider.clone());
-            builder.cwd = config_snapshot.cwd.clone();
+            builder.cwd = config_snapshot.cwd.to_path_buf();
             builder.cli_version = Some(env!("CARGO_PKG_VERSION").to_string());
             builder.sandbox_policy = config_snapshot.sandbox_policy.clone();
             builder.approval_mode = config_snapshot.approval_policy;
@@ -3510,7 +3595,7 @@ impl CodexMessageProcessor {
                         message: format!("failed to read unarchived thread: {err}"),
                         data: None,
                     })?;
-            Ok(summary_to_thread(summary))
+            Ok(summary_to_thread(summary, &self.config.cwd))
         }
         .await;
 
@@ -3738,15 +3823,15 @@ impl CodexMessageProcessor {
             .map(|value| value as usize)
             .unwrap_or(THREAD_LIST_DEFAULT_LIMIT)
             .clamp(1, THREAD_LIST_MAX_LIMIT);
-        let core_sort_key = match sort_key.unwrap_or(ThreadSortKey::CreatedAt) {
-            ThreadSortKey::CreatedAt => CoreThreadSortKey::CreatedAt,
-            ThreadSortKey::UpdatedAt => CoreThreadSortKey::UpdatedAt,
+        let store_sort_key = match sort_key.unwrap_or(ThreadSortKey::CreatedAt) {
+            ThreadSortKey::CreatedAt => StoreThreadSortKey::CreatedAt,
+            ThreadSortKey::UpdatedAt => StoreThreadSortKey::UpdatedAt,
         };
         let (summaries, next_cursor) = match self
             .list_threads_common(
                 requested_page_size,
                 cursor,
-                core_sort_key,
+                store_sort_key,
                 ThreadListFilters {
                     model_providers,
                     source_kinds,
@@ -3771,7 +3856,7 @@ impl CodexMessageProcessor {
             let conversation_id = summary.conversation_id;
             thread_ids.insert(conversation_id);
 
-            let thread = summary_to_thread(summary);
+            let thread = summary_to_thread(summary, &self.config.cwd);
             status_ids.push(thread.id.clone());
             threads.push((conversation_id, thread));
         }
@@ -3915,11 +4000,11 @@ impl CodexMessageProcessor {
         }
 
         let mut thread = if let Some(summary) = db_summary {
-            summary_to_thread(summary)
+            summary_to_thread(summary, &self.config.cwd)
         } else if let Some(rollout_path) = rollout_path.as_ref() {
             let fallback_provider = self.config.model_provider_id.as_str();
             match read_summary_from_rollout(rollout_path, fallback_provider).await {
-                Ok(summary) => summary_to_thread(summary),
+                Ok(summary) => summary_to_thread(summary, &self.config.cwd),
                 Err(err) => {
                     self.send_internal_error(
                         request_id,
@@ -4425,9 +4510,7 @@ impl CodexMessageProcessor {
                 );
             }
             let mut config_for_instruction_sources = self.config.as_ref().clone();
-            if let Ok(cwd) = AbsolutePathBuf::try_from(config_snapshot.cwd.clone()) {
-                config_for_instruction_sources.cwd = cwd;
-            }
+            config_for_instruction_sources.cwd = config_snapshot.cwd.clone();
             let instruction_sources =
                 Self::instruction_sources_from_config(&config_for_instruction_sources).await;
             let thread_summary = match load_thread_summary_for_rollout(
@@ -4810,7 +4893,7 @@ impl CodexMessageProcessor {
             .await
             {
                 Ok(summary) => {
-                    let mut thread = summary_to_thread(summary);
+                    let mut thread = summary_to_thread(summary, &self.config.cwd);
                     thread.forked_from_id =
                         forked_from_id_from_rollout(fork_rollout_path.as_path()).await;
                     thread
@@ -4992,7 +5075,7 @@ impl CodexMessageProcessor {
         &self,
         requested_page_size: usize,
         cursor: Option<String>,
-        sort_key: CoreThreadSortKey,
+        sort_key: StoreThreadSortKey,
         filters: ThreadListFilters,
     ) -> Result<(Vec<ConversationSummary>, Option<String>), JSONRPCErrorError> {
         let ThreadListFilters {
@@ -5002,16 +5085,7 @@ impl CodexMessageProcessor {
             cwd,
             search_term,
         } = filters;
-        let mut cursor_obj: Option<RolloutCursor> = match cursor.as_ref() {
-            Some(cursor_str) => {
-                Some(parse_cursor(cursor_str).ok_or_else(|| JSONRPCErrorError {
-                    code: INVALID_REQUEST_ERROR_CODE,
-                    message: format!("invalid cursor: {cursor_str}"),
-                    data: None,
-                })?)
-            }
-            None => None,
-        };
+        let mut cursor_obj = cursor;
         let mut last_cursor = cursor_obj.clone();
         let mut remaining = requested_page_size;
         let mut items = Vec::with_capacity(requested_page_size);
@@ -5030,54 +5104,26 @@ impl CodexMessageProcessor {
         let fallback_provider = self.config.model_provider_id.clone();
         let (allowed_sources_vec, source_kind_filter) = compute_source_filters(source_kinds);
         let allowed_sources = allowed_sources_vec.as_slice();
-        let state_db_ctx = get_state_db(&self.config).await;
+        let store = LocalThreadStore::new(codex_rollout::RolloutConfig::from_view(&self.config));
 
         while remaining > 0 {
             let page_size = remaining.min(THREAD_LIST_MAX_LIMIT);
-            let page = if archived {
-                RolloutRecorder::list_archived_threads(
-                    &self.config,
+            let page = store
+                .list_threads(StoreListThreadsParams {
                     page_size,
-                    cursor_obj.as_ref(),
+                    cursor: cursor_obj.clone(),
                     sort_key,
-                    allowed_sources,
-                    model_provider_filter.as_deref(),
-                    fallback_provider.as_str(),
-                    search_term.as_deref(),
-                )
+                    allowed_sources: allowed_sources.to_vec(),
+                    model_providers: model_provider_filter.clone(),
+                    archived,
+                    search_term: search_term.clone(),
+                })
                 .await
-                .map_err(|err| JSONRPCErrorError {
-                    code: INTERNAL_ERROR_CODE,
-                    message: format!("failed to list threads: {err}"),
-                    data: None,
-                })?
-            } else {
-                RolloutRecorder::list_threads(
-                    &self.config,
-                    page_size,
-                    cursor_obj.as_ref(),
-                    sort_key,
-                    allowed_sources,
-                    model_provider_filter.as_deref(),
-                    fallback_provider.as_str(),
-                    search_term.as_deref(),
-                )
-                .await
-                .map_err(|err| JSONRPCErrorError {
-                    code: INTERNAL_ERROR_CODE,
-                    message: format!("failed to list threads: {err}"),
-                    data: None,
-                })?
-            };
+                .map_err(thread_store_list_error)?;
 
             let mut filtered = Vec::with_capacity(page.items.len());
             for it in page.items {
-                let Some(summary) = summary_from_thread_list_item(
-                    it,
-                    fallback_provider.as_str(),
-                    state_db_ctx.as_ref(),
-                )
-                .await
+                let Some(summary) = summary_from_stored_thread(it, fallback_provider.as_str())
                 else {
                     continue;
                 };
@@ -5097,12 +5143,8 @@ impl CodexMessageProcessor {
             items.extend(filtered);
             remaining = requested_page_size.saturating_sub(items.len());
 
-            // Encode RolloutCursor into the JSON-RPC string form returned to clients.
             let next_cursor_value = page.next_cursor.clone();
-            next_cursor = next_cursor_value
-                .as_ref()
-                .and_then(|cursor| serde_json::to_value(cursor).ok())
-                .and_then(|value| value.as_str().map(str::to_owned));
+            next_cursor = next_cursor_value.clone();
             if remaining == 0 {
                 break;
             }
@@ -6298,6 +6340,23 @@ impl CodexMessageProcessor {
         };
         let skills_manager = self.thread_manager.skills_manager();
         let plugins_manager = self.thread_manager.plugins_manager();
+        let fs = match self.thread_manager.environment_manager().current().await {
+            Ok(Some(environment)) => Some(environment.get_filesystem()),
+            Ok(None) => None,
+            Err(err) => {
+                self.outgoing
+                    .send_error(
+                        request_id,
+                        JSONRPCErrorError {
+                            code: INTERNAL_ERROR_CODE,
+                            message: format!("failed to create environment: {err}"),
+                            data: None,
+                        },
+                    )
+                    .await;
+                return;
+            }
+        };
         let cli_overrides = self.current_cli_overrides();
         let mut data = Vec::new();
         for cwd in cwds {
@@ -6349,13 +6408,18 @@ impl CodexMessageProcessor {
                 )
                 .await;
             let skills_input = codex_core::skills::SkillsLoadInput::new(
-                cwd_abs,
+                cwd_abs.clone(),
                 effective_skill_roots,
                 config_layer_stack,
                 config.bundled_skills_enabled(),
             );
             let outcome = skills_manager
-                .skills_for_cwd_with_extra_user_roots(&skills_input, force_reload, extra_roots)
+                .skills_for_cwd_with_extra_user_roots(
+                    &skills_input,
+                    force_reload,
+                    extra_roots,
+                    fs.clone(),
+                )
                 .await;
             let errors = errors_to_info(&outcome.errors);
             let skills = skills_to_info(&outcome.skills, &outcome.disabled_paths);
@@ -7616,7 +7680,7 @@ impl CodexMessageProcessor {
         if let Some(rollout_path) = review_thread.rollout_path() {
             match read_summary_from_rollout(rollout_path.as_path(), fallback_provider).await {
                 Ok(summary) => {
-                    let mut thread = summary_to_thread(summary);
+                    let mut thread = summary_to_thread(summary, &self.config.cwd);
                     self.thread_watch_manager
                         .upsert_thread_silently(thread.clone())
                         .await;
@@ -8818,7 +8882,7 @@ fn collect_resume_override_mismatches(
     }
     if let Some(requested_cwd) = request.cwd.as_deref() {
         let requested_cwd_path = std::path::PathBuf::from(requested_cwd);
-        if requested_cwd_path != config_snapshot.cwd {
+        if requested_cwd_path != config_snapshot.cwd.as_path() {
             mismatch_details.push(format!(
                 "cwd requested={} active={}",
                 requested_cwd_path.display(),
@@ -9320,67 +9384,52 @@ fn set_thread_name_from_title(thread: &mut Thread, title: String) {
     thread.name = Some(title);
 }
 
-async fn summary_from_thread_list_item(
-    it: codex_core::ThreadItem,
-    fallback_provider: &str,
-    state_db_ctx: Option<&StateDbHandle>,
-) -> Option<ConversationSummary> {
-    if let Some(thread_id) = it.thread_id {
-        let timestamp = it.created_at.clone();
-        let updated_at = it.updated_at.clone().or_else(|| timestamp.clone());
-        let model_provider = it
-            .model_provider
-            .clone()
-            .unwrap_or_else(|| fallback_provider.to_string());
-        let cwd = it.cwd?;
-        let cli_version = it.cli_version.unwrap_or_default();
-        let source = with_thread_spawn_agent_metadata(
-            it.source
-                .unwrap_or(codex_protocol::protocol::SessionSource::Unknown),
-            it.agent_nickname.clone(),
-            it.agent_role.clone(),
-        );
-        return Some(ConversationSummary {
-            conversation_id: thread_id,
-            path: it.path,
-            preview: it.first_user_message.unwrap_or_default(),
-            timestamp,
-            updated_at,
-            model_provider,
-            cwd,
-            cli_version,
-            source,
-            git_info: if it.git_sha.is_none()
-                && it.git_branch.is_none()
-                && it.git_origin_url.is_none()
-            {
-                None
-            } else {
-                Some(ConversationGitInfo {
-                    sha: it.git_sha,
-                    branch: it.git_branch,
-                    origin_url: it.git_origin_url,
-                })
-            },
-        });
+fn thread_store_list_error(err: ThreadStoreError) -> JSONRPCErrorError {
+    match err {
+        ThreadStoreError::InvalidRequest { message } => JSONRPCErrorError {
+            code: INVALID_REQUEST_ERROR_CODE,
+            message,
+            data: None,
+        },
+        err => JSONRPCErrorError {
+            code: INTERNAL_ERROR_CODE,
+            message: format!("failed to list threads: {err}"),
+            data: None,
+        },
     }
-    if let Some(thread_id) = thread_id_from_rollout_path(it.path.as_path()) {
-        return read_summary_from_state_db_context_by_thread_id(state_db_ctx, thread_id).await;
-    }
-    None
 }
 
-fn thread_id_from_rollout_path(path: &Path) -> Option<ThreadId> {
-    let file_name = path.file_name()?.to_str()?;
-    let stem = file_name.strip_suffix(".jsonl")?;
-    if stem.len() < 37 {
-        return None;
-    }
-    let uuid_start = stem.len().saturating_sub(36);
-    if !stem[..uuid_start].ends_with('-') {
-        return None;
-    }
-    ThreadId::from_string(&stem[uuid_start..]).ok()
+fn summary_from_stored_thread(
+    thread: StoredThread,
+    fallback_provider: &str,
+) -> Option<ConversationSummary> {
+    let path = thread.rollout_path?;
+    let source = with_thread_spawn_agent_metadata(
+        thread.source,
+        thread.agent_nickname.clone(),
+        thread.agent_role.clone(),
+    );
+    let git_info = thread.git_info.map(|git| ConversationGitInfo {
+        sha: git.commit_hash.map(|sha| sha.0),
+        branch: git.branch,
+        origin_url: git.repository_url,
+    });
+    Some(ConversationSummary {
+        conversation_id: thread.thread_id,
+        path,
+        preview: thread.first_user_message.unwrap_or(thread.preview),
+        timestamp: Some(thread.created_at.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        updated_at: Some(thread.updated_at.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        model_provider: if thread.model_provider.is_empty() {
+            fallback_provider.to_string()
+        } else {
+            thread.model_provider
+        },
+        cwd: thread.cwd,
+        cli_version: thread.cli_version,
+        source,
+        git_info,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -9602,7 +9651,7 @@ async fn load_thread_summary_for_rollout(
 ) -> std::result::Result<Thread, String> {
     let mut thread = read_summary_from_rollout(rollout_path, fallback_provider)
         .await
-        .map(summary_to_thread)
+        .map(|summary| summary_to_thread(summary, &config.cwd))
         .map_err(|err| {
             format!(
                 "failed to load rollout `{}` for thread {thread_id}: {err}",
@@ -9613,10 +9662,13 @@ async fn load_thread_summary_for_rollout(
     if let Some(persisted_metadata) = persisted_metadata {
         merge_mutable_thread_metadata(
             &mut thread,
-            summary_to_thread(summary_from_thread_metadata(persisted_metadata)),
+            summary_to_thread(
+                summary_from_thread_metadata(persisted_metadata),
+                &config.cwd,
+            ),
         );
     } else if let Some(summary) = read_summary_from_state_db_by_thread_id(config, thread_id).await {
-        merge_mutable_thread_metadata(&mut thread, summary_to_thread(summary));
+        merge_mutable_thread_metadata(&mut thread, summary_to_thread(summary, &config.cwd));
     }
     let title = if let Some(metadata) = persisted_metadata {
         non_empty_title(metadata)
@@ -9736,7 +9788,10 @@ fn build_thread_from_snapshot(
     }
 }
 
-pub(crate) fn summary_to_thread(summary: ConversationSummary) -> Thread {
+pub(crate) fn summary_to_thread(
+    summary: ConversationSummary,
+    fallback_cwd: &AbsolutePathBuf,
+) -> Thread {
     let ConversationSummary {
         conversation_id,
         path,
@@ -9757,6 +9812,15 @@ pub(crate) fn summary_to_thread(summary: ConversationSummary) -> Thread {
         branch: info.branch,
         origin_url: info.origin_url,
     });
+    let cwd =
+        AbsolutePathBuf::relative_to_current_dir(path_utils::normalize_for_native_workdir(cwd))
+            .unwrap_or_else(|err| {
+                warn!(
+                    path = %path.display(),
+                    "failed to normalize thread cwd while summarizing thread: {err}"
+                );
+                fallback_cwd.clone()
+            });
 
     Thread {
         id: conversation_id.to_string(),
@@ -9790,6 +9854,8 @@ mod tests {
     use codex_protocol::openai_models::ReasoningEffort;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::SubAgentSource;
+    use codex_utils_absolute_path::test_support::PathBufExt;
+    use codex_utils_absolute_path::test_support::test_path_buf;
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use std::path::PathBuf;
@@ -9924,7 +9990,7 @@ mod tests {
             approval_policy: codex_protocol::protocol::AskForApproval::OnRequest,
             approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
             sandbox_policy: codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
-            cwd: PathBuf::from("/tmp"),
+            cwd: test_path_buf("/tmp").abs(),
             ephemeral: false,
             reasoning_effort: None,
             personality: None,
@@ -10284,7 +10350,8 @@ mod tests {
         fs::write(&path, format!("{}\n", serde_json::to_string(&line)?))?;
 
         let summary = read_summary_from_rollout(path.as_path(), "fallback").await?;
-        let thread = summary_to_thread(summary);
+        let fallback_cwd = AbsolutePathBuf::from_absolute_path("/")?;
+        let thread = summary_to_thread(summary, &fallback_cwd);
 
         assert_eq!(thread.agent_nickname, Some("atlas".to_string()));
         assert_eq!(thread.agent_role, Some("explorer".to_string()));
@@ -10418,7 +10485,8 @@ mod tests {
             /*git_origin_url*/ None,
         );
 
-        let thread = summary_to_thread(summary);
+        let fallback_cwd = AbsolutePathBuf::from_absolute_path("/")?;
+        let thread = summary_to_thread(summary, &fallback_cwd);
 
         assert_eq!(thread.agent_nickname, Some("atlas".to_string()));
         assert_eq!(thread.agent_role, Some("explorer".to_string()));

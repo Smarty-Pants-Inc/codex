@@ -111,6 +111,8 @@ use crate::resume_picker::SessionTarget;
 use crate::test_support::PathBufExt;
 #[cfg(test)]
 use crate::test_support::test_path_buf;
+#[cfg(test)]
+use crate::test_support::test_path_display;
 use crate::tui;
 use crate::tui::TuiEvent;
 use crate::update_action::UpdateAction;
@@ -142,6 +144,7 @@ use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadLoadedListParams;
+use codex_app_server_protocol::ThreadMemoryMode;
 use codex_app_server_protocol::ThreadRollbackResponse;
 use codex_app_server_protocol::ThreadStartSource;
 use codex_app_server_protocol::Turn;
@@ -1300,7 +1303,7 @@ struct OracleTestBrokerHooks {
 
 fn normalize_harness_overrides_for_cwd(
     mut overrides: ConfigOverrides,
-    base_cwd: &Path,
+    base_cwd: &AbsolutePathBuf,
 ) -> Result<ConfigOverrides> {
     if overrides.additional_writable_roots.is_empty() {
         return Ok(overrides);
@@ -1308,7 +1311,7 @@ fn normalize_harness_overrides_for_cwd(
 
     let mut normalized = Vec::with_capacity(overrides.additional_writable_roots.len());
     for root in overrides.additional_writable_roots.drain(..) {
-        let absolute = AbsolutePathBuf::resolve_path_against_base(root, base_cwd);
+        let absolute = base_cwd.join(root);
         normalized.push(absolute.into_path_buf());
     }
     overrides.additional_writable_roots = normalized;
@@ -1657,9 +1660,15 @@ impl App {
         }
 
         self.config = next_config;
+        let show_memory_enable_notice = feature_updates_to_apply
+            .iter()
+            .any(|(feature, enabled)| *feature == Feature::MemoryTool && *enabled);
         for (feature, effective_enabled) in feature_updates_to_apply {
             self.chat_widget
                 .set_feature_enabled(feature, effective_enabled);
+        }
+        if show_memory_enable_notice {
+            self.chat_widget.add_memories_enable_notice();
         }
         if approvals_reviewer_override.is_some() {
             self.set_approvals_reviewer_in_app_and_widget(self.config.approvals_reviewer);
@@ -1742,6 +1751,101 @@ impl App {
                 /*hint*/ None,
             );
         }
+    }
+
+    async fn update_memory_settings(
+        &mut self,
+        use_memories: bool,
+        generate_memories: bool,
+    ) -> bool {
+        let active_profile = self.active_profile.clone();
+        let scoped_memory_segments = |key: &str| {
+            if let Some(profile) = active_profile.as_deref() {
+                vec![
+                    "profiles".to_string(),
+                    profile.to_string(),
+                    "memories".to_string(),
+                    key.to_string(),
+                ]
+            } else {
+                vec!["memories".to_string(), key.to_string()]
+            }
+        };
+        let edits = [
+            ConfigEdit::SetPath {
+                segments: scoped_memory_segments("use_memories"),
+                value: use_memories.into(),
+            },
+            ConfigEdit::SetPath {
+                segments: scoped_memory_segments("generate_memories"),
+                value: generate_memories.into(),
+            },
+        ];
+
+        if let Err(err) = ConfigEditsBuilder::new(&self.config.codex_home)
+            .with_edits(edits)
+            .apply()
+            .await
+        {
+            tracing::error!(error = %err, "failed to persist memory settings");
+            self.chat_widget
+                .add_error_message(format!("Failed to save memory settings: {err}"));
+            return false;
+        }
+
+        self.config.memories.use_memories = use_memories;
+        self.config.memories.generate_memories = generate_memories;
+        self.chat_widget
+            .set_memory_settings(use_memories, generate_memories);
+        true
+    }
+
+    async fn update_memory_settings_with_app_server(
+        &mut self,
+        app_server: &mut AppServerSession,
+        use_memories: bool,
+        generate_memories: bool,
+    ) {
+        let previous_generate_memories = self.config.memories.generate_memories;
+        if !self
+            .update_memory_settings(use_memories, generate_memories)
+            .await
+        {
+            return;
+        }
+
+        if previous_generate_memories == generate_memories {
+            return;
+        }
+
+        let Some(thread_id) = self.current_displayed_thread_id() else {
+            return;
+        };
+
+        let mode = if generate_memories {
+            ThreadMemoryMode::Enabled
+        } else {
+            ThreadMemoryMode::Disabled
+        };
+
+        if let Err(err) = app_server.thread_memory_mode_set(thread_id, mode).await {
+            tracing::error!(error = %err, %thread_id, "failed to update thread memory mode");
+            self.chat_widget.add_error_message(format!(
+                "Saved memory settings, but failed to update the current thread: {err}"
+            ));
+        }
+    }
+
+    async fn reset_memories_with_app_server(&mut self, app_server: &mut AppServerSession) {
+        if let Err(err) = app_server.memory_reset().await {
+            tracing::error!(error = %err, "failed to reset memories");
+            self.chat_widget
+                .add_error_message(format!("Failed to reset memories: {err}"));
+            return;
+        }
+
+        self.chat_widget
+            .add_info_message("Reset local memories.".to_string(), /*hint*/ None);
     }
 
     fn open_url_in_browser(&mut self, url: String) {
@@ -2004,7 +2108,7 @@ impl App {
         self.chat_widget.set_active_agent_label(label);
     }
 
-    async fn thread_cwd(&self, thread_id: ThreadId) -> Option<PathBuf> {
+    async fn thread_cwd(&self, thread_id: ThreadId) -> Option<AbsolutePathBuf> {
         let channel = self.thread_event_channels.get(&thread_id)?;
         let store = channel.store.lock().await;
         store.session.as_ref().map(|session| session.cwd.clone())
@@ -6634,7 +6738,7 @@ impl App {
                     cwd: self
                         .thread_cwd(thread_id)
                         .await
-                        .unwrap_or_else(|| self.config.cwd.to_path_buf()),
+                        .unwrap_or_else(|| self.config.cwd.clone()),
                     changes: HashMap::new(),
                 }),
             ),
@@ -11474,6 +11578,20 @@ impl App {
             AppEvent::UpdateFeatureFlags { updates } => {
                 self.update_feature_flags(updates).await;
             }
+            AppEvent::UpdateMemorySettings {
+                use_memories,
+                generate_memories,
+            } => {
+                self.update_memory_settings_with_app_server(
+                    app_server,
+                    use_memories,
+                    generate_memories,
+                )
+                .await;
+            }
+            AppEvent::ResetMemories => {
+                self.reset_memories_with_app_server(app_server).await;
+            }
             AppEvent::SkipNextWorldWritableScan => {
                 self.windows_sandbox.skip_world_writable_scan_once = true;
             }
@@ -12406,7 +12524,7 @@ async fn fetch_plugins_list(
 ) -> Result<PluginListResponse> {
     let cwd = AbsolutePathBuf::try_from(cwd).wrap_err("plugin list cwd must be absolute")?;
     let request_id = RequestId::String(format!("plugin-list-{}", Uuid::new_v4()));
-    request_handle
+    let mut response = request_handle
         .request_typed(ClientRequest::PluginList {
             request_id,
             params: PluginListParams {
@@ -12415,7 +12533,17 @@ async fn fetch_plugins_list(
             },
         })
         .await
-        .wrap_err("plugin/list failed in TUI")
+        .wrap_err("plugin/list failed in TUI")?;
+    hide_cli_only_plugin_marketplaces(&mut response);
+    Ok(response)
+}
+
+const CLI_HIDDEN_PLUGIN_MARKETPLACES: &[&str] = &["openai-bundled"];
+
+fn hide_cli_only_plugin_marketplaces(response: &mut PluginListResponse) {
+    response
+        .marketplaces
+        .retain(|marketplace| !CLI_HIDDEN_PLUGIN_MARKETPLACES.contains(&marketplace.name.as_str()));
 }
 
 async fn fetch_plugin_detail(
@@ -12593,6 +12721,7 @@ mod tests {
     use codex_app_server_protocol::NetworkPolicyRuleAction as AppServerNetworkPolicyRuleAction;
     use codex_app_server_protocol::NonSteerableTurnKind as AppServerNonSteerableTurnKind;
     use codex_app_server_protocol::PermissionsRequestApprovalParams;
+    use codex_app_server_protocol::PluginMarketplaceEntry;
     use codex_app_server_protocol::RequestId as AppServerRequestId;
     use codex_app_server_protocol::ServerNotification;
     use codex_app_server_protocol::ServerRequest;
@@ -12652,10 +12781,45 @@ mod tests {
     }
 
     #[test]
+    fn hide_cli_only_plugin_marketplaces_removes_openai_bundled() {
+        let mut response = PluginListResponse {
+            marketplaces: vec![
+                PluginMarketplaceEntry {
+                    name: "openai-bundled".to_string(),
+                    path: test_absolute_path("/marketplaces/openai-bundled"),
+                    interface: None,
+                    plugins: Vec::new(),
+                },
+                PluginMarketplaceEntry {
+                    name: "openai-curated".to_string(),
+                    path: test_absolute_path("/marketplaces/openai-curated"),
+                    interface: None,
+                    plugins: Vec::new(),
+                },
+            ],
+            marketplace_load_errors: Vec::new(),
+            remote_sync_error: None,
+            featured_plugin_ids: Vec::new(),
+        };
+
+        hide_cli_only_plugin_marketplaces(&mut response);
+
+        assert_eq!(
+            response.marketplaces,
+            vec![PluginMarketplaceEntry {
+                name: "openai-curated".to_string(),
+                path: test_absolute_path("/marketplaces/openai-curated"),
+                interface: None,
+                plugins: Vec::new(),
+            }]
+        );
+    }
+
+    #[test]
     fn normalize_harness_overrides_resolves_relative_add_dirs() -> Result<()> {
         let temp_dir = tempdir()?;
-        let base_cwd = temp_dir.path().join("base");
-        std::fs::create_dir_all(&base_cwd)?;
+        let base_cwd = temp_dir.path().join("base").abs();
+        std::fs::create_dir_all(base_cwd.as_path())?;
 
         let overrides = ConfigOverrides {
             additional_writable_roots: vec![PathBuf::from("rel")],
@@ -12665,7 +12829,7 @@ mod tests {
 
         assert_eq!(
             normalized.additional_writable_roots,
-            vec![base_cwd.join("rel")]
+            vec![base_cwd.join("rel").into_path_buf()]
         );
         Ok(())
     }
@@ -12840,7 +13004,7 @@ mod tests {
     async fn ignore_same_thread_resume_reports_noop_for_current_thread() {
         let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
         let thread_id = ThreadId::new();
-        let session = test_thread_session(thread_id, PathBuf::from("/tmp/project"));
+        let session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
         app.chat_widget.handle_thread_session(session.clone());
         app.thread_event_channels.insert(
             thread_id,
@@ -12854,7 +13018,7 @@ mod tests {
         while app_event_rx.try_recv().is_ok() {}
 
         let ignored = app.ignore_same_thread_resume(&crate::resume_picker::SessionTarget {
-            path: Some(PathBuf::from("/tmp/project")),
+            path: Some(test_path_buf("/tmp/project")),
             thread_id,
         });
 
@@ -12864,18 +13028,21 @@ mod tests {
             other => panic!("expected info message after same-thread resume, saw {other:?}"),
         };
         let rendered = lines_to_single_string(&cell.display_lines(/*width*/ 80));
-        assert!(rendered.contains("Already viewing /tmp/project."));
+        assert!(rendered.contains(&format!(
+            "Already viewing {}.",
+            test_path_display("/tmp/project")
+        )));
     }
 
     #[tokio::test]
     async fn ignore_same_thread_resume_allows_reattaching_displayed_inactive_thread() {
         let mut app = make_test_app().await;
         let thread_id = ThreadId::new();
-        let session = test_thread_session(thread_id, PathBuf::from("/tmp/project"));
+        let session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
         app.chat_widget.handle_thread_session(session);
 
         let ignored = app.ignore_same_thread_resume(&crate::resume_picker::SessionTarget {
-            path: Some(PathBuf::from("/tmp/project")),
+            path: Some(test_path_buf("/tmp/project")),
             thread_id,
         });
 
@@ -12892,7 +13059,7 @@ mod tests {
 
         app.enqueue_primary_thread_request(approval_request).await?;
         app.enqueue_primary_thread_session(
-            test_thread_session(thread_id, PathBuf::from("/tmp/project")),
+            test_thread_session(thread_id, test_path_buf("/tmp/project")),
             Vec::new(),
         )
         .await?;
@@ -12964,7 +13131,7 @@ mod tests {
         });
 
         app.enqueue_primary_thread_session(
-            test_thread_session(thread_id, PathBuf::from("/tmp/project")),
+            test_thread_session(thread_id, test_path_buf("/tmp/project")),
             vec![test_turn(
                 "turn-1",
                 TurnStatus::Completed,
@@ -13131,7 +13298,7 @@ mod tests {
     async fn replay_thread_snapshot_restores_draft_and_queued_input() {
         let mut app = make_test_app().await;
         let thread_id = ThreadId::new();
-        let session = test_thread_session(thread_id, PathBuf::from("/tmp/project"));
+        let session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
         app.thread_event_channels.insert(
             thread_id,
             ThreadEventChannel::new_with_session(
@@ -13192,7 +13359,7 @@ mod tests {
     async fn active_turn_id_for_thread_uses_snapshot_turns() {
         let mut app = make_test_app().await;
         let thread_id = ThreadId::new();
-        let session = test_thread_session(thread_id, PathBuf::from("/tmp/project"));
+        let session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
         app.thread_event_channels.insert(
             thread_id,
             ThreadEventChannel::new_with_session(
@@ -13212,7 +13379,7 @@ mod tests {
     async fn replayed_turn_complete_submits_restored_queued_follow_up() {
         let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
         let thread_id = ThreadId::new();
-        let session = test_thread_session(thread_id, PathBuf::from("/tmp/project"));
+        let session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
         app.chat_widget.handle_thread_session(session.clone());
         app.chat_widget.handle_server_notification(
             turn_started_notification(thread_id, "turn-1"),
@@ -13265,7 +13432,7 @@ mod tests {
     async fn replay_only_thread_keeps_restored_queue_visible() {
         let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
         let thread_id = ThreadId::new();
-        let session = test_thread_session(thread_id, PathBuf::from("/tmp/project"));
+        let session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
         app.chat_widget.handle_thread_session(session.clone());
         app.chat_widget.handle_server_notification(
             turn_started_notification(thread_id, "turn-1"),
@@ -13317,7 +13484,7 @@ mod tests {
     async fn replay_thread_snapshot_keeps_queue_when_running_state_only_comes_from_snapshot() {
         let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
         let thread_id = ThreadId::new();
-        let session = test_thread_session(thread_id, PathBuf::from("/tmp/project"));
+        let session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
         app.chat_widget.handle_thread_session(session.clone());
         app.chat_widget.handle_server_notification(
             turn_started_notification(thread_id, "turn-1"),
@@ -13367,7 +13534,7 @@ mod tests {
     async fn replay_thread_snapshot_in_progress_turn_restores_running_queue_state() {
         let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
         let thread_id = ThreadId::new();
-        let session = test_thread_session(thread_id, PathBuf::from("/tmp/project"));
+        let session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
         app.chat_widget.handle_thread_session(session.clone());
         app.chat_widget.handle_server_notification(
             turn_started_notification(thread_id, "turn-1"),
@@ -13417,7 +13584,7 @@ mod tests {
     async fn replay_thread_snapshot_in_progress_turn_restores_running_state_without_input_state() {
         let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
         let thread_id = ThreadId::new();
-        let session = test_thread_session(thread_id, PathBuf::from("/tmp/project"));
+        let session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
         let (chat_widget, _app_event_tx, _rx, _new_op_rx) =
             make_chatwidget_manual_with_sender().await;
         app.chat_widget = chat_widget;
@@ -13441,7 +13608,7 @@ mod tests {
     async fn replay_thread_snapshot_does_not_submit_queue_before_replay_catches_up() {
         let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
         let thread_id = ThreadId::new();
-        let session = test_thread_session(thread_id, PathBuf::from("/tmp/project"));
+        let session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
         app.chat_widget.handle_thread_session(session.clone());
         app.chat_widget.handle_server_notification(
             turn_started_notification(thread_id, "turn-1"),
@@ -13516,7 +13683,7 @@ mod tests {
     async fn replay_thread_snapshot_restores_pending_pastes_for_submit() {
         let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
         let thread_id = ThreadId::new();
-        let session = test_thread_session(thread_id, PathBuf::from("/tmp/project"));
+        let session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
         app.thread_event_channels.insert(
             thread_id,
             ThreadEventChannel::new_with_session(
@@ -13573,7 +13740,7 @@ mod tests {
     async fn replay_thread_snapshot_restores_collaboration_mode_for_draft_submit() {
         let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
         let thread_id = ThreadId::new();
-        let session = test_thread_session(thread_id, PathBuf::from("/tmp/project"));
+        let session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
         app.chat_widget.handle_thread_session(session.clone());
         app.chat_widget
             .set_reasoning_effort(Some(ReasoningEffortConfig::High));
@@ -13658,7 +13825,7 @@ mod tests {
     async fn replay_thread_snapshot_restores_collaboration_mode_without_input() {
         let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
         let thread_id = ThreadId::new();
-        let session = test_thread_session(thread_id, PathBuf::from("/tmp/project"));
+        let session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
         app.chat_widget.handle_thread_session(session.clone());
         app.chat_widget
             .set_reasoning_effort(Some(ReasoningEffortConfig::High));
@@ -13716,7 +13883,7 @@ mod tests {
     async fn replayed_interrupted_turn_restores_queued_input_to_composer() {
         let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
         let thread_id = ThreadId::new();
-        let session = test_thread_session(thread_id, PathBuf::from("/tmp/project"));
+        let session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
         app.chat_widget.handle_thread_session(session.clone());
         app.chat_widget.handle_server_notification(
             turn_started_notification(thread_id, "turn-1"),
@@ -14190,6 +14357,111 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(rendered.contains("Subagents will be enabled in the next session."));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn update_memory_settings_persists_and_updates_widget_config() -> Result<()> {
+        let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
+
+        app.update_memory_settings_with_app_server(
+            &mut app_server,
+            /*use_memories*/ false,
+            /*generate_memories*/ false,
+        )
+        .await;
+
+        assert!(!app.config.memories.use_memories);
+        assert!(!app.config.memories.generate_memories);
+        assert!(!app.chat_widget.config_ref().memories.use_memories);
+        assert!(!app.chat_widget.config_ref().memories.generate_memories);
+
+        let config = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
+        let config_value = toml::from_str::<TomlValue>(&config)?;
+        let memories = config_value
+            .as_table()
+            .and_then(|table| table.get("memories"))
+            .and_then(TomlValue::as_table)
+            .expect("memories table should exist");
+        assert_eq!(
+            memories.get("use_memories"),
+            Some(&TomlValue::Boolean(false))
+        );
+        assert_eq!(
+            memories.get("generate_memories"),
+            Some(&TomlValue::Boolean(false))
+        );
+        assert!(
+            !memories.contains_key("no_memories_if_mcp_or_web_search"),
+            "the TUI menu should not write the MCP pollution setting"
+        );
+        app_server.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn update_memory_settings_updates_current_thread_memory_mode() -> Result<()> {
+        let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+
+        let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
+        let started = app_server.start_thread(&app.config).await?;
+        let thread_id = started.session.thread_id;
+        app.active_thread_id = Some(thread_id);
+
+        app.update_memory_settings_with_app_server(
+            &mut app_server,
+            /*use_memories*/ true,
+            /*generate_memories*/ false,
+        )
+        .await;
+
+        let state_db = codex_state::StateRuntime::init(
+            codex_home.path().to_path_buf(),
+            app.config.model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let memory_mode = state_db
+            .get_thread_memory_mode(thread_id)
+            .await
+            .expect("thread memory mode should be readable");
+        assert_eq!(memory_mode.as_deref(), Some("disabled"));
+
+        app_server.shutdown().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reset_memories_clears_local_memory_directories() -> Result<()> {
+        let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        app.config.sqlite_home = codex_home.path().to_path_buf();
+
+        let memory_root = codex_home.path().join("memories");
+        let extensions_root = codex_home.path().join("memories_extensions");
+        std::fs::create_dir_all(memory_root.join("rollout_summaries"))?;
+        std::fs::create_dir_all(&extensions_root)?;
+        std::fs::write(memory_root.join("MEMORY.md"), "stale memory\n")?;
+        std::fs::write(
+            memory_root.join("rollout_summaries").join("stale.md"),
+            "stale summary\n",
+        )?;
+        std::fs::write(extensions_root.join("stale.txt"), "stale extension\n")?;
+
+        let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
+
+        app.reset_memories_with_app_server(&mut app_server).await;
+
+        assert_eq!(std::fs::read_dir(&memory_root)?.count(), 0);
+        assert_eq!(std::fs::read_dir(&extensions_root)?.count(), 0);
+
+        app_server.shutdown().await?;
         Ok(())
     }
 
@@ -22805,8 +23077,8 @@ guardian_approval = true
                 ThreadSessionState {
                     approval_policy: AskForApproval::OnRequest,
                     sandbox_policy: SandboxPolicy::new_workspace_write_policy(),
-                    rollout_path: Some(PathBuf::from("/tmp/agent-rollout.jsonl")),
-                    ..test_thread_session(agent_thread_id, PathBuf::from("/tmp/agent"))
+                    rollout_path: Some(test_path_buf("/tmp/agent-rollout.jsonl")),
+                    ..test_thread_session(agent_thread_id, test_path_buf("/tmp/agent"))
                 },
                 Vec::new(),
             ),
@@ -23018,8 +23290,8 @@ guardian_approval = true
                 ThreadSessionState {
                     approval_policy: AskForApproval::OnRequest,
                     sandbox_policy: SandboxPolicy::new_workspace_write_policy(),
-                    rollout_path: Some(PathBuf::from("/tmp/agent-rollout.jsonl")),
-                    ..test_thread_session(agent_thread_id, PathBuf::from("/tmp/agent"))
+                    rollout_path: Some(test_path_buf("/tmp/agent-rollout.jsonl")),
+                    ..test_thread_session(agent_thread_id, test_path_buf("/tmp/agent"))
                 },
                 Vec::new(),
             ),
@@ -23071,7 +23343,7 @@ guardian_approval = true
         let primary_session = ThreadSessionState {
             approval_policy: AskForApproval::OnRequest,
             sandbox_policy: SandboxPolicy::new_workspace_write_policy(),
-            ..test_thread_session(main_thread_id, PathBuf::from("/tmp/main"))
+            ..test_thread_session(main_thread_id, test_path_buf("/tmp/main"))
         };
 
         app.primary_thread_id = Some(main_thread_id);
@@ -23090,7 +23362,7 @@ guardian_approval = true
         let turn_context = TurnContextItem {
             turn_id: None,
             trace_id: None,
-            cwd: PathBuf::from("/tmp/agent"),
+            cwd: test_path_buf("/tmp/agent"),
             current_date: None,
             timezone: None,
             approval_policy: primary_session.approval_policy,
@@ -23128,7 +23400,7 @@ guardian_approval = true
                     updated_at: 2,
                     status: codex_app_server_protocol::ThreadStatus::Idle,
                     path: Some(rollout_path.clone()),
-                    cwd: PathBuf::from("/tmp/agent"),
+                    cwd: test_path_buf("/tmp/agent").abs(),
                     cli_version: "0.0.0".to_string(),
                     source: codex_app_server_protocol::SessionSource::Unknown,
                     agent_nickname: Some("Robie".to_string()),
@@ -23156,7 +23428,7 @@ guardian_approval = true
         assert_eq!(session.model, "gpt-agent");
         assert_eq!(session.model_provider_id, "agent-provider");
         assert_eq!(session.approval_policy, primary_session.approval_policy);
-        assert_eq!(session.cwd, PathBuf::from("/tmp/agent"));
+        assert_eq!(session.cwd.as_path(), test_path_buf("/tmp/agent").as_path());
         assert_eq!(session.rollout_path, Some(rollout_path));
         assert_eq!(
             app.agent_navigation.get(&agent_thread_id),
@@ -23181,7 +23453,7 @@ guardian_approval = true
         let primary_session = ThreadSessionState {
             approval_policy: AskForApproval::OnRequest,
             sandbox_policy: SandboxPolicy::new_workspace_write_policy(),
-            ..test_thread_session(main_thread_id, PathBuf::from("/tmp/main"))
+            ..test_thread_session(main_thread_id, test_path_buf("/tmp/main"))
         };
 
         app.primary_thread_id = Some(main_thread_id);
@@ -23209,7 +23481,7 @@ guardian_approval = true
                     updated_at: 2,
                     status: codex_app_server_protocol::ThreadStatus::Idle,
                     path: None,
-                    cwd: PathBuf::from("/tmp/agent"),
+                    cwd: test_path_buf("/tmp/agent").abs(),
                     cli_version: "0.0.0".to_string(),
                     source: codex_app_server_protocol::SessionSource::Unknown,
                     agent_nickname: Some("Robie".to_string()),
@@ -23426,7 +23698,7 @@ guardian_approval = true
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
-                cwd: test_path_buf("/tmp/project"),
+                cwd: test_path_buf("/tmp/project").abs(),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
                 history_log_id: 0,
                 history_entry_count: 0,
@@ -23674,7 +23946,7 @@ guardian_approval = true
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
-            cwd,
+            cwd: cwd.abs(),
             instruction_source_paths: Vec::new(),
             reasoning_effort: None,
             history_log_id: 0,
@@ -23777,7 +24049,7 @@ guardian_approval = true
                 handler_type: AppServerHookHandlerType::Command,
                 execution_mode: AppServerHookExecutionMode::Sync,
                 scope: AppServerHookScope::Turn,
-                source_path: PathBuf::from("/tmp/hooks.json"),
+                source_path: test_path_buf("/tmp/hooks.json").abs(),
                 display_order: 0,
                 status: AppServerHookRunStatus::Running,
                 status_message: Some("checking go-workflow input policy".to_string()),
@@ -23799,7 +24071,7 @@ guardian_approval = true
                 handler_type: AppServerHookHandlerType::Command,
                 execution_mode: AppServerHookExecutionMode::Sync,
                 scope: AppServerHookScope::Turn,
-                source_path: PathBuf::from("/tmp/hooks.json"),
+                source_path: test_path_buf("/tmp/hooks.json").abs(),
                 display_order: 0,
                 status: AppServerHookRunStatus::Stopped,
                 status_message: Some("checking go-workflow input policy".to_string()),
@@ -23850,7 +24122,7 @@ guardian_approval = true
                 reason: Some("needs approval".to_string()),
                 network_approval_context: None,
                 command: Some("echo hello".to_string()),
-                cwd: Some(PathBuf::from("/tmp/project")),
+                cwd: Some(test_path_buf("/tmp/project").abs()),
                 command_actions: None,
                 additional_permissions: None,
                 proposed_execpolicy_amendment: None,
@@ -23887,7 +24159,7 @@ guardian_approval = true
     #[test]
     fn thread_event_store_restores_active_turn_from_snapshot_turns() {
         let thread_id = ThreadId::new();
-        let session = test_thread_session(thread_id, PathBuf::from("/tmp/project"));
+        let session = test_thread_session(thread_id, test_path_buf("/tmp/project"));
         let turns = vec![
             test_turn("turn-1", TurnStatus::Completed, Vec::new()),
             test_turn("turn-2", TurnStatus::InProgress, Vec::new()),
@@ -24105,8 +24377,8 @@ guardian_approval = true
         let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
         let origin_thread_id = ThreadId::new();
         let active_thread_id = ThreadId::new();
-        let origin_session = test_thread_session(origin_thread_id, PathBuf::from("/tmp/origin"));
-        let active_session = test_thread_session(active_thread_id, PathBuf::from("/tmp/active"));
+        let origin_session = test_thread_session(origin_thread_id, test_path_buf("/tmp/origin"));
+        let active_session = test_thread_session(active_thread_id, test_path_buf("/tmp/active"));
         app.thread_event_channels.insert(
             origin_thread_id,
             ThreadEventChannel::new_with_session(
@@ -24712,7 +24984,7 @@ guardian_approval = true
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
-                cwd: next_cwd.clone(),
+                cwd: next_cwd.clone().abs(),
                 reasoning_effort: None,
                 history_log_id: 0,
                 history_entry_count: 0,
@@ -24828,7 +25100,7 @@ guardian_approval = true
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
-                cwd: PathBuf::from("/home/user/project"),
+                cwd: test_path_buf("/home/user/project").abs(),
                 reasoning_effort: None,
                 history_log_id: 0,
                 history_entry_count: 0,
@@ -24891,7 +25163,7 @@ guardian_approval = true
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
-                cwd: PathBuf::from("/home/user/project"),
+                cwd: test_path_buf("/home/user/project").abs(),
                 reasoning_effort: None,
                 history_log_id: 0,
                 history_entry_count: 0,
@@ -24984,7 +25256,7 @@ guardian_approval = true
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
-                cwd: PathBuf::from("/home/user/project"),
+                cwd: test_path_buf("/home/user/project").abs(),
                 reasoning_effort: None,
                 history_log_id: 0,
                 history_entry_count: 0,
@@ -25041,7 +25313,7 @@ guardian_approval = true
             ThreadEventSnapshot {
                 session: Some(test_thread_session(
                     thread_id,
-                    PathBuf::from("/home/user/project"),
+                    test_path_buf("/home/user/project"),
                 )),
                 turns: vec![
                     Turn {
@@ -25250,7 +25522,7 @@ guardian_approval = true
     async fn refreshed_snapshot_session_persists_resumed_turns() {
         let mut app = make_test_app().await;
         let thread_id = ThreadId::new();
-        let initial_session = test_thread_session(thread_id, PathBuf::from("/tmp/original"));
+        let initial_session = test_thread_session(thread_id, test_path_buf("/tmp/original"));
         app.thread_event_channels.insert(
             thread_id,
             ThreadEventChannel::new_with_session(
@@ -25272,7 +25544,7 @@ guardian_approval = true
             }],
         )];
         let resumed_session = ThreadSessionState {
-            cwd: PathBuf::from("/tmp/refreshed"),
+            cwd: test_path_buf("/tmp/refreshed").abs(),
             ..initial_session.clone()
         };
         let mut snapshot = ThreadEventSnapshot {
@@ -25393,7 +25665,7 @@ guardian_approval = true
                     updated_at: 0,
                     status: codex_app_server_protocol::ThreadStatus::Idle,
                     path: None,
-                    cwd: PathBuf::from("/tmp/project"),
+                    cwd: test_path_buf("/tmp/project").abs(),
                     cli_version: "0.0.0".to_string(),
                     source: SessionSource::Cli.into(),
                     agent_nickname: None,
@@ -25428,7 +25700,7 @@ guardian_approval = true
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
-            cwd: PathBuf::from("/home/user/project"),
+            cwd: test_path_buf("/home/user/project").abs(),
             reasoning_effort: None,
             history_log_id: 0,
             history_entry_count: 0,
@@ -25537,7 +25809,7 @@ guardian_approval = true
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
-                cwd: PathBuf::from("/tmp/project"),
+                cwd: test_path_buf("/tmp/project").abs(),
                 reasoning_effort: None,
                 history_log_id: 0,
                 history_entry_count: 0,
