@@ -214,6 +214,7 @@ use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::unbounded_channel;
 use tokio::task::JoinHandle;
 use toml::Value as TomlValue;
+use url::Url;
 use uuid::Uuid;
 mod agent_navigation;
 mod app_server_adapter;
@@ -3084,7 +3085,7 @@ impl App {
         &self,
         anchor_thread_id: Option<ThreadId>,
     ) -> Option<String> {
-        anchor_thread_id.and_then(|thread_id| self.oracle_followup_session_for_thread(thread_id))
+        anchor_thread_id.and_then(|thread_id| self.oracle_control_followup_session_for_thread(thread_id))
     }
 
     fn preferred_oracle_followup_session(&self) -> Option<String> {
@@ -3110,6 +3111,71 @@ impl App {
             || session_id
                 .strip_prefix(session_root_slug)
                 .is_some_and(|suffix| suffix.starts_with('-'))
+    }
+
+    fn oracle_conversation_target(url: &str) -> Option<(String, String)> {
+        let parsed = Url::parse(url).ok()?;
+        let segments = parsed
+            .path_segments()?
+            .filter(|segment| !segment.is_empty())
+            .collect::<Vec<_>>();
+        match segments.as_slice() {
+            ["c", conversation_id] if !conversation_id.is_empty() => {
+                Some((String::new(), (*conversation_id).to_string()))
+            }
+            ["g", project_id, "c", conversation_id]
+                if !project_id.is_empty() && !conversation_id.is_empty() =>
+            {
+                Some((format!("g/{project_id}"), (*conversation_id).to_string()))
+            }
+            _ => None,
+        }
+    }
+
+    fn requested_oracle_conversation_url_matches_remote(
+        conversation_id: &str,
+        requested_url: Option<&str>,
+        remote_url: Option<&str>,
+    ) -> bool {
+        let Some(requested_url) = requested_url else {
+            return true;
+        };
+        let Some((requested_scope, requested_conversation_id)) =
+            Self::oracle_conversation_target(requested_url)
+        else {
+            return false;
+        };
+        let Some((remote_scope, remote_conversation_id)) =
+            remote_url.and_then(Self::oracle_conversation_target)
+        else {
+            return false;
+        };
+        requested_conversation_id == conversation_id
+            && remote_conversation_id == conversation_id
+            && requested_scope == remote_scope
+    }
+
+    fn oracle_control_followup_session_for_thread(&self, thread_id: ThreadId) -> Option<String> {
+        let binding = self.oracle_state.bindings.get(&thread_id)?;
+        let session_id = binding.current_session_id.clone()?;
+        match binding.current_session_ownership.as_ref() {
+            Some(OracleSessionOwnership::BrokerThread) if binding.current_session_verified => {
+                Some(session_id)
+            }
+            Some(OracleSessionOwnership::SessionRootSlug(root_slug))
+                if binding.session_root_slug.as_deref() == Some(root_slug.as_str())
+                    && Self::oracle_session_matches_root_slug(session_id.as_str(), root_slug) =>
+            {
+                Some(session_id)
+            }
+            None if binding.session_root_slug.as_ref().is_some_and(|root_slug| {
+                Self::oracle_session_matches_root_slug(session_id.as_str(), root_slug)
+            }) =>
+            {
+                Some(session_id)
+            }
+            _ => None,
+        }
     }
 
     fn oracle_followup_session_for_thread(&self, thread_id: ThreadId) -> Option<String> {
@@ -8973,6 +9039,8 @@ impl App {
         title_hint: Option<String>,
     ) -> Result<OracleAttachThreadBinding> {
         self.ensure_oracle_remote_thread_mutation_allowed()?;
+        let previous_oracle_state = self.oracle_state.clone();
+        let requested_conversation_url = conversation_url.clone();
         let mut anchor_thread_id = self.oracle_followup_session_anchor_thread_id();
         if let Some(thread_id) =
             self.find_unique_oracle_thread_by_conversation_id(conversation_id.as_str())?
@@ -9011,12 +9079,29 @@ impl App {
                 conversation_url,
                 anchor_thread_id,
             )
-            .await?;
+            .await
+            .map_err(|err| {
+                self.oracle_state = previous_oracle_state.clone();
+                err
+            })?;
         if remote.conversation_id.as_deref() != Some(conversation_id.as_str()) {
+            self.oracle_state = previous_oracle_state.clone();
             return Err(color_eyre::eyre::eyre!(
                 "Oracle attached conversation {} while {} was requested.",
                 remote.conversation_id.as_deref().unwrap_or("unknown"),
                 conversation_id
+            ));
+        }
+        if !Self::requested_oracle_conversation_url_matches_remote(
+            conversation_id.as_str(),
+            requested_conversation_url.as_deref(),
+            remote.url.as_deref(),
+        ) {
+            self.oracle_state = previous_oracle_state.clone();
+            return Err(color_eyre::eyre::eyre!(
+                "Oracle attached thread {} while {} was requested; refusing to bind because the returned thread URL/scope does not match the requested conversation target.",
+                remote.url.as_deref().unwrap_or("unknown"),
+                requested_conversation_url.as_deref().unwrap_or("unknown"),
             ));
         }
         let title = remote.title.clone();
@@ -15360,7 +15445,7 @@ guardian_approval = true
     async fn create_oracle_thread_binding_updates_local_state_from_remote_metadata() -> Result<()> {
         let mut app = make_test_app().await;
         let root_thread_id = app.create_visible_oracle_thread().await;
-        app.set_oracle_thread_broker_session_id(root_thread_id, Some("runtime-root".to_string()));
+        app.set_oracle_thread_broker_session(root_thread_id, Some("runtime-root".to_string()), true);
         queue_test_oracle_new_thread_result(
             &app,
             Ok(OracleBrokerThreadOpenResponse {
@@ -15446,6 +15531,22 @@ guardian_approval = true
     }
 
     #[tokio::test]
+    async fn preferred_oracle_followup_session_requires_verified_broker_session() {
+        let mut app = make_test_app().await;
+        let thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_thread_broker_session_id(thread_id, Some("runtime-root".to_string()));
+        app.activate_oracle_binding(thread_id);
+
+        assert_eq!(app.preferred_oracle_followup_session(), None);
+
+        app.set_oracle_thread_broker_session(thread_id, Some("runtime-root".to_string()), true);
+        assert_eq!(
+            app.preferred_oracle_followup_session().as_deref(),
+            Some("runtime-root")
+        );
+    }
+
+    #[tokio::test]
     async fn create_oracle_thread_binding_does_not_borrow_another_binding_session() -> Result<()> {
         let mut app = make_test_app().await;
         let attached_thread_id = app.create_visible_oracle_thread().await;
@@ -15491,7 +15592,7 @@ guardian_approval = true
     async fn create_oracle_thread_binding_times_out_remote_thread_creation() {
         let mut app = make_test_app().await;
         let thread_id = app.create_visible_oracle_thread().await;
-        app.set_oracle_thread_broker_session_id(thread_id, Some("runtime-root".to_string()));
+        app.set_oracle_thread_broker_session(thread_id, Some("runtime-root".to_string()), true);
         app.activate_oracle_binding(thread_id);
         queue_test_oracle_new_thread_delay(&app, Duration::from_millis(75));
 
@@ -15518,7 +15619,7 @@ guardian_approval = true
     -> Result<()> {
         let mut app = make_test_app().await;
         let root_thread_id = app.create_visible_oracle_thread().await;
-        app.set_oracle_thread_broker_session_id(root_thread_id, Some("runtime-root".to_string()));
+        app.set_oracle_thread_broker_session(root_thread_id, Some("runtime-root".to_string()), true);
         queue_test_oracle_new_thread_result(
             &app,
             Ok(OracleBrokerThreadOpenResponse {
@@ -15680,11 +15781,11 @@ guardian_approval = true
     }
 
     #[tokio::test]
-    async fn attach_oracle_thread_binding_reuses_existing_local_thread_without_remote_attach()
+    async fn attach_oracle_thread_binding_reuses_existing_verified_local_thread_without_remote_attach()
     -> Result<()> {
         let mut app = make_test_app().await;
         let thread_id = app.create_visible_oracle_thread().await;
-        app.set_oracle_thread_broker_session_id(thread_id, Some("runtime-root".to_string()));
+        app.set_oracle_thread_broker_session(thread_id, Some("runtime-root".to_string()), true);
         app.set_oracle_remote_metadata(
             thread_id,
             Some("attached-1".to_string()),
@@ -15765,10 +15866,7 @@ guardian_approval = true
             .lock()
             .expect("oracle test broker hooks");
         assert_eq!(hooks.attach_thread_calls, vec!["attached-1".to_string()]);
-        assert_eq!(
-            hooks.attach_thread_followup_sessions,
-            vec![Some("runtime-root".to_string())]
-        );
+        assert_eq!(hooks.attach_thread_followup_sessions, vec![None]);
         drop(hooks);
         assert_eq!(
             app.oracle_state
@@ -15989,6 +16087,65 @@ guardian_approval = true
         assert!(err.to_string().contains("wrong-9"));
         assert!(app.oracle_state.bindings.is_empty());
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn attach_oracle_thread_binding_rejects_mismatched_remote_thread_url_scope()
+    -> Result<()> {
+        let mut app = make_test_app().await;
+        queue_test_oracle_attach_thread_result(
+            &app,
+            Ok(OracleBrokerThreadOpenResponse {
+                url: Some("https://chatgpt.com/g/oracle-project/c/remote-7".to_string()),
+                ..test_oracle_thread_open_response("runtime-7", "Remote Thread", "remote-7")
+            }),
+        );
+
+        let err = app
+            .attach_oracle_thread_binding(
+                "remote-7".to_string(),
+                Some("https://chatgpt.com/c/remote-7".to_string()),
+                None,
+            )
+            .await
+            .expect_err("mismatched thread scope should fail closed");
+
+        assert!(err.to_string().contains("URL/scope"));
+        assert!(app.oracle_state.bindings.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn attach_oracle_thread_binding_restores_previous_active_binding_when_remote_attach_fails()
+    {
+        let mut app = make_test_app().await;
+        let previous_thread_id = app.create_visible_oracle_thread().await;
+        let attached_thread_id = app.create_visible_oracle_thread().await;
+        app.set_oracle_remote_metadata(
+            attached_thread_id,
+            Some("attached-1".to_string()),
+            Some("Attached Thread".to_string()),
+        );
+        app.activate_oracle_binding(previous_thread_id);
+        app.oracle_state.last_status = Some("Before attach".to_string());
+        app.persist_active_oracle_binding();
+        queue_test_oracle_attach_thread_delay(&app, Duration::from_millis(75));
+
+        let err = app
+            .attach_oracle_thread_binding(
+                "attached-1".to_string(),
+                None,
+                Some("Attached Thread".to_string()),
+            )
+            .await
+            .expect_err("slow remote attach should time out");
+
+        assert_eq!(
+            err.to_string(),
+            "Timed out after 50 ms while attaching a remote Oracle thread."
+        );
+        assert_eq!(app.oracle_state.oracle_thread_id, Some(previous_thread_id));
+        assert_eq!(app.oracle_state.last_status.as_deref(), Some("Before attach"));
     }
 
     #[tokio::test]
@@ -16663,9 +16820,13 @@ guardian_approval = true
     -> Result<()> {
         let mut app = make_test_app().await;
         let first_thread_id = app.create_visible_oracle_thread().await;
-        app.set_oracle_thread_broker_session_id(first_thread_id, Some("runtime-a".to_string()));
+        app.set_oracle_thread_broker_session(first_thread_id, Some("runtime-a".to_string()), true);
         let current_thread_id = app.create_visible_oracle_thread().await;
-        app.set_oracle_thread_broker_session_id(current_thread_id, Some("runtime-b".to_string()));
+        app.set_oracle_thread_broker_session(
+            current_thread_id,
+            Some("runtime-b".to_string()),
+            true,
+        );
         app.activate_oracle_binding(current_thread_id);
         queue_test_oracle_attach_thread_result(
             &app,
@@ -16694,7 +16855,7 @@ guardian_approval = true
     async fn attach_oracle_thread_binding_times_out_remote_attach() {
         let mut app = make_test_app().await;
         let thread_id = app.create_visible_oracle_thread().await;
-        app.set_oracle_thread_broker_session_id(thread_id, Some("runtime-root".to_string()));
+        app.set_oracle_thread_broker_session(thread_id, Some("runtime-root".to_string()), true);
         app.activate_oracle_binding(thread_id);
         queue_test_oracle_attach_thread_delay(&app, Duration::from_millis(75));
 
@@ -16964,9 +17125,13 @@ guardian_approval = true
     async fn open_oracle_picker_prefers_current_local_binding_for_remote_browse() -> Result<()> {
         let mut app = make_test_app().await;
         let first_thread_id = app.create_visible_oracle_thread().await;
-        app.set_oracle_thread_broker_session_id(first_thread_id, Some("runtime-a".to_string()));
+        app.set_oracle_thread_broker_session(first_thread_id, Some("runtime-a".to_string()), true);
         let current_thread_id = app.create_visible_oracle_thread().await;
-        app.set_oracle_thread_broker_session_id(current_thread_id, Some("runtime-b".to_string()));
+        app.set_oracle_thread_broker_session(
+            current_thread_id,
+            Some("runtime-b".to_string()),
+            true,
+        );
         app.activate_oracle_binding(current_thread_id);
         queue_test_oracle_list_threads_result(&app, Ok(Vec::new()));
 
