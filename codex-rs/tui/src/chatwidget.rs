@@ -784,6 +784,8 @@ pub(crate) struct ChatWidget {
     stream_controller: Option<StreamController>,
     // Stream lifecycle controller for proposed plan output.
     plan_stream_controller: Option<PlanStreamController>,
+    // Deduplicates StartCommitAnimation while streamed output is already active.
+    commit_animation_requested: bool,
     /// Holds the platform clipboard lease so copied text remains available while supported.
     clipboard_lease: Option<crate::clipboard_copy::ClipboardLease>,
     /// Raw markdown of the most recently completed agent response.
@@ -1740,6 +1742,22 @@ impl ChatWidget {
                 .unwrap_or(true)
     }
 
+    fn ensure_commit_animation(&mut self) {
+        if self.commit_animation_requested {
+            return;
+        }
+        self.commit_animation_requested = true;
+        self.app_event_tx.send(AppEvent::StartCommitAnimation);
+    }
+
+    fn stop_commit_animation(&mut self) {
+        if !self.commit_animation_requested {
+            return;
+        }
+        self.commit_animation_requested = false;
+        self.app_event_tx.send(AppEvent::StopCommitAnimation);
+    }
+
     /// Restore the status indicator only after commentary completion is pending,
     /// the turn is still running, and all stream queues have drained.
     ///
@@ -2243,7 +2261,7 @@ impl ChatWidget {
         if let Some(controller) = self.plan_stream_controller.as_mut()
             && controller.push(&delta)
         {
-            self.app_event_tx.send(AppEvent::StartCommitAnimation);
+            self.ensure_commit_animation();
             self.run_catch_up_commit_tick();
         }
         self.request_redraw();
@@ -2342,6 +2360,7 @@ impl ChatWidget {
         self.plan_item_active = false;
         self.adaptive_chunking.reset();
         self.plan_stream_controller = None;
+        self.stop_commit_animation();
         self.turn_runtime_metrics = RuntimeMetricsSummary::default();
         self.session_telemetry.reset_runtime_metrics();
         self.bottom_pane.clear_quit_shortcut_hint();
@@ -2850,6 +2869,7 @@ impl ChatWidget {
         self.adaptive_chunking.reset();
         self.stream_controller = None;
         self.plan_stream_controller = None;
+        self.stop_commit_animation();
         self.pending_status_indicator_restore = false;
         self.request_status_line_branch_refresh();
         self.maybe_show_pending_rate_limit_prompt();
@@ -4350,7 +4370,7 @@ impl ChatWidget {
 
         if outcome.has_controller && outcome.all_idle {
             self.maybe_restore_status_indicator_after_stream_idle();
-            self.app_event_tx.send(AppEvent::StopCommitAnimation);
+            self.stop_commit_animation();
         }
 
         if self.agent_turn_running {
@@ -4422,7 +4442,7 @@ impl ChatWidget {
         if let Some(controller) = self.stream_controller.as_mut()
             && controller.push(&delta)
         {
-            self.app_event_tx.send(AppEvent::StartCommitAnimation);
+            self.ensure_commit_animation();
             self.run_catch_up_commit_tick();
         }
         self.request_redraw();
@@ -4892,6 +4912,7 @@ impl ChatWidget {
             adaptive_chunking: AdaptiveChunkingPolicy::default(),
             stream_controller: None,
             plan_stream_controller: None,
+            commit_animation_requested: false,
             clipboard_lease: None,
             running_commands: HashMap::new(),
             collab_agent_metadata: HashMap::new(),

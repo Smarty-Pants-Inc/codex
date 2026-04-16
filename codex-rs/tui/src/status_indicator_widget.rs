@@ -51,7 +51,7 @@ pub(crate) struct StatusIndicatorWidget {
     elapsed_running: Duration,
     last_resume_at: Instant,
     is_paused: bool,
-    app_event_tx: AppEventSender,
+    _app_event_tx: AppEventSender,
     frame_requester: FrameRequester,
     animations_enabled: bool,
 }
@@ -89,14 +89,10 @@ impl StatusIndicatorWidget {
             last_resume_at: Instant::now(),
             is_paused: false,
 
-            app_event_tx,
+            _app_event_tx: app_event_tx,
             frame_requester,
             animations_enabled,
         }
-    }
-
-    pub(crate) fn interrupt(&self) {
-        self.app_event_tx.interrupt();
     }
 
     /// Update the animated header label (left of the brackets).

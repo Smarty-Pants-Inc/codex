@@ -368,6 +368,25 @@ fn guardian_approvals_mode() -> GuardianApprovalsMode {
 /// perceived typing speed for non-backlogged output.
 const COMMIT_ANIMATION_TICK: Duration = tui::TARGET_FRAME_INTERVAL;
 
+fn try_enqueue_commit_tick(tx: &AppEventSender, pending: &AtomicBool) -> bool {
+    if pending
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+
+    let event = AppEvent::CommitTick;
+    crate::session_log::log_inbound_app_event(&event);
+    if let Err(err) = tx.app_event_tx.send(event) {
+        pending.store(false, Ordering::Release);
+        tracing::error!("failed to send event: {err}");
+        return false;
+    }
+
+    true
+}
+
 #[derive(Debug, Clone)]
 pub struct AppExitInfo {
     pub token_usage: TokenUsage,
@@ -1163,6 +1182,8 @@ pub(crate) struct App {
 
     /// Controls the animation thread that sends CommitTick events.
     pub(crate) commit_anim_running: Arc<AtomicBool>,
+    /// Coalesces commit ticks so low-priority animation does not flood the main app event queue.
+    pub(crate) commit_anim_tick_pending: Arc<AtomicBool>,
     // Shared across ChatWidget instances so invalid status-line config warnings only emit once.
     status_line_invalid_items_warned: Arc<AtomicBool>,
     // Shared across ChatWidget instances so invalid terminal-title config warnings only emit once.
@@ -10083,6 +10104,7 @@ impl App {
             deferred_history_lines: Vec::new(),
             has_emitted_history_lines: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
+            commit_anim_tick_pending: Arc::new(AtomicBool::new(false)),
             status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
             terminal_title_invalid_items_warned: terminal_title_invalid_items_warned.clone(),
             backtrack: BacktrackState::default(),
@@ -10637,18 +10659,26 @@ impl App {
                 {
                     let tx = self.app_event_tx.clone();
                     let running = self.commit_anim_running.clone();
+                    let pending = self.commit_anim_tick_pending.clone();
                     thread::spawn(move || {
                         while running.load(Ordering::Relaxed) {
                             thread::sleep(COMMIT_ANIMATION_TICK);
-                            tx.send(AppEvent::CommitTick);
+                            if !running.load(Ordering::Relaxed) {
+                                break;
+                            }
+                            let _ = try_enqueue_commit_tick(&tx, &pending);
                         }
                     });
                 }
             }
             AppEvent::StopCommitAnimation => {
                 self.commit_anim_running.store(false, Ordering::Release);
+                self.commit_anim_tick_pending
+                    .store(false, Ordering::Release);
             }
             AppEvent::CommitTick => {
+                self.commit_anim_tick_pending
+                    .store(false, Ordering::Release);
                 self.chat_widget.on_commit_tick();
             }
             AppEvent::Exit(mode) => {
@@ -12915,6 +12945,28 @@ mod tests {
                 plugins: Vec::new(),
             }]
         );
+    }
+
+    #[test]
+    fn commit_tick_coalescing_leaves_room_for_interrupt_ops() {
+        let (tx, mut rx) = unbounded_channel();
+        let sender = AppEventSender::new(tx);
+        let pending = AtomicBool::new(false);
+
+        assert!(try_enqueue_commit_tick(&sender, &pending));
+        assert!(
+            !try_enqueue_commit_tick(&sender, &pending),
+            "duplicate commit ticks should be suppressed while one is pending"
+        );
+
+        sender.interrupt();
+
+        assert!(matches!(rx.try_recv(), Ok(AppEvent::CommitTick)));
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(AppEvent::CodexOp(Op::Interrupt))
+        ));
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
     }
 
     #[test]
@@ -24119,6 +24171,7 @@ guardian_approval = true
             has_emitted_history_lines: false,
             enhanced_keys_supported: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
+            commit_anim_tick_pending: Arc::new(AtomicBool::new(false)),
             status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
             terminal_title_invalid_items_warned: Arc::new(AtomicBool::new(false)),
             backtrack: BacktrackState::default(),
@@ -24181,6 +24234,7 @@ guardian_approval = true
                 has_emitted_history_lines: false,
                 enhanced_keys_supported: false,
                 commit_anim_running: Arc::new(AtomicBool::new(false)),
+                commit_anim_tick_pending: Arc::new(AtomicBool::new(false)),
                 status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
                 terminal_title_invalid_items_warned: Arc::new(AtomicBool::new(false)),
                 backtrack: BacktrackState::default(),
