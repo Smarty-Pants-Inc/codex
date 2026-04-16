@@ -1,13 +1,14 @@
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 
 fn main() {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR should always be set for cargo builds");
-    let repo_root = Path::new(&manifest_dir)
-        .parent()
-        .and_then(Path::parent)
-        .expect("tui crate should live under codex-rs/<crate>");
+    let Some(manifest_dir) = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from) else {
+        return;
+    };
+    let Some(repo_root) = manifest_dir.parent().and_then(Path::parent) else {
+        return;
+    };
 
     if let Some(version) = resolve_codex_version(repo_root) {
         println!("cargo:rustc-env=CODEX_RS_RESOLVED_VERSION={version}");

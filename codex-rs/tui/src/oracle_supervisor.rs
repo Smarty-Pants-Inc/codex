@@ -1545,26 +1545,22 @@ pub(crate) fn parse_oracle_control(
     let op = control
         .op
         .as_ref()
-        .as_deref()
         .and_then(|op| OracleControlOp::parse(op))
         .or_else(|| {
             control
                 .operation
                 .as_ref()
-                .as_deref()
                 .and_then(|op| OracleControlOp::parse(op))
         })
         .or_else(|| {
             control
                 .action
                 .as_ref()
-                .as_deref()
                 .and_then(|op| OracleControlOp::parse(op))
         });
     let action_hint = control
         .action
         .as_ref()
-        .as_deref()
         .and_then(|action| parse_legacy_action(action));
     if op.is_none() && action_hint.is_none() {
         return Err(OracleControlIssue::new(
@@ -1682,7 +1678,7 @@ pub(crate) fn oracle_delegate_task_from_directive(
         directive
             .participants
             .first()
-            .map(|participant| participant.display_label())
+            .map(OracleControlParticipant::display_label)
     });
     let detail = directive
         .message
@@ -2697,7 +2693,7 @@ mod tests {
             updated_at: 0,
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: None,
-            cwd: AbsolutePathBuf::try_from(workspace.clone()).expect("absolute workspace"),
+            cwd: AbsolutePathBuf::try_from(workspace.as_path()).expect("absolute workspace"),
             cli_version: "0.0.0".to_string(),
             source: codex_app_server_protocol::SessionSource::Unknown,
             agent_nickname: Some("Oracle Orchestrator".to_string()),
@@ -2710,7 +2706,7 @@ mod tests {
                     ThreadItem::CommandExecution {
                         id: "cmd-1".to_string(),
                         command: "mkdir -p /tmp/oracle-workspace/tmp/proof && printf P1 > tmp/proof/out.txt && wc -c < /tmp/oracle-workspace/tmp/proof/out.txt".to_string(),
-                        cwd: AbsolutePathBuf::try_from(workspace.clone())
+                        cwd: AbsolutePathBuf::try_from(workspace.as_path())
                             .expect("absolute workspace"),
                         process_id: None,
                         source: codex_app_server_protocol::CommandExecutionSource::Agent,
@@ -2766,7 +2762,7 @@ mod tests {
             updated_at: 0,
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: None,
-            cwd: AbsolutePathBuf::try_from(workspace.clone()).expect("absolute workspace"),
+            cwd: AbsolutePathBuf::try_from(workspace.as_path()).expect("absolute workspace"),
             cli_version: "0.0.0".to_string(),
             source: codex_app_server_protocol::SessionSource::Unknown,
             agent_nickname: Some("Oracle Orchestrator".to_string()),
@@ -2779,7 +2775,7 @@ mod tests {
                     ThreadItem::CommandExecution {
                         id: "cmd-1".to_string(),
                         command: "printf preparing".to_string(),
-                        cwd: AbsolutePathBuf::try_from(workspace.clone())
+                        cwd: AbsolutePathBuf::try_from(workspace.as_path())
                             .expect("absolute workspace"),
                         process_id: None,
                         source: codex_app_server_protocol::CommandExecutionSource::Agent,
@@ -2792,7 +2788,7 @@ mod tests {
                     ThreadItem::CommandExecution {
                         id: "cmd-2".to_string(),
                         command: "test -f /tmp/oracle-workspace/tmp/proof/out.txt".to_string(),
-                        cwd: AbsolutePathBuf::try_from(workspace.clone())
+                        cwd: AbsolutePathBuf::try_from(workspace.as_path())
                             .expect("absolute workspace"),
                         process_id: None,
                         source: codex_app_server_protocol::CommandExecutionSource::Agent,
@@ -2805,7 +2801,7 @@ mod tests {
                     ThreadItem::CommandExecution {
                         id: "cmd-3".to_string(),
                         command: "wc -c < /tmp/oracle-workspace/tmp/proof/out.txt".to_string(),
-                        cwd: AbsolutePathBuf::try_from(workspace.clone())
+                        cwd: AbsolutePathBuf::try_from(workspace.as_path())
                             .expect("absolute workspace"),
                         process_id: None,
                         source: codex_app_server_protocol::CommandExecutionSource::Agent,
@@ -2820,7 +2816,7 @@ mod tests {
                         command:
                             "printf '/tmp/oracle-workspace/tmp/proof/out.txt\\n13\\n50315f31\\n'"
                                 .to_string(),
-                        cwd: AbsolutePathBuf::try_from(workspace.clone())
+                        cwd: AbsolutePathBuf::try_from(workspace.as_path())
                             .expect("absolute workspace"),
                         process_id: None,
                         source: codex_app_server_protocol::CommandExecutionSource::Agent,

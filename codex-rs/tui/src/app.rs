@@ -230,9 +230,11 @@ use self::pending_interactive_replay::PendingInteractiveReplayState;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
 const THREAD_EVENT_CHANNEL_CAPACITY: usize = 32768;
-static ORACLE_RUN_REMOTE_METADATA: LazyLock<
-    StdMutex<HashMap<String, (Option<String>, Option<String>)>>,
-> = LazyLock::new(|| StdMutex::new(HashMap::new()));
+type OracleRunRemoteMetadata = (Option<String>, Option<String>);
+type OracleRunRemoteMetadataMap = HashMap<String, OracleRunRemoteMetadata>;
+
+static ORACLE_RUN_REMOTE_METADATA: LazyLock<StdMutex<OracleRunRemoteMetadataMap>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 fn remember_oracle_run_remote_metadata(
     run_id: &str,
@@ -245,14 +247,14 @@ fn remember_oracle_run_remote_metadata(
     }
     ORACLE_RUN_REMOTE_METADATA
         .lock()
-        .expect("oracle run remote metadata")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(run_id.to_string(), (conversation_id, remote_title));
 }
 
 fn take_oracle_run_remote_metadata(run_id: &str) -> (Option<String>, Option<String>) {
     ORACLE_RUN_REMOTE_METADATA
         .lock()
-        .expect("oracle run remote metadata")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .remove(run_id)
         .unwrap_or((None, None))
 }
@@ -622,7 +624,7 @@ enum ThreadBufferedEvent {
 #[derive(Debug, Clone)]
 enum ThreadReplayEntry {
     Turn(Turn),
-    Event(ThreadBufferedEvent),
+    Event(Box<ThreadBufferedEvent>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -801,7 +803,8 @@ impl ThreadEventStore {
 
     fn push_buffered_event(&mut self, event: ThreadBufferedEvent) {
         self.buffer.push_back(event.clone());
-        self.replay_entries.push(ThreadReplayEntry::Event(event));
+        self.replay_entries
+            .push(ThreadReplayEntry::Event(Box::new(event)));
         if self.buffer.len() > self.capacity
             && let Some(removed) = self.buffer.pop_front()
         {
@@ -879,7 +882,12 @@ impl ThreadEventStore {
             .iter()
             .cloned()
             .map(ThreadReplayEntry::Turn)
-            .chain(self.buffer.iter().cloned().map(ThreadReplayEntry::Event))
+            .chain(
+                self.buffer
+                    .iter()
+                    .cloned()
+                    .map(|event| ThreadReplayEntry::Event(Box::new(event))),
+            )
             .collect();
     }
 
@@ -2221,12 +2229,9 @@ impl App {
             }
             Self::sync_legacy_oracle_binding_fields(binding);
         }
-        let binding = self
-            .oracle_state
-            .bindings
-            .get(&thread_id)
-            .cloned()
-            .expect("oracle binding must exist");
+        let Some(binding) = self.oracle_state.bindings.get(&thread_id).cloned() else {
+            return;
+        };
         self.oracle_state.oracle_thread_id = Some(thread_id);
         self.oracle_state.session_root_slug = binding.session_root_slug;
         self.oracle_state.current_session_id = binding.current_session_id;
@@ -2344,11 +2349,8 @@ impl App {
         summary_hint: Option<String>,
         version_hint: Option<u64>,
     ) -> OracleWorkflowBinding {
-        let oracle_thread_id = self
-            .oracle_state
-            .oracle_thread_id
-            .expect("active oracle thread required for workflow");
-        let requested_workflow_id = workflow_id_hint.clone().unwrap_or_else(|| {
+        let oracle_thread_id = self.oracle_state.oracle_thread_id.unwrap_or_default();
+        let requested_workflow_id = workflow_id_hint.unwrap_or_else(|| {
             self.oracle_state
                 .workflow
                 .as_ref()
@@ -2361,20 +2363,25 @@ impl App {
             workflow.workflow_id != requested_workflow_id
                 || !matches!(workflow.status, OracleWorkflowStatus::Running)
         });
-        if replace_workflow {
-            self.oracle_state.workflow = Some(OracleWorkflowBinding {
+        let workflow = self
+            .oracle_state
+            .workflow
+            .get_or_insert_with(|| OracleWorkflowBinding {
                 workflow_id: requested_workflow_id.clone(),
                 mode: OracleWorkflowMode::Supervising,
                 status: OracleWorkflowStatus::Running,
                 version: requested_version,
                 ..Default::default()
             });
+        if replace_workflow {
+            *workflow = OracleWorkflowBinding {
+                workflow_id: requested_workflow_id,
+                mode: OracleWorkflowMode::Supervising,
+                status: OracleWorkflowStatus::Running,
+                version: requested_version,
+                ..Default::default()
+            };
         }
-        let workflow = self
-            .oracle_state
-            .workflow
-            .as_mut()
-            .expect("workflow initialized");
         workflow.mode = OracleWorkflowMode::Supervising;
         workflow.status = OracleWorkflowStatus::Running;
         if replace_workflow {
@@ -2939,7 +2946,7 @@ impl App {
                         .pending_checkpoint_versions
                         .insert(thread_id, workflow_version);
                 }
-                if let Some(turn_id) = turn_id.clone() {
+                if let Some(turn_id) = turn_id {
                     binding
                         .pending_checkpoint_turn_ids
                         .entry(thread_id)
@@ -3004,7 +3011,7 @@ impl App {
                         .pending_checkpoint_versions
                         .insert(thread_id, workflow_version);
                 }
-                if let Some(turn_id) = turn_id.clone() {
+                if let Some(turn_id) = turn_id {
                     binding
                         .pending_checkpoint_turn_ids
                         .entry(thread_id)
@@ -3012,10 +3019,8 @@ impl App {
                 }
             }
         }
-        if !had_other_pending {
-            if let Some(thread_id) = thread_id {
-                self.schedule_orchestrator_checkpoint_retry(thread_id, workflow_version);
-            }
+        if !had_other_pending && let Some(thread_id) = thread_id {
+            self.schedule_orchestrator_checkpoint_retry(thread_id, workflow_version);
         }
         had_other_pending
     }
@@ -3069,7 +3074,7 @@ impl App {
                 (binding.conversation_id.as_deref() == Some(conversation_id)).then_some(*thread_id)
             })
             .collect::<Vec<_>>();
-        matches.sort_by_key(|thread_id| thread_id.to_string());
+        matches.sort_by_key(std::string::ToString::to_string);
         matches
     }
 
@@ -3273,7 +3278,7 @@ impl App {
                 .then_some(*bound_thread_id)
             })
             .collect::<Vec<_>>();
-        conflicting_thread_ids.sort_by_key(|candidate| candidate.to_string());
+        conflicting_thread_ids.sort_by_key(std::string::ToString::to_string);
         if let Some(conflicting_thread_id) = conflicting_thread_ids.into_iter().next() {
             return Err(color_eyre::eyre::eyre!(
                 "Oracle conversation {conversation_id} is already bound to local thread {conflicting_thread_id}; refusing to reattach it onto thread {thread_id}."
@@ -3872,10 +3877,10 @@ impl App {
     }
 
     fn ensure_oracle_broker(&mut self, oracle_repo: &Path) -> Result<OracleBrokerClient> {
-        if let Some((repo, broker)) = &self.oracle_broker {
-            if Self::cached_oracle_broker_matches(repo.as_path(), oracle_repo, broker) {
-                return Ok(broker.clone());
-            }
+        if let Some((repo, broker)) = &self.oracle_broker
+            && Self::cached_oracle_broker_matches(repo.as_path(), oracle_repo, broker)
+        {
+            return Ok(broker.clone());
         }
         self.shutdown_oracle_broker(false);
         let broker =
@@ -3913,34 +3918,33 @@ impl App {
         });
         for (oracle_thread_id, binding) in &bindings {
             let mut abort_message = Self::oracle_abort_message(binding.phase).map(str::to_string);
-            if binding.phase == OracleSupervisorPhase::WaitingForOrchestrator {
-                if let Some(orchestrator_thread_id) = binding.orchestrator_thread_id {
-                    abort_message = Some(
-                        "Oracle mode was disabled while the orchestrator was still working. The supervision workflow was aborted."
-                            .to_string(),
-                    );
-                    if let Some(turn_id) =
-                        self.active_turn_id_for_thread(orchestrator_thread_id).await
-                    {
-                        abort_message =
-                            match app_server.turn_interrupt(orchestrator_thread_id, turn_id).await {
-                                Ok(()) => Some(
-                                    "Oracle mode was disabled while the orchestrator was still working. The active orchestrator turn was interrupted and the supervision workflow was aborted."
+            if binding.phase == OracleSupervisorPhase::WaitingForOrchestrator
+                && let Some(orchestrator_thread_id) = binding.orchestrator_thread_id
+            {
+                abort_message = Some(
+                    "Oracle mode was disabled while the orchestrator was still working. The supervision workflow was aborted."
+                        .to_string(),
+                );
+                if let Some(turn_id) = self.active_turn_id_for_thread(orchestrator_thread_id).await
+                {
+                    abort_message =
+                        match app_server.turn_interrupt(orchestrator_thread_id, turn_id).await {
+                            Ok(()) => Some(
+                                "Oracle mode was disabled while the orchestrator was still working. The active orchestrator turn was interrupted and the supervision workflow was aborted."
+                                    .to_string(),
+                            ),
+                            Err(err) => {
+                                tracing::warn!(
+                                    %orchestrator_thread_id,
+                                    %err,
+                                    "failed to interrupt oracle orchestrator turn during shutdown"
+                                );
+                                Some(
+                                    "Oracle mode was disabled while the orchestrator was still working. Codex could not interrupt that turn cleanly, so background work may still be winding down."
                                         .to_string(),
-                                ),
-                                Err(err) => {
-                                    tracing::warn!(
-                                        %orchestrator_thread_id,
-                                        %err,
-                                        "failed to interrupt oracle orchestrator turn during shutdown"
-                                    );
-                                    Some(
-                                        "Oracle mode was disabled while the orchestrator was still working. Codex could not interrupt that turn cleanly, so background work may still be winding down."
-                                            .to_string(),
-                                    )
-                                }
-                            };
-                    }
+                                )
+                            }
+                        };
                 }
             }
             if let Some(message) = abort_message.as_deref() {
@@ -4488,23 +4492,19 @@ impl App {
         search_enabled: bool,
     ) -> Line<'static> {
         let next_model = self.oracle_state.model.toggle_family();
-        let mut spans = vec!["Hotkeys: ".dim().into()];
+        let mut spans = vec!["Hotkeys: ".dim()];
         if include_new_thread {
             spans.push(key_hint::plain(KeyCode::Char('n')).into());
-            spans.push(" new  ".dim().into());
+            spans.push(" new  ".dim());
         }
         if search_enabled {
             spans.push(key_hint::plain(KeyCode::Char('s')).into());
-            spans.push(" search  ".dim().into());
+            spans.push(" search  ".dim());
         }
         spans.push(key_hint::plain(KeyCode::Char('i')).into());
-        spans.push(" info  ".dim().into());
+        spans.push(" info  ".dim());
         spans.push(key_hint::plain(KeyCode::Tab).into());
-        spans.push(
-            format!(" {}", next_model.browser_label().to_ascii_lowercase())
-                .dim()
-                .into(),
-        );
+        spans.push(format!(" {}", next_model.browser_label().to_ascii_lowercase()).dim());
         Line::from(spans)
     }
 
@@ -4996,11 +4996,11 @@ impl App {
                         .all(|item| matches!(item, ThreadItem::AgentMessage { .. }))
                 })
             {
-                if let Some(first_imported_turn) = imported_turns.first() {
-                    if let Some(last_turn) = merged_turns.last_mut() {
-                        last_turn.items.extend(first_imported_turn.items.clone());
-                        merged_into_existing_local_turn = true;
-                    }
+                if let Some(first_imported_turn) = imported_turns.first()
+                    && let Some(last_turn) = merged_turns.last_mut()
+                {
+                    last_turn.items.extend(first_imported_turn.items.clone());
+                    merged_into_existing_local_turn = true;
                 }
                 imported_turns.remove(0);
             }
@@ -7073,7 +7073,7 @@ impl App {
                     ));
                     return Ok(());
                 }
-                if let Some(tui) = tui.as_deref_mut() {
+                if let Some(tui) = tui {
                     self.disable_oracle_mode(tui, app_server).await?;
                     self.chat_widget.add_to_history(oracle_history_cell(
                         "Oracle",
@@ -7128,7 +7128,7 @@ impl App {
 
     async fn submit_thread_op(
         &mut self,
-        mut tui: Option<&mut tui::Tui>,
+        tui: Option<&mut tui::Tui>,
         app_server: &mut AppServerSession,
         thread_id: ThreadId,
         op: AppCommand,
@@ -7148,12 +7148,7 @@ impl App {
 
         if let AppCommandView::UserTurn { items, .. } = op.view()
             && self
-                .maybe_route_natural_language_oracle_invocation(
-                    tui.as_deref_mut(),
-                    app_server,
-                    thread_id,
-                    items,
-                )
+                .maybe_route_natural_language_oracle_invocation(tui, app_server, thread_id, items)
                 .await?
         {
             return Ok(());
@@ -7890,62 +7885,57 @@ impl App {
                 }
             }
         }
-        if should_checkpoint_oracle {
-            if let Some(oracle_thread_id) = oracle_thread_id {
-                let mut workflow_version = None;
-                let mut should_emit_now = false;
-                if let Some(binding) = self.oracle_state.bindings.get_mut(&oracle_thread_id) {
-                    workflow_version = binding.workflow.as_ref().map(|workflow| workflow.version);
-                    let inserted_pending =
-                        if binding.pending_checkpoint_threads.contains(&thread_id) {
-                            match checkpoint_turn_id.as_ref() {
-                                Some(turn_id)
-                                    if binding.pending_checkpoint_turn_ids.get(&thread_id)
-                                        != Some(turn_id)
-                                        && binding.last_checkpoint_turn_ids.get(&thread_id)
-                                            != Some(turn_id) =>
-                                {
-                                    binding
-                                        .pending_checkpoint_turn_ids
-                                        .insert(thread_id, turn_id.clone());
-                                    if let Some(workflow_version) = workflow_version {
-                                        binding
-                                            .pending_checkpoint_versions
-                                            .insert(thread_id, workflow_version);
-                                    }
-                                    true
-                                }
-                                _ => false,
-                            }
-                        } else {
-                            binding.pending_checkpoint_threads.push(thread_id);
+        if should_checkpoint_oracle && let Some(oracle_thread_id) = oracle_thread_id {
+            let mut workflow_version = None;
+            let mut should_emit_now = false;
+            if let Some(binding) = self.oracle_state.bindings.get_mut(&oracle_thread_id) {
+                workflow_version = binding.workflow.as_ref().map(|workflow| workflow.version);
+                let inserted_pending = if binding.pending_checkpoint_threads.contains(&thread_id) {
+                    match checkpoint_turn_id.as_ref() {
+                        Some(turn_id)
+                            if binding.pending_checkpoint_turn_ids.get(&thread_id)
+                                != Some(turn_id)
+                                && binding.last_checkpoint_turn_ids.get(&thread_id)
+                                    != Some(turn_id) =>
+                        {
+                            binding
+                                .pending_checkpoint_turn_ids
+                                .insert(thread_id, turn_id.clone());
                             if let Some(workflow_version) = workflow_version {
                                 binding
                                     .pending_checkpoint_versions
                                     .insert(thread_id, workflow_version);
                             }
-                            if let Some(turn_id) = checkpoint_turn_id.as_ref() {
-                                binding
-                                    .pending_checkpoint_turn_ids
-                                    .insert(thread_id, turn_id.clone());
-                            }
                             true
-                        };
-                    let should_queue = matches!(
-                        binding.phase,
-                        OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::UserTurn)
-                            | OracleSupervisorPhase::WaitingForOracle(
-                                OracleRequestKind::Checkpoint
-                            )
-                    );
-                    should_emit_now = inserted_pending && !should_queue;
-                }
-                if should_emit_now {
-                    self.app_event_tx.send(AppEvent::OracleCheckpoint {
-                        thread_id,
-                        workflow_version,
-                    });
-                }
+                        }
+                        _ => false,
+                    }
+                } else {
+                    binding.pending_checkpoint_threads.push(thread_id);
+                    if let Some(workflow_version) = workflow_version {
+                        binding
+                            .pending_checkpoint_versions
+                            .insert(thread_id, workflow_version);
+                    }
+                    if let Some(turn_id) = checkpoint_turn_id.as_ref() {
+                        binding
+                            .pending_checkpoint_turn_ids
+                            .insert(thread_id, turn_id.clone());
+                    }
+                    true
+                };
+                let should_queue = matches!(
+                    binding.phase,
+                    OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::UserTurn)
+                        | OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::Checkpoint)
+                );
+                should_emit_now = inserted_pending && !should_queue;
+            }
+            if should_emit_now {
+                self.app_event_tx.send(AppEvent::OracleCheckpoint {
+                    thread_id,
+                    workflow_version,
+                });
             }
         }
         if is_thread_closed {
@@ -8314,12 +8304,7 @@ impl App {
         {
             snapshot.replay_entries.splice(
                 0..0,
-                snapshot
-                    .turns
-                    .iter()
-                    .cloned()
-                    .map(ThreadReplayEntry::Turn)
-                    .collect::<Vec<_>>(),
+                snapshot.turns.iter().cloned().map(ThreadReplayEntry::Turn),
             );
         } else {
             for turn in snapshot.turns.clone() {
@@ -8437,13 +8422,14 @@ impl App {
 
     async fn oracle_list_remote_threads(&mut self) -> Result<Vec<OracleBrokerThreadEntry>> {
         #[cfg(test)]
-        if let Some(delay) = self
+        let delay = self
             .oracle_test_broker_hooks
             .lock()
             .expect("oracle test broker hooks")
             .list_thread_delay
-            .take()
-        {
+            .take();
+        #[cfg(test)]
+        if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
         #[cfg(test)]
@@ -8453,11 +8439,12 @@ impl App {
                 .oracle_test_broker_hooks
                 .lock()
                 .expect("oracle test broker hooks");
-            hooks.list_thread_results.pop_front().map(|result| {
+            let result = hooks.list_thread_results.pop_front();
+            if result.is_some() {
                 hooks.list_thread_calls += 1;
                 hooks.list_thread_followup_sessions.push(followup_session);
-                result
-            })
+            }
+            result
         } {
             let mut remote_threads = result.map_err(|err| color_eyre::eyre::eyre!(err))?;
             remote_threads.sort_by(|a, b| {
@@ -8517,13 +8504,14 @@ impl App {
         let timeout = self.oracle_remote_thread_mutation_timeout();
         match tokio::time::timeout(timeout, async {
             #[cfg(test)]
-            if let Some(delay) = self
+            let delay = self
                 .oracle_test_broker_hooks
                 .lock()
                 .expect("oracle test broker hooks")
                 .new_thread_delay
-                .take()
-            {
+                .take();
+            #[cfg(test)]
+            if let Some(delay) = delay {
                 tokio::time::sleep(delay).await;
             }
             #[cfg(test)]
@@ -8535,11 +8523,12 @@ impl App {
                     .oracle_test_broker_hooks
                     .lock()
                     .expect("oracle test broker hooks");
-                hooks.new_thread_results.pop_front().map(|result| {
+                let result = hooks.new_thread_results.pop_front();
+                if result.is_some() {
                     hooks.new_thread_calls += 1;
                     hooks.new_thread_followup_sessions.push(followup_session);
-                    result
-                })
+                }
+                result
             } {
                 return result.map_err(|err| color_eyre::eyre::eyre!(err));
             }
@@ -8581,13 +8570,14 @@ impl App {
         let timeout = self.oracle_remote_thread_mutation_timeout();
         match tokio::time::timeout(timeout, async {
             #[cfg(test)]
-            if let Some(delay) = self
+            let delay = self
                 .oracle_test_broker_hooks
                 .lock()
                 .expect("oracle test broker hooks")
                 .attach_thread_delay
-                .take()
-            {
+                .take();
+            #[cfg(test)]
+            if let Some(delay) = delay {
                 tokio::time::sleep(delay).await;
             }
             #[cfg(test)]
@@ -8599,11 +8589,12 @@ impl App {
                     .lock()
                     .expect("oracle test broker hooks");
                 let conversation_id_for_log = conversation_id.clone();
-                hooks.attach_thread_results.pop_front().map(|result| {
+                let result = hooks.attach_thread_results.pop_front();
+                if result.is_some() {
                     hooks.attach_thread_calls.push(conversation_id_for_log);
                     hooks.attach_thread_followup_sessions.push(followup_session);
-                    result
-                })
+                }
+                result
             } {
                 return result.map_err(|err| color_eyre::eyre::eyre!(err));
             }
@@ -8656,12 +8647,13 @@ impl App {
                 .oracle_test_broker_hooks
                 .lock()
                 .expect("oracle test broker hooks");
-            hooks.thread_history_results.pop_front().map(|result| {
+            let result = hooks.thread_history_results.pop_front();
+            if result.is_some() {
                 hooks
                     .thread_history_followup_sessions
                     .push(followup_session);
-                result
-            })
+            }
+            result
         } {
             let response = result.map_err(|err| color_eyre::eyre::eyre!(err))?;
             if response.conversation_id.as_deref() != Some(conversation_id.as_str()) {
@@ -8815,7 +8807,6 @@ impl App {
                 name: format!("Attached: {}", self.oracle_picker_thread_title(thread_id)),
                 is_current,
                 actions: vec![Box::new({
-                    let thread_id = thread_id;
                     move |tx| tx.send(AppEvent::SelectAgentThread(thread_id))
                 })],
                 dismiss_on_select: true,
@@ -9113,9 +9104,8 @@ impl App {
                 anchor_thread_id,
             )
             .await
-            .map_err(|err| {
+            .inspect_err(|_| {
                 self.oracle_state = previous_oracle_state.clone();
-                err
             })?;
         if remote.conversation_id.as_deref() != Some(conversation_id.as_str()) {
             self.oracle_state = previous_oracle_state.clone();
@@ -9834,7 +9824,7 @@ impl App {
                     ThreadReplayEntry::Turn(turn) => self
                         .chat_widget
                         .replay_thread_turns(vec![turn], ReplayKind::ThreadSnapshot),
-                    ThreadReplayEntry::Event(event) => self.handle_thread_event_replay(event),
+                    ThreadReplayEntry::Event(event) => self.handle_thread_event_replay(*event),
                 }
             }
         } else {
@@ -16064,16 +16054,17 @@ guardian_approval = true
         )
         .await?;
 
-        let hooks = app
-            .oracle_test_broker_hooks
-            .lock()
-            .expect("oracle test broker hooks");
-        assert!(hooks.attach_thread_calls.is_empty());
-        assert_eq!(
-            hooks.thread_history_followup_sessions,
-            vec![Some("runtime-root".to_string())]
-        );
-        drop(hooks);
+        {
+            let hooks = app
+                .oracle_test_broker_hooks
+                .lock()
+                .expect("oracle test broker hooks");
+            assert!(hooks.attach_thread_calls.is_empty());
+            assert_eq!(
+                hooks.thread_history_followup_sessions,
+                vec![Some("runtime-root".to_string())]
+            );
+        }
 
         assert_eq!(app.oracle_state.oracle_thread_id, Some(thread_id));
         let channel = app
@@ -16363,16 +16354,17 @@ guardian_approval = true
             .get(&thread_id)
             .expect("oracle binding");
         assert_eq!(binding.conversation_id.as_deref(), Some("remote-7"));
-        let hooks = app
-            .oracle_test_broker_hooks
-            .lock()
-            .expect("oracle test broker hooks");
-        assert_eq!(hooks.attach_thread_calls, vec!["remote-7".to_string()]);
-        assert_eq!(
-            hooks.thread_history_followup_sessions,
-            vec![Some("runtime-7".to_string())]
-        );
-        drop(hooks);
+        {
+            let hooks = app
+                .oracle_test_broker_hooks
+                .lock()
+                .expect("oracle test broker hooks");
+            assert_eq!(hooks.attach_thread_calls, vec!["remote-7".to_string()]);
+            assert_eq!(
+                hooks.thread_history_followup_sessions,
+                vec![Some("runtime-7".to_string())]
+            );
+        }
 
         let channel = app
             .thread_event_channels
@@ -16429,16 +16421,17 @@ guardian_approval = true
         .await?;
 
         let thread_id = app.oracle_state.oracle_thread_id.expect("oracle thread");
-        let hooks = app
-            .oracle_test_broker_hooks
-            .lock()
-            .expect("oracle test broker hooks");
-        assert_eq!(hooks.attach_thread_calls, vec!["remote-7".to_string()]);
-        assert_eq!(
-            hooks.thread_history_followup_sessions,
-            vec![Some("runtime-7".to_string())]
-        );
-        drop(hooks);
+        {
+            let hooks = app
+                .oracle_test_broker_hooks
+                .lock()
+                .expect("oracle test broker hooks");
+            assert_eq!(hooks.attach_thread_calls, vec!["remote-7".to_string()]);
+            assert_eq!(
+                hooks.thread_history_followup_sessions,
+                vec![Some("runtime-7".to_string())]
+            );
+        }
         let channel = app
             .thread_event_channels
             .get(&thread_id)
@@ -24629,8 +24622,12 @@ guardian_approval = true
         );
         assert_matches!(
             &replay_entries[1],
-            ThreadReplayEntry::Event(ThreadBufferedEvent::OracleWorkflowEvent(event))
-                if event.title == "Oracle delegated work to the orchestrator."
+            ThreadReplayEntry::Event(event)
+                if matches!(
+                    event.as_ref(),
+                    ThreadBufferedEvent::OracleWorkflowEvent(workflow_event)
+                        if workflow_event.title == "Oracle delegated work to the orchestrator."
+                )
         );
         assert_matches!(
             &replay_entries[2],

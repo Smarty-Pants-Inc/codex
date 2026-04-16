@@ -513,9 +513,8 @@ impl OracleBrokerClient {
                     return Err("Oracle broker closed before replying".to_string());
                 }
             };
-            parse_success_response::<OracleBrokerResponse>(value).map_err(|error| {
+            parse_success_response::<OracleBrokerResponse>(value).inspect_err(|_| {
                 self.mark_transport_unavailable();
-                error
             })
         };
         let recovery_result = await_recoverable_supervisor_response(
@@ -600,10 +599,9 @@ impl OracleBrokerClient {
                 return Err("Oracle broker closed before replying".to_string());
             }
         };
-        parse_success_field_response::<Vec<OracleBrokerThreadEntry>>(value, "threads").map_err(
-            |error| {
+        parse_success_field_response::<Vec<OracleBrokerThreadEntry>>(value, "threads").inspect_err(
+            |_| {
                 self.mark_transport_unavailable();
-                error
             },
         )
     }
@@ -640,9 +638,8 @@ impl OracleBrokerClient {
                 return Err("Oracle broker closed before replying".to_string());
             }
         };
-        decode_thread_open_envelope(value).map_err(|error| {
+        decode_thread_open_envelope(value).inspect_err(|_| {
             self.mark_transport_unavailable();
-            error
         })
     }
 
@@ -682,9 +679,8 @@ impl OracleBrokerClient {
                 return Err("Oracle broker closed before replying".to_string());
             }
         };
-        decode_thread_open_envelope(value).map_err(|error| {
+        decode_thread_open_envelope(value).inspect_err(|_| {
             self.mark_transport_unavailable();
-            error
         })
     }
 
@@ -724,9 +720,8 @@ impl OracleBrokerClient {
                 return Err("Oracle broker closed before replying".to_string());
             }
         };
-        decode_thread_history_envelope(value).map_err(|error| {
+        decode_thread_history_envelope(value).inspect_err(|_| {
             self.mark_transport_unavailable();
-            error
         })
     }
 
@@ -970,7 +965,7 @@ fn format_oracle_broker_unexpected_exit_message(
         .try_wait()
         .ok()
         .flatten()
-        .map(|status| format_oracle_broker_exit_status(&status));
+        .map(format_oracle_broker_exit_status);
     let stderr_excerpt = stderr_tail
         .lock()
         .ok()
@@ -979,7 +974,7 @@ fn format_oracle_broker_unexpected_exit_message(
     format_oracle_broker_unexpected_exit_message_parts(exit_status, &stderr_excerpt)
 }
 
-fn format_oracle_broker_exit_status(status: &std::process::ExitStatus) -> String {
+fn format_oracle_broker_exit_status(status: std::process::ExitStatus) -> String {
     if let Some(code) = status.code() {
         return format!("exit code {code}");
     }

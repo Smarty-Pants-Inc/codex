@@ -100,7 +100,7 @@ model_provider = "ollama"
                         if chunk_text.contains("Use ↑/↓ to move, press enter to confirm") {
                             last_nux_seen_at = Some(tokio::time::Instant::now());
                             if last_nux_ack_at
-                                .map_or(true, |instant| instant.elapsed() >= Duration::from_millis(500))
+                                .is_none_or(|instant| instant.elapsed() >= Duration::from_millis(500))
                             {
                                 last_nux_ack_at = Some(tokio::time::Instant::now());
                                 let _ = writer_tx.send(b"\r".to_vec()).await;
@@ -108,7 +108,7 @@ model_provider = "ollama"
                         }
 
                         let startup_nux_settled = last_nux_seen_at
-                            .map_or(true, |instant| instant.elapsed() >= Duration::from_secs(1));
+                            .is_none_or(|instant| instant.elapsed() >= Duration::from_secs(1));
 
                         if answered_cursor_query
                             && !sent_command
@@ -140,7 +140,7 @@ model_provider = "ollama"
                 },
                 _ = tokio::time::sleep(Duration::from_millis(150)) => {
                     let startup_nux_settled = last_nux_seen_at
-                        .map_or(true, |instant| instant.elapsed() >= Duration::from_secs(1));
+                        .is_none_or(|instant| instant.elapsed() >= Duration::from_secs(1));
 
                     if !sent_command
                         && startup.elapsed() >= Duration::from_secs(2)

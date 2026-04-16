@@ -615,7 +615,7 @@ async fn native_oracle_attach_and_pro_extended_roundtrip() -> Result<()> {
                         if chunk_text.contains("Use ↑/↓ to move, press enter to confirm") {
                             last_nux_seen_at = Some(tokio::time::Instant::now());
                             if last_nux_ack_at
-                                .map_or(true, |instant| instant.elapsed() >= Duration::from_millis(500))
+                                .is_none_or(|instant| instant.elapsed() >= Duration::from_millis(500))
                             {
                                 last_nux_ack_at = Some(tokio::time::Instant::now());
                                 let _ = writer_tx.send(b"\r".to_vec()).await;
@@ -678,7 +678,7 @@ async fn native_oracle_attach_and_pro_extended_roundtrip() -> Result<()> {
 
                     let now = tokio::time::Instant::now();
                     let startup_nux_settled = last_nux_seen_at
-                        .map_or(true, |instant| instant.elapsed() >= Duration::from_secs(1));
+                        .is_none_or(|instant| instant.elapsed() >= Duration::from_secs(1));
 
                     if !sent_attach
                         && startup_nux_settled
@@ -911,7 +911,7 @@ async fn native_oracle_attach_fail_closed_for_missing_project_thread() -> Result
                         if chunk_text.contains("Use ↑/↓ to move, press enter to confirm") {
                             last_nux_seen_at = Some(tokio::time::Instant::now());
                             if last_nux_ack_at
-                                .map_or(true, |instant| instant.elapsed() >= Duration::from_millis(500))
+                                .is_none_or(|instant| instant.elapsed() >= Duration::from_millis(500))
                             {
                                 last_nux_ack_at = Some(tokio::time::Instant::now());
                                 let _ = writer_tx.send(b"\r".to_vec()).await;
@@ -938,17 +938,15 @@ async fn native_oracle_attach_fail_closed_for_missing_project_thread() -> Result
                 _ = loop_tick.tick() => {
                     if session_log_path.is_file()
                         && let Ok(log) = fs::read_to_string(&session_log_path)
+                        && startup_seen_at.is_none()
+                        && (log.contains("\"type\":\"list_skills\"")
+                            || log.contains("\"variant\":\"PluginMentionsLoaded"))
                     {
-                        if startup_seen_at.is_none()
-                            && (log.contains("\"type\":\"list_skills\"")
-                                || log.contains("\"variant\":\"PluginMentionsLoaded"))
-                        {
-                            startup_seen_at = Some(tokio::time::Instant::now());
-                        }
+                        startup_seen_at = Some(tokio::time::Instant::now());
                     }
 
                     let startup_nux_settled = last_nux_seen_at
-                        .map_or(true, |instant| instant.elapsed() >= Duration::from_secs(1));
+                        .is_none_or(|instant| instant.elapsed() >= Duration::from_secs(1));
 
                     if !sent_attach
                         && answered_cursor_query
@@ -1175,7 +1173,7 @@ async fn native_oracle_interrupt_recovery_roundtrip() -> Result<()> {
                         if chunk_text.contains("Use ↑/↓ to move, press enter to confirm") {
                             last_nux_seen_at = Some(tokio::time::Instant::now());
                             if last_nux_ack_at
-                                .map_or(true, |instant| instant.elapsed() >= Duration::from_millis(500))
+                                .is_none_or(|instant| instant.elapsed() >= Duration::from_millis(500))
                             {
                                 last_nux_ack_at = Some(tokio::time::Instant::now());
                                 let _ = writer_tx.send(b"\r".to_vec()).await;
@@ -1266,11 +1264,10 @@ async fn native_oracle_interrupt_recovery_roundtrip() -> Result<()> {
                     }
 
                     let startup_nux_settled = last_nux_seen_at
-                        .map_or(true, |instant| instant.elapsed() >= Duration::from_secs(1));
+                        .is_none_or(|instant| instant.elapsed() >= Duration::from_secs(1));
                     if !answered_cursor_query
                         || !startup_nux_settled
-                        || !startup_seen_at
-                            .is_some_and(|instant| instant.elapsed() >= Duration::from_secs(2))
+                        || startup_seen_at.is_none_or(|instant| instant.elapsed() < Duration::from_secs(2))
                     {
                         continue;
                     }
@@ -1764,8 +1761,7 @@ fn oracle_history_import_log_proof(
         .context("session log did not record oracle_history_import")?;
     let attach_index = oracle_attach_import_indices(&entries, conversation_id)
         .into_iter()
-        .filter(|index| *index < import_index)
-        .next_back()
+        .rfind(|index| *index < import_index)
         .context("session log did not record ConfigureOracleMode attach --import-history before oracle_history_import")?;
     let user_turn_index = first_user_turn_index_after(&entries, import_index, token).context(
         "session log did not record the token-bearing user_turn after oracle_history_import",
@@ -2016,7 +2012,7 @@ async fn native_oracle_attach_with_import_history_roundtrip() -> Result<()> {
                         if chunk_text.contains("Use ↑/↓ to move, press enter to confirm") {
                             last_nux_seen_at = Some(tokio::time::Instant::now());
                             if last_nux_ack_at
-                                .map_or(true, |instant| instant.elapsed() >= Duration::from_millis(500))
+                                .is_none_or(|instant| instant.elapsed() >= Duration::from_millis(500))
                             {
                                 last_nux_ack_at = Some(tokio::time::Instant::now());
                                 let _ = writer_tx.send(b"\r".to_vec()).await;
@@ -2076,7 +2072,7 @@ async fn native_oracle_attach_with_import_history_roundtrip() -> Result<()> {
                     }
 
                     let startup_nux_settled = last_nux_seen_at
-                        .map_or(true, |instant| instant.elapsed() >= Duration::from_secs(1));
+                        .is_none_or(|instant| instant.elapsed() >= Duration::from_secs(1));
 
                     if !sent_attach
                         && answered_cursor_query
@@ -2386,7 +2382,7 @@ async fn native_oracle_model_matrix_roundtrip() -> Result<()> {
                         if chunk_text.contains("Use ↑/↓ to move, press enter to confirm") {
                             last_nux_seen_at = Some(tokio::time::Instant::now());
                             if last_nux_ack_at
-                                .map_or(true, |instant| instant.elapsed() >= Duration::from_millis(500))
+                                .is_none_or(|instant| instant.elapsed() >= Duration::from_millis(500))
                             {
                                 last_nux_ack_at = Some(tokio::time::Instant::now());
                                 let _ = writer_tx.send(b"\r".to_vec()).await;
@@ -2463,11 +2459,10 @@ async fn native_oracle_model_matrix_roundtrip() -> Result<()> {
                     }
 
                     let startup_nux_settled = last_nux_seen_at
-                        .map_or(true, |instant| instant.elapsed() >= Duration::from_secs(1));
+                        .is_none_or(|instant| instant.elapsed() >= Duration::from_secs(1));
                     if !answered_cursor_query
                         || !startup_nux_settled
-                        || !startup_seen_at
-                            .is_some_and(|instant| instant.elapsed() >= Duration::from_secs(2))
+                        || startup_seen_at.is_none_or(|instant| instant.elapsed() < Duration::from_secs(2))
                     {
                         continue;
                     }
@@ -2777,7 +2772,7 @@ async fn native_oracle_file_upload_roundtrip() -> Result<()> {
                         if chunk_text.contains("Use ↑/↓ to move, press enter to confirm") {
                             last_nux_seen_at = Some(tokio::time::Instant::now());
                             if last_nux_ack_at
-                                .map_or(true, |instant| instant.elapsed() >= Duration::from_millis(500))
+                                .is_none_or(|instant| instant.elapsed() >= Duration::from_millis(500))
                             {
                                 last_nux_ack_at = Some(tokio::time::Instant::now());
                                 let _ = writer_tx.send(b"\r".to_vec()).await;
@@ -2825,7 +2820,7 @@ async fn native_oracle_file_upload_roundtrip() -> Result<()> {
                     }
 
                     let startup_nux_settled = last_nux_seen_at
-                        .map_or(true, |instant| instant.elapsed() >= Duration::from_secs(1));
+                        .is_none_or(|instant| instant.elapsed() >= Duration::from_secs(1));
 
                     if !sent_attach
                         && answered_cursor_query
@@ -3073,7 +3068,7 @@ async fn native_oracle_multi_file_upload_roundtrip() -> Result<()> {
                         if chunk_text.contains("Use ↑/↓ to move, press enter to confirm") {
                             last_nux_seen_at = Some(tokio::time::Instant::now());
                             if last_nux_ack_at
-                                .map_or(true, |instant| instant.elapsed() >= Duration::from_millis(500))
+                                .is_none_or(|instant| instant.elapsed() >= Duration::from_millis(500))
                             {
                                 last_nux_ack_at = Some(tokio::time::Instant::now());
                                 let _ = writer_tx.send(b"\r".to_vec()).await;
@@ -3125,7 +3120,7 @@ async fn native_oracle_multi_file_upload_roundtrip() -> Result<()> {
                     }
 
                     let startup_nux_settled = last_nux_seen_at
-                        .map_or(true, |instant| instant.elapsed() >= Duration::from_secs(1));
+                        .is_none_or(|instant| instant.elapsed() >= Duration::from_secs(1));
 
                     if !sent_attach
                         && answered_cursor_query
@@ -3367,7 +3362,7 @@ async fn native_oracle_zip_upload_roundtrip() -> Result<()> {
                         if chunk_text.contains("Use ↑/↓ to move, press enter to confirm") {
                             last_nux_seen_at = Some(tokio::time::Instant::now());
                             if last_nux_ack_at
-                                .map_or(true, |instant| instant.elapsed() >= Duration::from_millis(500))
+                                .is_none_or(|instant| instant.elapsed() >= Duration::from_millis(500))
                             {
                                 last_nux_ack_at = Some(tokio::time::Instant::now());
                                 let _ = writer_tx.send(b"\r".to_vec()).await;
@@ -3419,7 +3414,7 @@ async fn native_oracle_zip_upload_roundtrip() -> Result<()> {
                     }
 
                     let startup_nux_settled = last_nux_seen_at
-                        .map_or(true, |instant| instant.elapsed() >= Duration::from_secs(1));
+                        .is_none_or(|instant| instant.elapsed() >= Duration::from_secs(1));
 
                     if !sent_attach
                         && answered_cursor_query

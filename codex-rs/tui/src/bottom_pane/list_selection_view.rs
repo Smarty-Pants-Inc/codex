@@ -94,11 +94,13 @@ pub(crate) fn side_by_side_layout_widths(
 /// One selectable item in the generic selection list.
 pub(crate) type SelectionAction = Box<dyn Fn(&AppEventSender) + Send + Sync>;
 
+type SelectionShortcutAction = dyn Fn(&mut ListSelectionView, &AppEventSender) + Send + Sync;
+
 /// One non-list keyboard shortcut handled by a selection popup.
 pub(crate) struct SelectionShortcut {
     pub shortcuts: Vec<KeyBinding>,
     pub active_while_searching: bool,
-    pub action: Box<dyn Fn(&mut ListSelectionView, &AppEventSender) + Send + Sync>,
+    pub action: Box<SelectionShortcutAction>,
 }
 
 /// Callback invoked whenever the highlighted item changes (arrow keys, search
