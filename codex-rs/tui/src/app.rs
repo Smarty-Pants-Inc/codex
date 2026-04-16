@@ -3085,7 +3085,8 @@ impl App {
         &self,
         anchor_thread_id: Option<ThreadId>,
     ) -> Option<String> {
-        anchor_thread_id.and_then(|thread_id| self.oracle_control_followup_session_for_thread(thread_id))
+        anchor_thread_id
+            .and_then(|thread_id| self.oracle_control_followup_session_for_thread(thread_id))
     }
 
     fn preferred_oracle_followup_session(&self) -> Option<String> {
@@ -4635,7 +4636,11 @@ impl App {
     }
 
     fn oracle_thread_history_limit(&self) -> Option<usize> {
-        Some(100)
+        std::env::var("CODEX_ORACLE_THREAD_HISTORY_LIMIT")
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .or(Some(100))
     }
 
     fn oracle_thread_history_requires_reattach(error: &str) -> bool {
@@ -6923,29 +6928,17 @@ impl App {
                     Ok(binding) => {
                         let thread_id = binding.thread_id();
                         if import_history {
-                            let history_response = match &binding {
-                                OracleAttachThreadBinding::AttachedRemote { history, .. }
-                                    if !history.is_empty() =>
-                                {
-                                    Some(OracleBrokerThreadHistoryResponse {
-                                        session_id: None,
-                                        title: String::new(),
-                                        conversation_id: Some(conversation_id.clone()),
-                                        url: None,
-                                        history: history.clone(),
-                                        history_window: None,
-                                    })
-                                }
-                                _ => match self.oracle_fetch_remote_thread_history(thread_id).await
-                                {
-                                    Ok(history) => Some(history),
-                                    Err(err) => {
-                                        self.chat_widget.add_error_message(format!(
+                            let history_response = match self
+                                .oracle_fetch_remote_thread_history(thread_id)
+                                .await
+                            {
+                                Ok(history) => Some(history),
+                                Err(err) => {
+                                    self.chat_widget.add_error_message(format!(
                                             "Attached Oracle thread on {thread_id}, but failed to fetch remote history: {err}"
                                         ));
-                                        None
-                                    }
-                                },
+                                    None
+                                }
                             };
                             if let Some(history_response) = history_response {
                                 match self
@@ -6958,6 +6951,24 @@ impl App {
                                     .await
                                 {
                                     Ok(outcome) => {
+                                        let (outcome_label, message_count) = match outcome {
+                                            OracleHistoryImportOutcome::Imported {
+                                                message_count,
+                                            } => ("imported", Some(message_count)),
+                                            OracleHistoryImportOutcome::NoNewMessages => {
+                                                ("no_new_messages", None)
+                                            }
+                                            OracleHistoryImportOutcome::SkippedToAvoidConflict => {
+                                                ("skipped_to_avoid_conflict", None)
+                                            }
+                                        };
+                                        crate::session_log::log_oracle_history_import(
+                                            thread_id,
+                                            conversation_id.as_str(),
+                                            outcome_label,
+                                            message_count,
+                                            history_response.history_window.as_ref(),
+                                        );
                                         let status = Self::oracle_attach_history_message(
                                             &binding,
                                             outcome,
@@ -15445,7 +15456,11 @@ guardian_approval = true
     async fn create_oracle_thread_binding_updates_local_state_from_remote_metadata() -> Result<()> {
         let mut app = make_test_app().await;
         let root_thread_id = app.create_visible_oracle_thread().await;
-        app.set_oracle_thread_broker_session(root_thread_id, Some("runtime-root".to_string()), true);
+        app.set_oracle_thread_broker_session(
+            root_thread_id,
+            Some("runtime-root".to_string()),
+            true,
+        );
         queue_test_oracle_new_thread_result(
             &app,
             Ok(OracleBrokerThreadOpenResponse {
@@ -15619,7 +15634,11 @@ guardian_approval = true
     -> Result<()> {
         let mut app = make_test_app().await;
         let root_thread_id = app.create_visible_oracle_thread().await;
-        app.set_oracle_thread_broker_session(root_thread_id, Some("runtime-root".to_string()), true);
+        app.set_oracle_thread_broker_session(
+            root_thread_id,
+            Some("runtime-root".to_string()),
+            true,
+        );
         queue_test_oracle_new_thread_result(
             &app,
             Ok(OracleBrokerThreadOpenResponse {
@@ -15883,7 +15902,7 @@ guardian_approval = true
     -> Result<()> {
         let mut app = make_test_app().await;
         let thread_id = app.create_visible_oracle_thread().await;
-        app.set_oracle_thread_broker_session_id(thread_id, Some("runtime-root".to_string()));
+        app.set_oracle_thread_broker_session(thread_id, Some("runtime-root".to_string()), true);
         app.set_oracle_remote_metadata(
             thread_id,
             Some("attached-1".to_string()),
@@ -16090,8 +16109,8 @@ guardian_approval = true
     }
 
     #[tokio::test]
-    async fn attach_oracle_thread_binding_rejects_mismatched_remote_thread_url_scope()
-    -> Result<()> {
+    async fn attach_oracle_thread_binding_rejects_mismatched_remote_thread_url_scope() -> Result<()>
+    {
         let mut app = make_test_app().await;
         queue_test_oracle_attach_thread_result(
             &app,
@@ -16117,7 +16136,7 @@ guardian_approval = true
 
     #[tokio::test]
     async fn attach_oracle_thread_binding_restores_previous_active_binding_when_remote_attach_fails()
-    {
+     {
         let mut app = make_test_app().await;
         let previous_thread_id = app.create_visible_oracle_thread().await;
         let attached_thread_id = app.create_visible_oracle_thread().await;
@@ -16145,14 +16164,17 @@ guardian_approval = true
             "Timed out after 50 ms while attaching a remote Oracle thread."
         );
         assert_eq!(app.oracle_state.oracle_thread_id, Some(previous_thread_id));
-        assert_eq!(app.oracle_state.last_status.as_deref(), Some("Before attach"));
+        assert_eq!(
+            app.oracle_state.last_status.as_deref(),
+            Some("Before attach")
+        );
     }
 
     #[tokio::test]
-    async fn oracle_attach_command_with_import_history_seeds_empty_local_transcript() -> Result<()>
-    {
+    async fn oracle_attach_command_with_import_history_ignores_unbounded_inline_attach_history()
+    -> Result<()> {
         let mut app = make_test_app().await;
-        let remote_history = vec![
+        let inline_attach_history = vec![
             OracleBrokerThreadHistoryEntry {
                 role: "user".to_string(),
                 text: "Earlier question".to_string(),
@@ -16166,11 +16188,37 @@ guardian_approval = true
                 text: "Later question".to_string(),
             },
         ];
+        let fetched_history = vec![
+            OracleBrokerThreadHistoryEntry {
+                role: "user".to_string(),
+                text: "Earlier question".to_string(),
+            },
+            OracleBrokerThreadHistoryEntry {
+                role: "assistant".to_string(),
+                text: "Earlier answer".to_string(),
+            },
+        ];
         queue_test_oracle_attach_thread_result(
             &app,
             Ok(OracleBrokerThreadOpenResponse {
-                history: remote_history.clone(),
+                history: inline_attach_history,
                 ..test_oracle_thread_open_response("runtime-7", "Remote Thread", "remote-7")
+            }),
+        );
+        queue_test_oracle_thread_history_result(
+            &app,
+            Ok(OracleBrokerThreadHistoryResponse {
+                session_id: Some("runtime-7".to_string()),
+                title: "Remote Thread".to_string(),
+                conversation_id: Some("remote-7".to_string()),
+                url: Some("https://chatgpt.com/c/remote-7".to_string()),
+                history_window: Some(OracleBrokerThreadHistoryWindow {
+                    limit: 2,
+                    returned_count: 2,
+                    total_count: 3,
+                    truncated: true,
+                }),
+                history: fetched_history,
             }),
         );
 
@@ -16197,7 +16245,10 @@ guardian_approval = true
             .lock()
             .expect("oracle test broker hooks");
         assert_eq!(hooks.attach_thread_calls, vec!["remote-7".to_string()]);
-        assert!(hooks.thread_history_followup_sessions.is_empty());
+        assert_eq!(
+            hooks.thread_history_followup_sessions,
+            vec![Some("runtime-7".to_string())]
+        );
         drop(hooks);
 
         let channel = app
@@ -16205,17 +16256,13 @@ guardian_approval = true
             .get(&thread_id)
             .expect("oracle thread channel");
         let store = channel.store.lock().await;
-        assert_eq!(store.turns.len(), 2);
+        assert_eq!(store.turns.len(), 1);
         assert!(matches!(
             store.turns[0].items.as_slice(),
             [
                 ThreadItem::UserMessage { .. },
                 ThreadItem::AgentMessage { text, .. }
             ] if text == "Earlier answer"
-        ));
-        assert!(matches!(
-            store.turns[1].items.as_slice(),
-            [ThreadItem::UserMessage { .. }]
         ));
         Ok(())
     }

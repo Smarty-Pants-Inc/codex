@@ -135,6 +135,20 @@ fn oracle_run_completed_value(
     })
 }
 
+fn oracle_history_window_value(
+    history_window: Option<&crate::oracle_broker::OracleBrokerThreadHistoryWindow>,
+) -> serde_json::Value {
+    let Some(history_window) = history_window else {
+        return serde_json::Value::Null;
+    };
+    json!({
+        "limit": history_window.limit,
+        "returned_count": history_window.returned_count,
+        "total_count": history_window.total_count,
+        "truncated": history_window.truncated,
+    })
+}
+
 fn oracle_run_failed_value(
     run_id: &str,
     visible_thread_id: codex_protocol::ThreadId,
@@ -186,6 +200,22 @@ fn inbound_app_event_value(event: &AppEvent) -> Option<serde_json::Value> {
             "kind": "file_search_result",
             "query": query,
             "matches": matches.len(),
+        })),
+        AppEvent::ConfigureOracleMode { raw_command } => Some(json!({
+            "ts": now_ts(),
+            "dir": "to_tui",
+            "kind": "app_event",
+            "variant": "ConfigureOracleMode",
+            "payload": {
+                "raw_command": raw_command,
+                "conversation_id": raw_command
+                    .split_whitespace()
+                    .find_map(|token| token.split("/c/").nth(1))
+                    .map(|value| value.trim_end_matches('/').to_string()),
+                "import_history": raw_command
+                    .split_whitespace()
+                    .any(|token| token == "--import-history"),
+            },
         })),
         AppEvent::OracleRunCompleted { .. } | AppEvent::OracleRunFailed { .. } => None,
         AppEvent::OracleCheckpoint {
@@ -266,6 +296,31 @@ pub(crate) fn log_oracle_run_completed(result: &crate::oracle_supervisor::Oracle
         return;
     }
     LOGGER.write_json_line(oracle_run_completed_value(result));
+}
+
+pub(crate) fn log_oracle_history_import(
+    thread_id: codex_protocol::ThreadId,
+    conversation_id: &str,
+    outcome: &str,
+    message_count: Option<usize>,
+    history_window: Option<&crate::oracle_broker::OracleBrokerThreadHistoryWindow>,
+) {
+    if !LOGGER.is_enabled() {
+        return;
+    }
+    let value = json!({
+        "ts": now_ts(),
+        "dir": "to_tui",
+        "kind": "oracle_history_import",
+        "payload": {
+            "thread_id": thread_id.to_string(),
+            "conversation_id": conversation_id,
+            "outcome": outcome,
+            "message_count": message_count,
+            "history_window": oracle_history_window_value(history_window),
+        }
+    });
+    LOGGER.write_json_line(value);
 }
 
 pub(crate) fn log_oracle_run_failed(

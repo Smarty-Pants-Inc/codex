@@ -111,6 +111,7 @@ See `codex-rs/tui/styles.md`.
 - Keep browser-shape assumptions isolated to broker/protocol seams rather than spreading them through general TUI state code.
 - Add targeted tests for alternate payload shapes, stale-session repair, mismatched conversation ids, and other drift-related failure modes when changing Oracle integration behavior.
 - For live Oracle/Codex framework testing on this machine, stay in the Oracle project scope and keep the browser hidden/backgrounded. A visible Chrome launch is a regression unless explicitly debugging.
+- For Oracle testing on this machine, default to the non-Pro thinking path unless the test is explicitly about Pro behavior. Use Pro only for deliberate Pro-specific proofs such as standard vs extended model-selection verification.
 
 ## Tests
 
