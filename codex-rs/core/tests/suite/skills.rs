@@ -23,6 +23,7 @@ use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
+use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use std::fs;
 use std::path::Path;
@@ -201,6 +202,93 @@ async fn list_skills_includes_repo_and_home_skills_remote_aware() -> Result<()> 
     assert!(
         home_path.ends_with("/skills/home-demo/SKILL.md"),
         "unexpected home skill path: {home_path}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn new_thread_sees_home_skill_installed_after_cache_warmup() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mock = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_assistant_message("msg-1", "done"),
+            ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+
+    let test = test_codex().build(&server).await?;
+
+    write_home_skill(
+        test.codex_home_path(),
+        "late-home-skill",
+        "late-home-skill",
+        "installed after first thread",
+    )?;
+
+    let new_thread = test
+        .thread_manager
+        .start_thread(test.config.clone())
+        .await?;
+    let skill_path = test
+        .config
+        .codex_home
+        .join("skills/late-home-skill/SKILL.md")
+        .canonicalize()
+        .unwrap_or_else(|_| {
+            test.config
+                .codex_home
+                .join("skills/late-home-skill/SKILL.md")
+        })
+        .to_path_buf();
+
+    new_thread
+        .thread
+        .submit(Op::UserTurn {
+            items: vec![
+                UserInput::Text {
+                    text: "please use $late-home-skill".to_string(),
+                    text_elements: Vec::new(),
+                },
+                UserInput::Skill {
+                    name: "late-home-skill".to_string(),
+                    path: skill_path.clone(),
+                },
+            ],
+            final_output_json_schema: None,
+            cwd: test.config.cwd.to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model: new_thread.session_configured.model.clone(),
+            effort: None,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await?;
+
+    wait_for_event(new_thread.thread.as_ref(), |event| {
+        matches!(event, codex_protocol::protocol::EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let request = mock.single_request();
+    let user_texts = request.message_input_texts("user");
+    let skill_path_str = skill_path.to_string_lossy();
+    assert!(
+        user_texts.iter().any(|text| {
+            text.contains("<skill>\n<name>late-home-skill</name>")
+                && text.contains("<path>")
+                && text.contains(skill_path_str.as_ref())
+        }),
+        "expected newly installed home skill in user input, got {user_texts:?}"
     );
 
     Ok(())

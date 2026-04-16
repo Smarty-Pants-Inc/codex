@@ -925,6 +925,9 @@ impl ThreadManagerState {
             }
             Some(_) | None => crate::file_watcher::WatchRegistration::default(),
         };
+        // SkillsManager caches by root/config shape, not current root contents.
+        // Refresh before thread spawn so warm processes pick up newly installed skills.
+        self.skills_manager.clear_cache();
         let CodexSpawnOk {
             codex, thread_id, ..
         } = Codex::spawn(CodexSpawnArgs {
