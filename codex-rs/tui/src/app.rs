@@ -4950,7 +4950,11 @@ impl App {
             let store = channel.store.lock().await;
             store.snapshot()
         };
-        let init = self.chatwidget_init_for_forked_or_resumed_thread(tui, self.config.clone());
+        let init = self.chatwidget_init_for_forked_or_resumed_thread(
+            tui,
+            self.config.clone(),
+            /*initial_user_message*/ None,
+        );
         self.replace_chat_widget(ChatWidget::new_with_app_event(init));
         self.reset_for_thread_switch(tui)?;
         self.replay_thread_snapshot(snapshot, /*resume_restored_queue*/ false);
