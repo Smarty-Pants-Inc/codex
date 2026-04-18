@@ -30,6 +30,8 @@ use crate::cwd_prompt::CwdPromptAction;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::split_command_string;
 use crate::exec_command::strip_bash_lc_and_escape;
+use crate::external_agent_config_migration_startup::ExternalAgentConfigMigrationStartupOutcome;
+use crate::external_agent_config_migration_startup::handle_external_agent_config_migration_prompt_if_needed;
 use crate::external_editor;
 use crate::file_search::FileSearchManager;
 use crate::history_cell;
@@ -123,6 +125,8 @@ use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::CodexErrorInfo as AppServerCodexErrorInfo;
 use codex_app_server_protocol::ConfigLayerSource;
+use codex_app_server_protocol::ConfigValueWriteParams;
+use codex_app_server_protocol::ConfigWriteResponse;
 use codex_app_server_protocol::FeedbackUploadParams;
 use codex_app_server_protocol::FeedbackUploadResponse;
 use codex_app_server_protocol::GetAccountRateLimitsResponse;
@@ -130,6 +134,7 @@ use codex_app_server_protocol::ListMcpServerStatusParams;
 use codex_app_server_protocol::ListMcpServerStatusResponse;
 use codex_app_server_protocol::McpServerStatus;
 use codex_app_server_protocol::McpServerStatusDetail;
+use codex_app_server_protocol::MergeStrategy;
 use codex_app_server_protocol::PluginInstallParams;
 use codex_app_server_protocol::PluginInstallResponse;
 use codex_app_server_protocol::PluginListParams;
@@ -1270,6 +1275,9 @@ pub(crate) struct App {
     oracle_broker: Option<(PathBuf, OracleBrokerClient)>,
     #[cfg(test)]
     oracle_test_broker_hooks: Arc<StdMutex<OracleTestBrokerHooks>>,
+    // Serialize plugin enablement writes per plugin so stale completions cannot
+    // overwrite a newer toggle from the popup.
+    pending_plugin_enabled_writes: HashMap<String, Option<bool>>,
 }
 
 #[derive(Default)]
@@ -2655,6 +2663,48 @@ impl App {
             Some("failed") | Some("blocked") | Some("error") => OracleWorkflowStatus::Failed,
             _ => fallback,
         }
+    }
+
+    fn set_plugin_enabled(
+        &mut self,
+        app_server: &AppServerSession,
+        cwd: PathBuf,
+        plugin_id: String,
+        enabled: bool,
+    ) {
+        if let Some(queued_enabled) = self.pending_plugin_enabled_writes.get_mut(&plugin_id) {
+            *queued_enabled = Some(enabled);
+            return;
+        }
+
+        self.pending_plugin_enabled_writes
+            .insert(plugin_id.clone(), None);
+        self.spawn_plugin_enabled_write(app_server, cwd, plugin_id, enabled);
+    }
+
+    fn spawn_plugin_enabled_write(
+        &mut self,
+        app_server: &AppServerSession,
+        cwd: PathBuf,
+        plugin_id: String,
+        enabled: bool,
+    ) {
+        let request_handle = app_server.request_handle();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let cwd_for_event = cwd.clone();
+            let plugin_id_for_event = plugin_id.clone();
+            let result = write_plugin_enabled(request_handle, plugin_id, enabled)
+                .await
+                .map(|_| ())
+                .map_err(|err| format!("Failed to update plugin config: {err}"));
+            app_event_tx.send(AppEvent::PluginEnabledSet {
+                cwd: cwd_for_event,
+                plugin_id: plugin_id_for_event,
+                enabled,
+                result,
+            });
+        });
     }
 
     fn oracle_workflow_status_for_action(
@@ -7629,6 +7679,7 @@ impl App {
                     if handled {
                         return Ok(true);
                     }
+                    return Ok(false);
                 }
                 if let Some(turn_id) = self.active_turn_id_for_thread(thread_id).await {
                     app_server.turn_interrupt(thread_id, turn_id).await?;
@@ -9965,6 +10016,7 @@ impl App {
         session_selection: SessionSelection,
         feedback: codex_feedback::CodexFeedback,
         is_first_run: bool,
+        entered_trust_nux: bool,
         should_prompt_windows_sandbox_nux_at_startup: bool,
         remote_app_server_url: Option<String>,
         remote_app_server_auth_token: Option<String>,
@@ -9982,6 +10034,38 @@ impl App {
 
         let harness_overrides =
             normalize_harness_overrides_for_cwd(harness_overrides, &config.cwd)?;
+        let external_agent_config_migration_outcome =
+            handle_external_agent_config_migration_prompt_if_needed(
+                tui,
+                &mut app_server,
+                &mut config,
+                &cli_kv_overrides,
+                &harness_overrides,
+                entered_trust_nux,
+            )
+            .await?;
+        let external_agent_config_migration_message = match external_agent_config_migration_outcome
+        {
+            ExternalAgentConfigMigrationStartupOutcome::Continue { success_message } => {
+                success_message
+            }
+            ExternalAgentConfigMigrationStartupOutcome::ExitRequested => {
+                app_server
+                    .shutdown()
+                    .await
+                    .inspect_err(|err| {
+                        tracing::warn!("app-server shutdown failed: {err}");
+                    })
+                    .ok();
+                return Ok(AppExitInfo {
+                    token_usage: TokenUsage::default(),
+                    thread_id: None,
+                    thread_name: None,
+                    update_action: None,
+                    exit_reason: ExitReason::UserRequested,
+                });
+            }
+        };
         let bootstrap = app_server.bootstrap(&config).await?;
         let mut model = bootstrap.default_model;
         let available_models = bootstrap.available_models;
@@ -10152,6 +10236,9 @@ impl App {
                 (ChatWidget::new_with_app_event(init), Some(forked))
             }
         };
+        if let Some(message) = external_agent_config_migration_message {
+            chat_widget.add_info_message(message, /*hint*/ None);
+        }
 
         chat_widget
             .maybe_prompt_windows_sandbox_enable(should_prompt_windows_sandbox_nux_at_startup);
@@ -10209,6 +10296,7 @@ impl App {
             oracle_broker: None,
             #[cfg(test)]
             oracle_test_broker_hooks: Arc::new(StdMutex::new(OracleTestBrokerHooks::default())),
+            pending_plugin_enabled_writes: HashMap::new(),
         };
         if let Some(started) = initial_started_thread {
             app.enqueue_primary_thread_session(started.session, started.turns)
@@ -11023,6 +11111,13 @@ impl App {
             } => {
                 self.fetch_plugin_uninstall(app_server, cwd, plugin_id, plugin_display_name);
             }
+            AppEvent::SetPluginEnabled {
+                cwd,
+                plugin_id,
+                enabled,
+            } => {
+                self.set_plugin_enabled(app_server, cwd, plugin_id, enabled);
+            }
             AppEvent::PluginInstallLoaded {
                 cwd,
                 marketplace_path,
@@ -11053,11 +11148,52 @@ impl App {
                             app_server,
                             cwd,
                             PluginReadParams {
-                                marketplace_path,
+                                marketplace_path: Some(marketplace_path),
+                                remote_marketplace_name: None,
                                 plugin_name,
                             },
                         );
                     }
+                }
+            }
+            AppEvent::PluginEnabledSet {
+                cwd,
+                plugin_id,
+                enabled,
+                result,
+            } => {
+                let queued_enabled = self
+                    .pending_plugin_enabled_writes
+                    .get_mut(&plugin_id)
+                    .and_then(Option::take);
+                let should_apply_result = if let Some(queued_enabled) = queued_enabled
+                    && (result.is_err() || queued_enabled != enabled)
+                {
+                    self.spawn_plugin_enabled_write(
+                        app_server,
+                        cwd.clone(),
+                        plugin_id.clone(),
+                        queued_enabled,
+                    );
+                    false
+                } else {
+                    true
+                };
+                if should_apply_result {
+                    self.pending_plugin_enabled_writes.remove(&plugin_id);
+                    let update_succeeded = result.is_ok();
+                    if update_succeeded {
+                        if let Err(err) = self.refresh_in_memory_config_from_disk().await {
+                            tracing::warn!(
+                                error = %err,
+                                "failed to refresh config after plugin toggle"
+                            );
+                        }
+                        self.chat_widget.refresh_plugin_mentions();
+                        self.chat_widget.submit_op(AppCommand::reload_user_config());
+                    }
+                    self.chat_widget
+                        .on_plugin_enabled_set(cwd, plugin_id, enabled, result);
                 }
             }
             AppEvent::FetchMcpInventory => {
@@ -12792,7 +12928,6 @@ async fn fetch_plugins_list(
             request_id,
             params: PluginListParams {
                 cwds: Some(vec![cwd]),
-                force_remote_sync: false,
             },
         })
         .await
@@ -12830,9 +12965,9 @@ async fn fetch_plugin_install(
         .request_typed(ClientRequest::PluginInstall {
             request_id,
             params: PluginInstallParams {
-                marketplace_path,
+                marketplace_path: Some(marketplace_path),
+                remote_marketplace_name: None,
                 plugin_name,
-                force_remote_sync: false,
             },
         })
         .await
@@ -12847,13 +12982,31 @@ async fn fetch_plugin_uninstall(
     request_handle
         .request_typed(ClientRequest::PluginUninstall {
             request_id,
-            params: PluginUninstallParams {
-                plugin_id,
-                force_remote_sync: false,
-            },
+            params: PluginUninstallParams { plugin_id },
         })
         .await
         .wrap_err("plugin/uninstall failed in TUI")
+}
+
+async fn write_plugin_enabled(
+    request_handle: AppServerRequestHandle,
+    plugin_id: String,
+    enabled: bool,
+) -> Result<ConfigWriteResponse> {
+    let request_id = RequestId::String(format!("plugin-enable-{}", Uuid::new_v4()));
+    request_handle
+        .request_typed(ClientRequest::ConfigValueWrite {
+            request_id,
+            params: ConfigValueWriteParams {
+                key_path: format!("plugins.{plugin_id}"),
+                value: serde_json::json!({ "enabled": enabled }),
+                merge_strategy: MergeStrategy::Upsert,
+                file_path: None,
+                expected_version: None,
+            },
+        })
+        .await
+        .wrap_err("config/value/write failed while updating plugin enablement in TUI")
 }
 
 fn build_feedback_upload_params(
@@ -13049,19 +13202,18 @@ mod tests {
             marketplaces: vec![
                 PluginMarketplaceEntry {
                     name: "openai-bundled".to_string(),
-                    path: test_absolute_path("/marketplaces/openai-bundled"),
+                    path: Some(test_absolute_path("/marketplaces/openai-bundled")),
                     interface: None,
                     plugins: Vec::new(),
                 },
                 PluginMarketplaceEntry {
                     name: "openai-curated".to_string(),
-                    path: test_absolute_path("/marketplaces/openai-curated"),
+                    path: Some(test_absolute_path("/marketplaces/openai-curated")),
                     interface: None,
                     plugins: Vec::new(),
                 },
             ],
             marketplace_load_errors: Vec::new(),
-            remote_sync_error: None,
             featured_plugin_ids: Vec::new(),
         };
 
@@ -13071,7 +13223,7 @@ mod tests {
             response.marketplaces,
             vec![PluginMarketplaceEntry {
                 name: "openai-curated".to_string(),
-                path: test_absolute_path("/marketplaces/openai-curated"),
+                path: Some(test_absolute_path("/marketplaces/openai-curated")),
                 interface: None,
                 plugins: Vec::new(),
             }]
@@ -22686,6 +22838,7 @@ guardian_approval = true
     #[tokio::test]
     async fn natural_language_oracle_entrypoint_routes_through_oracle_supervisor() -> Result<()> {
         let mut app = make_test_app().await;
+        std::fs::create_dir_all(app.chat_widget.config_ref().cwd.as_path())?;
         let oracle_repo =
             find_oracle_repo(app.chat_widget.config_ref().cwd.as_path()).expect("oracle repo");
         app.oracle_broker = Some((oracle_repo, OracleBrokerClient::new_test_client()));
@@ -22770,6 +22923,7 @@ guardian_approval = true
     async fn natural_language_oracle_entrypoint_routes_into_the_visible_oracle_thread() -> Result<()>
     {
         let mut app = make_test_app().await;
+        std::fs::create_dir_all(app.chat_widget.config_ref().cwd.as_path())?;
         let oracle_repo =
             find_oracle_repo(app.chat_widget.config_ref().cwd.as_path()).expect("oracle repo");
         app.oracle_broker = Some((oracle_repo, OracleBrokerClient::new_test_client()));
@@ -24339,6 +24493,7 @@ guardian_approval = true
             oracle_picker_include_new_thread: false,
             oracle_broker: None,
             oracle_test_broker_hooks: Arc::new(StdMutex::new(OracleTestBrokerHooks::default())),
+            pending_plugin_enabled_writes: HashMap::new(),
         }
     }
 
@@ -24404,6 +24559,7 @@ guardian_approval = true
                 oracle_picker_include_new_thread: false,
                 oracle_broker: None,
                 oracle_test_broker_hooks: Arc::new(StdMutex::new(OracleTestBrokerHooks::default())),
+                pending_plugin_enabled_writes: HashMap::new(),
             },
             rx,
             op_rx,
