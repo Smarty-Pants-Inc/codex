@@ -196,6 +196,54 @@ fn oracle_session_matches_with_file(
     )
 }
 
+fn oracle_session_matches_with_download(
+    meta_path: &Path,
+    thread_url: &str,
+    conversation_id: &str,
+    expected_filename: &str,
+    expected_download_contents: &str,
+) -> bool {
+    let Ok(raw) = fs::read_to_string(meta_path) else {
+        return false;
+    };
+    let Ok(meta) = serde_json::from_str::<JsonValue>(&raw) else {
+        return false;
+    };
+    let runtime = meta.get("browser").and_then(|value| value.get("runtime"));
+    let expected_link_prefix = format!("[{expected_filename}](sandbox:/mnt/data/");
+    let response = meta
+        .get("response")
+        .and_then(|value| value.get("assistantOutput"))
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    let downloads = meta
+        .get("response")
+        .and_then(|value| value.get("downloads"))
+        .and_then(JsonValue::as_array);
+    runtime
+        .and_then(|value| value.get("conversationId"))
+        .and_then(JsonValue::as_str)
+        == Some(conversation_id)
+        && runtime
+            .and_then(|value| value.get("tabUrl"))
+            .and_then(JsonValue::as_str)
+            .is_some_and(|value| normalize_url(value) == normalize_url(thread_url))
+        && response.contains(&expected_link_prefix)
+        && downloads.is_some_and(|entries| {
+            entries.iter().any(|entry| {
+                let Some(path_value) = entry.get("path").and_then(JsonValue::as_str) else {
+                    return false;
+                };
+                let suggested_filename = entry.get("suggestedFilename").and_then(JsonValue::as_str);
+                fs::read_to_string(path_value).ok().is_some_and(|contents| {
+                    suggested_filename == Some(expected_filename)
+                        && contents.replace("\r\n", "\n").trim_end()
+                            == expected_download_contents.replace("\r\n", "\n").trim_end()
+                })
+            })
+        })
+}
+
 fn recent_oracle_meta_paths(
     sessions_dir: &Path,
     test_started_at: SystemTime,
@@ -1662,6 +1710,122 @@ async fn query_oracle_history_probe(
         total_count,
         truncated,
     })
+}
+
+async fn create_fresh_oracle_project_thread(
+    smarty_root: &Path,
+    project_url: &str,
+) -> Result<(String, String)> {
+    let oracle_root = smarty_root.join("forks").join("oracle");
+    let home = env::var_os("HOME")
+        .map(PathBuf::from)
+        .context("HOME is unset; cannot inspect Oracle sessions")?;
+    let slug = format!(
+        "codex-oracle-download-seed-{}",
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_secs()
+    );
+    let meta_path = home
+        .join(".oracle")
+        .join("sessions")
+        .join(&slug)
+        .join("meta.json");
+    let child = Command::new("pnpm")
+        .arg("exec")
+        .arg("tsx")
+        .arg("bin/oracle-cli.ts")
+        .arg("--engine")
+        .arg("browser")
+        .arg("--model")
+        .arg("gpt-5.4")
+        .arg("--wait")
+        .arg("--heartbeat")
+        .arg("0")
+        .arg("--timeout")
+        .arg("900")
+        .arg("--browser-input-timeout")
+        .arg("120000")
+        .arg("--browser-manual-login")
+        .arg("--browser-model-strategy")
+        .arg("select")
+        .arg("--browser-hide-window")
+        .arg("--chatgpt-url")
+        .arg(project_url)
+        .arg("--slug")
+        .arg(&slug)
+        .arg("--force")
+        .arg("--prompt")
+        .arg("Reply with exactly READY and nothing else.")
+        .current_dir(&oracle_root)
+        .env("ORACLE_ALLOW_VISIBLE_CHROME", "0")
+        .env("ORACLE_CHATGPT_PROJECT_URL", project_url)
+        .env("ORACLE_SUPERVISOR_CHATGPT_URL", project_url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "failed to start Oracle CLI for a fresh project thread in {}",
+                oracle_root.display()
+            )
+        })?;
+    let output = timeout(Duration::from_secs(240), child.wait_with_output())
+        .await
+        .context("timed out waiting for Oracle CLI to create a fresh project thread")??;
+    if !output.status.success() {
+        anyhow::bail!(
+            "Oracle CLI fresh-thread seed failed with status {}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let raw = fs::read_to_string(&meta_path).with_context(|| {
+        format!(
+            "fresh Oracle thread seed did not write session metadata at {}",
+            meta_path.display()
+        )
+    })?;
+    let meta: JsonValue = serde_json::from_str(&raw).with_context(|| {
+        format!(
+            "failed to parse fresh Oracle thread seed metadata at {}",
+            meta_path.display()
+        )
+    })?;
+    let assistant_output = meta
+        .get("response")
+        .and_then(|value| value.get("assistantOutput"))
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default()
+        .trim();
+    if assistant_output != "READY" {
+        anyhow::bail!(
+            "fresh Oracle thread seed returned unexpected output {assistant_output:?} in {}",
+            meta_path.display()
+        );
+    }
+
+    let thread_url = meta
+        .get("browser")
+        .and_then(|value| value.get("runtime"))
+        .and_then(|value| value.get("tabUrl"))
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned)
+        .filter(|value| value.contains("/c/"))
+        .context("fresh Oracle thread seed metadata omitted a concrete thread url")?;
+    let conversation_id = meta
+        .get("browser")
+        .and_then(|value| value.get("runtime"))
+        .and_then(|value| value.get("conversationId"))
+        .and_then(JsonValue::as_str)
+        .map(str::to_owned)
+        .or_else(|| parse_conversation_id(&thread_url))
+        .context("fresh Oracle thread seed metadata omitted conversation id")?;
+
+    Ok((thread_url, conversation_id))
 }
 
 fn session_log_entries(path: &Path) -> Result<Vec<JsonValue>> {
@@ -3500,6 +3664,303 @@ async fn native_oracle_zip_upload_roundtrip() -> Result<()> {
     if !matched {
         anyhow::bail!(
             "expected a matching Oracle zip upload session for {conversation_id} containing {zip_ack_token}\n{}",
+            failure_artifacts(&codex_home_path, &session_log_path, &output)
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+#[serial(oracle_live_browser)]
+#[ignore = "live native Oracle PTY proof; requires ORACLE_SUPERVISOR_CHATGPT_URL"]
+async fn native_oracle_assistant_download_roundtrip() -> Result<()> {
+    if cfg!(windows) {
+        return Ok(());
+    }
+
+    let project_url = match std::env::var("ORACLE_SUPERVISOR_CHATGPT_URL") {
+        Ok(value) => value,
+        Err(_) => {
+            eprintln!(
+                "skipping live oracle assistant download: ORACLE_SUPERVISOR_CHATGPT_URL is unset"
+            );
+            return Ok(());
+        }
+    };
+    let codex_repo_root = codex_utils_cargo_bin::repo_root()?;
+    let smarty_root = find_smarty_root(&codex_repo_root)?;
+    // Use a fresh project-scoped thread so long-lived thread state cannot hide download regressions.
+    let (thread_url, conversation_id) =
+        create_fresh_oracle_project_thread(&smarty_root, &project_url).await?;
+    let launcher = smarty_root.join("bin").join("smarty-codex");
+    let workspace = smarty_root.clone();
+    let sessions_dir = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".oracle").join("sessions"))
+        .context("HOME is unset; cannot inspect Oracle sessions")?;
+    let test_started_at = SystemTime::now();
+    let timestamp = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)?
+        .as_millis();
+    let download_token = format!("CODEX_DOWNLOAD_CONTENT_{timestamp}");
+    let expected_download_contents = format!("# Codex Download Proof\n\n{download_token}");
+    let codex_home = tempfile::tempdir()?;
+    let codex_home_path = codex_home.path().to_path_buf();
+    let session_log_path = codex_home_path.join("native-oracle-download.jsonl");
+    let throttle_file_path = codex_home_path.join("oracle-supervisor-throttle.json");
+    fs::write(
+        codex_home_path.join("config.toml"),
+        format!(
+            "model_provider = \"ollama\"\ncheck_for_update_on_startup = false\n\n[tui]\nshow_tooltips = false\n\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+            workspace.display()
+        ),
+    )?;
+
+    let args = vec![
+        "--no-alt-screen".to_string(),
+        "-C".to_string(),
+        workspace.display().to_string(),
+        "-c".to_string(),
+        "analytics.enabled=false".to_string(),
+    ];
+    let mut env = HashMap::new();
+    env.insert(
+        "CODEX_HOME".to_string(),
+        codex_home_path.display().to_string(),
+    );
+    env.insert("SMARTY_NO_UPSTREAM_CHECK".to_string(), "1".to_string());
+    env.insert(
+        "SMARTY_CODEX_NO_DANGEROUS_DEFAULT".to_string(),
+        "1".to_string(),
+    );
+    for key in ["PATH", "HOME", "SHELL", "TMPDIR"] {
+        if let Ok(value) = std::env::var(key) {
+            env.insert(key.to_string(), value);
+        }
+    }
+    env.insert("ORACLE_ALLOW_VISIBLE_CHROME".to_string(), "0".to_string());
+    env.insert(
+        "ORACLE_CHATGPT_PROJECT_URL".to_string(),
+        project_url.clone(),
+    );
+    env.insert("ORACLE_SUPERVISOR_CHATGPT_URL".to_string(), project_url);
+    env.insert(
+        "ORACLE_SUPERVISOR_THROTTLE_FILE".to_string(),
+        throttle_file_path.display().to_string(),
+    );
+    env.insert("CODEX_TUI_RECORD_SESSION".to_string(), "1".to_string());
+    env.insert(
+        "CODEX_TUI_SESSION_LOG_PATH".to_string(),
+        session_log_path.display().to_string(),
+    );
+
+    let spawned = codex_utils_pty::spawn_pty_process(
+        launcher.to_string_lossy().as_ref(),
+        &args,
+        &workspace,
+        &env,
+        &None,
+        codex_utils_pty::TerminalSize::default(),
+    )
+    .await?;
+    let codex_utils_pty::SpawnedProcess {
+        session,
+        stdout_rx,
+        stderr_rx,
+        exit_rx,
+    } = spawned;
+    let mut output = Vec::new();
+    let mut output_rx = codex_utils_pty::combine_output_receivers(stdout_rx, stderr_rx);
+    let mut exit_rx = exit_rx;
+    let writer_tx = session.writer_sender();
+    let interrupt_writer = writer_tx.clone();
+    let mut answered_cursor_query = false;
+    let mut recorded_failure: Option<String> = None;
+    let mut saw_completion_log = false;
+    let mut last_nux_seen_at: Option<tokio::time::Instant> = None;
+    let mut last_nux_ack_at: Option<tokio::time::Instant> = None;
+    let mut startup_seen_at: Option<tokio::time::Instant> = None;
+    let mut attach_ready_at: Option<tokio::time::Instant> = None;
+    let mut model_command_sent_at: Option<tokio::time::Instant> = None;
+    let mut thinking_ack_at: Option<tokio::time::Instant> = None;
+    let mut sent_attach = false;
+    let mut sent_prompt = false;
+    let mut loop_tick = tokio::time::interval(Duration::from_millis(250));
+    loop_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop_tick.tick().await;
+
+    let exit_code = match timeout(oracle_live_timeout(Duration::from_secs(420), 1), async {
+        loop {
+            select! {
+                result = output_rx.recv() => match result {
+                    Ok(chunk) => {
+                        if chunk.windows(4).any(|window| window == b"\x1b[6n") {
+                            let _ = writer_tx.send(b"\x1b[1;1R".to_vec()).await;
+                            answered_cursor_query = true;
+                        }
+                        let chunk_text = String::from_utf8_lossy(&chunk);
+                        if chunk_text.contains("Use ↑/↓ to move, press enter to confirm") {
+                            last_nux_seen_at = Some(tokio::time::Instant::now());
+                            if last_nux_ack_at
+                                .is_none_or(|instant| instant.elapsed() >= Duration::from_millis(500))
+                            {
+                                last_nux_ack_at = Some(tokio::time::Instant::now());
+                                let _ = writer_tx.send(b"\r".to_vec()).await;
+                            }
+                        }
+                        output.extend_from_slice(&chunk);
+                        let sanitized_output = sanitized_output_text(&output);
+                        let now = tokio::time::Instant::now();
+                        if attach_ready_at.is_none()
+                            && sanitized_output.contains("Attached Oracle thread on ")
+                        {
+                            attach_ready_at = Some(now);
+                        }
+                        if thinking_ack_at.is_none()
+                            && sanitized_output.contains(
+                                "Oracle model preference set to gpt-5.4 (Thinking 5.4).",
+                            )
+                        {
+                            thinking_ack_at = Some(now);
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break exit_rx.await,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                },
+                _ = loop_tick.tick() => {
+                    if session_log_path.is_file()
+                        && let Ok(log) = fs::read_to_string(&session_log_path)
+                    {
+                        let now = tokio::time::Instant::now();
+                        if startup_seen_at.is_none()
+                            && (log.contains("\"type\":\"list_skills\"")
+                                || log.contains("\"variant\":\"PluginMentionsLoaded"))
+                        {
+                            startup_seen_at = Some(now);
+                        }
+                        if log.contains("\"kind\":\"oracle_run_failed\"") {
+                            recorded_failure = Some(format!(
+                                "oracle_run_failed recorded in {session_log_path:?}"
+                            ));
+                            send_interrupt_burst(
+                                &interrupt_writer,
+                                3,
+                                Duration::from_millis(200),
+                            )
+                            .await;
+                        }
+                        if log.contains("\"kind\":\"oracle_run_completed\"") && !saw_completion_log {
+                            saw_completion_log = true;
+                            send_interrupt_burst(
+                                &interrupt_writer,
+                                3,
+                                Duration::from_millis(200),
+                            )
+                            .await;
+                        }
+                    }
+
+                    let startup_nux_settled = last_nux_seen_at
+                        .is_none_or(|instant| instant.elapsed() >= Duration::from_secs(1));
+
+                    if !sent_attach
+                        && answered_cursor_query
+                        && startup_nux_settled
+                        && startup_seen_at
+                            .is_some_and(|instant| instant.elapsed() >= Duration::from_secs(2))
+                    {
+                        sent_attach = true;
+                        submit_humanlike(
+                            &writer_tx,
+                            format!("/oracle attach {thread_url}").as_str(),
+                        )
+                        .await;
+                        continue;
+                    }
+
+                    if !sent_prompt
+                        && model_command_sent_at.is_none()
+                        && attach_ready_at
+                            .is_some_and(|instant| instant.elapsed() >= Duration::from_secs(2))
+                    {
+                        model_command_sent_at = Some(tokio::time::Instant::now());
+                        submit_humanlike(&writer_tx, "/oracle model thinking").await;
+                        continue;
+                    }
+
+                    if !sent_prompt
+                        && model_command_sent_at
+                            .is_some_and(|instant| instant.elapsed() >= Duration::from_secs(2))
+                        && (thinking_ack_at.is_some()
+                            || model_command_sent_at
+                                .is_some_and(|instant| instant.elapsed() >= Duration::from_secs(10)))
+                    {
+                        sent_prompt = true;
+                        submit_humanlike_with_delays(
+                            &writer_tx,
+                            format!(
+                                "Generate an example markdown file named codex-download-proof.md whose exact contents are:\n# Codex Download Proof\n\n{download_token}\n\nProvide it in your reply as a clickable markdown hyperlink to the file, with no extra explanation."
+                            )
+                            .as_str(),
+                            Duration::from_millis(25),
+                            Duration::from_millis(350),
+                        )
+                        .await;
+                    }
+                }
+                result = &mut exit_rx => break result,
+            }
+        }
+    })
+    .await {
+        Ok(Ok(code)) => code,
+        Ok(Err(err)) => return Err(err.into()),
+        Err(_) => {
+            session.terminate();
+            while let Ok(chunk) = output_rx.try_recv() {
+                output.extend_from_slice(&chunk);
+            }
+            anyhow::bail!(
+                "timed out waiting for native oracle assistant download roundtrip\n{}",
+                failure_artifacts(&codex_home_path, &session_log_path, &output)
+            );
+        }
+    };
+
+    if let Some(recorded_failure) = recorded_failure {
+        anyhow::bail!(
+            "{recorded_failure}\n{}",
+            failure_artifacts(&codex_home_path, &session_log_path, &output)
+        );
+    }
+    if !saw_completion_log {
+        anyhow::bail!(
+            "expected oracle_run_completed in {session_log_path:?}\n{}",
+            failure_artifacts(&codex_home_path, &session_log_path, &output)
+        );
+    }
+    if !(exit_code == 0 || exit_code == 130 || exit_code == 1) {
+        anyhow::bail!(
+            "unexpected exit code {exit_code}\n{}",
+            failure_artifacts(&codex_home_path, &session_log_path, &output)
+        );
+    }
+
+    let matched = recent_oracle_meta_paths(&sessions_dir, test_started_at)?
+        .iter()
+        .any(|path| {
+            oracle_session_matches_with_download(
+                path,
+                &thread_url,
+                &conversation_id,
+                "codex-download-proof.md",
+                &expected_download_contents,
+            )
+        });
+    if !matched {
+        anyhow::bail!(
+            "expected a matching Oracle download session for {conversation_id} containing codex-download-proof.md and a saved file with {download_token}\n{}",
             failure_artifacts(&codex_home_path, &session_log_path, &output)
         );
     }
