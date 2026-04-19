@@ -759,6 +759,7 @@ impl ChatWidget {
             | SlashCommand::MultiAgents
             | SlashCommand::Approvals
             | SlashCommand::Permissions
+            | SlashCommand::Oracle
             | SlashCommand::ElevateSandbox
             | SlashCommand::SandboxReadRoot
             | SlashCommand::Experimental
