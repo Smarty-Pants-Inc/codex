@@ -24469,6 +24469,7 @@ guardian_approval = true
             }),
             turns: Vec::new(),
             events: Vec::new(),
+            replay_entries: Vec::new(),
             input_state: None,
         };
 
@@ -24497,6 +24498,7 @@ guardian_approval = true
             }),
             turns: Vec::new(),
             events: Vec::new(),
+            replay_entries: Vec::new(),
             input_state: None,
         };
 
