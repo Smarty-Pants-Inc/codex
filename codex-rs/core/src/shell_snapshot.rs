@@ -151,12 +151,7 @@ impl ShellSnapshot {
             temp_path.display()
         );
 
-        let mut temp_snapshot = Self {
-            path: temp_path.clone(),
-            cwd: session_cwd.clone(),
-        };
-
-        if let Err(err) = validate_snapshot(shell, &temp_snapshot.path, session_cwd).await {
+        if let Err(err) = validate_snapshot(shell, &temp_path, session_cwd).await {
             tracing::error!("Shell snapshot validation failed: {err:?}");
             remove_snapshot_file(&temp_path).await;
             return Err("validation_failed");
@@ -168,8 +163,10 @@ impl ShellSnapshot {
             return Err("write_failed");
         }
 
-        temp_snapshot.path = path;
-        Ok(temp_snapshot)
+        Ok(Self {
+            path,
+            cwd: session_cwd.clone(),
+        })
     }
 }
 
