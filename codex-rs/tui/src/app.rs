@@ -793,7 +793,8 @@ impl ThreadEventStore {
                 ThreadBufferedEvent::Request(_)
                 | ThreadBufferedEvent::Notification(_)
                 | ThreadBufferedEvent::HistoryEntryResponse(_)
-                | ThreadBufferedEvent::FeedbackSubmission(_) => None,
+                | ThreadBufferedEvent::FeedbackSubmission(_)
+                | ThreadBufferedEvent::OracleWorkflowEvent(_) => None,
             })
             .collect()
     }
@@ -24079,6 +24080,7 @@ guardian_approval = true
                         /*approval_id*/ None,
                     )),
                 ],
+                replay_entries: Vec::new(),
                 input_state: None,
             },
             /*resume_restored_queue*/ false,

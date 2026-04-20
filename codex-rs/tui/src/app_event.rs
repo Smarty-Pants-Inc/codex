@@ -49,8 +49,6 @@ use codex_protocol::protocol::SandboxPolicy;
 use codex_realtime_webrtc::RealtimeWebrtcEvent;
 use codex_realtime_webrtc::RealtimeWebrtcSessionHandle;
 
-use crate::history_cell::HistoryCell;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RealtimeAudioDeviceKind {
     Microphone,
