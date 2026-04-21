@@ -11970,16 +11970,17 @@ guardian_approval = true
     #[tokio::test]
     async fn hidden_oracle_orchestrator_thread_is_omitted_from_agent_picker() {
         let mut app = make_test_app().await;
-        let hidden_thread_id = ThreadId::new();
+        app.ensure_visible_oracle_thread().await;
+        let mut app_server =
+            crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
+                .await
+                .expect("embedded app server");
+        let hidden_thread_id = app
+            .ensure_orchestrator_thread(&mut app_server)
+            .await
+            .expect("orchestrator thread");
 
-        app.oracle_state.orchestrator_thread_id = Some(hidden_thread_id);
-        app.upsert_agent_picker_thread(
-            hidden_thread_id,
-            Some("Oracle".to_string()),
-            Some("orchestrator".to_string()),
-            /*is_closed*/ false,
-        );
-
+        assert!(app.is_hidden_oracle_thread(hidden_thread_id));
         assert!(app.agent_navigation.get(&hidden_thread_id).is_none());
     }
 
@@ -16815,41 +16816,25 @@ guardian_approval = true
             crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())
                 .await
                 .expect("embedded app server");
-        let thread_id = ThreadId::new();
+        let origin_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000111").expect("valid thread");
 
-        app.submit_thread_op(
-            &mut app_server,
-            thread_id,
-            AppCommand::user_turn(
-                vec![UserInput::Text {
+        let handled = app
+            .maybe_route_natural_language_oracle_invocation(
+                None,
+                &mut app_server,
+                origin_thread_id,
+                &[UserInput::Text {
                     text: "Use your oracle skill to tell the orchestrator to compute 2+2 and report back.".to_string(),
                     text_elements: Vec::new(),
                 }],
-                app.chat_widget.config_ref().cwd.to_path_buf(),
-                app.chat_widget
-                    .config_ref()
-                    .permissions
-                    .approval_policy
-                    .value(),
-                app.chat_widget
-                    .config_ref()
-                    .permissions
-                    .sandbox_policy
-                    .get()
-                    .clone(),
-                app.chat_widget.current_model().to_string(),
-                app.chat_widget.current_reasoning_effort(),
-                None,
-                app.chat_widget.config_ref().service_tier.map(Some),
-                None,
-                None,
-                None,
-            ),
-        )
-        .await?;
+            )
+            .await?;
+
+        assert!(handled);
 
         let oracle_thread_id = app.oracle_state.oracle_thread_id.expect("oracle thread");
-        assert_ne!(oracle_thread_id, thread_id);
+        assert_ne!(oracle_thread_id, origin_thread_id);
         assert!(app.oracle_state.bindings.contains_key(&oracle_thread_id));
         assert_eq!(
             app.oracle_state.phase,

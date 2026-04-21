@@ -484,6 +484,9 @@ impl App {
     ) -> Result<bool> {
         match op.view() {
             AppCommandView::Interrupt => {
+                if self.is_visible_oracle_thread(thread_id) {
+                    return self.interrupt_oracle_thread(app_server, thread_id).await;
+                }
                 if let Some(turn_id) = self.active_turn_id_for_thread(thread_id).await {
                     app_server.turn_interrupt(thread_id, turn_id).await?;
                 } else {
