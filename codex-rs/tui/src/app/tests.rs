@@ -1614,6 +1614,40 @@ async fn should_attach_live_thread_for_selection_skips_closed_metadata_only_thre
 }
 
 #[tokio::test]
+async fn should_attach_live_thread_for_selection_skips_visible_oracle_threads() {
+    let mut app = make_test_app().await;
+    let thread_id = app.create_visible_oracle_thread().await;
+
+    assert!(!app.should_attach_live_thread_for_selection(thread_id));
+
+    app.thread_event_channels.remove(&thread_id);
+    assert!(
+        !app.should_attach_live_thread_for_selection(thread_id),
+        "visible oracle threads should select from local replay state",
+    );
+}
+
+#[tokio::test]
+async fn ensure_oracle_thread_channel_for_selection_restores_missing_oracle_channel() {
+    let mut app = make_test_app().await;
+    let thread_id = app.create_visible_oracle_thread().await;
+    app.thread_event_channels.remove(&thread_id);
+
+    app.ensure_oracle_thread_channel_for_selection(thread_id)
+        .await;
+
+    let channel = app
+        .thread_event_channels
+        .get(&thread_id)
+        .expect("oracle thread channel");
+    assert!(channel.receiver.is_some());
+    let store = channel.store.lock().await;
+    let session = store.session.as_ref().expect("oracle thread session");
+    assert_eq!(session.thread_id, thread_id);
+    assert_eq!(session.model_provider_id.as_str(), "oracle-browser");
+}
+
+#[tokio::test]
 async fn refresh_agent_picker_thread_liveness_prunes_closed_metadata_only_threads() -> Result<()> {
     let mut app = make_test_app().await;
     let mut app_server = crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref())

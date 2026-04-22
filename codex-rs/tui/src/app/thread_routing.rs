@@ -156,7 +156,7 @@ impl App {
     /// navigation both follow what the user is actually looking at, not whichever thread most
     /// recently began switching.
     pub(super) fn current_displayed_thread_id(&self) -> Option<ThreadId> {
-        self.active_thread_id.or(self.chat_widget.thread_id())
+        self.chat_widget.thread_id().or(self.active_thread_id)
     }
 
     pub(super) fn ignore_same_thread_resume(
@@ -365,7 +365,7 @@ impl App {
         app_server: &mut AppServerSession,
         op: AppCommand,
     ) -> Result<()> {
-        let Some(thread_id) = self.active_thread_id else {
+        let Some(thread_id) = self.current_displayed_thread_id() else {
             self.chat_widget
                 .add_error_message("No active thread is available.".to_string());
             return Ok(());
@@ -508,6 +508,19 @@ impl App {
                 collaboration_mode,
                 personality,
             } => {
+                if self.is_visible_oracle_thread(thread_id) {
+                    return self
+                        .handle_oracle_user_turn(app_server, thread_id, items)
+                        .await;
+                }
+                if self
+                    .maybe_route_natural_language_oracle_invocation(
+                        None, app_server, thread_id, items,
+                    )
+                    .await?
+                {
+                    return Ok(true);
+                }
                 let mut should_start_turn = true;
                 if let Some(turn_id) = self.active_turn_id_for_thread(thread_id).await {
                     let mut steer_turn_id = turn_id;

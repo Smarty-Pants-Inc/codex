@@ -279,6 +279,30 @@ impl App {
         Ok(live_attached)
     }
 
+    pub(super) async fn ensure_oracle_thread_channel_for_selection(&mut self, thread_id: ThreadId) {
+        if !self.is_visible_oracle_thread(thread_id) {
+            return;
+        }
+
+        if !self.thread_event_channels.contains_key(&thread_id) {
+            self.thread_event_channels.insert(
+                thread_id,
+                ThreadEventChannel::new_with_session(
+                    THREAD_EVENT_CHANNEL_CAPACITY,
+                    self.oracle_thread_session(thread_id),
+                    Vec::new(),
+                ),
+            );
+            return;
+        }
+
+        let session = self.oracle_thread_session(thread_id);
+        if let Some(channel) = self.thread_event_channels.get(&thread_id) {
+            let mut store = channel.store.lock().await;
+            store.session = Some(session);
+        }
+    }
+
     /// Replaces the chat widget and re-seeds the new widget's collab metadata from the navigation
     /// cache.
     ///
@@ -323,6 +347,8 @@ impl App {
                 .add_error_message(format!("Agent thread {thread_id} is no longer available."));
             return Ok(());
         }
+        self.ensure_oracle_thread_channel_for_selection(thread_id)
+            .await;
 
         let mut is_replay_only = self
             .agent_navigation
@@ -356,15 +382,32 @@ impl App {
         let previous_thread_id = self.active_thread_id;
         self.store_active_thread_receiver().await;
         self.active_thread_id = None;
-        let Some((receiver, mut snapshot)) = self.activate_thread_for_replay(thread_id).await
-        else {
-            self.chat_widget
-                .add_error_message(format!("Agent thread {thread_id} is already active."));
-            if let Some(previous_thread_id) = previous_thread_id {
-                self.activate_thread_channel(previous_thread_id).await;
-            }
-            return Ok(());
-        };
+        let (receiver, mut snapshot) =
+            if let Some((receiver, snapshot)) = self.activate_thread_for_replay(thread_id).await {
+                (Some(receiver), snapshot)
+            } else if self.is_visible_oracle_thread(thread_id) {
+                let Some(channel) = self.thread_event_channels.get(&thread_id) else {
+                    self.chat_widget
+                        .add_error_message(format!("Agent thread {thread_id} is already active."));
+                    if let Some(previous_thread_id) = previous_thread_id {
+                        self.activate_thread_channel(previous_thread_id).await;
+                    }
+                    return Ok(());
+                };
+                let mut store = channel.store.lock().await;
+                if store.session.is_none() {
+                    store.session = Some(self.oracle_thread_session(thread_id));
+                }
+                store.active = true;
+                (None, store.snapshot())
+            } else {
+                self.chat_widget
+                    .add_error_message(format!("Agent thread {thread_id} is already active."));
+                if let Some(previous_thread_id) = previous_thread_id {
+                    self.activate_thread_channel(previous_thread_id).await;
+                }
+                return Ok(());
+            };
 
         self.refresh_snapshot_session_if_needed(
             app_server,
@@ -375,7 +418,7 @@ impl App {
         .await;
 
         self.active_thread_id = Some(thread_id);
-        self.active_thread_rx = Some(receiver);
+        self.active_thread_rx = receiver;
 
         let init = self.chatwidget_init_for_forked_or_resumed_thread(
             tui,
@@ -403,6 +446,9 @@ impl App {
     }
 
     pub(super) fn should_attach_live_thread_for_selection(&self, thread_id: ThreadId) -> bool {
+        if self.is_visible_oracle_thread(thread_id) {
+            return false;
+        }
         !self.thread_event_channels.contains_key(&thread_id)
             && self
                 .agent_navigation

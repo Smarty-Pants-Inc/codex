@@ -1600,10 +1600,12 @@ struct OracleHistoryProbe {
     truncated: bool,
 }
 
+#[derive(Debug)]
 struct OracleHistoryImportLogProof {
     attach_index: usize,
     import_index: usize,
     user_turn_index: usize,
+    completion_index: usize,
     imported_cell_count_before_user_turn: usize,
     outcome: String,
     message_count: Option<usize>,
@@ -1904,6 +1906,20 @@ fn first_user_turn_index_after(
         })
 }
 
+fn first_oracle_run_completed_index_after(
+    entries: &[JsonValue],
+    start_index: usize,
+) -> Option<usize> {
+    entries
+        .iter()
+        .enumerate()
+        .skip(start_index + 1)
+        .find_map(|(index, entry)| {
+            (entry.get("kind").and_then(JsonValue::as_str) == Some("oracle_run_completed"))
+                .then_some(index)
+        })
+}
+
 fn oracle_history_import_log_proof(
     path: &Path,
     conversation_id: &str,
@@ -1930,6 +1946,8 @@ fn oracle_history_import_log_proof(
     let user_turn_index = first_user_turn_index_after(&entries, import_index, token).context(
         "session log did not record the token-bearing user_turn after oracle_history_import",
     )?;
+    let completion_index = first_oracle_run_completed_index_after(&entries, user_turn_index)
+        .context("session log did not record oracle_run_completed after token-bearing user_turn")?;
     let import_payload = entries[import_index]
         .get("payload")
         .context("oracle_history_import omitted payload")?;
@@ -1947,6 +1965,7 @@ fn oracle_history_import_log_proof(
         attach_index,
         import_index,
         user_turn_index,
+        completion_index,
         imported_cell_count_before_user_turn,
         outcome: import_payload
             .get("outcome")
@@ -1972,6 +1991,123 @@ fn oracle_history_import_log_proof(
             .and_then(JsonValue::as_bool)
             .context("oracle_history_import omitted history_window.truncated")?,
     })
+}
+
+fn write_temp_session_log(entries: &[JsonValue]) -> Result<PathBuf> {
+    let nonce = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)?
+        .as_nanos();
+    let path = env::temp_dir().join(format!(
+        "codex-oracle-import-history-proof-{}-{nonce}.jsonl",
+        std::process::id()
+    ));
+    let mut raw = String::new();
+    for entry in entries {
+        raw.push_str(&serde_json::to_string(entry)?);
+        raw.push('\n');
+    }
+    fs::write(&path, raw)?;
+    Ok(path)
+}
+
+#[test]
+fn oracle_history_import_log_proof_requires_oracle_run_completed_after_token_user_turn()
+-> Result<()> {
+    let conversation_id = "conv-123";
+    let token = "PROOF_TOKEN";
+    let path = write_temp_session_log(&[
+        serde_json::json!({
+            "kind": "app_event",
+            "variant": "ConfigureOracleMode",
+            "payload": {
+                "conversation_id": conversation_id,
+                "import_history": true
+            }
+        }),
+        serde_json::json!({
+            "kind": "oracle_history_import",
+            "payload": {
+                "conversation_id": conversation_id,
+                "outcome": "imported",
+                "message_count": 2,
+                "history_window": {
+                    "returned_count": 2,
+                    "total_count": 3,
+                    "truncated": true
+                }
+            }
+        }),
+        serde_json::json!({"kind": "insert_history_cell"}),
+        serde_json::json!({
+            "dir": "from_tui",
+            "kind": "op",
+            "payload": {
+                "type": "user_turn",
+                "items": [{"text": format!("Reply with {token}")}]
+            }
+        }),
+    ])?;
+
+    let err = match oracle_history_import_log_proof(&path, conversation_id, token) {
+        Ok(_) => anyhow::bail!("missing completion after token-bearing user turn should fail"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains(
+            "session log did not record oracle_run_completed after token-bearing user_turn"
+        )
+    );
+
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
+#[test]
+fn oracle_history_import_log_proof_tracks_completion_index_after_user_turn() -> Result<()> {
+    let conversation_id = "conv-123";
+    let token = "PROOF_TOKEN";
+    let path = write_temp_session_log(&[
+        serde_json::json!({
+            "kind": "app_event",
+            "variant": "ConfigureOracleMode",
+            "payload": {
+                "conversation_id": conversation_id,
+                "import_history": true
+            }
+        }),
+        serde_json::json!({
+            "kind": "oracle_history_import",
+            "payload": {
+                "conversation_id": conversation_id,
+                "outcome": "imported",
+                "message_count": 2,
+                "history_window": {
+                    "returned_count": 2,
+                    "total_count": 3,
+                    "truncated": true
+                }
+            }
+        }),
+        serde_json::json!({"kind": "insert_history_cell"}),
+        serde_json::json!({
+            "dir": "from_tui",
+            "kind": "op",
+            "payload": {
+                "type": "user_turn",
+                "items": [{"text": format!("Reply with {token}")}]
+            }
+        }),
+        serde_json::json!({"kind": "oracle_run_completed", "payload": {"run_id": "run-1"}}),
+    ])?;
+
+    let proof = oracle_history_import_log_proof(&path, conversation_id, token)?;
+    assert_eq!(proof.attach_index, 0);
+    assert_eq!(proof.import_index, 1);
+    assert_eq!(proof.user_turn_index, 3);
+    assert_eq!(proof.completion_index, 4);
+
+    let _ = fs::remove_file(path);
+    Ok(())
 }
 
 #[tokio::test]
@@ -2159,6 +2295,9 @@ async fn native_oracle_attach_with_import_history_roundtrip() -> Result<()> {
     let mut sent_attach = false;
     let mut sent_prompt = false;
     let mut import_history_ready_at: Option<tokio::time::Instant> = None;
+    let mut import_replay_ready_at: Option<tokio::time::Instant> = None;
+    let mut insert_history_cell_count = 0usize;
+    let mut insert_history_cell_baseline_at_attach: Option<usize> = None;
     let mut loop_tick = tokio::time::interval(Duration::from_millis(250));
     loop_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop_tick.tick().await;
@@ -2205,6 +2344,8 @@ async fn native_oracle_attach_with_import_history_roundtrip() -> Result<()> {
                         && let Ok(log) = fs::read_to_string(&session_log_path)
                     {
                         let now = tokio::time::Instant::now();
+                        insert_history_cell_count =
+                            count_occurrences(&log, "\"kind\":\"insert_history_cell\"");
                         if startup_seen_at.is_none()
                             && (log.contains("\"type\":\"list_skills\"")
                                 || log.contains("\"variant\":\"PluginMentionsLoaded"))
@@ -2216,6 +2357,16 @@ async fn native_oracle_attach_with_import_history_roundtrip() -> Result<()> {
                         {
                             saw_import_history_log = true;
                             import_history_ready_at = Some(now);
+                        }
+                        if import_replay_ready_at.is_none()
+                            && saw_import_history_log
+                            && insert_history_cell_baseline_at_attach
+                                .is_some_and(|baseline| {
+                                    insert_history_cell_count
+                                        >= baseline + limited_history.returned_count
+                                })
+                        {
+                            import_replay_ready_at = Some(now);
                         }
                         if log.contains("\"kind\":\"oracle_run_failed\"") {
                             recorded_failure = Some(format!(
@@ -2245,6 +2396,18 @@ async fn native_oracle_attach_with_import_history_roundtrip() -> Result<()> {
                             .is_some_and(|instant| instant.elapsed() >= Duration::from_secs(2))
                     {
                         sent_attach = true;
+                        insert_history_cell_baseline_at_attach = Some(
+                            if session_log_path.is_file() {
+                                fs::read_to_string(&session_log_path)
+                                    .ok()
+                                    .map(|log| {
+                                        count_occurrences(&log, "\"kind\":\"insert_history_cell\"")
+                                    })
+                                    .unwrap_or(insert_history_cell_count)
+                            } else {
+                                insert_history_cell_count
+                            },
+                        );
                         submit_humanlike(
                             &writer_tx,
                             format!("/oracle attach {thread_url} --import-history").as_str(),
@@ -2256,6 +2419,8 @@ async fn native_oracle_attach_with_import_history_roundtrip() -> Result<()> {
                     if !sent_prompt
                         && import_history_ready_at
                             .is_some_and(|instant| instant.elapsed() >= Duration::from_secs(2))
+                        && import_replay_ready_at
+                            .is_some_and(|instant| instant.elapsed() >= Duration::from_secs(1))
                     {
                         sent_prompt = true;
                         submit_humanlike_with_delays(
@@ -2379,13 +2544,15 @@ async fn native_oracle_attach_with_import_history_roundtrip() -> Result<()> {
         );
     }
     if !(import_proof.attach_index < import_proof.import_index
-        && import_proof.import_index < import_proof.user_turn_index)
+        && import_proof.import_index < import_proof.user_turn_index
+        && import_proof.user_turn_index < import_proof.completion_index)
     {
         anyhow::bail!(
-            "oracle_history_import ordering was invalid: attach_index={} import_index={} user_turn_index={}\n{}",
+            "oracle_history_import ordering was invalid: attach_index={} import_index={} user_turn_index={} completion_index={}\n{}",
             import_proof.attach_index,
             import_proof.import_index,
             import_proof.user_turn_index,
+            import_proof.completion_index,
             failure_artifacts(&codex_home_path, &session_log_path, &output)
         );
     }

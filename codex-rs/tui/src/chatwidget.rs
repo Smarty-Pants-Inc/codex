@@ -6618,9 +6618,14 @@ impl ChatWidget {
                     notification.action,
                 );
             }
-            ServerNotification::ThreadClosed(_) => {
+            ServerNotification::ThreadClosed(notification) => {
                 if !from_replay {
-                    self.on_shutdown_complete();
+                    let should_exit = self.thread_id.is_none_or(|visible_thread_id| {
+                        notification.thread_id == visible_thread_id.to_string()
+                    });
+                    if should_exit {
+                        self.on_shutdown_complete();
+                    }
                 }
             }
             ServerNotification::ThreadRealtimeStarted(notification) => {

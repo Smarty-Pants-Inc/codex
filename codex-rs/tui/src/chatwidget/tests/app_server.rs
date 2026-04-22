@@ -705,13 +705,30 @@ async fn live_app_server_thread_name_update_shows_resume_hint() {
 #[tokio::test]
 async fn live_app_server_thread_closed_requests_immediate_exit() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
 
     chat.handle_server_notification(
         ServerNotification::ThreadClosed(ThreadClosedNotification {
-            thread_id: "thread-1".to_string(),
+            thread_id: thread_id.to_string(),
         }),
         /*replay_kind*/ None,
     );
 
     assert_matches!(rx.try_recv(), Ok(AppEvent::Exit(ExitMode::Immediate)));
+}
+
+#[tokio::test]
+async fn live_app_server_thread_closed_for_non_visible_thread_is_ignored() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.handle_server_notification(
+        ServerNotification::ThreadClosed(ThreadClosedNotification {
+            thread_id: ThreadId::new().to_string(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
 }
