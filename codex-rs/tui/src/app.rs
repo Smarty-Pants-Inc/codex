@@ -215,9 +215,9 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::LazyLock;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
-use std::sync::Mutex as StdMutex;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -1285,7 +1285,6 @@ impl App {
             exit_reason,
         })
     }
-
 }
 
 impl App {
@@ -1855,6 +1854,90 @@ impl App {
                 || (self.oracle_state.phase
                     == OracleSupervisorPhase::WaitingForOracle(OracleRequestKind::Checkpoint)
                     && self.oracle_state.active_checkpoint_thread_id == Some(thread_id)))
+    }
+
+    fn queue_orchestrator_checkpoint_candidate(
+        &mut self,
+        oracle_thread_id: ThreadId,
+        thread_id: ThreadId,
+        turn_id: Option<&str>,
+    ) -> (bool, bool) {
+        let workflow_version = self
+            .oracle_state
+            .workflow
+            .as_ref()
+            .map(|workflow| workflow.version);
+        let mut already_pending = false;
+        let mut is_head = false;
+        if let Some(binding) = self.oracle_state.bindings.get_mut(&oracle_thread_id) {
+            already_pending = binding.pending_checkpoint_threads.contains(&thread_id);
+            if !already_pending {
+                binding.pending_checkpoint_threads.push(thread_id);
+            }
+            if let Some(workflow_version) = workflow_version {
+                binding
+                    .pending_checkpoint_versions
+                    .insert(thread_id, workflow_version);
+            }
+            if let Some(turn_id) = turn_id {
+                binding
+                    .pending_checkpoint_turn_ids
+                    .insert(thread_id, turn_id.to_string());
+            }
+            is_head = binding.pending_checkpoint_threads.first().copied() == Some(thread_id);
+        }
+        (already_pending, is_head)
+    }
+
+    async fn handle_routed_orchestrator_notification(
+        &mut self,
+        thread_id: ThreadId,
+        notification: &ServerNotification,
+    ) {
+        let Some(oracle_thread_id) = self.find_oracle_thread_by_orchestrator_thread(thread_id)
+        else {
+            return;
+        };
+        self.activate_oracle_binding(oracle_thread_id);
+
+        if Self::notification_is_orchestrator_checkpoint_candidate(notification) {
+            let (_, is_head) = self.queue_orchestrator_checkpoint_candidate(
+                oracle_thread_id,
+                thread_id,
+                Self::notification_orchestrator_checkpoint_turn_id(notification),
+            );
+            self.persist_active_oracle_binding();
+            if is_head
+                && !matches!(
+                    self.oracle_state.phase,
+                    OracleSupervisorPhase::WaitingForOracle(_)
+                )
+            {
+                self.emit_next_pending_oracle_checkpoint(oracle_thread_id);
+            }
+            return;
+        }
+
+        if !matches!(notification, ServerNotification::ThreadClosed(_)) {
+            return;
+        }
+
+        if self.thread_closed_preserves_orchestrator_checkpoint(oracle_thread_id, thread_id) {
+            self.mark_agent_picker_thread_closed(thread_id);
+            self.thread_event_channels.remove(&thread_id);
+            let (already_pending, is_head) =
+                self.queue_orchestrator_checkpoint_candidate(oracle_thread_id, thread_id, None);
+            self.persist_active_oracle_binding();
+            if !already_pending
+                && is_head
+                && self.oracle_state.phase == OracleSupervisorPhase::WaitingForOrchestrator
+            {
+                self.emit_next_pending_oracle_checkpoint(oracle_thread_id);
+            }
+            return;
+        }
+
+        self.handle_routed_oracle_thread_closed(thread_id).await;
     }
 
     fn terminal_orchestrator_turn_id(thread: &codex_app_server_protocol::Thread) -> Option<&str> {

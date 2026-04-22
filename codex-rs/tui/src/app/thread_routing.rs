@@ -801,7 +801,7 @@ impl App {
         let notification_status_change = SideParentStatusChange::for_notification(&notification);
 
         if should_send {
-            match sender.try_send(ThreadBufferedEvent::Notification(notification)) {
+            match sender.try_send(ThreadBufferedEvent::Notification(notification.clone())) {
                 Ok(()) => {}
                 Err(TrySendError::Full(event)) => {
                     tokio::spawn(async move {
@@ -820,6 +820,10 @@ impl App {
         } else if let Some(change) = notification_status_change {
             self.apply_side_parent_status_change(thread_id, change);
         }
+        // Hidden Oracle orchestrator threads are never the active renderer, so
+        // convert their completion/closure notifications into checkpoint work here.
+        self.handle_routed_orchestrator_notification(thread_id, &notification)
+            .await;
         self.refresh_pending_thread_approvals().await;
         Ok(())
     }
