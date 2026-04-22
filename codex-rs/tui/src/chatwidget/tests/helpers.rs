@@ -960,7 +960,7 @@ pub(super) fn plugins_test_detail(
 ) -> PluginDetail {
     PluginDetail {
         marketplace_name: "ChatGPT Marketplace".to_string(),
-        marketplace_path: plugins_test_absolute_path("marketplaces/chatgpt"),
+        marketplace_path: Some(plugins_test_absolute_path("marketplaces/chatgpt")),
         summary,
         description: description.map(str::to_string),
         skills: skills
@@ -970,7 +970,9 @@ pub(super) fn plugins_test_detail(
                 description: format!("{name} description"),
                 short_description: None,
                 interface: None,
-                path: plugins_test_absolute_path(&format!("skills/{name}/SKILL.md")),
+                path: Some(plugins_test_absolute_path(&format!(
+                    "skills/{name}/SKILL.md"
+                ))),
                 enabled: true,
             })
             .collect(),
