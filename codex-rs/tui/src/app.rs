@@ -9048,11 +9048,11 @@ mod carried_tests {
     }
 
     #[tokio::test]
-    async fn update_feature_flags_enabling_guardian_selects_guardian_approvals() -> Result<()> {
+    async fn update_feature_flags_enabling_guardian_selects_auto_review() -> Result<()> {
         let (mut app, mut app_event_rx, mut op_rx) = make_test_app_with_channels().await;
         let codex_home = tempdir()?;
         app.config.codex_home = codex_home.path().to_path_buf().abs();
-        let guardian_approvals = guardian_approvals_mode();
+        let auto_review = auto_review_mode();
 
         app.update_feature_flags(vec![(Feature::GuardianApproval, true)])
             .await;
@@ -9066,11 +9066,11 @@ mod carried_tests {
         );
         assert_eq!(
             app.config.approvals_reviewer,
-            guardian_approvals.approvals_reviewer
+            auto_review.approvals_reviewer
         );
         assert_eq!(
             app.config.permissions.approval_policy.value(),
-            guardian_approvals.approval_policy
+            auto_review.approval_policy
         );
         assert_eq!(
             app.chat_widget
@@ -9078,7 +9078,7 @@ mod carried_tests {
                 .permissions
                 .approval_policy
                 .value(),
-            guardian_approvals.approval_policy
+            auto_review.approval_policy
         );
         assert_eq!(
             app.chat_widget
@@ -9086,11 +9086,11 @@ mod carried_tests {
                 .permissions
                 .sandbox_policy
                 .get(),
-            &guardian_approvals.sandbox_policy
+            &auto_review.sandbox_policy
         );
         assert_eq!(
             app.chat_widget.config_ref().approvals_reviewer,
-            guardian_approvals.approvals_reviewer
+            auto_review.approvals_reviewer
         );
         assert_eq!(app.runtime_approval_policy_override, None);
         assert_eq!(app.runtime_sandbox_policy_override, None);
@@ -9098,9 +9098,9 @@ mod carried_tests {
             op_rx.try_recv(),
             Ok(Op::OverrideTurnContext {
                 cwd: None,
-                approval_policy: Some(guardian_approvals.approval_policy),
-                approvals_reviewer: Some(guardian_approvals.approvals_reviewer),
-                sandbox_policy: Some(guardian_approvals.sandbox_policy.clone()),
+                approval_policy: Some(auto_review.approval_policy),
+                approvals_reviewer: Some(auto_review.approvals_reviewer),
+                sandbox_policy: Some(auto_review.sandbox_policy.clone()),
                 permission_profile: None,
                 windows_sandbox_level: None,
                 model: None,
@@ -9125,7 +9125,7 @@ mod carried_tests {
 
         let config = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
         assert!(config.contains("guardian_approval = true"));
-        assert!(config.contains("approvals_reviewer = \"guardian_subagent\""));
+        assert!(config.contains("approvals_reviewer = \"auto_review\""));
         assert!(config.contains("approval_policy = \"on-request\""));
         assert!(config.contains("sandbox_mode = \"workspace-write\""));
         Ok(())
@@ -9150,9 +9150,9 @@ mod carried_tests {
             .set_enabled(Feature::GuardianApproval, /*enabled*/ true)?;
         app.chat_widget
             .set_feature_enabled(Feature::GuardianApproval, /*enabled*/ true);
-        app.config.approvals_reviewer = ApprovalsReviewer::GuardianSubagent;
+        app.config.approvals_reviewer = ApprovalsReviewer::AutoReview;
         app.chat_widget
-            .set_approvals_reviewer(ApprovalsReviewer::GuardianSubagent);
+            .set_approvals_reviewer(ApprovalsReviewer::AutoReview);
         app.config
             .permissions
             .approval_policy
@@ -9229,7 +9229,7 @@ mod carried_tests {
         let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
         let codex_home = tempdir()?;
         app.config.codex_home = codex_home.path().to_path_buf().abs();
-        let guardian_approvals = guardian_approvals_mode();
+        let auto_review = auto_review_mode();
         let config_toml_path = codex_home.path().join("config.toml").abs();
         let config_toml = "approvals_reviewer = \"user\"\n";
         std::fs::write(config_toml_path.as_path(), config_toml)?;
@@ -9248,15 +9248,15 @@ mod carried_tests {
         assert!(app.config.features.enabled(Feature::GuardianApproval));
         assert_eq!(
             app.config.approvals_reviewer,
-            guardian_approvals.approvals_reviewer
+            auto_review.approvals_reviewer
         );
         assert_eq!(
             app.chat_widget.config_ref().approvals_reviewer,
-            guardian_approvals.approvals_reviewer
+            auto_review.approvals_reviewer
         );
         assert_eq!(
             app.config.permissions.approval_policy.value(),
-            guardian_approvals.approval_policy
+            auto_review.approval_policy
         );
         assert_eq!(
             app.chat_widget
@@ -9264,15 +9264,15 @@ mod carried_tests {
                 .permissions
                 .sandbox_policy
                 .get(),
-            &guardian_approvals.sandbox_policy
+            &auto_review.sandbox_policy
         );
         assert_eq!(
             op_rx.try_recv(),
             Ok(Op::OverrideTurnContext {
                 cwd: None,
-                approval_policy: Some(guardian_approvals.approval_policy),
-                approvals_reviewer: Some(guardian_approvals.approvals_reviewer),
-                sandbox_policy: Some(guardian_approvals.sandbox_policy.clone()),
+                approval_policy: Some(auto_review.approval_policy),
+                approvals_reviewer: Some(auto_review.approvals_reviewer),
+                sandbox_policy: Some(auto_review.sandbox_policy.clone()),
                 permission_profile: None,
                 windows_sandbox_level: None,
                 model: None,
@@ -9285,7 +9285,7 @@ mod carried_tests {
         );
 
         let config = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
-        assert!(config.contains("approvals_reviewer = \"guardian_subagent\""));
+        assert!(config.contains("approvals_reviewer = \"auto_review\""));
         assert!(config.contains("guardian_approval = true"));
         assert!(config.contains("approval_policy = \"on-request\""));
         assert!(config.contains("sandbox_mode = \"workspace-write\""));
@@ -9358,7 +9358,7 @@ mod carried_tests {
         let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
         let codex_home = tempdir()?;
         app.config.codex_home = codex_home.path().to_path_buf().abs();
-        let guardian_approvals = guardian_approvals_mode();
+        let auto_review = auto_review_mode();
         app.active_profile = Some("guardian".to_string());
         let config_toml_path = codex_home.path().join("config.toml").abs();
         let config_toml = "profile = \"guardian\"\napprovals_reviewer = \"user\"\n";
@@ -9378,19 +9378,19 @@ mod carried_tests {
         assert!(app.config.features.enabled(Feature::GuardianApproval));
         assert_eq!(
             app.config.approvals_reviewer,
-            guardian_approvals.approvals_reviewer
+            auto_review.approvals_reviewer
         );
         assert_eq!(
             app.chat_widget.config_ref().approvals_reviewer,
-            guardian_approvals.approvals_reviewer
+            auto_review.approvals_reviewer
         );
         assert_eq!(
             op_rx.try_recv(),
             Ok(Op::OverrideTurnContext {
                 cwd: None,
-                approval_policy: Some(guardian_approvals.approval_policy),
-                approvals_reviewer: Some(guardian_approvals.approvals_reviewer),
-                sandbox_policy: Some(guardian_approvals.sandbox_policy.clone()),
+                approval_policy: Some(auto_review.approval_policy),
+                approvals_reviewer: Some(auto_review.approvals_reviewer),
+                sandbox_policy: Some(auto_review.sandbox_policy.clone()),
                 permission_profile: None,
                 windows_sandbox_level: None,
                 model: None,
@@ -9419,7 +9419,7 @@ mod carried_tests {
         );
         assert_eq!(
             profile_config.get("approvals_reviewer"),
-            Some(&TomlValue::String("guardian_subagent".to_string()))
+            Some(&TomlValue::String("auto_review".to_string()))
         );
         Ok(())
     }
@@ -9453,9 +9453,9 @@ guardian_approval = true
             .set_enabled(Feature::GuardianApproval, /*enabled*/ true)?;
         app.chat_widget
             .set_feature_enabled(Feature::GuardianApproval, /*enabled*/ true);
-        app.config.approvals_reviewer = ApprovalsReviewer::GuardianSubagent;
+        app.config.approvals_reviewer = ApprovalsReviewer::AutoReview;
         app.chat_widget
-            .set_approvals_reviewer(ApprovalsReviewer::GuardianSubagent);
+            .set_approvals_reviewer(ApprovalsReviewer::AutoReview);
 
         app.update_feature_flags(vec![(Feature::GuardianApproval, false)])
             .await;
@@ -9533,9 +9533,9 @@ guardian_approval = true
             .set_enabled(Feature::GuardianApproval, /*enabled*/ true)?;
         app.chat_widget
             .set_feature_enabled(Feature::GuardianApproval, /*enabled*/ true);
-        app.config.approvals_reviewer = ApprovalsReviewer::GuardianSubagent;
+        app.config.approvals_reviewer = ApprovalsReviewer::AutoReview;
         app.chat_widget
-            .set_approvals_reviewer(ApprovalsReviewer::GuardianSubagent);
+            .set_approvals_reviewer(ApprovalsReviewer::AutoReview);
 
         app.update_feature_flags(vec![(Feature::GuardianApproval, false)])
             .await;
@@ -9549,11 +9549,11 @@ guardian_approval = true
         );
         assert_eq!(
             app.config.approvals_reviewer,
-            ApprovalsReviewer::GuardianSubagent
+            ApprovalsReviewer::AutoReview
         );
         assert_eq!(
             app.chat_widget.config_ref().approvals_reviewer,
-            ApprovalsReviewer::GuardianSubagent
+            ApprovalsReviewer::AutoReview
         );
         assert!(
             op_rx.try_recv().is_err(),
