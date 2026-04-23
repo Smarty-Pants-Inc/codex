@@ -7158,6 +7158,10 @@ mod tests;
 #[cfg(test)]
 mod carried_tests {
     use super::*;
+    use super::background_requests::McpInventoryMaps;
+    use super::background_requests::build_feedback_upload_params;
+    use super::background_requests::hide_cli_only_plugin_marketplaces;
+    use super::background_requests::mcp_inventory_maps_from_statuses;
     use crate::app_backtrack::BacktrackSelection;
     use crate::app_backtrack::BacktrackState;
     use crate::app_backtrack::user_count;
@@ -7371,7 +7375,7 @@ mod carried_tests {
             },
         ];
 
-        let (tools, resources, resource_templates, auth_statuses) =
+        let (tools, resources, resource_templates, auth_statuses): McpInventoryMaps =
             mcp_inventory_maps_from_statuses(statuses);
         let mut resource_names = resources.keys().cloned().collect::<Vec<_>>();
         resource_names.sort();
@@ -9096,6 +9100,7 @@ mod carried_tests {
                 approval_policy: Some(guardian_approvals.approval_policy),
                 approvals_reviewer: Some(guardian_approvals.approvals_reviewer),
                 sandbox_policy: Some(guardian_approvals.sandbox_policy.clone()),
+                permission_profile: None,
                 windows_sandbox_level: None,
                 model: None,
                 effort: None,
@@ -9187,6 +9192,7 @@ mod carried_tests {
                 approval_policy: None,
                 approvals_reviewer: Some(ApprovalsReviewer::User),
                 sandbox_policy: None,
+                permission_profile: None,
                 windows_sandbox_level: None,
                 model: None,
                 effort: None,
@@ -9266,6 +9272,7 @@ mod carried_tests {
                 approval_policy: Some(guardian_approvals.approval_policy),
                 approvals_reviewer: Some(guardian_approvals.approvals_reviewer),
                 sandbox_policy: Some(guardian_approvals.sandbox_policy.clone()),
+                permission_profile: None,
                 windows_sandbox_level: None,
                 model: None,
                 effort: None,
@@ -9323,6 +9330,7 @@ mod carried_tests {
                 approval_policy: None,
                 approvals_reviewer: Some(ApprovalsReviewer::User),
                 sandbox_policy: None,
+                permission_profile: None,
                 windows_sandbox_level: None,
                 model: None,
                 effort: None,
@@ -9382,6 +9390,7 @@ mod carried_tests {
                 approval_policy: Some(guardian_approvals.approval_policy),
                 approvals_reviewer: Some(guardian_approvals.approvals_reviewer),
                 sandbox_policy: Some(guardian_approvals.sandbox_policy.clone()),
+                permission_profile: None,
                 windows_sandbox_level: None,
                 model: None,
                 effort: None,
@@ -9469,6 +9478,7 @@ guardian_approval = true
                 approval_policy: None,
                 approvals_reviewer: Some(ApprovalsReviewer::User),
                 sandbox_policy: None,
+                permission_profile: None,
                 windows_sandbox_level: None,
                 model: None,
                 effort: None,
@@ -18373,6 +18383,7 @@ guardian_approval = true
             file_system: Some(AdditionalFileSystemPermissions {
                 read: Some(vec![test_absolute_path("/tmp/read-only")]),
                 write: Some(vec![test_absolute_path("/tmp/write")]),
+                glob_scan_max_depth: None,
                 entries: None,
             }),
         });
@@ -18473,6 +18484,7 @@ guardian_approval = true
                 thread_id: thread_id.to_string(),
                 turn_id: "turn-approval".to_string(),
                 item_id: "call-approval".to_string(),
+                cwd: test_absolute_path("/tmp"),
                 reason: Some("Need access to .git".to_string()),
                 permissions: codex_app_server_protocol::RequestPermissionProfile {
                     network: Some(AdditionalNetworkPermissions {
@@ -18481,6 +18493,7 @@ guardian_approval = true
                     file_system: Some(AdditionalFileSystemPermissions {
                         read: Some(vec![test_absolute_path("/tmp/read-only")]),
                         write: Some(vec![test_absolute_path("/tmp/write")]),
+                        glob_scan_max_depth: None,
                         entries: None,
                     }),
                 },
@@ -19601,7 +19614,7 @@ guardian_approval = true
             backtrack_render_pending: false,
             feedback: codex_feedback::CodexFeedback::new(),
             feedback_audience: FeedbackAudience::External,
-            environment_manager: Arc::new(EnvironmentManager::new(/*exec_server_url*/ None)),
+            environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
             remote_app_server_url: None,
             remote_app_server_auth_token: None,
             pending_update_action: None,
@@ -19665,9 +19678,7 @@ guardian_approval = true
                 backtrack_render_pending: false,
                 feedback: codex_feedback::CodexFeedback::new(),
                 feedback_audience: FeedbackAudience::External,
-                environment_manager: Arc::new(EnvironmentManager::new(
-                    /*exec_server_url*/ None,
-                )),
+                environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
                 remote_app_server_url: None,
                 remote_app_server_auth_token: None,
                 pending_update_action: None,
@@ -20109,7 +20120,7 @@ guardian_approval = true
             params
                 .tags
                 .as_ref()
-                .and_then(|tags| tags.get("turn_id"))
+                .and_then(|tags: &BTreeMap<String, String>| tags.get("turn_id"))
                 .map(String::as_str),
             Some("turn-123")
         );

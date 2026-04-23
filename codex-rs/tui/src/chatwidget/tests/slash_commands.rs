@@ -1037,6 +1037,7 @@ async fn slash_copy_state_clears_on_thread_rollback() {
             last_agent_message: Some("Reply that will be rolled back".to_string()),
             completed_at: None,
             duration_ms: None,
+            time_to_first_token_ms: None,
         }),
     });
     chat.handle_codex_event(Event {
@@ -1067,6 +1068,7 @@ async fn slash_copy_is_unavailable_when_legacy_agent_message_is_not_repeated_on_
             last_agent_message: None,
             completed_at: None,
             duration_ms: None,
+            time_to_first_token_ms: None,
         }),
     });
     let _ = drain_insert_history(&mut rx);

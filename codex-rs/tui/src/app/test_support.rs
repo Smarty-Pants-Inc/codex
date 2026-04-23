@@ -55,6 +55,13 @@ pub(super) async fn make_test_app() -> App {
         primary_session_configured: None,
         pending_primary_events: VecDeque::new(),
         pending_app_server_requests: PendingAppServerRequests::default(),
+        pending_startup_ui_action: None,
+        oracle_state: OracleSupervisorState::default(),
+        oracle_picker_show_info: false,
+        oracle_picker_remote_threads: Vec::new(),
+        oracle_picker_include_new_thread: false,
+        oracle_broker: None,
+        oracle_test_broker_hooks: Arc::new(StdMutex::new(OracleTestBrokerHooks::default())),
         pending_plugin_enabled_writes: HashMap::new(),
     }
 }
