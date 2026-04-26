@@ -316,6 +316,27 @@ enabled = false
 }
 
 #[test]
+fn model_reasoning_effort_max_alias_deserializes_to_xhigh() {
+    let cfg: ConfigToml = toml::from_str(
+        r#"
+model_reasoning_effort = "max"
+
+[profiles.opus47-heavy]
+model_reasoning_effort = "heavy"
+"#,
+    )
+    .expect("TOML deserialization should succeed");
+
+    assert_eq!(cfg.model_reasoning_effort, Some(ReasoningEffort::XHigh));
+    assert_eq!(
+        cfg.profiles
+            .get("opus47-heavy")
+            .and_then(|profile| profile.model_reasoning_effort),
+        Some(ReasoningEffort::XHigh)
+    );
+}
+
+#[test]
 fn tools_web_search_true_deserializes_to_none() {
     let cfg: ConfigToml = toml::from_str(
         r#"

@@ -47,6 +47,7 @@ pub enum ReasoningEffort {
     #[default]
     Medium,
     High,
+    #[serde(alias = "max", alias = "heavy")]
     XHigh,
 }
 
@@ -584,6 +585,18 @@ mod tests {
     fn reasoning_effort_from_str_accepts_known_values() {
         assert_eq!("high".parse(), Ok(ReasoningEffort::High));
         assert_eq!("minimal".parse(), Ok(ReasoningEffort::Minimal));
+    }
+
+    #[test]
+    fn reasoning_effort_from_str_accepts_max_aliases_for_xhigh() {
+        assert_eq!("max".parse(), Ok(ReasoningEffort::XHigh));
+        assert_eq!("heavy".parse(), Ok(ReasoningEffort::XHigh));
+    }
+
+    #[test]
+    fn reasoning_effort_serializes_xhigh_as_canonical_value() -> anyhow::Result<()> {
+        assert_eq!(serde_json::to_string(&ReasoningEffort::XHigh)?, "\"xhigh\"");
+        Ok(())
     }
 
     #[test]
