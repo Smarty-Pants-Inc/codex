@@ -2241,14 +2241,6 @@ impl ChatWidget {
         }
     }
 
-    pub(crate) fn emitted_fork_event_threads(&self) -> HashSet<ThreadId> {
-        self.emitted_fork_event_threads.clone()
-    }
-
-    pub(crate) fn set_emitted_fork_event_threads(&mut self, thread_ids: HashSet<ThreadId>) {
-        self.emitted_fork_event_threads = thread_ids;
-    }
-
     pub(crate) fn handle_thread_session(&mut self, session: ThreadSessionState) {
         self.instruction_source_paths = session.instruction_source_paths.clone();
         let fork_parent_title = session.fork_parent_title.clone();

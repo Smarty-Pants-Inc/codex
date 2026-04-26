@@ -1,16 +1,9 @@
 //! Platform-specific app actions and small global shortcuts.
 //!
-//! This module owns platform state used by `App`, the side-conversation return shortcut predicate,
-//! and Windows sandbox helper actions that are compiled only on Windows.
+//! This module owns the side-conversation return shortcut predicate and Windows sandbox helper
+//! actions that are compiled only on Windows.
 
 use super::*;
-
-#[derive(Default)]
-pub(super) struct WindowsSandboxState {
-    pub(super) setup_started_at: Option<Instant>,
-    // One-shot suppression of the next world-writable scan after user confirmation.
-    pub(super) skip_world_writable_scan_once: bool,
-}
 
 impl App {
     #[cfg(target_os = "windows")]
