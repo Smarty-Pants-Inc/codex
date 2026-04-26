@@ -510,6 +510,26 @@ async fn openai_compatible_list_preserves_bundled_metadata() {
     assert!(!model_info.used_fallback_model_metadata);
     assert!(!model_info.base_instructions.is_empty());
     assert!(!model_info.supported_reasoning_levels.is_empty());
+    assert_eq!(model_info.priority, 0);
+
+    let available = manager.list_models(RefreshStrategy::Offline).await;
+    let gpt_55 = available
+        .iter()
+        .position(|model| model.model == "gpt-5.5")
+        .expect("gpt-5.5 should be listed");
+    let mini = available
+        .iter()
+        .position(|model| model.model == "gpt-5.5-mini")
+        .expect("gpt-5.5-mini should remain listed from the bundled catalog");
+    assert!(gpt_55 < mini, "gpt-5.5 should stay ahead of mini");
+    assert!(
+        available[gpt_55].is_default,
+        "gpt-5.5 should stay the picker default"
+    );
+    assert!(
+        !available[mini].is_default,
+        "gpt-5.5-mini should not become the picker default"
+    );
     assert_eq!(endpoint.fetch_count(), 1);
 }
 

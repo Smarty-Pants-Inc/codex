@@ -413,6 +413,7 @@ fn normalize_remote_model_info(model: ModelInfo, existing: Option<&ModelInfo>) -
     }
 
     let existing_visibility = existing.map(|model| model.visibility);
+    let existing_priority = existing.map(|model| model.priority);
     let mut hydrated = existing
         .cloned()
         .unwrap_or_else(|| model_info::provider_listed_model_info_from_slug(&model.slug));
@@ -434,7 +435,7 @@ fn normalize_remote_model_info(model: ModelInfo, existing: Option<&ModelInfo>) -
         _ => model.visibility,
     };
     hydrated.supported_in_api = model.supported_in_api;
-    hydrated.priority = model.priority;
+    hydrated.priority = existing_priority.unwrap_or(model.priority);
     hydrated.additional_speed_tiers = model.additional_speed_tiers;
     hydrated.availability_nux = model.availability_nux;
     hydrated.upgrade = model.upgrade;
