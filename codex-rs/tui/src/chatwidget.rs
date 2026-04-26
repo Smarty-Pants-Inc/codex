@@ -9095,7 +9095,10 @@ impl ChatWidget {
     }
 
     fn is_auto_model(model: &str) -> bool {
-        model.starts_with("codex-auto-")
+        matches!(
+            model,
+            "codex-auto-fast" | "codex-auto-balanced" | "codex-auto-thorough"
+        )
     }
 
     fn auto_model_order(model: &str) -> usize {

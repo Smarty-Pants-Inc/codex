@@ -1975,7 +1975,69 @@ async fn realtime_audio_picker_emits_persist_event() {
 async fn model_picker_hides_show_in_picker_false_models_from_cache() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("test-visible-model")).await;
     chat.thread_id = Some(ThreadId::new());
-    let preset = |slug: &str, show_in_picker: bool| ModelPreset {
+
+    chat.open_model_popup_with_presets(vec![
+        model_picker_preset("test-visible-model", true),
+        model_picker_preset("test-hidden-model", false),
+    ]);
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert_chatwidget_snapshot!("model_picker_filters_hidden_models", popup);
+    assert!(
+        popup.contains("test-visible-model"),
+        "expected visible model to appear in picker:\n{popup}"
+    );
+    assert!(
+        !popup.contains("test-hidden-model"),
+        "expected hidden model to be excluded from picker:\n{popup}"
+    );
+}
+
+#[tokio::test]
+async fn model_picker_does_not_treat_review_model_as_quick_auto_mode() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.open_model_popup_with_presets(vec![
+        model_picker_preset("codex-auto-review", true),
+        model_picker_preset("gpt-5.5", true),
+    ]);
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert!(
+        popup.contains("Select Model and Effort"),
+        "expected full model picker when only internal review auto model is present:\n{popup}"
+    );
+    assert!(
+        !popup.contains("Pick a quick auto mode"),
+        "internal review model should not open the top-level auto picker:\n{popup}"
+    );
+}
+
+#[tokio::test]
+async fn model_picker_shows_user_facing_auto_modes_first() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
+    chat.thread_id = Some(ThreadId::new());
+
+    chat.open_model_popup_with_presets(vec![
+        model_picker_preset("codex-auto-balanced", true),
+        model_picker_preset("gpt-5.5", true),
+    ]);
+    let popup = render_bottom_popup(&chat, /*width*/ 80);
+    assert!(
+        popup.contains("Pick a quick auto mode"),
+        "expected user-facing auto models to keep the top-level picker:\n{popup}"
+    );
+    assert!(
+        popup.contains("codex-auto-balanced"),
+        "expected visible auto mode in top-level picker:\n{popup}"
+    );
+    assert!(
+        popup.contains("All models"),
+        "expected top-level picker to keep the All models escape hatch:\n{popup}"
+    );
+}
+
+fn model_picker_preset(slug: &str, show_in_picker: bool) -> ModelPreset {
+    ModelPreset {
         id: slug.to_string(),
         model: slug.to_string(),
         display_name: slug.to_string(),
@@ -1993,22 +2055,7 @@ async fn model_picker_hides_show_in_picker_false_models_from_cache() {
         availability_nux: None,
         supported_in_api: true,
         input_modalities: default_input_modalities(),
-    };
-
-    chat.open_model_popup_with_presets(vec![
-        preset("test-visible-model", true),
-        preset("test-hidden-model", false),
-    ]);
-    let popup = render_bottom_popup(&chat, /*width*/ 80);
-    assert_chatwidget_snapshot!("model_picker_filters_hidden_models", popup);
-    assert!(
-        popup.contains("test-visible-model"),
-        "expected visible model to appear in picker:\n{popup}"
-    );
-    assert!(
-        !popup.contains("test-hidden-model"),
-        "expected hidden model to be excluded from picker:\n{popup}"
-    );
+    }
 }
 
 #[tokio::test]

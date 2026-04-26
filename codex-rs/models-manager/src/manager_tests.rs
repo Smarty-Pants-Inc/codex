@@ -461,6 +461,38 @@ async fn openai_compatible_listed_opus_is_picker_ready() {
 }
 
 #[tokio::test]
+async fn openai_compatible_list_does_not_promote_hidden_bundled_models() {
+    let codex_home = tempdir().expect("temp dir");
+    let endpoint = TestModelsEndpoint::new(vec![vec![openai_compatible_remote_model(
+        "codex-auto-review",
+    )]]);
+    let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
+
+    manager
+        .refresh_available_models(RefreshStrategy::Online)
+        .await
+        .expect("refresh should fetch OpenAI-compatible model list");
+
+    let raw_models = manager.get_remote_models().await;
+    let review_info = raw_models
+        .iter()
+        .find(|model| model.slug == "codex-auto-review")
+        .expect("review model should remain in raw catalog");
+    assert_eq!(review_info.visibility, ModelVisibility::Hide);
+
+    let available = manager.list_models(RefreshStrategy::Offline).await;
+    let review = available
+        .iter()
+        .find(|model| model.model == "codex-auto-review")
+        .expect("review model should remain addressable");
+    assert!(
+        !review.show_in_picker,
+        "internal review model should stay hidden from manual model picking"
+    );
+    assert_eq!(endpoint.fetch_count(), 1);
+}
+
+#[tokio::test]
 async fn openai_compatible_list_preserves_bundled_metadata() {
     let codex_home = tempdir().expect("temp dir");
     let endpoint = TestModelsEndpoint::new(vec![vec![openai_compatible_remote_model("gpt-5.5")]]);

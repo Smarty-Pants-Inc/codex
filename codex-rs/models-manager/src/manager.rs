@@ -9,6 +9,7 @@ use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::error::Result as CoreResult;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
+use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ModelsResponse;
 use std::fmt;
 use std::path::PathBuf;
@@ -411,6 +412,7 @@ fn normalize_remote_model_info(model: ModelInfo, existing: Option<&ModelInfo>) -
         return model;
     }
 
+    let existing_visibility = existing.map(|model| model.visibility);
     let mut hydrated = existing
         .cloned()
         .unwrap_or_else(|| model_info::provider_listed_model_info_from_slug(&model.slug));
@@ -427,7 +429,10 @@ fn normalize_remote_model_info(model: ModelInfo, existing: Option<&ModelInfo>) -
     if !model.supported_reasoning_levels.is_empty() {
         hydrated.supported_reasoning_levels = model.supported_reasoning_levels;
     }
-    hydrated.visibility = model.visibility;
+    hydrated.visibility = match existing_visibility {
+        Some(visibility @ (ModelVisibility::Hide | ModelVisibility::None)) => visibility,
+        _ => model.visibility,
+    };
     hydrated.supported_in_api = model.supported_in_api;
     hydrated.priority = model.priority;
     hydrated.additional_speed_tiers = model.additional_speed_tiers;
