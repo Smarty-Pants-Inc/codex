@@ -1,6 +1,30 @@
 use super::*;
 use crate::ModelsManagerConfig;
+use codex_protocol::openai_models::ReasoningEffort;
 use pretty_assertions::assert_eq;
+
+#[test]
+fn claude_opus_4_7_fallback_advertises_adaptive_reasoning_levels() {
+    let model = model_info_from_slug("claude-opus-4-7");
+
+    assert_eq!(model.display_name, "Claude Opus 4.7");
+    assert_eq!(model.default_reasoning_level, Some(ReasoningEffort::High));
+    assert!(model.supports_reasoning_summaries);
+    assert_eq!(
+        model
+            .supported_reasoning_levels
+            .iter()
+            .map(|preset| preset.effort)
+            .collect::<Vec<_>>(),
+        vec![
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::Max,
+        ]
+    );
+}
 
 #[test]
 fn reasoning_summaries_override_true_enables_support() {

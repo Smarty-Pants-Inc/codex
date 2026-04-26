@@ -8389,6 +8389,7 @@ impl ChatWidget {
             Some(ReasoningEffortConfig::Medium) => "medium",
             Some(ReasoningEffortConfig::High) => "high",
             Some(ReasoningEffortConfig::XHigh) => "xhigh",
+            Some(ReasoningEffortConfig::Max) => "max",
             None | Some(ReasoningEffortConfig::None) => "default",
         }
     }
@@ -9335,6 +9336,11 @@ impl ChatWidget {
 
         let warn_effort = if supported
             .iter()
+            .any(|option| option.effort == ReasoningEffortConfig::Max)
+        {
+            Some(ReasoningEffortConfig::Max)
+        } else if supported
+            .iter()
             .any(|option| option.effort == ReasoningEffortConfig::XHigh)
         {
             Some(ReasoningEffortConfig::XHigh)
@@ -9501,6 +9507,7 @@ impl ChatWidget {
             ReasoningEffortConfig::Medium => "Medium",
             ReasoningEffortConfig::High => "High",
             ReasoningEffortConfig::XHigh => "Extra high",
+            ReasoningEffortConfig::Max => "Max",
         }
     }
 
@@ -10959,6 +10966,7 @@ impl ChatWidget {
                     Some(ReasoningEffortConfig::Medium) => "medium",
                     Some(ReasoningEffortConfig::High) => "high",
                     Some(ReasoningEffortConfig::XHigh) => "xhigh",
+                    Some(ReasoningEffortConfig::Max) => "max",
                     None | Some(ReasoningEffortConfig::None) => "default",
                 };
                 message.push(' ');

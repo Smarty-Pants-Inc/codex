@@ -47,8 +47,9 @@ pub enum ReasoningEffort {
     #[default]
     Medium,
     High,
-    #[serde(alias = "max", alias = "heavy")]
     XHigh,
+    #[serde(alias = "heavy")]
+    Max,
 }
 
 impl FromStr for ReasoningEffort {
@@ -520,6 +521,7 @@ fn effort_rank(effort: ReasoningEffort) -> i32 {
         ReasoningEffort::Medium => 3,
         ReasoningEffort::High => 4,
         ReasoningEffort::XHigh => 5,
+        ReasoningEffort::Max => 6,
     }
 }
 
@@ -588,14 +590,15 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_effort_from_str_accepts_max_aliases_for_xhigh() {
-        assert_eq!("max".parse(), Ok(ReasoningEffort::XHigh));
-        assert_eq!("heavy".parse(), Ok(ReasoningEffort::XHigh));
+    fn reasoning_effort_from_str_accepts_anthropic_max_effort() {
+        assert_eq!("max".parse(), Ok(ReasoningEffort::Max));
+        assert_eq!("heavy".parse(), Ok(ReasoningEffort::Max));
     }
 
     #[test]
-    fn reasoning_effort_serializes_xhigh_as_canonical_value() -> anyhow::Result<()> {
+    fn reasoning_effort_serializes_extended_efforts_as_canonical_values() -> anyhow::Result<()> {
         assert_eq!(serde_json::to_string(&ReasoningEffort::XHigh)?, "\"xhigh\"");
+        assert_eq!(serde_json::to_string(&ReasoningEffort::Max)?, "\"max\"");
         Ok(())
     }
 

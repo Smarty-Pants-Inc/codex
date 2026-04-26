@@ -4,6 +4,8 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelInstructionsVariables;
 use codex_protocol::openai_models::ModelMessages;
 use codex_protocol::openai_models::ModelVisibility;
+use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::openai_models::TruncationMode;
 use codex_protocol::openai_models::TruncationPolicyConfig;
 use codex_protocol::openai_models::WebSearchToolType;
@@ -64,7 +66,33 @@ pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig)
 
 /// Build a minimal fallback model descriptor for missing/unknown slugs.
 pub fn model_info_from_slug(slug: &str) -> ModelInfo {
+    let mut model = fallback_model_info_from_slug(slug);
+    if slug == "claude-opus-4-7" {
+        model.display_name = "Claude Opus 4.7".to_string();
+        model.description = Some("Anthropic Claude Opus 4.7".to_string());
+        model.default_reasoning_level = Some(ReasoningEffort::High);
+        model.supported_reasoning_levels = vec![
+            reasoning_effort_preset(
+                ReasoningEffort::Low,
+                "Fast responses with lighter reasoning",
+            ),
+            reasoning_effort_preset(
+                ReasoningEffort::Medium,
+                "Balances speed and reasoning depth for everyday tasks",
+            ),
+            reasoning_effort_preset(ReasoningEffort::High, "Greater reasoning depth"),
+            reasoning_effort_preset(ReasoningEffort::XHigh, "Extra high reasoning depth"),
+            reasoning_effort_preset(ReasoningEffort::Max, "Maximum adaptive thinking"),
+        ];
+        model.supports_reasoning_summaries = true;
+        return model;
+    }
+
     warn!("Unknown model {slug} is used. This will use fallback model metadata.");
+    model
+}
+
+fn fallback_model_info_from_slug(slug: &str) -> ModelInfo {
     ModelInfo {
         slug: slug.to_string(),
         display_name: slug.to_string(),
@@ -97,6 +125,13 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: true, // this is the fallback model metadata
         supports_search_tool: false,
+    }
+}
+
+fn reasoning_effort_preset(effort: ReasoningEffort, description: &str) -> ReasoningEffortPreset {
+    ReasoningEffortPreset {
+        effort,
+        description: description.to_string(),
     }
 }
 

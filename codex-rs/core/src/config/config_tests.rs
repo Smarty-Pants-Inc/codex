@@ -316,7 +316,7 @@ enabled = false
 }
 
 #[test]
-fn model_reasoning_effort_max_alias_deserializes_to_xhigh() {
+fn model_reasoning_effort_max_deserializes_to_max() {
     let cfg: ConfigToml = toml::from_str(
         r#"
 model_reasoning_effort = "max"
@@ -327,12 +327,12 @@ model_reasoning_effort = "heavy"
     )
     .expect("TOML deserialization should succeed");
 
-    assert_eq!(cfg.model_reasoning_effort, Some(ReasoningEffort::XHigh));
+    assert_eq!(cfg.model_reasoning_effort, Some(ReasoningEffort::Max));
     assert_eq!(
         cfg.profiles
             .get("opus47-heavy")
             .and_then(|profile| profile.model_reasoning_effort),
-        Some(ReasoningEffort::XHigh)
+        Some(ReasoningEffort::Max)
     );
 }
 

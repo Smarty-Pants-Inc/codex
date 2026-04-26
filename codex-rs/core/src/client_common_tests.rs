@@ -1,9 +1,11 @@
 use codex_api::OpenAiVerbosity;
+use codex_api::Reasoning;
 use codex_api::ResponsesApiRequest;
 use codex_api::TextControls;
 use codex_api::create_text_param_for_request;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::openai_models::ReasoningEffort;
 use pretty_assertions::assert_eq;
 
 use super::*;
@@ -139,6 +141,37 @@ fn omits_text_when_not_set() {
 
     let v = serde_json::to_value(&req).expect("json");
     assert!(v.get("text").is_none());
+}
+
+#[test]
+fn serializes_max_reasoning_effort_when_set() {
+    let req = ResponsesApiRequest {
+        model: "claude-opus-4-7".to_string(),
+        instructions: "i".to_string(),
+        input: vec![],
+        tools: vec![],
+        tool_choice: "auto".to_string(),
+        parallel_tool_calls: true,
+        reasoning: Some(Reasoning {
+            effort: Some(ReasoningEffort::Max),
+            summary: None,
+        }),
+        store: false,
+        stream: true,
+        include: vec![],
+        prompt_cache_key: None,
+        service_tier: None,
+        text: None,
+        client_metadata: None,
+    };
+
+    let v = serde_json::to_value(&req).expect("json");
+    assert_eq!(
+        v.get("reasoning")
+            .and_then(|reasoning| reasoning.get("effort"))
+            .and_then(|effort| effort.as_str()),
+        Some("max")
+    );
 }
 
 #[test]
