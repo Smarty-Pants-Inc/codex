@@ -1781,9 +1781,9 @@ mod tests {
                 followup_session: None,
                 files: Vec::new(),
                 cwd: std::env::temp_dir(),
-                model: "gpt-5.4".to_string(),
+                model: "gpt-5.5".to_string(),
                 browser_model_strategy: "select".to_string(),
-                browser_model_label: Some("Thinking 5.4".to_string()),
+                browser_model_label: Some("Thinking 5.5".to_string()),
                 browser_thinking_time: None,
             })
             .await

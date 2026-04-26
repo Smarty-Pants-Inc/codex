@@ -27,7 +27,7 @@ REASONING_RANK = {
     "high": 4,
     "xhigh": 5,
 }
-PREFERRED_MODEL = "gpt-5.4"
+PREFERRED_MODEL = "gpt-5.5"
 
 
 def _pick_highest_model(models):

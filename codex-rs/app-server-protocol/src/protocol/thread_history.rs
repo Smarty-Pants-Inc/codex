@@ -2788,7 +2788,7 @@ mod tests {
                 new_agent_nickname: Some("Scout".into()),
                 new_agent_role: Some("explorer".into()),
                 prompt: "inspect the repo".into(),
-                model: "gpt-5.4-mini".into(),
+                model: "gpt-5.5-mini".into(),
                 reasoning_effort: codex_protocol::openai_models::ReasoningEffort::Medium,
                 status: AgentStatus::Running,
             }),
@@ -2810,7 +2810,7 @@ mod tests {
                 sender_thread_id: "00000000-0000-0000-0000-000000000001".into(),
                 receiver_thread_ids: vec!["00000000-0000-0000-0000-000000000002".into()],
                 prompt: Some("inspect the repo".into()),
-                model: Some("gpt-5.4-mini".into()),
+                model: Some("gpt-5.5-mini".into()),
                 reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
                 agents_states: [(
                     "00000000-0000-0000-0000-000000000002".into(),

@@ -244,7 +244,7 @@ mod tests {
                 &Method::Post,
                 "/v1/responses",
                 &headers,
-                br#"{"model":"gpt-5.4"}"#,
+                br#"{"model":"gpt-5.5"}"#,
             )
             .expect("dump request");
 
@@ -283,7 +283,7 @@ mod tests {
                     }
                 ],
                 "body": {
-                    "model": "gpt-5.4"
+                    "model": "gpt-5.5"
                 }
             })
         );

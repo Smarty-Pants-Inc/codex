@@ -678,7 +678,7 @@ async fn native_oracle_attach_and_pro_extended_roundtrip() -> Result<()> {
                         {
                             attach_ready_at = Some(now);
                         }
-                        if sanitized_output.contains("requested gpt-5.4-pro (Extended)") {
+                        if sanitized_output.contains("requested gpt-5.5-pro (Extended)") {
                             saw_extended_model = true;
                             if extended_ready_at.is_none() {
                                 extended_ready_at = Some(now);
@@ -686,7 +686,7 @@ async fn native_oracle_attach_and_pro_extended_roundtrip() -> Result<()> {
                         }
                         if oracle_model_ack_at.is_none()
                             && sanitized_output.contains(
-                                "Oracle model preference set to gpt-5.4-pro (Extended).",
+                                "Oracle model preference set to gpt-5.5-pro (Extended).",
                             )
                         {
                             oracle_model_ack_at = Some(now);
@@ -1237,7 +1237,7 @@ async fn native_oracle_interrupt_recovery_roundtrip() -> Result<()> {
                         }
                         if thinking_ack_at.is_none()
                             && sanitized_output.contains(
-                                "Oracle model preference set to gpt-5.4 (Thinking 5.4).",
+                                "Oracle model preference set to gpt-5.5 (Thinking 5.5).",
                             )
                         {
                             thinking_ack_at = Some(now);
@@ -1499,12 +1499,12 @@ async fn native_oracle_interrupt_recovery_roundtrip() -> Result<()> {
                 &thread_url,
                 &conversation_id,
                 &recovery_token,
-                "gpt-5.4",
+                "gpt-5.5",
             )
         });
     if !matched {
         anyhow::bail!(
-            "expected matching Oracle recovery session on gpt-5.4 for conversation {conversation_id} containing {recovery_token}\n{}",
+            "expected matching Oracle recovery session on gpt-5.5 for conversation {conversation_id} containing {recovery_token}\n{}",
             failure_artifacts(&codex_home_path, &session_log_path, &output)
         );
     }
@@ -1740,7 +1740,7 @@ async fn create_fresh_oracle_project_thread(
         .arg("--engine")
         .arg("browser")
         .arg("--model")
-        .arg("gpt-5.4")
+        .arg("gpt-5.5")
         .arg("--wait")
         .arg("--heartbeat")
         .arg("0")
@@ -2490,12 +2490,12 @@ async fn native_oracle_attach_with_import_history_roundtrip() -> Result<()> {
                 &thread_url,
                 &conversation_id,
                 &token,
-                "gpt-5.4",
+                "gpt-5.5",
             )
         });
     if !matched {
         anyhow::bail!(
-            "expected a matching Oracle import-history session for {conversation_id} containing {token} on gpt-5.4\n{}",
+            "expected a matching Oracle import-history session for {conversation_id} containing {token} on gpt-5.5\n{}",
             failure_artifacts(&codex_home_path, &session_log_path, &output)
         );
     }
@@ -2728,32 +2728,32 @@ async fn native_oracle_model_matrix_roundtrip() -> Result<()> {
                         {
                             attach_ready_at = Some(now);
                         }
-                        if sanitized_output.contains("requested gpt-5.4-pro (Standard)") {
+                        if sanitized_output.contains("requested gpt-5.5-pro (Standard)") {
                             saw_standard_model = true;
                         }
-                        if sanitized_output.contains("requested gpt-5.4-pro (Extended)") {
+                        if sanitized_output.contains("requested gpt-5.5-pro (Extended)") {
                             saw_extended_model = true;
                         }
-                        if sanitized_output.contains("requested gpt-5.4 (Thinking 5.4)") {
+                        if sanitized_output.contains("requested gpt-5.5 (Thinking 5.5)") {
                             saw_thinking_model = true;
                         }
                         if standard_ack_at.is_none()
                             && sanitized_output.contains(
-                                "Oracle model preference set to gpt-5.4-pro (Standard).",
+                                "Oracle model preference set to gpt-5.5-pro (Standard).",
                             )
                         {
                             standard_ack_at = Some(now);
                         }
                         if extended_ack_at.is_none()
                             && sanitized_output.contains(
-                                "Oracle model preference set to gpt-5.4-pro (Extended).",
+                                "Oracle model preference set to gpt-5.5-pro (Extended).",
                             )
                         {
                             extended_ack_at = Some(now);
                         }
                         if thinking_ack_at.is_none()
                             && sanitized_output.contains(
-                                "Oracle model preference set to gpt-5.4 (Thinking 5.4).",
+                                "Oracle model preference set to gpt-5.5 (Thinking 5.5).",
                             )
                         {
                             thinking_ack_at = Some(now);
@@ -3986,7 +3986,7 @@ async fn native_oracle_assistant_download_roundtrip() -> Result<()> {
                         }
                         if thinking_ack_at.is_none()
                             && sanitized_output.contains(
-                                "Oracle model preference set to gpt-5.4 (Thinking 5.4).",
+                                "Oracle model preference set to gpt-5.5 (Thinking 5.5).",
                             )
                         {
                             thinking_ack_at = Some(now);

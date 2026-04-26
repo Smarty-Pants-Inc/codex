@@ -2165,7 +2165,7 @@ async fn snapshot_request_shape_remote_pre_turn_compaction_strips_incoming_model
 -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let previous_model = "gpt-5.4";
+    let previous_model = "gpt-5.5";
     let next_model = "gpt-5.3-codex";
     let harness = TestCodexHarness::with_builder(
         test_codex()

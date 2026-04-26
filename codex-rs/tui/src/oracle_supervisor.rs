@@ -138,9 +138,9 @@ pub(crate) enum OracleModelPreset {
 impl OracleModelPreset {
     fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "pro" | "pro-standard" | "pro_standard" | "gpt-5.4-pro" => Some(Self::Pro),
+            "pro" | "pro-standard" | "pro_standard" | "gpt-5.5-pro" => Some(Self::Pro),
             "pro-extended" | "pro_extended" => Some(Self::ProExtended),
-            "thinking" | "gpt-5.4" => Some(Self::Thinking),
+            "thinking" | "gpt-5.5" => Some(Self::Thinking),
             _ => None,
         }
     }
@@ -150,7 +150,7 @@ impl OracleModelPreset {
             [] => None,
             [model] => Self::parse(model),
             [model, level] => match model.trim().to_ascii_lowercase().as_str() {
-                "pro" | "gpt-5.4-pro" => match level.trim().to_ascii_lowercase().as_str() {
+                "pro" | "gpt-5.5-pro" => match level.trim().to_ascii_lowercase().as_str() {
                     "standard" => Some(Self::Pro),
                     "extended" => Some(Self::ProExtended),
                     _ => None,
@@ -163,31 +163,31 @@ impl OracleModelPreset {
 
     pub(crate) fn model_id(self) -> &'static str {
         match self {
-            Self::Pro | Self::ProExtended => "gpt-5.4-pro",
-            Self::Thinking => "gpt-5.4",
+            Self::Pro | Self::ProExtended => "gpt-5.5-pro",
+            Self::Thinking => "gpt-5.5",
         }
     }
 
     pub(crate) fn browser_label(self) -> &'static str {
         match self {
-            Self::Pro | Self::ProExtended => "GPT-5.4 Pro",
-            Self::Thinking => "Thinking 5.4",
+            Self::Pro | Self::ProExtended => "GPT-5.5 Pro",
+            Self::Thinking => "Thinking 5.5",
         }
     }
 
     pub(crate) fn picker_label(self) -> &'static str {
         match self {
-            Self::Pro => "GPT-5.4 Pro (Standard)",
-            Self::ProExtended => "GPT-5.4 Pro (Extended)",
-            Self::Thinking => "Thinking 5.4",
+            Self::Pro => "GPT-5.5 Pro (Standard)",
+            Self::ProExtended => "GPT-5.5 Pro (Extended)",
+            Self::Thinking => "Thinking 5.5",
         }
     }
 
     pub(crate) fn display_name(self) -> &'static str {
         match self {
-            Self::Pro => "gpt-5.4-pro (Standard)",
-            Self::ProExtended => "gpt-5.4-pro (Extended)",
-            Self::Thinking => "gpt-5.4 (Thinking 5.4)",
+            Self::Pro => "gpt-5.5-pro (Standard)",
+            Self::ProExtended => "gpt-5.5-pro (Extended)",
+            Self::Thinking => "gpt-5.5 (Thinking 5.5)",
         }
     }
 
@@ -2919,23 +2919,23 @@ mod tests {
 
     #[test]
     fn oracle_model_preset_maps_to_expected_browser_values() {
-        assert_eq!(OracleModelPreset::Pro.model_id(), "gpt-5.4-pro");
-        assert_eq!(OracleModelPreset::Pro.browser_label(), "GPT-5.4 Pro");
+        assert_eq!(OracleModelPreset::Pro.model_id(), "gpt-5.5-pro");
+        assert_eq!(OracleModelPreset::Pro.browser_label(), "GPT-5.5 Pro");
         assert_eq!(
             OracleModelPreset::Pro.browser_thinking_time(),
             Some("standard")
         );
-        assert_eq!(OracleModelPreset::ProExtended.model_id(), "gpt-5.4-pro");
+        assert_eq!(OracleModelPreset::ProExtended.model_id(), "gpt-5.5-pro");
         assert_eq!(
             OracleModelPreset::ProExtended.browser_label(),
-            "GPT-5.4 Pro"
+            "GPT-5.5 Pro"
         );
         assert_eq!(
             OracleModelPreset::ProExtended.browser_thinking_time(),
             Some("extended")
         );
-        assert_eq!(OracleModelPreset::Thinking.model_id(), "gpt-5.4");
-        assert_eq!(OracleModelPreset::Thinking.browser_label(), "Thinking 5.4");
+        assert_eq!(OracleModelPreset::Thinking.model_id(), "gpt-5.5");
+        assert_eq!(OracleModelPreset::Thinking.browser_label(), "Thinking 5.5");
         assert_eq!(OracleModelPreset::Thinking.browser_thinking_time(), None);
     }
 
@@ -2946,7 +2946,7 @@ mod tests {
             OracleModelPreset::Thinking
         );
         assert_eq!(
-            OracleModelPreset::resolve_default(Some("gpt-5.4-pro")),
+            OracleModelPreset::resolve_default(Some("gpt-5.5-pro")),
             OracleModelPreset::Pro
         );
         assert_eq!(

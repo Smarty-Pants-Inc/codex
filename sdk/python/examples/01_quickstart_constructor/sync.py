@@ -18,7 +18,7 @@ from codex_app_server import Codex
 with Codex(config=runtime_config()) as codex:
     print("Server:", server_label(codex.metadata))
 
-    thread = codex.thread_start(model="gpt-5.4", config={"model_reasoning_effort": "high"})
+    thread = codex.thread_start(model="gpt-5.5", config={"model_reasoning_effort": "high"})
     result = thread.run("Say hello in one sentence.")
     print("Items:", len(result.items))
     print("Text:", result.final_response)

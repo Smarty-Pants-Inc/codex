@@ -5,6 +5,6 @@ expression: rendered
 ╭────────────────────────────────────────────────────╮
 │ >_ OpenAI Codex (v<VERSION>)                       │
 │                                                    │
-│ model:     gpt-5.4 xhigh   fast   /model to change │
+│ model:     gpt-5.5 xhigh   fast   /model to change │
 │ directory: /tmp/project                            │
 ╰────────────────────────────────────────────────────╯

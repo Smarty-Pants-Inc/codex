@@ -2047,12 +2047,12 @@ async fn server_overloaded_error_does_not_switch_models() {
 
 #[tokio::test]
 async fn model_reasoning_selection_popup_snapshot() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
 
     set_chatgpt_auth(&mut chat);
     chat.set_reasoning_effort(Some(ReasoningEffortConfig::High));
 
-    let preset = get_available_model(&chat, "gpt-5.4");
+    let preset = get_available_model(&chat, "gpt-5.5");
     chat.open_reasoning_popup(preset);
 
     let popup = render_bottom_popup(&chat, /*width*/ 80);
@@ -2075,7 +2075,7 @@ async fn model_reasoning_selection_popup_extra_high_warning_snapshot() {
 
 #[tokio::test]
 async fn alt_period_raises_reasoning_effort() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.thread_id = Some(ThreadId::new());
     chat.set_reasoning_effort(Some(ReasoningEffortConfig::Medium));
 
@@ -2085,7 +2085,7 @@ async fn alt_period_raises_reasoning_effort() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, AppEvent::UpdateModel(model) if model == "gpt-5.4")),
+            .any(|event| matches!(event, AppEvent::UpdateModel(model) if model == "gpt-5.5")),
         "expected model update event; events: {events:?}"
     );
     assert!(
@@ -2105,7 +2105,7 @@ async fn alt_period_raises_reasoning_effort() {
 
 #[tokio::test]
 async fn alt_comma_lowers_reasoning_effort() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.thread_id = Some(ThreadId::new());
     chat.set_reasoning_effort(Some(ReasoningEffortConfig::Medium));
 
@@ -2129,7 +2129,7 @@ async fn alt_comma_lowers_reasoning_effort() {
 
 #[tokio::test]
 async fn reasoning_shortcut_clears_armed_quit_shortcut() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.thread_id = Some(ThreadId::new());
     chat.set_reasoning_effort(Some(ReasoningEffortConfig::Medium));
     chat.arm_quit_shortcut(key_hint::ctrl(KeyCode::Char('c')));
@@ -2150,7 +2150,7 @@ async fn reasoning_shortcut_clears_armed_quit_shortcut() {
 
 #[tokio::test]
 async fn reasoning_shortcut_is_ignored_with_model_popup_open() {
-    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.thread_id = Some(ThreadId::new());
     chat.set_reasoning_effort(Some(ReasoningEffortConfig::Medium));
     chat.open_model_popup();
@@ -2174,11 +2174,11 @@ async fn reasoning_shortcut_is_ignored_with_model_popup_open() {
 
 #[tokio::test]
 async fn reasoning_popup_shows_extra_high_with_space() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
 
     set_chatgpt_auth(&mut chat);
 
-    let preset = get_available_model(&chat, "gpt-5.4");
+    let preset = get_available_model(&chat, "gpt-5.5");
     chat.open_reasoning_popup(preset);
 
     let popup = render_bottom_popup(&chat, /*width*/ 120);
@@ -2288,11 +2288,11 @@ async fn feedback_good_result_consent_popup_includes_connectivity_diagnostics_fi
 
 #[tokio::test]
 async fn reasoning_popup_escape_returns_to_model_popup() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.thread_id = Some(ThreadId::new());
     chat.open_model_popup();
 
-    let preset = get_available_model(&chat, "gpt-5.4");
+    let preset = get_available_model(&chat, "gpt-5.5");
     chat.open_reasoning_popup(preset);
 
     let before_escape = render_bottom_popup(&chat, /*width*/ 80);

@@ -3792,12 +3792,12 @@ impl App {
         let items = [
             (
                 true,
-                "GPT-5.4 Pro",
+                "GPT-5.5 Pro",
                 "Best Oracle reasoning quality. Press enter to choose Standard or Extended.",
             ),
             (
                 false,
-                "Thinking 5.4",
+                "Thinking 5.5",
                 "Faster, cheaper Oracle turns when you want a lighter pass.",
             ),
         ]
@@ -9885,11 +9885,11 @@ guardian_approval = true
         assert!(popup.contains(" new"));
         assert!(popup.contains(" search"));
         assert!(popup.contains("info"));
-        assert!(popup.contains("thinking 5.4"));
+        assert!(popup.contains("thinking 5.5"));
         assert!(!popup.contains("https://chatgpt.com/"));
         assert!(!popup.contains("session "));
         assert!(!popup.contains("convo "));
-        assert!(!popup.contains("requested gpt-5.4"));
+        assert!(!popup.contains("requested gpt-5.5"));
         assert!(popup.contains("Attached: Attached Thread"));
         assert!(popup.contains("Remote: Fresh Thread"));
     }
@@ -10046,7 +10046,7 @@ guardian_approval = true
         let store = channel.store.lock().await;
         assert_eq!(
             store.session.as_ref().map(|session| session.model.as_str()),
-            Some("requested gpt-5.4-pro (Standard)")
+            Some("requested gpt-5.5-pro (Standard)")
         );
         assert_eq!(
             app.oracle_test_broker_hooks
@@ -11958,7 +11958,7 @@ guardian_approval = true
 
         assert!(app.toggle_oracle_picker_info());
         let popup = render_bottom_popup(&app, /*width*/ 100);
-        assert!(popup.contains("Model: GPT-5.4 Pro"));
+        assert!(popup.contains("Model: GPT-5.5 Pro"));
         assert!(popup.contains("Phase: waiting for Oracle user-turn reply"));
         assert!(popup.contains("Attached: 1"));
         assert!(popup.contains("Remote: 0"));
@@ -11975,13 +11975,13 @@ guardian_approval = true
         app.show_oracle_picker(Vec::new(), /*include_new_thread*/ true);
 
         assert_eq!(app.oracle_state.model, OracleModelPreset::Pro);
-        assert!(render_bottom_popup(&app, /*width*/ 100).contains("thinking 5.4"));
+        assert!(render_bottom_popup(&app, /*width*/ 100).contains("thinking 5.5"));
 
         assert!(app.toggle_oracle_picker_model().await);
         assert_eq!(app.oracle_state.model, OracleModelPreset::Thinking);
         let popup = render_bottom_popup(&app, /*width*/ 100);
-        assert!(popup.contains("gpt-5.4 pro"));
-        assert!(!popup.contains("thinking 5.4"));
+        assert!(popup.contains("gpt-5.5 pro"));
+        assert!(!popup.contains("thinking 5.5"));
     }
 
     #[tokio::test]
@@ -11996,8 +11996,8 @@ guardian_approval = true
 
         let popup = render_bottom_popup(&app, /*width*/ 100);
         assert!(popup.contains("Oracle Model"));
-        assert!(popup.contains("GPT-5.4 Pro"));
-        assert!(popup.contains("Thinking 5.4"));
+        assert!(popup.contains("GPT-5.5 Pro"));
+        assert!(popup.contains("Thinking 5.5"));
     }
 
     #[tokio::test]
@@ -12030,7 +12030,7 @@ guardian_approval = true
         assert!(popup.contains("Oracle Pro Thinking"));
         assert!(popup.contains("Standard"));
         assert!(popup.contains("Extended"));
-        assert!(popup.contains("GPT-5.4 Pro (Extended)"));
+        assert!(popup.contains("GPT-5.5 Pro (Extended)"));
     }
 
     #[tokio::test]
@@ -12073,7 +12073,7 @@ guardian_approval = true
             let store = channel.store.lock().await;
             assert_eq!(
                 store.session.as_ref().map(|session| session.model.as_str()),
-                Some("requested gpt-5.4 (Thinking 5.4)")
+                Some("requested gpt-5.5 (Thinking 5.5)")
             );
         }
         Ok(())
@@ -12091,7 +12091,7 @@ guardian_approval = true
             .await;
 
         assert_eq!(app.oracle_state.model, OracleModelPreset::ProExtended);
-        assert!(status.contains("gpt-5.4-pro (Extended)"));
+        assert!(status.contains("gpt-5.5-pro (Extended)"));
         let channel = app
             .thread_event_channels
             .get(&thread_id)
@@ -12099,7 +12099,7 @@ guardian_approval = true
         let store = channel.store.lock().await;
         assert_eq!(
             store.session.as_ref().map(|session| session.model.as_str()),
-            Some("requested gpt-5.4-pro (Extended)")
+            Some("requested gpt-5.5-pro (Extended)")
         );
         Ok(())
     }
@@ -12123,7 +12123,7 @@ guardian_approval = true
         );
         assert_eq!(
             app.chat_widget.current_model(),
-            "requested gpt-5.4 (Thinking 5.4)"
+            "requested gpt-5.5 (Thinking 5.5)"
         );
     }
 
@@ -14113,7 +14113,7 @@ guardian_approval = true
                 .as_deref(),
             Some(expected_model.as_str())
         );
-        assert_ne!(model, "requested gpt-5.4 (Thinking 5.4)");
+        assert_ne!(model, "requested gpt-5.5 (Thinking 5.5)");
         Ok(())
     }
 
@@ -15059,7 +15059,7 @@ guardian_approval = true
                 followup_session: Some("runtime-root".to_string()),
                 model: OracleModelPreset::Thinking,
                 browser_model_strategy: "select".to_string(),
-                browser_model_label: Some("Thinking 5.4".to_string()),
+                browser_model_label: Some("Thinking 5.5".to_string()),
                 browser_thinking_time: None,
                 requires_control: false,
                 repair_attempt: 0,
@@ -16584,7 +16584,7 @@ guardian_approval = true
                 followup_session: None,
                 model: OracleModelPreset::Thinking,
                 browser_model_strategy: "select".to_string(),
-                browser_model_label: Some("Thinking 5.4".to_string()),
+                browser_model_label: Some("Thinking 5.5".to_string()),
                 browser_thinking_time: None,
                 requires_control: false,
                 repair_attempt: 0,
@@ -17688,7 +17688,7 @@ guardian_approval = true
                 followup_session: Some("oracle-session-a".to_string()),
                 model: OracleModelPreset::Pro,
                 browser_model_strategy: "select".to_string(),
-                browser_model_label: Some("GPT-5.4 Pro".to_string()),
+                browser_model_label: Some("GPT-5.5 Pro".to_string()),
                 browser_thinking_time: Some("standard".to_string()),
                 requires_control: false,
                 repair_attempt: 0,
@@ -17825,7 +17825,7 @@ guardian_approval = true
                 followup_session: Some("oracle-session-a".to_string()),
                 model: OracleModelPreset::Pro,
                 browser_model_strategy: "select".to_string(),
-                browser_model_label: Some("GPT-5.4 Pro".to_string()),
+                browser_model_label: Some("GPT-5.5 Pro".to_string()),
                 browser_thinking_time: Some("standard".to_string()),
                 requires_control: false,
                 repair_attempt: 0,
@@ -19617,7 +19617,7 @@ guardian_approval = true
     async fn clear_ui_header_shows_fast_status_for_fast_capable_models() {
         let mut app = make_test_app().await;
         app.config.cwd = test_path_buf("/tmp/project").abs();
-        app.chat_widget.set_model("gpt-5.4");
+        app.chat_widget.set_model("gpt-5.5");
         set_fast_mode_test_catalog(&mut app.chat_widget);
         app.chat_widget
             .set_reasoning_effort(Some(ReasoningEffortConfig::XHigh));

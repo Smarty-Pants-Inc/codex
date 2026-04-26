@@ -109,7 +109,7 @@ fn discoverable_connector(id: &str, name: &str, description: &str) -> Discoverab
 
 async fn search_capable_model_info() -> ModelInfo {
     let config = test_config().await;
-    let mut model_info = construct_model_info_offline("gpt-5.4", &config);
+    let mut model_info = construct_model_info_offline("gpt-5.5", &config);
     model_info.supports_search_tool = true;
     model_info
 }
@@ -218,7 +218,7 @@ fn find_namespace_function_tool<'a>(
 
 async fn multi_agent_v2_tools_config() -> ToolsConfig {
     let config = test_config().await;
-    let model_info = construct_model_info_offline("gpt-5.4", &config);
+    let model_info = construct_model_info_offline("gpt-5.5", &config);
     let mut features = Features::with_defaults();
     features.enable(Feature::Collab);
     features.enable(Feature::MultiAgentV2);
@@ -298,7 +298,7 @@ fn build_specs_with_unavailable_tools(
 
 #[tokio::test]
 async fn model_provided_unified_exec_is_blocked_for_windows_sandboxed_policies() {
-    let mut model_info = model_info_from_models_json("gpt-5.4").await;
+    let mut model_info = model_info_from_models_json("gpt-5.5").await;
     model_info.shell_type = ConfigShellToolType::UnifiedExec;
     let features = Features::with_defaults();
     let available_models = Vec::new();
@@ -324,7 +324,7 @@ async fn model_provided_unified_exec_is_blocked_for_windows_sandboxed_policies()
 #[tokio::test]
 async fn get_memory_requires_feature_flag() {
     let config = test_config().await;
-    let model_info = construct_model_info_offline("gpt-5.4", &config);
+    let model_info = construct_model_info_offline("gpt-5.5", &config);
     let mut features = Features::with_defaults();
     features.disable(Feature::MemoryTool);
     let available_models = Vec::new();
@@ -409,7 +409,7 @@ async fn assert_default_model_tools(
 async fn test_build_specs_gpt5_codex_default() {
     let features = Features::with_defaults();
     assert_default_model_tools(
-        "gpt-5.4",
+        "gpt-5.5",
         &features,
         Some(WebSearchMode::Cached),
         "shell_command",
@@ -434,7 +434,7 @@ async fn test_build_specs_gpt5_codex_default() {
 async fn test_build_specs_gpt51_codex_default() {
     let features = Features::with_defaults();
     assert_default_model_tools(
-        "gpt-5.4",
+        "gpt-5.5",
         &features,
         Some(WebSearchMode::Cached),
         "shell_command",
@@ -460,7 +460,7 @@ async fn test_build_specs_gpt5_codex_unified_exec_web_search() {
     let mut features = Features::with_defaults();
     features.enable(Feature::UnifiedExec);
     assert_model_tools(
-        "gpt-5.4",
+        "gpt-5.5",
         &features,
         Some(WebSearchMode::Live),
         &[
@@ -487,7 +487,7 @@ async fn test_build_specs_gpt51_codex_unified_exec_web_search() {
     let mut features = Features::with_defaults();
     features.enable(Feature::UnifiedExec);
     assert_model_tools(
-        "gpt-5.4",
+        "gpt-5.5",
         &features,
         Some(WebSearchMode::Live),
         &[
@@ -513,7 +513,7 @@ async fn test_build_specs_gpt51_codex_unified_exec_web_search() {
 async fn test_gpt_5_1_codex_max_defaults() {
     let features = Features::with_defaults();
     assert_default_model_tools(
-        "gpt-5.4",
+        "gpt-5.5",
         &features,
         Some(WebSearchMode::Cached),
         "shell_command",
@@ -538,7 +538,7 @@ async fn test_gpt_5_1_codex_max_defaults() {
 async fn test_codex_5_1_mini_defaults() {
     let features = Features::with_defaults();
     assert_default_model_tools(
-        "gpt-5.4-mini",
+        "gpt-5.5-mini",
         &features,
         Some(WebSearchMode::Cached),
         "shell_command",
@@ -588,7 +588,7 @@ async fn test_gpt_5_defaults() {
 async fn test_gpt_5_1_defaults() {
     let features = Features::with_defaults();
     assert_default_model_tools(
-        "gpt-5.4",
+        "gpt-5.5",
         &features,
         Some(WebSearchMode::Cached),
         "shell_command",
@@ -614,7 +614,7 @@ async fn test_gpt_5_1_codex_max_unified_exec_web_search() {
     let mut features = Features::with_defaults();
     features.enable(Feature::UnifiedExec);
     assert_model_tools(
-        "gpt-5.4",
+        "gpt-5.5",
         &features,
         Some(WebSearchMode::Live),
         &[
@@ -1004,7 +1004,7 @@ async fn search_tool_registers_namespaced_mcp_tool_aliases() {
 #[tokio::test]
 async fn direct_mcp_tools_register_namespaced_handlers() {
     let config = test_config().await;
-    let model_info = construct_model_info_offline("gpt-5.4", &config);
+    let model_info = construct_model_info_offline("gpt-5.5", &config);
     let mut features = Features::with_defaults();
     features.enable(Feature::UnifiedExec);
     let available_models = Vec::new();
@@ -1041,7 +1041,7 @@ async fn direct_mcp_tools_register_namespaced_handlers() {
 #[tokio::test]
 async fn unavailable_mcp_tools_are_exposed_as_dummy_function_tools() {
     let config = test_config().await;
-    let model_info = construct_model_info_offline("gpt-5.4", &config);
+    let model_info = construct_model_info_offline("gpt-5.5", &config);
     let mut features = Features::with_defaults();
     features.enable(Feature::UnifiedExec);
     let available_models = Vec::new();
@@ -1090,7 +1090,7 @@ async fn unavailable_mcp_tools_are_exposed_as_dummy_function_tools() {
 #[tokio::test]
 async fn test_mcp_tool_property_missing_type_defaults_to_string() {
     let config = test_config().await;
-    let model_info = construct_model_info_offline("gpt-5.4", &config);
+    let model_info = construct_model_info_offline("gpt-5.5", &config);
     let mut features = Features::with_defaults();
     features.enable(Feature::UnifiedExec);
     let available_models = Vec::new();
@@ -1153,7 +1153,7 @@ async fn test_mcp_tool_property_missing_type_defaults_to_string() {
 #[tokio::test]
 async fn test_mcp_tool_preserves_integer_schema() {
     let config = test_config().await;
-    let model_info = construct_model_info_offline("gpt-5.4", &config);
+    let model_info = construct_model_info_offline("gpt-5.5", &config);
     let mut features = Features::with_defaults();
     features.enable(Feature::UnifiedExec);
     let available_models = Vec::new();
@@ -1214,7 +1214,7 @@ async fn test_mcp_tool_preserves_integer_schema() {
 #[tokio::test]
 async fn test_mcp_tool_array_without_items_gets_default_string_items() {
     let config = test_config().await;
-    let model_info = construct_model_info_offline("gpt-5.4", &config);
+    let model_info = construct_model_info_offline("gpt-5.5", &config);
     let mut features = Features::with_defaults();
     features.enable(Feature::UnifiedExec);
     features.enable(Feature::ApplyPatchFreeform);
@@ -1279,7 +1279,7 @@ async fn test_mcp_tool_array_without_items_gets_default_string_items() {
 #[tokio::test]
 async fn test_mcp_tool_anyof_defaults_to_string() {
     let config = test_config().await;
-    let model_info = construct_model_info_offline("gpt-5.4", &config);
+    let model_info = construct_model_info_offline("gpt-5.5", &config);
     let mut features = Features::with_defaults();
     features.enable(Feature::UnifiedExec);
     let available_models = Vec::new();
@@ -1348,7 +1348,7 @@ async fn test_mcp_tool_anyof_defaults_to_string() {
 #[tokio::test]
 async fn test_get_openai_tools_mcp_tools_with_additional_properties_schema() {
     let config = test_config().await;
-    let model_info = construct_model_info_offline("gpt-5.4", &config);
+    let model_info = construct_model_info_offline("gpt-5.5", &config);
     let mut features = Features::with_defaults();
     features.enable(Feature::UnifiedExec);
     let available_models = Vec::new();
@@ -1467,7 +1467,7 @@ async fn code_mode_only_restricts_model_tools_to_exec_tools() {
     features.enable(Feature::CodeModeOnly);
 
     assert_model_tools(
-        "gpt-5.4",
+        "gpt-5.5",
         &features,
         Some(WebSearchMode::Live),
         &["exec", "wait"],

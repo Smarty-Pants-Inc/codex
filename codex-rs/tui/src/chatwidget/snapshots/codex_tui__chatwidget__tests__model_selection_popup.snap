@@ -7,8 +7,8 @@ expression: popup
 
   1. gpt-5.5 (default)  Frontier model for complex coding, research, and real-
                         world work.
-  2. gpt-5.4            Strong model for everyday coding.
-  3. gpt-5.4-mini       Small, fast, and cost-efficient model for simpler
+  2. gpt-5.5            Strong model for everyday coding.
+  3. gpt-5.5-mini       Small, fast, and cost-efficient model for simpler
                         coding tasks.
   4. gpt-5.3-codex      Coding-optimized model.
 › 5. gpt-5.2 (current)  Optimized for professional work and long-running

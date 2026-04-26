@@ -4684,7 +4684,7 @@ mod tests {
             |composer| {
                 composer.set_status_line_enabled(/*enabled*/ true);
                 composer.set_status_line(Some(Line::from(
-                    "gpt-5.4 high fast · ~/code/codex-1 · Context 0% used",
+                    "gpt-5.5 high fast · ~/code/codex-1 · Context 0% used",
                 )));
                 composer.set_text_content("!git status".to_string(), Vec::new(), Vec::new());
             },
@@ -4726,7 +4726,7 @@ mod tests {
         );
         composer.set_status_line_enabled(/*enabled*/ true);
         composer.set_status_line(Some(Line::from(
-            "gpt-5.4 high fast · ~/code/codex-1 · Context 0% used",
+            "gpt-5.5 high fast · ~/code/codex-1 · Context 0% used",
         )));
         composer.set_text_content("!git status".to_string(), Vec::new(), Vec::new());
 

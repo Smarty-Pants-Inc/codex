@@ -418,10 +418,10 @@ if (!tool) {
             let model = model_catalog
                 .models
                 .iter_mut()
-                .find(|model| model.slug == "gpt-5.4")
-                .expect("gpt-5.4 exists in bundled models.json");
+                .find(|model| model.slug == "gpt-5.5")
+                .expect("gpt-5.5 exists in bundled models.json");
             config.chatgpt_base_url = apps_base_url;
-            config.model = Some("gpt-5.4".to_string());
+            config.model = Some("gpt-5.5".to_string());
             model.supports_search_tool = true;
             config.model_catalog = Some(model_catalog);
         });

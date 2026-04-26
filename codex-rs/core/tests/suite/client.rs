@@ -540,7 +540,7 @@ async fn resume_replays_legacy_js_repl_image_rollout_shapes() {
     .await;
 
     let codex_home = Arc::new(TempDir::new().unwrap());
-    let mut builder = test_codex().with_model("gpt-5.4");
+    let mut builder = test_codex().with_model("gpt-5.5");
     let test = builder
         .resume(&server, codex_home, session_path.clone())
         .await
@@ -691,7 +691,7 @@ async fn resume_replays_image_tool_outputs_with_detail() {
     .await;
 
     let codex_home = Arc::new(TempDir::new().unwrap());
-    let mut builder = test_codex().with_model("gpt-5.4");
+    let mut builder = test_codex().with_model("gpt-5.5");
     let test = builder
         .resume(&server, codex_home, session_path.clone())
         .await
@@ -1595,7 +1595,7 @@ async fn includes_configured_effort_in_request() -> anyhow::Result<()> {
     )
     .await;
     let TestCodex { codex, .. } = test_codex()
-        .with_model("gpt-5.4")
+        .with_model("gpt-5.5")
         .with_config(|config| {
             config.model_reasoning_effort = Some(ReasoningEffort::Medium);
         })
@@ -1641,7 +1641,7 @@ async fn includes_no_effort_in_request() -> anyhow::Result<()> {
         sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
     )
     .await;
-    let TestCodex { codex, .. } = test_codex().with_model("gpt-5.4").build(&server).await?;
+    let TestCodex { codex, .. } = test_codex().with_model("gpt-5.5").build(&server).await?;
 
     codex
         .submit(Op::UserInput {
@@ -1683,7 +1683,7 @@ async fn includes_default_reasoning_effort_in_request_when_defined_by_model_info
         sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
     )
     .await;
-    let TestCodex { codex, .. } = test_codex().with_model("gpt-5.4").build(&server).await?;
+    let TestCodex { codex, .. } = test_codex().with_model("gpt-5.5").build(&server).await?;
 
     codex
         .submit(Op::UserInput {
@@ -1729,12 +1729,12 @@ async fn user_turn_collaboration_mode_overrides_model_and_effort() -> anyhow::Re
         config,
         session_configured,
         ..
-    } = test_codex().with_model("gpt-5.4").build(&server).await?;
+    } = test_codex().with_model("gpt-5.5").build(&server).await?;
 
     let collaboration_mode = CollaborationMode {
         mode: ModeKind::Default,
         settings: Settings {
-            model: "gpt-5.4".to_string(),
+            model: "gpt-5.5".to_string(),
             reasoning_effort: Some(ReasoningEffort::High),
             developer_instructions: None,
         },
@@ -1769,7 +1769,7 @@ async fn user_turn_collaboration_mode_overrides_model_and_effort() -> anyhow::Re
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     let request_body = resp_mock.single_request().body_json();
-    assert_eq!(request_body["model"].as_str(), Some("gpt-5.4"));
+    assert_eq!(request_body["model"].as_str(), Some("gpt-5.5"));
     assert_eq!(
         request_body
             .get("reasoning")
@@ -1844,8 +1844,8 @@ async fn user_turn_explicit_reasoning_summary_overrides_model_catalog_default() 
     let model = model_catalog
         .models
         .iter_mut()
-        .find(|model| model.slug == "gpt-5.4")
-        .expect("gpt-5.4 exists in bundled models.json");
+        .find(|model| model.slug == "gpt-5.5")
+        .expect("gpt-5.5 exists in bundled models.json");
     model.supports_reasoning_summaries = true;
     model.default_reasoning_summary = ReasoningSummary::Detailed;
 
@@ -1855,7 +1855,7 @@ async fn user_turn_explicit_reasoning_summary_overrides_model_catalog_default() 
         session_configured,
         ..
     } = test_codex()
-        .with_model("gpt-5.4")
+        .with_model("gpt-5.5")
         .with_config(move |config| {
             config.model_catalog = Some(model_catalog);
         })
@@ -1961,13 +1961,13 @@ async fn reasoning_summary_none_overrides_model_catalog_default() -> anyhow::Res
     let model = model_catalog
         .models
         .iter_mut()
-        .find(|model| model.slug == "gpt-5.4")
-        .expect("gpt-5.4 exists in bundled models.json");
+        .find(|model| model.slug == "gpt-5.5")
+        .expect("gpt-5.5 exists in bundled models.json");
     model.supports_reasoning_summaries = true;
     model.default_reasoning_summary = ReasoningSummary::Detailed;
 
     let TestCodex { codex, .. } = test_codex()
-        .with_model("gpt-5.4")
+        .with_model("gpt-5.5")
         .with_config(move |config| {
             config.model_reasoning_summary = Some(ReasoningSummary::None);
             config.model_catalog = Some(model_catalog);
@@ -2011,7 +2011,7 @@ async fn includes_default_verbosity_in_request() -> anyhow::Result<()> {
         sse(vec![ev_response_created("resp1"), ev_completed("resp1")]),
     )
     .await;
-    let TestCodex { codex, .. } = test_codex().with_model("gpt-5.4").build(&server).await?;
+    let TestCodex { codex, .. } = test_codex().with_model("gpt-5.5").build(&server).await?;
 
     codex
         .submit(Op::UserInput {
@@ -2099,7 +2099,7 @@ async fn configured_verbosity_is_sent() -> anyhow::Result<()> {
     )
     .await;
     let TestCodex { codex, .. } = test_codex()
-        .with_model("gpt-5.4")
+        .with_model("gpt-5.5")
         .with_config(|config| {
             config.model_verbosity = Some(Verbosity::High);
         })
@@ -2525,7 +2525,7 @@ async fn token_count_includes_rate_limits_snapshot() {
                     "reasoning_output_tokens": 0,
                     "total_tokens": 123
                 },
-                // Default model is gpt-5.4 in tests → 95% usable context window
+                // Default model is gpt-5.5 in tests → 95% usable context window
                 "model_context_window": 258400
             },
             "rate_limits": {
@@ -2691,7 +2691,7 @@ async fn context_window_error_sets_total_tokens_to_model_window() -> anyhow::Res
 
     let TestCodex { codex, .. } = test_codex()
         .with_config(|config| {
-            config.model = Some("gpt-5.4".to_string());
+            config.model = Some("gpt-5.5".to_string());
             config.model_context_window = Some(272_000);
         })
         .build(&server)

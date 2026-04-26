@@ -2798,7 +2798,7 @@ async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2
     const SPAWN_CALL_ID: &str = "spawn-call-1";
     const REQUESTED_MODEL: &str = "gpt-5.2";
     const REQUESTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
-    const ROLE_MODEL: &str = "gpt-5.4";
+    const ROLE_MODEL: &str = "gpt-5.5";
     const ROLE_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::High;
 
     let server = responses::start_mock_server().await;

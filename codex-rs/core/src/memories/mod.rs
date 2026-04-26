@@ -35,7 +35,7 @@ mod extensions;
 /// Phase 1 (startup extraction).
 mod phase_one {
     /// Default model used for phase 1.
-    pub(super) const MODEL: &str = "gpt-5.4-mini";
+    pub(super) const MODEL: &str = "gpt-5.5-mini";
     /// Default reasoning effort used for phase 1.
     pub(super) const REASONING_EFFORT: super::ReasoningEffort = super::ReasoningEffort::Low;
     /// Prompt used for phase 1.
@@ -67,7 +67,7 @@ mod phase_one {
 /// Phase 2 (aka `Consolidation`).
 mod phase_two {
     /// Default model used for phase 2.
-    pub(super) const MODEL: &str = "gpt-5.4";
+    pub(super) const MODEL: &str = "gpt-5.5";
     /// Default reasoning effort used for phase 2.
     pub(super) const REASONING_EFFORT: super::ReasoningEffort = super::ReasoningEffort::Medium;
     /// Lease duration (seconds) for phase-2 consolidation job ownership.

@@ -413,7 +413,7 @@ fn session_configured_from_thread_response_uses_review_policy_from_response() {
             name: Some("thread".to_string()),
             turns: vec![],
         },
-        model: "gpt-5.4".to_string(),
+        model: "gpt-5.5".to_string(),
         model_provider: "openai".to_string(),
         service_tier: None,
         cwd: test_path_buf("/tmp").abs(),

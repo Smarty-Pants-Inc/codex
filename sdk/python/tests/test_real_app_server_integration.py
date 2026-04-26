@@ -238,7 +238,7 @@ def test_real_thread_and_turn_start_smoke(runtime_env: PreparedRuntimeEnv) -> No
 
             with Codex() as codex:
                 thread = codex.thread_start(
-                    model="gpt-5.4",
+                    model="gpt-5.5",
                     config={"model_reasoning_effort": "high"},
                 )
                 result = thread.turn(TextInput("hello")).run()
@@ -275,7 +275,7 @@ def test_real_thread_run_convenience_smoke(runtime_env: PreparedRuntimeEnv) -> N
 
             with Codex() as codex:
                 thread = codex.thread_start(
-                    model="gpt-5.4",
+                    model="gpt-5.5",
                     config={"model_reasoning_effort": "high"},
                 )
                 result = thread.run("say ok")
@@ -309,7 +309,7 @@ def test_real_async_thread_turn_usage_and_ids_smoke(
             async def main():
                 async with AsyncCodex() as codex:
                     thread = await codex.thread_start(
-                        model="gpt-5.4",
+                        model="gpt-5.5",
                         config={"model_reasoning_effort": "high"},
                     )
                     result = await (await thread.turn(TextInput("say ok"))).run()
@@ -352,7 +352,7 @@ def test_real_async_thread_run_convenience_smoke(
             async def main():
                 async with AsyncCodex() as codex:
                     thread = await codex.thread_start(
-                        model="gpt-5.4",
+                        model="gpt-5.5",
                         config={"model_reasoning_effort": "high"},
                     )
                     result = await thread.run("say ok")
@@ -440,7 +440,7 @@ def test_real_streaming_smoke_turn_completed(runtime_env: PreparedRuntimeEnv) ->
 
             with Codex() as codex:
                 thread = codex.thread_start(
-                    model="gpt-5.4",
+                    model="gpt-5.5",
                     config={"model_reasoning_effort": "high"},
                 )
                 turn = thread.turn(TextInput("Reply with one short sentence."))
@@ -473,7 +473,7 @@ def test_real_turn_interrupt_smoke(runtime_env: PreparedRuntimeEnv) -> None:
 
             with Codex() as codex:
                 thread = codex.thread_start(
-                    model="gpt-5.4",
+                    model="gpt-5.5",
                     config={"model_reasoning_effort": "high"},
                 )
                 turn = thread.turn(TextInput("Count from 1 to 200 with commas."))

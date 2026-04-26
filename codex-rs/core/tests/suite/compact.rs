@@ -3161,7 +3161,7 @@ async fn snapshot_request_shape_pre_turn_compaction_strips_incoming_model_switch
     skip_if_no_network!();
 
     let server = start_mock_server().await;
-    let previous_model = "gpt-5.4";
+    let previous_model = "gpt-5.5";
     let next_model = "gpt-5.3-codex";
 
     let request_log = mount_sse_sequence(

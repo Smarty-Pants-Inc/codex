@@ -76,7 +76,7 @@ fn tmux_split_preserves_fresh_session_composer_row_after_resize_reflow() -> Resu
     )?;
     wait_for_capture_contains(
         &codex_pane,
-        "gpt-5.4 default",
+        "gpt-5.5 default",
         Duration::from_secs(/*secs*/ 15),
     )?;
     let draft = "Notice where we are here in terms of y location.";
@@ -245,7 +245,7 @@ fn tmux_width_resize_restore_keeps_visible_content_anchored() -> Result<()> {
     )?;
     wait_for_capture_contains(
         &codex_pane,
-        "gpt-5.4 default",
+        "gpt-5.5 default",
         Duration::from_secs(/*secs*/ 15),
     )?;
     let draft = "Notice where we are here in terms of y location.";
@@ -373,7 +373,7 @@ fn run_repeated_resize_smoke(terminal_resize_reflow_enabled: bool) -> Result<()>
     )?;
     wait_for_capture_contains(
         &codex_pane,
-        "gpt-5.4 default",
+        "gpt-5.5 default",
         Duration::from_secs(/*secs*/ 15),
     )?;
     let draft = "Notice where we are here in terms of y location.";
@@ -487,7 +487,7 @@ fn write_config(
 ) -> Result<()> {
     let repo_root_display = repo_root.display();
     let config = format!(
-        r#"model = "gpt-5.4"
+        r#"model = "gpt-5.5"
 model_provider = "openai"
 suppress_unstable_features_warning = true
 

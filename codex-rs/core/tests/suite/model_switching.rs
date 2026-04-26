@@ -117,7 +117,7 @@ async fn model_change_appends_model_instructions_developer_message() -> Result<(
 
     let mut builder = test_codex().with_model("gpt-5.3-codex");
     let test = builder.build(&server).await?;
-    let next_model = "gpt-5.4";
+    let next_model = "gpt-5.5";
 
     test.codex
         .submit(Op::UserTurn {

@@ -33,9 +33,9 @@ const TURN_2_NO_WAIT_PROMPT: &str = "follow up without wait";
 const CHILD_PROMPT: &str = "child: do work";
 const INHERITED_MODEL: &str = "gpt-5.3-codex";
 const INHERITED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::XHigh;
-const REQUESTED_MODEL: &str = "gpt-5.4";
+const REQUESTED_MODEL: &str = "gpt-5.5";
 const REQUESTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
-const ROLE_MODEL: &str = "gpt-5.4";
+const ROLE_MODEL: &str = "gpt-5.5";
 const ROLE_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::High;
 
 fn body_contains(req: &wiremock::Request, text: &str) -> bool {
@@ -690,7 +690,7 @@ async fn spawn_agent_tool_description_mentions_role_locked_settings() -> Result<
         role_block(&agent_type_description, "custom").expect("custom role description");
     assert_eq!(
         custom_role_description,
-        "custom: {\nCustom role\n- This role's model is set to `gpt-5.4` and its reasoning effort is set to `high`. These settings cannot be changed.\n}"
+        "custom: {\nCustom role\n- This role's model is set to `gpt-5.5` and its reasoning effort is set to `high`. These settings cannot be changed.\n}"
     );
 
     Ok(())

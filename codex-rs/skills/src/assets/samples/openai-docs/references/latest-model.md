@@ -8,9 +8,9 @@ This file is a curated helper. Every recommendation here must be verified agains
 | --- | --- |
 | `gpt-5.5` | Latest/default text and reasoning model for most new apps, including coding and tool-heavy workflows |
 | `gpt-5.5-pro` | Maximum reasoning or quality when latency and cost matter less |
-| `gpt-5.4` | Previous default text and reasoning model; use for existing GPT-5.4 integrations |
-| `gpt-5.4-mini` | Lower-cost testing and lighter production workflows |
-| `gpt-5.4-nano` | High-throughput simple tasks and classification |
+| `gpt-5.5` | Previous default text and reasoning model; use for existing GPT-5.5 integrations |
+| `gpt-5.5-mini` | Lower-cost testing and lighter production workflows |
+| `gpt-5.5-nano` | High-throughput simple tasks and classification |
 | `gpt-5.5` | Explicit no-reasoning text path via `reasoning.effort: none` |
 | `gpt-4.1-mini` | Cheaper no-reasoning text |
 | `gpt-4.1-nano` | Fastest and cheapest no-reasoning text |

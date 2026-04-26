@@ -3646,7 +3646,7 @@ async fn ctrl_l_clear_ui_after_long_transcript_reuses_clear_header_snapshot() {
 async fn clear_ui_header_shows_fast_status_for_fast_capable_models() {
     let mut app = make_test_app().await;
     app.config.cwd = test_path_buf("/tmp/project").abs();
-    app.chat_widget.set_model("gpt-5.4");
+    app.chat_widget.set_model("gpt-5.5");
     set_fast_mode_test_catalog(&mut app.chat_widget);
     app.chat_widget
         .set_reasoning_effort(Some(ReasoningEffortConfig::XHigh));

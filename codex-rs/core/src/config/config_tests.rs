@@ -3524,14 +3524,14 @@ async fn set_model_updates_defaults() -> anyhow::Result<()> {
     let codex_home = TempDir::new()?;
 
     ConfigEditsBuilder::new(codex_home.path())
-        .set_model(Some("gpt-5.4"), Some(ReasoningEffort::High))
+        .set_model(Some("gpt-5.5"), Some(ReasoningEffort::High))
         .apply()
         .await?;
 
     let serialized = tokio::fs::read_to_string(codex_home.path().join(CONFIG_TOML_FILE)).await?;
     let parsed: ConfigToml = toml::from_str(&serialized)?;
 
-    assert_eq!(parsed.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(parsed.model.as_deref(), Some("gpt-5.5"));
     assert_eq!(parsed.model_reasoning_effort, Some(ReasoningEffort::High));
 
     Ok(())
@@ -3545,7 +3545,7 @@ async fn set_model_overwrites_existing_model() -> anyhow::Result<()> {
     tokio::fs::write(
         &config_path,
         r#"
-model = "gpt-5.4"
+model = "gpt-5.5"
 model_reasoning_effort = "medium"
 
 [profiles.dev]
@@ -3581,7 +3581,7 @@ async fn set_model_updates_profile() -> anyhow::Result<()> {
 
     ConfigEditsBuilder::new(codex_home.path())
         .with_profile(Some("dev"))
-        .set_model(Some("gpt-5.4"), Some(ReasoningEffort::Medium))
+        .set_model(Some("gpt-5.5"), Some(ReasoningEffort::Medium))
         .apply()
         .await?;
 
@@ -3592,7 +3592,7 @@ async fn set_model_updates_profile() -> anyhow::Result<()> {
         .get("dev")
         .expect("profile should be created");
 
-    assert_eq!(profile.model.as_deref(), Some("gpt-5.4"));
+    assert_eq!(profile.model.as_deref(), Some("gpt-5.5"));
     assert_eq!(
         profile.model_reasoning_effort,
         Some(ReasoningEffort::Medium)
@@ -3614,7 +3614,7 @@ model = "gpt-4"
 model_reasoning_effort = "medium"
 
 [profiles.prod]
-model = "gpt-5.4"
+model = "gpt-5.5"
 "#,
     )
     .await?;
@@ -3643,7 +3643,7 @@ model = "gpt-5.4"
             .profiles
             .get("prod")
             .and_then(|profile| profile.model.as_deref()),
-        Some("gpt-5.4"),
+        Some("gpt-5.5"),
     );
 
     Ok(())
@@ -5214,7 +5214,7 @@ approval_policy = "on-failure"
 enabled = false
 
 [profiles.gpt5]
-model = "gpt-5.4"
+model = "gpt-5.5"
 model_provider = "openai"
 approval_policy = "on-failure"
 model_reasoning_effort = "high"
@@ -5788,7 +5788,7 @@ async fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
     )
     .await?;
     let expected_gpt5_profile_config = Config {
-        model: Some("gpt-5.4".to_string()),
+        model: Some("gpt-5.5".to_string()),
         review_model: None,
         model_context_window: None,
         model_auto_compact_token_limit: None,
@@ -6442,7 +6442,7 @@ fn config_toml_deserializes_mcp_oauth_callback_url() {
 async fn config_loads_mcp_oauth_callback_port_from_toml() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let toml = r#"
-model = "gpt-5.4"
+model = "gpt-5.5"
 mcp_oauth_callback_port = 5678
 "#;
     let cfg: ConfigToml =
@@ -6464,7 +6464,7 @@ async fn config_loads_allow_login_shell_from_toml() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let cfg: ConfigToml = toml::from_str(
         r#"
-model = "gpt-5.4"
+model = "gpt-5.5"
 allow_login_shell = false
 "#,
     )
@@ -6485,7 +6485,7 @@ allow_login_shell = false
 async fn config_loads_mcp_oauth_callback_url_from_toml() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let toml = r#"
-model = "gpt-5.4"
+model = "gpt-5.5"
 mcp_oauth_callback_url = "https://example.com/callback"
 "#;
     let cfg: ConfigToml =

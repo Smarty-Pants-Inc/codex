@@ -25,8 +25,8 @@ fn test_session_telemetry() -> SessionTelemetry {
     .expect("in-memory metrics client");
     SessionTelemetry::new(
         ThreadId::new(),
-        "gpt-5.4",
-        "gpt-5.4",
+        "gpt-5.5",
+        "gpt-5.5",
         /*account_id*/ None,
         /*account_email*/ None,
         /*auth_mode*/ None,

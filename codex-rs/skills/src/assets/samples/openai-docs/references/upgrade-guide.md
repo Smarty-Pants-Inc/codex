@@ -30,7 +30,7 @@ Upgrade with the narrowest safe change set:
    - Prefer the closest prompt surface first: inline system or developer text, then adjacent prompt files, then shared templates.
    - If you cannot confidently tie a prompt to the model usage, say so instead of guessing.
 3. Classify the source model family.
-   - Common buckets: GPT-5.4, GPT-5.3-Codex or GPT-5.2-Codex, earlier GPT-5.x, GPT-4o or GPT-4.1, reasoning models such as o1 or o3 or o4-mini, third-party model, or mixed and unclear.
+   - Common buckets: GPT-5.5, GPT-5.3-Codex or GPT-5.2-Codex, earlier GPT-5.x, GPT-4o or GPT-4.1, reasoning models such as o1 or o3 or o4-mini, third-party model, or mixed and unclear.
 4. Decide the upgrade class.
    - `model string only`
    - `model string + light prompt rewrite`
@@ -70,7 +70,7 @@ Output rule:
 
 Choose this when:
 
-- the source model is GPT-5.4
+- the source model is GPT-5.5
 - the existing prompts are already short, explicit, and task-bounded
 - the workflow does not rely on strict output formats, tool-call behavior, batch completeness, or long-horizon execution that should be validated after the upgrade
 - there are no obvious compatibility blockers
@@ -174,7 +174,7 @@ If a safe GPT-5.5 upgrade requires any of those changes, mark the path as blocke
 ## Validation plan
 
 - Validate each upgraded usage site with existing tests, realistic spot checks, or an existing eval suite when one is already available.
-- Compare against the current GPT-5.4 baseline when available.
+- Compare against the current GPT-5.5 baseline when available.
 - Check task success, retry count, tool-call count, total tokens, latency, output shape, and user-visible quality.
 - For specialized workflows, validate the contract that matters most instead of judging only general output quality.
 - If prompt edits were added, confirm each block is doing real work instead of adding noise.

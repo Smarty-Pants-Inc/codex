@@ -2880,7 +2880,7 @@ async fn delegated_turn_user_role_echo_does_not_redelegate_and_still_forwards_au
     ]])
     .await;
 
-    let mut builder = test_codex().with_model("gpt-5.4").with_config({
+    let mut builder = test_codex().with_model("gpt-5.5").with_config({
         let realtime_base_url = realtime_server.uri().to_string();
         move |config| {
             config.experimental_realtime_ws_base_url = Some(realtime_base_url);
@@ -3026,7 +3026,7 @@ async fn inbound_handoff_request_does_not_block_realtime_event_forwarding() -> R
     ]]])
     .await;
 
-    let mut builder = test_codex().with_model("gpt-5.4").with_config({
+    let mut builder = test_codex().with_model("gpt-5.5").with_config({
         let realtime_base_url = realtime_server.uri().to_string();
         move |config| {
             config.experimental_realtime_ws_base_url = Some(realtime_base_url);
@@ -3157,7 +3157,7 @@ async fn inbound_handoff_request_steers_active_turn() -> Result<()> {
     ]])
     .await;
 
-    let mut builder = test_codex().with_model("gpt-5.4").with_config({
+    let mut builder = test_codex().with_model("gpt-5.5").with_config({
         let realtime_base_url = realtime_server.uri().to_string();
         move |config| {
             config.experimental_realtime_ws_base_url = Some(realtime_base_url);
@@ -3308,7 +3308,7 @@ async fn inbound_handoff_request_starts_turn_and_does_not_block_realtime_audio()
     ]]])
     .await;
 
-    let mut builder = test_codex().with_model("gpt-5.4").with_config({
+    let mut builder = test_codex().with_model("gpt-5.5").with_config({
         let realtime_base_url = realtime_server.uri().to_string();
         move |config| {
             config.experimental_realtime_ws_base_url = Some(realtime_base_url);

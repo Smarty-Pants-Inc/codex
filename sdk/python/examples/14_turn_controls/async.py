@@ -20,7 +20,7 @@ from codex_app_server import AsyncCodex, TextInput
 
 async def main() -> None:
     async with AsyncCodex(config=runtime_config()) as codex:
-        thread = await codex.thread_start(model="gpt-5.4", config={"model_reasoning_effort": "high"})
+        thread = await codex.thread_start(model="gpt-5.5", config={"model_reasoning_effort": "high"})
         steer_turn = await thread.turn(TextInput("Count from 1 to 40 with commas, then one summary sentence."))
         steer_result = "sent"
         try:

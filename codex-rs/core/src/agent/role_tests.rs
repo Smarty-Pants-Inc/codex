@@ -83,7 +83,7 @@ async fn apply_explorer_role_sets_model_and_adds_session_flags_layer() {
         .await
         .expect("explorer role should apply");
 
-    assert_eq!(config.model.as_deref(), Some("gpt-5.4-mini"));
+    assert_eq!(config.model.as_deref(), Some("gpt-5.5-mini"));
     assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::Medium));
     assert_eq!(session_flags_layer_count(&config), before_layers + 1);
 }
@@ -92,14 +92,14 @@ async fn apply_explorer_role_sets_model_and_adds_session_flags_layer() {
 async fn apply_empty_explorer_role_preserves_current_model_and_reasoning_effort() {
     let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
     let before_layers = session_flags_layer_count(&config);
-    config.model = Some("gpt-5.4-mini".to_string());
+    config.model = Some("gpt-5.5-mini".to_string());
     config.model_reasoning_effort = Some(ReasoningEffort::High);
 
     apply_role_to_config(&mut config, Some("explorer"))
         .await
         .expect("explorer role should apply");
 
-    assert_eq!(config.model.as_deref(), Some("gpt-5.4-mini"));
+    assert_eq!(config.model.as_deref(), Some("gpt-5.5-mini"));
     assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::High));
     assert_eq!(session_flags_layer_count(&config), before_layers);
 }

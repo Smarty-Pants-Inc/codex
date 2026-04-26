@@ -30,7 +30,7 @@ with Codex() as codex:
     server = codex.metadata.serverInfo
     print("Server:", None if server is None else server.name, None if server is None else server.version)
 
-    thread = codex.thread_start(model="gpt-5.4", config={"model_reasoning_effort": "high"})
+    thread = codex.thread_start(model="gpt-5.5", config={"model_reasoning_effort": "high"})
     result = thread.run("Say hello in one sentence.")
 
     print("Thread:", thread.id)
@@ -53,7 +53,7 @@ What happened:
 from codex_app_server import Codex
 
 with Codex() as codex:
-    thread = codex.thread_start(model="gpt-5.4", config={"model_reasoning_effort": "high"})
+    thread = codex.thread_start(model="gpt-5.5", config={"model_reasoning_effort": "high"})
 
     first = thread.run("Summarize Rust ownership in 2 bullets.")
     second = thread.run("Now explain it to a Python developer.")
@@ -74,7 +74,7 @@ from codex_app_server import AsyncCodex
 
 async def main() -> None:
     async with AsyncCodex() as codex:
-        thread = await codex.thread_start(model="gpt-5.4", config={"model_reasoning_effort": "high"})
+        thread = await codex.thread_start(model="gpt-5.5", config={"model_reasoning_effort": "high"})
         result = await thread.run("Continue where we left off.")
         print(result.final_response)
 

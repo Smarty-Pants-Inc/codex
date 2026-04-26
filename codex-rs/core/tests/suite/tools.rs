@@ -227,7 +227,7 @@ async fn historical_unavailable_mcp_call_is_exposed_as_placeholder_tool() -> Res
     };
     let codex_home = Arc::new(TempDir::new()?);
     let mut builder = test_codex()
-        .with_model("gpt-5.4")
+        .with_model("gpt-5.5")
         .with_home(Arc::clone(&codex_home))
         .with_config(move |config| {
             config
@@ -316,7 +316,7 @@ async fn historical_unavailable_mcp_call_is_exposed_as_placeholder_tool() -> Res
     )
     .await;
 
-    let mut resume_builder = test_codex().with_model("gpt-5.4").with_config(|config| {
+    let mut resume_builder = test_codex().with_model("gpt-5.5").with_config(|config| {
         config
             .features
             .enable(Feature::UnavailableDummyTools)
@@ -451,7 +451,7 @@ async fn sandbox_denied_shell_returns_original_output() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let mut builder = test_codex().with_model("gpt-5.4");
+    let mut builder = test_codex().with_model("gpt-5.5");
     let fixture = builder.build(&server).await?;
 
     let call_id = "sandbox-denied-shell";
@@ -548,7 +548,7 @@ async fn shell_enforces_glob_deny_read_policy() -> Result<()> {
     let read_only_policy = SandboxPolicy::new_read_only_policy();
     let read_only_policy_for_config = read_only_policy.clone();
     let mut builder = test_codex()
-        .with_model("gpt-5.4")
+        .with_model("gpt-5.5")
         .with_config(move |config| {
             config.permissions.sandbox_policy = Constrained::allow_any(read_only_policy_for_config);
             let mut file_system_sandbox_policy = FileSystemSandboxPolicy::default();
@@ -781,7 +781,7 @@ async fn shell_timeout_handles_background_grandchild_stdout() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let mut builder = test_codex().with_model("gpt-5.4").with_config(|config| {
+    let mut builder = test_codex().with_model("gpt-5.5").with_config(|config| {
         config
             .permissions
             .sandbox_policy

@@ -122,9 +122,9 @@ async fn remote_models_config_context_window_override_clamps_to_max_context_wind
     skip_if_sandbox!(Ok(()));
 
     let server = MockServer::start().await;
-    let requested_model = "gpt-5.4-test";
+    let requested_model = "gpt-5.5-test";
     let mut remote_model =
-        test_remote_model("gpt-5.4", ModelVisibility::List, /*priority*/ 1_000);
+        test_remote_model("gpt-5.5", ModelVisibility::List, /*priority*/ 1_000);
     remote_model.context_window = Some(273_000);
     remote_model.max_context_window = Some(400_000);
     remote_model.effective_context_window_percent = 100;
@@ -200,9 +200,9 @@ async fn remote_models_config_override_above_max_uses_max_context_window() -> Re
     skip_if_sandbox!(Ok(()));
 
     let server = MockServer::start().await;
-    let requested_model = "gpt-5.4-test";
+    let requested_model = "gpt-5.5-test";
     let mut remote_model =
-        test_remote_model("gpt-5.4", ModelVisibility::List, /*priority*/ 1_000);
+        test_remote_model("gpt-5.5", ModelVisibility::List, /*priority*/ 1_000);
     remote_model.context_window = Some(273_000);
     remote_model.max_context_window = Some(400_000);
     remote_model.effective_context_window_percent = 100;
@@ -278,9 +278,9 @@ async fn remote_models_use_context_window_when_config_override_is_absent() -> Re
     skip_if_sandbox!(Ok(()));
 
     let server = MockServer::start().await;
-    let requested_model = "gpt-5.4-test";
+    let requested_model = "gpt-5.5-test";
     let mut remote_model =
-        test_remote_model("gpt-5.4", ModelVisibility::List, /*priority*/ 1_000);
+        test_remote_model("gpt-5.5", ModelVisibility::List, /*priority*/ 1_000);
     remote_model.context_window = Some(273_000);
     remote_model.max_context_window = Some(400_000);
     remote_model.effective_context_window_percent = 100;
@@ -563,7 +563,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
     let mut builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(|config| {
-            config.model = Some("gpt-5.4".to_string());
+            config.model = Some("gpt-5.5".to_string());
         });
     let TestCodex {
         codex,
@@ -690,7 +690,7 @@ async fn remote_models_truncation_policy_without_override_preserves_remote() -> 
     let mut builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(|config| {
-            config.model = Some("gpt-5.4".to_string());
+            config.model = Some("gpt-5.5".to_string());
         });
     let test = builder.build(&server).await?;
 
@@ -736,7 +736,7 @@ async fn remote_models_truncation_policy_with_tool_output_override() -> Result<(
     let mut builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(|config| {
-            config.model = Some("gpt-5.4".to_string());
+            config.model = Some("gpt-5.5".to_string());
             config.tool_output_token_limit = Some(50);
         });
     let test = builder.build(&server).await?;

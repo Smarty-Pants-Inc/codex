@@ -986,16 +986,16 @@ async fn commentary_completion_restores_status_indicator_before_exec_begin() {
 
 #[tokio::test]
 async fn fast_status_indicator_requires_chatgpt_auth() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     set_fast_mode_test_catalog(&mut chat);
-    assert!(get_available_model(&chat, "gpt-5.4").supports_fast_mode());
+    assert!(get_available_model(&chat, "gpt-5.5").supports_fast_mode());
     chat.set_service_tier(Some(ServiceTier::Fast));
 
     assert!(!chat.should_show_fast_status(chat.current_model(), chat.current_service_tier(),));
 
     set_chatgpt_auth(&mut chat);
     set_fast_mode_test_catalog(&mut chat);
-    assert!(get_available_model(&chat, "gpt-5.4").supports_fast_mode());
+    assert!(get_available_model(&chat, "gpt-5.5").supports_fast_mode());
 
     assert!(chat.should_show_fast_status(chat.current_model(), chat.current_service_tier(),));
 }
@@ -1015,12 +1015,12 @@ async fn fast_status_indicator_is_hidden_for_models_without_fast_support() {
 
 #[tokio::test]
 async fn fast_status_indicator_is_hidden_when_fast_mode_is_off() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     set_fast_mode_test_catalog(&mut chat);
-    assert!(get_available_model(&chat, "gpt-5.4").supports_fast_mode());
+    assert!(get_available_model(&chat, "gpt-5.5").supports_fast_mode());
     set_chatgpt_auth(&mut chat);
     set_fast_mode_test_catalog(&mut chat);
-    assert!(get_available_model(&chat, "gpt-5.4").supports_fast_mode());
+    assert!(get_available_model(&chat, "gpt-5.5").supports_fast_mode());
 
     assert!(!chat.should_show_fast_status(chat.current_model(), chat.current_service_tier(),));
 }
@@ -1421,9 +1421,9 @@ async fn status_line_fast_mode_footer_snapshot() {
 
 #[tokio::test]
 async fn status_line_model_with_reasoning_includes_fast_for_fast_capable_models() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     set_fast_mode_test_catalog(&mut chat);
-    assert!(get_available_model(&chat, "gpt-5.4").supports_fast_mode());
+    assert!(get_available_model(&chat, "gpt-5.5").supports_fast_mode());
     chat.config.cwd = test_project_path().abs();
     chat.config.tui_status_line = Some(vec![
         "model-with-reasoning".to_string(),
@@ -1434,13 +1434,13 @@ async fn status_line_model_with_reasoning_includes_fast_for_fast_capable_models(
     chat.set_service_tier(Some(ServiceTier::Fast));
     set_chatgpt_auth(&mut chat);
     set_fast_mode_test_catalog(&mut chat);
-    assert!(get_available_model(&chat, "gpt-5.4").supports_fast_mode());
+    assert!(get_available_model(&chat, "gpt-5.5").supports_fast_mode());
     chat.refresh_status_line();
     let test_cwd = test_path_display("/tmp/project");
 
     assert_eq!(
         status_line_text(&chat),
-        Some(format!("gpt-5.4 xhigh fast · Context 0% used · {test_cwd}"))
+        Some(format!("gpt-5.5 xhigh fast · Context 0% used · {test_cwd}"))
     );
 
     chat.set_model("gpt-5.3-codex");
@@ -1456,11 +1456,11 @@ async fn status_line_model_with_reasoning_includes_fast_for_fast_capable_models(
 
 #[tokio::test]
 async fn terminal_title_model_updates_on_model_change_without_manual_refresh() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.config.tui_terminal_title = Some(vec!["model".to_string()]);
     chat.refresh_terminal_title();
 
-    assert_eq!(chat.last_terminal_title, Some("gpt-5.4".to_string()));
+    assert_eq!(chat.last_terminal_title, Some("gpt-5.5".to_string()));
 
     chat.set_model("gpt-5.3-codex");
 
@@ -1566,9 +1566,9 @@ async fn status_line_model_with_reasoning_fast_footer_snapshot() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     set_fast_mode_test_catalog(&mut chat);
-    assert!(get_available_model(&chat, "gpt-5.4").supports_fast_mode());
+    assert!(get_available_model(&chat, "gpt-5.5").supports_fast_mode());
     chat.show_welcome_banner = false;
     chat.config.cwd = test_project_path().abs();
     chat.config.tui_status_line = Some(vec![
@@ -1580,7 +1580,7 @@ async fn status_line_model_with_reasoning_fast_footer_snapshot() {
     chat.set_service_tier(Some(ServiceTier::Fast));
     set_chatgpt_auth(&mut chat);
     set_fast_mode_test_catalog(&mut chat);
-    assert!(get_available_model(&chat, "gpt-5.4").supports_fast_mode());
+    assert!(get_available_model(&chat, "gpt-5.5").supports_fast_mode());
     chat.refresh_status_line();
 
     let width = 80;
@@ -1600,9 +1600,9 @@ async fn status_line_model_with_reasoning_context_remaining_footer_snapshot() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     set_fast_mode_test_catalog(&mut chat);
-    assert!(get_available_model(&chat, "gpt-5.4").supports_fast_mode());
+    assert!(get_available_model(&chat, "gpt-5.5").supports_fast_mode());
     chat.show_welcome_banner = false;
     chat.config.cwd = test_project_path().abs();
     chat.config.tui_status_line = Some(vec![
@@ -1614,7 +1614,7 @@ async fn status_line_model_with_reasoning_context_remaining_footer_snapshot() {
     chat.set_service_tier(Some(ServiceTier::Fast));
     set_chatgpt_auth(&mut chat);
     set_fast_mode_test_catalog(&mut chat);
-    assert!(get_available_model(&chat, "gpt-5.4").supports_fast_mode());
+    assert!(get_available_model(&chat, "gpt-5.5").supports_fast_mode());
     chat.refresh_status_line();
 
     let width = 80;
@@ -1634,7 +1634,7 @@ async fn status_line_goal_active_token_budget_footer_snapshot() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.set_feature_enabled(Feature::Goals, /*enabled*/ true);
     chat.show_welcome_banner = false;
     chat.config.tui_status_line = Some(vec!["model-name".to_string()]);
@@ -1671,7 +1671,7 @@ async fn status_line_goal_complete_elapsed_footer_snapshot() {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.set_feature_enabled(Feature::Goals, /*enabled*/ true);
     chat.show_welcome_banner = false;
     chat.config.tui_status_line = Some(vec!["model-name".to_string()]);
@@ -1705,7 +1705,7 @@ async fn status_line_goal_complete_elapsed_footer_snapshot() {
 
 #[tokio::test]
 async fn session_configured_clears_goal_status_footer() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.set_feature_enabled(Feature::Goals, /*enabled*/ true);
     chat.handle_server_notification(
         ServerNotification::ThreadGoalUpdated(
@@ -1736,7 +1736,7 @@ async fn session_configured_clears_goal_status_footer() {
             session_id: ThreadId::new(),
             forked_from_id: None,
             thread_name: None,
-            model: "gpt-5.4".to_string(),
+            model: "gpt-5.5".to_string(),
             model_provider_id: "test-provider".to_string(),
             service_tier: None,
             approval_policy: AskForApproval::Never,
@@ -1759,7 +1759,7 @@ async fn session_configured_clears_goal_status_footer() {
 
 #[tokio::test]
 async fn thread_goal_update_for_other_thread_is_ignored() {
-    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.5")).await;
     chat.set_feature_enabled(Feature::Goals, /*enabled*/ true);
     chat.thread_id = Some(ThreadId::new());
     let other_thread_id = ThreadId::new().to_string();

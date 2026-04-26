@@ -13,14 +13,14 @@ use codex_protocol::openai_models::TruncationPolicyConfig;
 use codex_protocol::openai_models::WebSearchToolType;
 
 const GPT_OSS_CONTEXT_WINDOW: i64 = 128_000;
-const GPT_5_4_CONTEXT_WINDOW: i64 = 272_000;
-const GPT_5_4_MAX_CONTEXT_WINDOW: i64 = 1_000_000;
-const GPT_5_4_CMB_MODEL_ID: &str = "openai.gpt-5.4-cmb";
+const GPT_5_5_CONTEXT_WINDOW: i64 = 272_000;
+const GPT_5_5_MAX_CONTEXT_WINDOW: i64 = 1_000_000;
+const GPT_5_5_CMB_MODEL_ID: &str = "openai.gpt-5.5-cmb";
 
 pub(crate) fn static_model_catalog() -> ModelsResponse {
     ModelsResponse {
         models: vec![
-            gpt_5_4_cmb_bedrock_model(/*priority*/ 0),
+            gpt_5_5_cmb_bedrock_model(/*priority*/ 0),
             bedrock_oss_model(
                 "openai.gpt-oss-120b",
                 "GPT OSS 120B on Bedrock",
@@ -35,13 +35,13 @@ pub(crate) fn static_model_catalog() -> ModelsResponse {
     }
 }
 
-fn gpt_5_4_cmb_bedrock_model(priority: i32) -> ModelInfo {
+fn gpt_5_5_cmb_bedrock_model(priority: i32) -> ModelInfo {
     ModelInfo {
-        slug: GPT_5_4_CMB_MODEL_ID.to_string(),
-        display_name: "gpt-5.4".to_string(),
+        slug: GPT_5_5_CMB_MODEL_ID.to_string(),
+        display_name: "gpt-5.5".to_string(),
         description: Some("Strong model for everyday coding.".to_string()),
         default_reasoning_level: Some(ReasoningEffort::Medium),
-        supported_reasoning_levels: gpt_5_4_cmb_reasoning_levels(),
+        supported_reasoning_levels: gpt_5_5_cmb_reasoning_levels(),
         shell_type: ConfigShellToolType::ShellCommand,
         visibility: ModelVisibility::List,
         supported_in_api: true,
@@ -60,8 +60,8 @@ fn gpt_5_4_cmb_bedrock_model(priority: i32) -> ModelInfo {
         truncation_policy: TruncationPolicyConfig::tokens(/*limit*/ 10_000),
         supports_parallel_tool_calls: true,
         supports_image_detail_original: true,
-        context_window: Some(GPT_5_4_CONTEXT_WINDOW),
-        max_context_window: Some(GPT_5_4_MAX_CONTEXT_WINDOW),
+        context_window: Some(GPT_5_5_CONTEXT_WINDOW),
+        max_context_window: Some(GPT_5_5_MAX_CONTEXT_WINDOW),
         auto_compact_token_limit: None,
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
@@ -111,7 +111,7 @@ fn bedrock_oss_model(slug: &str, display_name: &str, priority: i32) -> ModelInfo
     }
 }
 
-fn gpt_5_4_cmb_reasoning_levels() -> Vec<ReasoningEffortPreset> {
+fn gpt_5_5_cmb_reasoning_levels() -> Vec<ReasoningEffortPreset> {
     vec![
         reasoning_effort_preset(ReasoningEffort::Minimal),
         reasoning_effort_preset(ReasoningEffort::Low),
@@ -146,23 +146,23 @@ mod tests {
         let catalog = static_model_catalog();
 
         assert_eq!(catalog.models.len(), 3);
-        assert_eq!(catalog.models[0].slug, GPT_5_4_CMB_MODEL_ID);
+        assert_eq!(catalog.models[0].slug, GPT_5_5_CMB_MODEL_ID);
         assert_eq!(catalog.models[1].slug, "openai.gpt-oss-120b");
         assert_eq!(catalog.models[2].slug, "openai.gpt-oss-20b");
     }
 
     #[test]
-    fn gpt_5_4_cmb_advertises_only_bedrock_supported_reasoning_levels() {
+    fn gpt_5_5_cmb_advertises_only_bedrock_supported_reasoning_levels() {
         let catalog = static_model_catalog();
         let cmb_model = catalog
             .models
             .iter()
-            .find(|model| model.slug == GPT_5_4_CMB_MODEL_ID)
-            .expect("Bedrock catalog should include GPT-5.4 CMB");
+            .find(|model| model.slug == GPT_5_5_CMB_MODEL_ID)
+            .expect("Bedrock catalog should include GPT-5.5 CMB");
 
         assert_eq!(
             cmb_model.supported_reasoning_levels,
-            gpt_5_4_cmb_reasoning_levels()
+            gpt_5_5_cmb_reasoning_levels()
         );
     }
 }

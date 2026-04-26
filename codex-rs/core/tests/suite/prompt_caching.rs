@@ -517,7 +517,7 @@ async fn override_before_first_turn_emits_environment_context() -> anyhow::Resul
     let collaboration_mode = CollaborationMode {
         mode: ModeKind::Default,
         settings: Settings {
-            model: "gpt-5.4".to_string(),
+            model: "gpt-5.5".to_string(),
             reasoning_effort: Some(ReasoningEffort::High),
             developer_instructions: None,
         },
@@ -531,7 +531,7 @@ async fn override_before_first_turn_emits_environment_context() -> anyhow::Resul
             sandbox_policy: None,
             permission_profile: None,
             windows_sandbox_level: None,
-            model: Some("gpt-5.4".to_string()),
+            model: Some("gpt-5.5".to_string()),
             effort: Some(Some(ReasoningEffort::Low)),
             summary: None,
             service_tier: None,
@@ -555,7 +555,7 @@ async fn override_before_first_turn_emits_environment_context() -> anyhow::Resul
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     let body = req.single_request().body_json();
-    assert_eq!(body["model"].as_str(), Some("gpt-5.4"));
+    assert_eq!(body["model"].as_str(), Some("gpt-5.5"));
     assert_eq!(
         body.get("reasoning")
             .and_then(|reasoning| reasoning.get("effort"))
