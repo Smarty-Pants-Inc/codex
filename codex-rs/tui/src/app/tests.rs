@@ -15,6 +15,7 @@ use crate::chatwidget::tests::set_fast_mode_test_catalog;
 use crate::file_search::FileSearchManager;
 use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
+use crate::history_cell::PlainHistoryCell;
 use crate::history_cell::UserHistoryCell;
 use crate::history_cell::new_session_info;
 use crate::multi_agents::AgentPickerThreadEntry;
@@ -22,6 +23,7 @@ use assert_matches::assert_matches;
 
 use crate::legacy_core::config::ConfigBuilder;
 use crate::legacy_core::config::ConfigOverrides;
+use crate::legacy_core::config::TerminalResizeReflowMaxRows;
 use codex_app_server_protocol::AdditionalFileSystemPermissions;
 use codex_app_server_protocol::AdditionalNetworkPermissions;
 use codex_app_server_protocol::AdditionalPermissionProfile;
@@ -61,6 +63,7 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
+use codex_protocol::models::AdditionalPermissionProfile as CoreAdditionalPermissionProfile;
 use codex_protocol::models::FileSystemPermissions;
 use codex_protocol::models::NetworkPermissions;
 use codex_protocol::models::PermissionProfile;
@@ -1686,7 +1689,10 @@ async fn update_feature_flags_enabling_guardian_selects_auto_review() -> Result<
         auto_review.approvals_reviewer
     );
     assert_eq!(app.runtime_approval_policy_override, None);
-    assert_eq!(app.runtime_sandbox_policy_override, None);
+    assert_eq!(
+        app.runtime_sandbox_policy_override,
+        Some(auto_review.sandbox_policy.clone())
+    );
     assert_eq!(
         op_rx.try_recv(),
         Ok(Op::OverrideTurnContext {
@@ -1718,7 +1724,7 @@ async fn update_feature_flags_enabling_guardian_selects_auto_review() -> Result<
 
     let config = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
     assert!(config.contains("guardian_approval = true"));
-    assert!(config.contains("approvals_reviewer = \"auto_review\""));
+    assert!(config.contains("approvals_reviewer = \"guardian_subagent\""));
     assert!(config.contains("approval_policy = \"on-request\""));
     assert!(config.contains("sandbox_mode = \"workspace-write\""));
     Ok(())
@@ -1878,7 +1884,7 @@ async fn update_feature_flags_enabling_guardian_overrides_explicit_manual_review
     );
 
     let config = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
-    assert!(config.contains("approvals_reviewer = \"auto_review\""));
+    assert!(config.contains("approvals_reviewer = \"guardian_subagent\""));
     assert!(config.contains("guardian_approval = true"));
     assert!(config.contains("approval_policy = \"on-request\""));
     assert!(config.contains("sandbox_mode = \"workspace-write\""));
@@ -2012,7 +2018,7 @@ async fn update_feature_flags_enabling_guardian_in_profile_sets_profile_auto_rev
     );
     assert_eq!(
         profile_config.get("approvals_reviewer"),
-        Some(&TomlValue::String("auto_review".to_string()))
+        Some(&TomlValue::String("guardian_subagent".to_string()))
     );
     Ok(())
 }
@@ -2257,7 +2263,6 @@ async fn inactive_thread_approval_bubbles_into_active_view() -> Result<()> {
                 sandbox_policy: SandboxPolicy::new_workspace_write_policy(),
                 permission_profile: Some(PermissionProfile::from_legacy_sandbox_policy(
                     &SandboxPolicy::new_workspace_write_policy(),
-                    std::path::Path::new("/tmp/agent"),
                 )),
                 rollout_path: Some(test_path_buf("/tmp/agent-rollout.jsonl")),
                 ..test_thread_session(agent_thread_id, test_path_buf("/tmp/agent"))
@@ -2421,7 +2426,6 @@ async fn side_defers_subagent_approval_overlay_until_side_exits() -> Result<()> 
                 sandbox_policy: SandboxPolicy::new_workspace_write_policy(),
                 permission_profile: Some(PermissionProfile::from_legacy_sandbox_policy(
                     &SandboxPolicy::new_workspace_write_policy(),
-                    std::path::Path::new("/tmp/agent"),
                 )),
                 rollout_path: Some(test_path_buf("/tmp/agent-rollout.jsonl")),
                 ..test_thread_session(agent_thread_id, test_path_buf("/tmp/agent"))
@@ -2517,7 +2521,7 @@ async fn inactive_thread_exec_approval_preserves_context() {
     );
     assert_eq!(
         additional_permissions,
-        Some(PermissionProfile {
+        Some(CoreAdditionalPermissionProfile {
             network: Some(NetworkPermissions {
                 enabled: Some(true),
             }),
@@ -2647,7 +2651,6 @@ async fn inactive_thread_approval_badge_clears_after_turn_completion_notificatio
                 sandbox_policy: SandboxPolicy::new_workspace_write_policy(),
                 permission_profile: Some(PermissionProfile::from_legacy_sandbox_policy(
                     &SandboxPolicy::new_workspace_write_policy(),
-                    std::path::Path::new("/tmp/agent"),
                 )),
                 rollout_path: Some(test_path_buf("/tmp/agent-rollout.jsonl")),
                 ..test_thread_session(agent_thread_id, test_path_buf("/tmp/agent"))
@@ -2704,7 +2707,6 @@ async fn inactive_thread_started_notification_initializes_replay_session() -> Re
         sandbox_policy: SandboxPolicy::new_workspace_write_policy(),
         permission_profile: Some(PermissionProfile::from_legacy_sandbox_policy(
             &SandboxPolicy::new_workspace_write_policy(),
-            std::path::Path::new("/tmp/main"),
         )),
         ..test_thread_session(main_thread_id, test_path_buf("/tmp/main"))
     };
@@ -2820,7 +2822,6 @@ async fn inactive_thread_started_notification_preserves_primary_model_when_path_
         sandbox_policy: SandboxPolicy::new_workspace_write_policy(),
         permission_profile: Some(PermissionProfile::from_legacy_sandbox_policy(
             &SandboxPolicy::new_workspace_write_policy(),
-            std::path::Path::new("/tmp/main"),
         )),
         ..test_thread_session(main_thread_id, test_path_buf("/tmp/main"))
     };
@@ -2892,7 +2893,6 @@ async fn thread_read_session_state_does_not_reuse_primary_permission_profile() {
         sandbox_policy: SandboxPolicy::new_workspace_write_policy(),
         permission_profile: Some(PermissionProfile::from_legacy_sandbox_policy(
             &SandboxPolicy::new_workspace_write_policy(),
-            std::path::Path::new("/tmp/main"),
         )),
         ..test_thread_session(main_thread_id, test_path_buf("/tmp/main"))
     };
@@ -3560,6 +3560,7 @@ async fn render_clear_ui_header_after_long_transcript_for_snapshot() -> String {
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            permission_profile: None,
             cwd: test_path_buf("/tmp/project").abs(),
             reasoning_effort: Some(ReasoningEffortConfig::High),
             history_log_id: 0,
@@ -3692,6 +3693,8 @@ async fn make_test_app() -> App {
         overlay: None,
         deferred_history_lines: Vec::new(),
         has_emitted_history_lines: false,
+        transcript_reflow: TranscriptReflowState::default(),
+        initial_history_replay_buffer: None,
         enhanced_keys_supported: false,
         commit_anim_running: Arc::new(AtomicBool::new(false)),
         status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
@@ -3756,6 +3759,8 @@ async fn make_test_app_with_channels() -> (
             overlay: None,
             deferred_history_lines: Vec::new(),
             has_emitted_history_lines: false,
+            transcript_reflow: TranscriptReflowState::default(),
+            initial_history_replay_buffer: None,
             enhanced_keys_supported: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
@@ -3809,7 +3814,6 @@ fn test_thread_session(thread_id: ThreadId, cwd: PathBuf) -> ThreadSessionState 
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         permission_profile: Some(PermissionProfile::from_legacy_sandbox_policy(
             &SandboxPolicy::new_read_only_policy(),
-            cwd.as_path(),
         )),
         cwd: cwd.abs(),
         instruction_source_paths: Vec::new(),
@@ -3819,6 +3823,147 @@ fn test_thread_session(thread_id: ThreadId, cwd: PathBuf) -> ThreadSessionState 
         network_proxy: None,
         rollout_path: Some(PathBuf::new()),
     }
+}
+
+fn enable_terminal_resize_reflow(app: &mut App) {
+    app.config
+        .features
+        .set_enabled(Feature::TerminalResizeReflow, /*enabled*/ true)
+        .expect("feature should be configurable");
+}
+
+fn plain_line_cell(text: impl Into<String>) -> Arc<dyn HistoryCell> {
+    Arc::new(PlainHistoryCell::new(vec![Line::from(text.into())])) as Arc<dyn HistoryCell>
+}
+
+fn rendered_line_text(line: &Line<'static>) -> String {
+    line.spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect()
+}
+
+#[tokio::test]
+async fn capped_resize_reflow_renders_recent_suffix_only() {
+    let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;
+    app.config.terminal_resize_reflow.max_rows = TerminalResizeReflowMaxRows::Limit(5);
+    app.transcript_cells = (0..20)
+        .map(|i| plain_line_cell(format!("cell {i}")))
+        .collect();
+
+    let rendered = app.render_transcript_lines_for_reflow(/*width*/ 80);
+
+    assert_eq!(rendered.lines.len(), 5);
+    assert_eq!(
+        rendered
+            .lines
+            .iter()
+            .map(rendered_line_text)
+            .collect::<Vec<_>>(),
+        vec![
+            "cell 17".to_string(),
+            String::new(),
+            "cell 18".to_string(),
+            String::new(),
+            "cell 19".to_string(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn uncapped_resize_reflow_renders_all_cells_when_row_cap_absent() {
+    let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;
+    app.config.terminal_resize_reflow.max_rows = TerminalResizeReflowMaxRows::Disabled;
+    app.transcript_cells = (0..20)
+        .map(|i| plain_line_cell(format!("cell {i}")))
+        .collect();
+
+    let rendered = app.render_transcript_lines_for_reflow(/*width*/ 80);
+
+    assert_eq!(rendered.lines.len(), 39);
+    assert_eq!(rendered_line_text(&rendered.lines[0]), "cell 0");
+    assert_eq!(rendered_line_text(&rendered.lines[38]), "cell 19");
+}
+
+#[tokio::test]
+async fn uncapped_resize_reflow_renders_all_cells_under_row_limit() {
+    let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;
+    app.config.terminal_resize_reflow.max_rows = TerminalResizeReflowMaxRows::Limit(100);
+    app.transcript_cells = (0..3)
+        .map(|i| plain_line_cell(format!("cell {i}")))
+        .collect();
+
+    let rendered = app.render_transcript_lines_for_reflow(/*width*/ 80);
+
+    assert_eq!(
+        rendered
+            .lines
+            .iter()
+            .map(rendered_line_text)
+            .collect::<Vec<_>>(),
+        vec![
+            "cell 0".to_string(),
+            String::new(),
+            "cell 1".to_string(),
+            String::new(),
+            "cell 2".to_string(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn initial_replay_buffer_keeps_recent_rows_when_row_cap_present() {
+    let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;
+    enable_terminal_resize_reflow(&mut app);
+    app.config.terminal_resize_reflow.max_rows = TerminalResizeReflowMaxRows::Limit(3);
+
+    app.begin_initial_history_replay_buffer();
+    for index in 0..5 {
+        App::buffer_initial_history_replay_display_lines(
+            app.initial_history_replay_buffer
+                .as_mut()
+                .expect("initial replay buffer active"),
+            vec![Line::from(format!("line {index}"))],
+            /*max_rows*/ 3,
+        );
+    }
+
+    let buffer = app
+        .initial_history_replay_buffer
+        .as_ref()
+        .expect("initial replay buffer should remain active");
+    assert_eq!(
+        buffer
+            .retained_lines
+            .iter()
+            .map(rendered_line_text)
+            .collect::<Vec<_>>(),
+        vec![
+            "line 2".to_string(),
+            "line 3".to_string(),
+            "line 4".to_string(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn height_shrink_schedules_resize_reflow() {
+    let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;
+    enable_terminal_resize_reflow(&mut app);
+    let frame_requester = crate::tui::FrameRequester::test_dummy();
+
+    assert!(!app.handle_draw_size_change(
+        ratatui::layout::Size::new(/*width*/ 118, /*height*/ 35),
+        ratatui::layout::Size::new(/*width*/ 118, /*height*/ 35),
+        &frame_requester,
+    ));
+
+    assert!(app.handle_draw_size_change(
+        ratatui::layout::Size::new(/*width*/ 118, /*height*/ 24),
+        ratatui::layout::Size::new(/*width*/ 118, /*height*/ 35),
+        &frame_requester,
+    ));
+    assert!(app.transcript_reflow.has_pending_reflow());
 }
 
 fn test_turn(turn_id: &str, status: TurnStatus, items: Vec<ThreadItem>) -> Turn {
@@ -4182,6 +4327,7 @@ async fn backtrack_selection_with_duplicate_history_targets_unique_turn() {
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            permission_profile: None,
             cwd: test_path_buf("/home/user/project").abs(),
             reasoning_effort: None,
             history_log_id: 0,
@@ -4245,6 +4391,7 @@ async fn backtrack_selection_with_duplicate_history_targets_unique_turn() {
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            permission_profile: None,
             cwd: test_path_buf("/home/user/project").abs(),
             reasoning_effort: None,
             history_log_id: 0,
@@ -4338,6 +4485,7 @@ async fn backtrack_resubmit_preserves_data_image_urls_in_user_turn() {
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            permission_profile: None,
             cwd: test_path_buf("/home/user/project").abs(),
             reasoning_effort: None,
             history_log_id: 0,
@@ -4724,6 +4872,7 @@ async fn new_session_requests_shutdown_for_previous_conversation() {
         approval_policy: AskForApproval::Never,
         approvals_reviewer: ApprovalsReviewer::User,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
+        permission_profile: None,
         cwd: test_path_buf("/home/user/project").abs(),
         reasoning_effort: None,
         history_log_id: 0,
@@ -4836,6 +4985,7 @@ async fn clear_only_ui_reset_preserves_chat_session_state() {
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            permission_profile: None,
             cwd: test_path_buf("/tmp/project").abs(),
             reasoning_effort: None,
             history_log_id: 0,
