@@ -304,6 +304,28 @@ async fn get_model_info_uses_custom_catalog() {
 }
 
 #[tokio::test]
+async fn bundled_gpt_5_5_uses_measured_default_window() {
+    let config = ModelsManagerConfig::default();
+    let manager = static_manager_for_tests(ModelsResponse {
+        models: load_remote_models_from_file().expect("bundled model catalog"),
+    });
+
+    let model_info = manager.get_model_info("gpt-5.5", &config).await;
+
+    assert_eq!(model_info.context_window, Some(272_000));
+    assert_eq!(model_info.max_context_window, Some(272_000));
+    assert_eq!(
+        model_info
+            .resolved_context_window()
+            .map(
+                |context_window| context_window * model_info.effective_context_window_percent / 100
+            ),
+        Some(258_400)
+    );
+    assert_eq!(model_info.auto_compact_token_limit(), Some(244_800));
+}
+
+#[tokio::test]
 async fn get_model_info_matches_namespaced_suffix() {
     let codex_home = tempdir().expect("temp dir");
     let config = ModelsManagerConfig::default();
