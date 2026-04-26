@@ -1126,7 +1126,7 @@ impl App {
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
             pending_app_server_requests: PendingAppServerRequests::default(),
-            pending_startup_ui_action: None,
+            pending_startup_ui_action: StartupUiAction::from_env(),
             oracle_state: OracleSupervisorState::default(),
             oracle_picker_show_info: false,
             oracle_picker_remote_threads: Vec::new(),
@@ -3457,6 +3457,7 @@ impl App {
         self.oracle_state.bindings.contains_key(&thread_id)
     }
 
+    #[cfg(test)]
     fn is_hidden_oracle_thread(&self, thread_id: ThreadId) -> bool {
         self.oracle_state.orchestrator_thread_id == Some(thread_id)
             || self.oracle_state.bindings.values().any(|binding| {
@@ -4661,6 +4662,23 @@ impl App {
                 .features
                 .enabled(Feature::Personality)
         });
+        let permission_profile = if matches!(
+            self.chat_widget
+                .config_ref()
+                .permissions
+                .sandbox_policy
+                .get(),
+            SandboxPolicy::ExternalSandbox { .. }
+        ) {
+            None
+        } else {
+            Some(
+                self.chat_widget
+                    .config_ref()
+                    .permissions
+                    .permission_profile(),
+            )
+        };
         let reminder = self
             .oracle_state
             .workflow
@@ -4684,6 +4702,7 @@ impl App {
                 .sandbox_policy
                 .get()
                 .clone(),
+            permission_profile,
             routed_model,
             collaboration_mode.reasoning_effort(),
             /*summary*/ None,
@@ -7181,11 +7200,11 @@ mod tests;
 
 #[cfg(test)]
 mod carried_tests {
-    use super::*;
     use super::background_requests::McpInventoryMaps;
     use super::background_requests::build_feedback_upload_params;
     use super::background_requests::hide_cli_only_plugin_marketplaces;
     use super::background_requests::mcp_inventory_maps_from_statuses;
+    use super::*;
     use crate::app_backtrack::BacktrackSelection;
     use crate::app_backtrack::BacktrackState;
     use crate::app_backtrack::user_count;
@@ -9570,10 +9589,7 @@ guardian_approval = true
                 .features
                 .enabled(Feature::GuardianApproval)
         );
-        assert_eq!(
-            app.config.approvals_reviewer,
-            ApprovalsReviewer::AutoReview
-        );
+        assert_eq!(app.config.approvals_reviewer, ApprovalsReviewer::AutoReview);
         assert_eq!(
             app.chat_widget.config_ref().approvals_reviewer,
             ApprovalsReviewer::AutoReview
@@ -10921,6 +10937,12 @@ guardian_approval = true
                     .sandbox_policy
                     .get()
                     .clone(),
+                Some(
+                    app.chat_widget
+                        .config_ref()
+                        .permissions
+                        .permission_profile(),
+                ),
                 app.oracle_thread_session(thread_id).model,
                 None,
                 None,
@@ -12156,6 +12178,12 @@ guardian_approval = true
                     .sandbox_policy
                     .get()
                     .clone(),
+                Some(
+                    app.chat_widget
+                        .config_ref()
+                        .permissions
+                        .permission_profile(),
+                ),
                 app.oracle_thread_session(oracle_thread_id).model,
                 None,
                 None,
@@ -17524,6 +17552,12 @@ guardian_approval = true
                     .sandbox_policy
                     .get()
                     .clone(),
+                Some(
+                    app.chat_widget
+                        .config_ref()
+                        .permissions
+                        .permission_profile(),
+                ),
                 app.oracle_thread_session(thread_id).model,
                 None,
                 None,
@@ -18437,7 +18471,7 @@ guardian_approval = true
         );
         assert_eq!(
             additional_permissions,
-            Some(PermissionProfile {
+            Some(codex_protocol::models::AdditionalPermissionProfile {
                 network: Some(NetworkPermissions {
                     enabled: Some(true),
                 }),
@@ -19495,6 +19529,9 @@ guardian_approval = true
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                permission_profile: Some(PermissionProfile::from_legacy_sandbox_policy(
+                    &SandboxPolicy::new_read_only_policy(),
+                )),
                 cwd: test_path_buf("/tmp/project").abs(),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
                 history_log_id: 0,
@@ -19631,6 +19668,8 @@ guardian_approval = true
             overlay: None,
             deferred_history_lines: Vec::new(),
             has_emitted_history_lines: false,
+            transcript_reflow: TranscriptReflowState::default(),
+            initial_history_replay_buffer: None,
             enhanced_keys_supported: false,
             commit_anim_running: Arc::new(AtomicBool::new(false)),
             status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
@@ -19695,6 +19734,8 @@ guardian_approval = true
                 overlay: None,
                 deferred_history_lines: Vec::new(),
                 has_emitted_history_lines: false,
+                transcript_reflow: TranscriptReflowState::default(),
+                initial_history_replay_buffer: None,
                 enhanced_keys_supported: false,
                 commit_anim_running: Arc::new(AtomicBool::new(false)),
                 status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
@@ -19748,7 +19789,6 @@ guardian_approval = true
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             permission_profile: Some(PermissionProfile::from_legacy_sandbox_policy(
                 &SandboxPolicy::new_read_only_policy(),
-                cwd.as_path(),
             )),
             cwd: cwd.abs(),
             instruction_source_paths: Vec::new(),
@@ -20504,6 +20544,9 @@ guardian_approval = true
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                permission_profile: Some(PermissionProfile::from_legacy_sandbox_policy(
+                    &SandboxPolicy::new_read_only_policy(),
+                )),
                 cwd: next_cwd.clone().abs(),
                 reasoning_effort: None,
                 history_log_id: 0,
@@ -20620,6 +20663,9 @@ guardian_approval = true
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                permission_profile: Some(PermissionProfile::from_legacy_sandbox_policy(
+                    &SandboxPolicy::new_read_only_policy(),
+                )),
                 cwd: test_path_buf("/home/user/project").abs(),
                 reasoning_effort: None,
                 history_log_id: 0,
@@ -20683,6 +20729,9 @@ guardian_approval = true
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                permission_profile: Some(PermissionProfile::from_legacy_sandbox_policy(
+                    &SandboxPolicy::new_read_only_policy(),
+                )),
                 cwd: test_path_buf("/home/user/project").abs(),
                 reasoning_effort: None,
                 history_log_id: 0,
@@ -20776,6 +20825,9 @@ guardian_approval = true
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                permission_profile: Some(PermissionProfile::from_legacy_sandbox_policy(
+                    &SandboxPolicy::new_read_only_policy(),
+                )),
                 cwd: test_path_buf("/home/user/project").abs(),
                 reasoning_effort: None,
                 history_log_id: 0,
@@ -21220,6 +21272,9 @@ guardian_approval = true
             approval_policy: AskForApproval::Never,
             approvals_reviewer: ApprovalsReviewer::User,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
+            permission_profile: Some(PermissionProfile::from_legacy_sandbox_policy(
+                &SandboxPolicy::new_read_only_policy(),
+            )),
             cwd: test_path_buf("/home/user/project").abs(),
             reasoning_effort: None,
             history_log_id: 0,
@@ -21336,6 +21391,9 @@ guardian_approval = true
                 approval_policy: AskForApproval::Never,
                 approvals_reviewer: ApprovalsReviewer::User,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                permission_profile: Some(PermissionProfile::from_legacy_sandbox_policy(
+                    &SandboxPolicy::new_read_only_policy(),
+                )),
                 cwd: test_path_buf("/tmp/project").abs(),
                 reasoning_effort: None,
                 history_log_id: 0,

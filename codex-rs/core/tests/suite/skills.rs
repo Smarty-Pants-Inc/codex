@@ -253,6 +253,7 @@ async fn new_thread_sees_home_skill_installed_after_cache_warmup() -> Result<()>
     new_thread
         .thread
         .submit(Op::UserTurn {
+            environments: None,
             items: vec![
                 UserInput::Text {
                     text: "please use $late-home-skill".to_string(),
@@ -274,6 +275,7 @@ async fn new_thread_sees_home_skill_installed_after_cache_warmup() -> Result<()>
             service_tier: None,
             collaboration_mode: None,
             personality: None,
+            permission_profile: None,
         })
         .await?;
 
