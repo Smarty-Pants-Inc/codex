@@ -30,8 +30,8 @@ const DEFAULT_MODEL_CACHE_TTL: Duration = Duration::from_secs(300);
 /// this endpoint only when it decides a remote refresh should happen.
 #[async_trait]
 pub trait ModelsEndpointClient: fmt::Debug + Send + Sync {
-    /// Returns whether this provider can authenticate command-scoped requests.
-    fn has_command_auth(&self) -> bool;
+    /// Returns whether this provider can fetch its OpenAI-compatible model catalog.
+    fn can_fetch_model_catalog(&self) -> bool;
 
     /// Returns whether the currently resolved auth can use Codex backend-only models.
     async fn uses_codex_backend(&self) -> bool;
@@ -320,7 +320,8 @@ impl OpenAiModelsManager {
     }
 
     async fn should_refresh_models(&self) -> bool {
-        self.endpoint_client.uses_codex_backend().await || self.endpoint_client.has_command_auth()
+        self.endpoint_client.uses_codex_backend().await
+            || self.endpoint_client.can_fetch_model_catalog()
     }
 
     async fn get_etag(&self) -> Option<String> {
@@ -331,10 +332,14 @@ impl OpenAiModelsManager {
     async fn apply_remote_models(&self, models: Vec<ModelInfo>) {
         let mut existing_models = load_remote_models_from_file().unwrap_or_default();
         for model in models {
-            if let Some(existing_index) = existing_models
+            let existing_index = existing_models
                 .iter()
-                .position(|existing| existing.slug == model.slug)
-            {
+                .position(|existing| existing.slug == model.slug);
+            let model = normalize_remote_model_info(
+                model,
+                existing_index.and_then(|index| existing_models.get(index)),
+            );
+            if let Some(existing_index) = existing_index {
                 existing_models[existing_index] = model;
             } else {
                 existing_models.push(model);
@@ -399,6 +404,37 @@ impl ModelsManager for StaticModelsManager {
 
 fn load_remote_models_from_file() -> Result<Vec<ModelInfo>, std::io::Error> {
     Ok(crate::bundled_models_response()?.models)
+}
+
+fn normalize_remote_model_info(model: ModelInfo, existing: Option<&ModelInfo>) -> ModelInfo {
+    if !model.base_instructions.is_empty() {
+        return model;
+    }
+
+    let mut hydrated = existing
+        .cloned()
+        .unwrap_or_else(|| model_info::provider_listed_model_info_from_slug(&model.slug));
+    hydrated.used_fallback_model_metadata = false;
+    if model.display_name != model.slug {
+        hydrated.display_name = model.display_name;
+    }
+    if model.description.is_some() {
+        hydrated.description = model.description;
+    }
+    if model.default_reasoning_level.is_some() {
+        hydrated.default_reasoning_level = model.default_reasoning_level;
+    }
+    if !model.supported_reasoning_levels.is_empty() {
+        hydrated.supported_reasoning_levels = model.supported_reasoning_levels;
+    }
+    hydrated.visibility = model.visibility;
+    hydrated.supported_in_api = model.supported_in_api;
+    hydrated.priority = model.priority;
+    hydrated.additional_speed_tiers = model.additional_speed_tiers;
+    hydrated.availability_nux = model.availability_nux;
+    hydrated.upgrade = model.upgrade;
+    hydrated.input_modalities = model.input_modalities;
+    hydrated
 }
 
 fn default_model_from_available(available: Vec<ModelPreset>) -> String {

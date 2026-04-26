@@ -13,6 +13,7 @@ use codex_login::auth::AgentIdentityAuth;
 use codex_login::auth::AgentIdentityAuthRecord;
 use codex_protocol::account::PlanType;
 use codex_protocol::openai_models::ModelsResponse;
+use codex_protocol::openai_models::ReasoningEffort;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::VecDeque;
@@ -28,6 +29,17 @@ mod model_info_overrides_tests;
 
 fn remote_model(slug: &str, display: &str, priority: i32) -> ModelInfo {
     remote_model_with_visibility(slug, display, priority, "list")
+}
+
+fn openai_compatible_remote_model(slug: &str) -> ModelInfo {
+    let mut model = remote_model_with_visibility(slug, slug, /*priority*/ 99, "list");
+    model.description = None;
+    model.default_reasoning_level = None;
+    model.supported_reasoning_levels.clear();
+    model.base_instructions.clear();
+    model.context_window = None;
+    model.max_context_window = None;
+    model
 }
 
 fn remote_model_with_visibility(
@@ -75,7 +87,7 @@ fn assert_models_contain(actual: &[ModelInfo], expected: &[ModelInfo]) {
 
 #[derive(Debug)]
 struct TestModelsEndpoint {
-    has_command_auth: bool,
+    can_fetch_model_catalog: bool,
     uses_codex_backend: bool,
     responses: Mutex<VecDeque<Vec<ModelInfo>>>,
     fetch_count: AtomicUsize,
@@ -84,7 +96,7 @@ struct TestModelsEndpoint {
 impl TestModelsEndpoint {
     fn new(responses: Vec<Vec<ModelInfo>>) -> Arc<Self> {
         Arc::new(Self {
-            has_command_auth: false,
+            can_fetch_model_catalog: false,
             uses_codex_backend: true,
             responses: Mutex::new(responses.into()),
             fetch_count: AtomicUsize::new(0),
@@ -93,7 +105,7 @@ impl TestModelsEndpoint {
 
     fn without_refresh(responses: Vec<Vec<ModelInfo>>) -> Arc<Self> {
         Arc::new(Self {
-            has_command_auth: false,
+            can_fetch_model_catalog: false,
             uses_codex_backend: false,
             responses: Mutex::new(responses.into()),
             fetch_count: AtomicUsize::new(0),
@@ -149,8 +161,8 @@ impl ExternalAuth for TestUnresolvedExternalApiKeyAuth {
 
 #[async_trait]
 impl ModelsEndpointClient for TestModelsEndpoint {
-    fn has_command_auth(&self) -> bool {
-        self.has_command_auth
+    fn can_fetch_model_catalog(&self) -> bool {
+        self.can_fetch_model_catalog
     }
 
     async fn uses_codex_backend(&self) -> bool {
@@ -393,6 +405,83 @@ async fn refresh_available_models_sorts_by_priority() {
 }
 
 #[tokio::test]
+async fn openai_compatible_listed_opus_is_picker_ready() {
+    let codex_home = tempdir().expect("temp dir");
+    let endpoint = TestModelsEndpoint::new(vec![vec![openai_compatible_remote_model(
+        "claude-opus-4-7",
+    )]]);
+    let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
+
+    manager
+        .refresh_available_models(RefreshStrategy::Online)
+        .await
+        .expect("refresh should fetch OpenAI-compatible model list");
+
+    let model_info = manager
+        .get_model_info("claude-opus-4-7", &ModelsManagerConfig::default())
+        .await;
+    assert_eq!(model_info.display_name, "Claude Opus 4.7");
+    assert!(!model_info.used_fallback_model_metadata);
+    assert_eq!(
+        model_info
+            .supported_reasoning_levels
+            .iter()
+            .map(|preset| preset.effort)
+            .collect::<Vec<_>>(),
+        vec![
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::Max,
+        ]
+    );
+
+    let available = manager.list_models(RefreshStrategy::Offline).await;
+    let opus = available
+        .iter()
+        .find(|model| model.model == "claude-opus-4-7")
+        .expect("Opus should be picker-visible");
+    assert_eq!(opus.display_name, "Claude Opus 4.7");
+    assert!(opus.show_in_picker);
+    assert_eq!(
+        opus.supported_reasoning_efforts
+            .iter()
+            .map(|preset| preset.effort)
+            .collect::<Vec<_>>(),
+        vec![
+            ReasoningEffort::Low,
+            ReasoningEffort::Medium,
+            ReasoningEffort::High,
+            ReasoningEffort::XHigh,
+            ReasoningEffort::Max,
+        ]
+    );
+    assert_eq!(endpoint.fetch_count(), 1);
+}
+
+#[tokio::test]
+async fn openai_compatible_list_preserves_bundled_metadata() {
+    let codex_home = tempdir().expect("temp dir");
+    let endpoint = TestModelsEndpoint::new(vec![vec![openai_compatible_remote_model("gpt-5.5")]]);
+    let manager = openai_manager_for_tests(codex_home.path().to_path_buf(), endpoint.clone());
+
+    manager
+        .refresh_available_models(RefreshStrategy::Online)
+        .await
+        .expect("refresh should fetch OpenAI-compatible model list");
+
+    let model_info = manager
+        .get_model_info("gpt-5.5", &ModelsManagerConfig::default())
+        .await;
+    assert_eq!(model_info.display_name, "GPT-5.5");
+    assert!(!model_info.used_fallback_model_metadata);
+    assert!(!model_info.base_instructions.is_empty());
+    assert!(!model_info.supported_reasoning_levels.is_empty());
+    assert_eq!(endpoint.fetch_count(), 1);
+}
+
+#[tokio::test]
 async fn refresh_available_models_uses_cache_when_fresh() {
     let remote_models = vec![remote_model("cached", "Cached", /*priority*/ 5)];
     let codex_home = tempdir().expect("temp dir");
@@ -587,7 +676,7 @@ impl TestAuthAwareModelsEndpoint {
 
 #[async_trait]
 impl ModelsEndpointClient for TestAuthAwareModelsEndpoint {
-    fn has_command_auth(&self) -> bool {
+    fn can_fetch_model_catalog(&self) -> bool {
         false
     }
 

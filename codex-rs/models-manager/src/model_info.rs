@@ -66,8 +66,29 @@ pub fn with_config_overrides(mut model: ModelInfo, config: &ModelsManagerConfig)
 
 /// Build a minimal fallback model descriptor for missing/unknown slugs.
 pub fn model_info_from_slug(slug: &str) -> ModelInfo {
-    let mut model = fallback_model_info_from_slug(slug);
+    if let Some(model) = known_model_info_from_slug(slug) {
+        return model;
+    }
+
+    warn!("Unknown model {slug} is used. This will use fallback model metadata.");
+    fallback_model_info_from_slug(slug)
+}
+
+/// Build metadata for a model id that the active provider explicitly listed.
+pub fn provider_listed_model_info_from_slug(slug: &str) -> ModelInfo {
+    let mut model = known_model_info_from_slug(slug).unwrap_or_else(|| {
+        let mut model = fallback_model_info_from_slug(slug);
+        model.used_fallback_model_metadata = false;
+        model
+    });
+    model.visibility = ModelVisibility::List;
+    model.supported_in_api = true;
+    model
+}
+
+pub fn known_model_info_from_slug(slug: &str) -> Option<ModelInfo> {
     if slug == "claude-opus-4-7" {
+        let mut model = fallback_model_info_from_slug(slug);
         model.display_name = "Claude Opus 4.7".to_string();
         model.description = Some("Anthropic Claude Opus 4.7".to_string());
         model.default_reasoning_level = Some(ReasoningEffort::High);
@@ -85,11 +106,11 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
             reasoning_effort_preset(ReasoningEffort::Max, "Maximum adaptive thinking"),
         ];
         model.supports_reasoning_summaries = true;
-        return model;
+        model.used_fallback_model_metadata = false;
+        return Some(model);
     }
 
-    warn!("Unknown model {slug} is used. This will use fallback model metadata.");
-    model
+    None
 }
 
 fn fallback_model_info_from_slug(slug: &str) -> ModelInfo {

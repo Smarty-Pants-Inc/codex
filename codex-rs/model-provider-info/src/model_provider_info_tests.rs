@@ -140,6 +140,24 @@ fn test_supports_remote_compaction_for_openai() {
 }
 
 #[test]
+fn bearer_token_provider_can_fetch_model_catalog() {
+    let provider = ModelProviderInfo {
+        experimental_bearer_token: Some("token".to_string()),
+        requires_openai_auth: false,
+        ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+    };
+
+    assert!(provider.can_fetch_model_catalog());
+}
+
+#[test]
+fn openai_login_provider_without_cached_auth_cannot_fetch_model_catalog_by_itself() {
+    let provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None);
+
+    assert!(!provider.can_fetch_model_catalog());
+}
+
+#[test]
 fn test_supports_remote_compaction_for_azure_name() {
     let provider = ModelProviderInfo {
         name: "Azure".into(),

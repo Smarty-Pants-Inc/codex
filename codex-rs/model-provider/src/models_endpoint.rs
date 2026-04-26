@@ -67,8 +67,8 @@ impl OpenAiModelsEndpoint {
 
 #[async_trait]
 impl ModelsEndpointClient for OpenAiModelsEndpoint {
-    fn has_command_auth(&self) -> bool {
-        self.provider_info.has_command_auth()
+    fn can_fetch_model_catalog(&self) -> bool {
+        self.provider_info.can_fetch_model_catalog()
     }
 
     async fn uses_codex_backend(&self) -> bool {
@@ -232,16 +232,30 @@ mod tests {
             /*auth_manager*/ None,
         );
 
-        assert!(endpoint.has_command_auth());
+        assert!(endpoint.can_fetch_model_catalog());
     }
 
     #[test]
-    fn provider_without_command_auth_reports_no_command_auth() {
+    fn provider_without_catalog_auth_cannot_fetch_model_catalog() {
         let endpoint = OpenAiModelsEndpoint::new(
             ModelProviderInfo::create_openai_provider(/*base_url*/ None),
             /*auth_manager*/ None,
         );
 
-        assert!(!endpoint.has_command_auth());
+        assert!(!endpoint.can_fetch_model_catalog());
+    }
+
+    #[test]
+    fn provider_with_configured_bearer_token_can_fetch_model_catalog() {
+        let endpoint = OpenAiModelsEndpoint::new(
+            ModelProviderInfo {
+                experimental_bearer_token: Some("token".to_string()),
+                requires_openai_auth: false,
+                ..ModelProviderInfo::create_openai_provider(/*base_url*/ None)
+            },
+            /*auth_manager*/ None,
+        );
+
+        assert!(endpoint.can_fetch_model_catalog());
     }
 }

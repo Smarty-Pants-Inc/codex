@@ -389,6 +389,20 @@ impl ModelProviderInfo {
     pub fn has_command_auth(&self) -> bool {
         self.auth.is_some()
     }
+
+    pub fn can_fetch_model_catalog(&self) -> bool {
+        self.has_command_auth()
+            || self
+                .experimental_bearer_token
+                .as_ref()
+                .is_some_and(|token| !token.trim().is_empty())
+            || self.aws.is_some()
+            || self.env_key.as_ref().is_some_and(|env_key| {
+                std::env::var(env_key)
+                    .ok()
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
+    }
 }
 
 pub const DEFAULT_LMSTUDIO_PORT: u16 = 1234;

@@ -4,12 +4,28 @@ use crate::error::ApiError;
 use crate::provider::Provider;
 use codex_client::HttpTransport;
 use codex_client::RequestTelemetry;
+use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ModelVisibility;
 use codex_protocol::openai_models::ModelsResponse;
+use codex_protocol::openai_models::TruncationPolicyConfig;
+use codex_protocol::openai_models::default_input_modalities;
 use http::HeaderMap;
 use http::Method;
 use http::header::ETAG;
+use serde::Deserialize;
 use std::sync::Arc;
+
+#[derive(Debug, Deserialize)]
+struct OpenAiModelsResponse {
+    data: Vec<OpenAiModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenAiModel {
+    id: String,
+}
 
 pub struct ModelsClient<T: HttpTransport> {
     session: EndpointSession<T>,
@@ -61,15 +77,65 @@ impl<T: HttpTransport> ModelsClient<T> {
             .and_then(|value| value.to_str().ok())
             .map(ToString::to_string);
 
-        let ModelsResponse { models } = serde_json::from_slice::<ModelsResponse>(&resp.body)
-            .map_err(|e| {
-                ApiError::Stream(format!(
-                    "failed to decode models response: {e}; body: {}",
-                    String::from_utf8_lossy(&resp.body)
-                ))
-            })?;
+        let models = parse_models_response(&resp.body)?;
 
         Ok((models, header_etag))
+    }
+}
+
+fn parse_models_response(body: &[u8]) -> Result<Vec<ModelInfo>, ApiError> {
+    match serde_json::from_slice::<ModelsResponse>(body) {
+        Ok(ModelsResponse { models }) => Ok(models),
+        Err(codex_err) => serde_json::from_slice::<OpenAiModelsResponse>(body)
+            .map(|response| {
+                response
+                    .data
+                    .into_iter()
+                    .map(model_info_from_openai_model)
+                    .collect()
+            })
+            .map_err(|openai_err| {
+                ApiError::Stream(format!(
+                    "failed to decode models response as Codex or OpenAI-compatible shape: codex={codex_err}; openai={openai_err}; body: {}",
+                    String::from_utf8_lossy(body)
+                ))
+            }),
+    }
+}
+
+fn model_info_from_openai_model(model: OpenAiModel) -> ModelInfo {
+    ModelInfo {
+        slug: model.id.clone(),
+        display_name: model.id,
+        description: None,
+        default_reasoning_level: None,
+        supported_reasoning_levels: Vec::new(),
+        shell_type: ConfigShellToolType::Default,
+        visibility: ModelVisibility::List,
+        supported_in_api: true,
+        priority: 99,
+        additional_speed_tiers: Vec::new(),
+        availability_nux: None,
+        upgrade: None,
+        base_instructions: String::new(),
+        model_messages: None,
+        supports_reasoning_summaries: false,
+        default_reasoning_summary: ReasoningSummary::Auto,
+        support_verbosity: false,
+        default_verbosity: None,
+        apply_patch_tool_type: None,
+        web_search_tool_type: Default::default(),
+        truncation_policy: TruncationPolicyConfig::bytes(/*limit*/ 10_000),
+        supports_parallel_tool_calls: false,
+        supports_image_detail_original: false,
+        context_window: None,
+        max_context_window: None,
+        auto_compact_token_limit: None,
+        effective_context_window_percent: 95,
+        experimental_supported_tools: Vec::new(),
+        input_modalities: default_input_modalities(),
+        used_fallback_model_metadata: false,
+        supports_search_tool: false,
     }
 }
 
@@ -86,6 +152,7 @@ mod tests {
     use http::HeaderMap;
     use http::StatusCode;
     use pretty_assertions::assert_eq;
+    use serde::Serialize;
     use serde_json::json;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -94,17 +161,23 @@ mod tests {
     #[derive(Clone)]
     struct CapturingTransport {
         last_request: Arc<Mutex<Option<Request>>>,
-        body: Arc<ModelsResponse>,
+        body: Arc<Vec<u8>>,
         etag: Option<String>,
+    }
+
+    impl CapturingTransport {
+        fn with_json(body: impl Serialize) -> Self {
+            Self {
+                last_request: Arc::new(Mutex::new(None)),
+                body: Arc::new(serde_json::to_vec(&body).unwrap()),
+                etag: None,
+            }
+        }
     }
 
     impl Default for CapturingTransport {
         fn default() -> Self {
-            Self {
-                last_request: Arc::new(Mutex::new(None)),
-                body: Arc::new(ModelsResponse { models: Vec::new() }),
-                etag: None,
-            }
+            Self::with_json(ModelsResponse { models: Vec::new() })
         }
     }
 
@@ -112,7 +185,6 @@ mod tests {
     impl HttpTransport for CapturingTransport {
         async fn execute(&self, req: Request) -> Result<Response, TransportError> {
             *self.last_request.lock().unwrap() = Some(req);
-            let body = serde_json::to_vec(&*self.body).unwrap();
             let mut headers = HeaderMap::new();
             if let Some(etag) = &self.etag {
                 headers.insert(ETAG, etag.parse().unwrap());
@@ -120,7 +192,7 @@ mod tests {
             Ok(Response {
                 status: StatusCode::OK,
                 headers,
-                body: body.into(),
+                body: self.body.as_ref().clone().into(),
             })
         }
 
@@ -157,11 +229,7 @@ mod tests {
     async fn appends_client_version_query() {
         let response = ModelsResponse { models: Vec::new() };
 
-        let transport = CapturingTransport {
-            last_request: Arc::new(Mutex::new(None)),
-            body: Arc::new(response),
-            etag: None,
-        };
+        let transport = CapturingTransport::with_json(response);
 
         let client = ModelsClient::new(
             transport.clone(),
@@ -221,11 +289,7 @@ mod tests {
             ],
         };
 
-        let transport = CapturingTransport {
-            last_request: Arc::new(Mutex::new(None)),
-            body: Arc::new(response),
-            etag: None,
-        };
+        let transport = CapturingTransport::with_json(response);
 
         let client = ModelsClient::new(
             transport,
@@ -245,13 +309,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn parses_openai_compatible_models_response() {
+        let transport = CapturingTransport::with_json(json!({
+            "object": "list",
+            "data": [
+                {
+                    "id": "claude-opus-4-7",
+                    "object": "model",
+                    "owned_by": "anthropic"
+                }
+            ]
+        }));
+
+        let client = ModelsClient::new(
+            transport,
+            provider("https://example.com/v1"),
+            Arc::new(DummyAuth),
+        );
+
+        let (models, _) = client
+            .list_models("0.99.0", HeaderMap::new())
+            .await
+            .expect("request should succeed");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].slug, "claude-opus-4-7");
+        assert_eq!(models[0].display_name, "claude-opus-4-7");
+        assert_eq!(models[0].visibility, ModelVisibility::List);
+        assert_eq!(models[0].supported_in_api, true);
+        assert_eq!(models[0].priority, 99);
+        assert!(models[0].supported_reasoning_levels.is_empty());
+        assert!(models[0].base_instructions.is_empty());
+    }
+
+    #[tokio::test]
     async fn list_models_includes_etag() {
         let response = ModelsResponse { models: Vec::new() };
 
         let transport = CapturingTransport {
-            last_request: Arc::new(Mutex::new(None)),
-            body: Arc::new(response),
+            body: Arc::new(serde_json::to_vec(&response).unwrap()),
             etag: Some("\"abc\"".to_string()),
+            last_request: Arc::new(Mutex::new(None)),
         };
 
         let client = ModelsClient::new(

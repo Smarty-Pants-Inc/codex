@@ -4,12 +4,13 @@ use codex_protocol::openai_models::ReasoningEffort;
 use pretty_assertions::assert_eq;
 
 #[test]
-fn claude_opus_4_7_fallback_advertises_adaptive_reasoning_levels() {
+fn claude_opus_4_7_local_metadata_advertises_adaptive_reasoning_levels() {
     let model = model_info_from_slug("claude-opus-4-7");
 
     assert_eq!(model.display_name, "Claude Opus 4.7");
     assert_eq!(model.default_reasoning_level, Some(ReasoningEffort::High));
     assert!(model.supports_reasoning_summaries);
+    assert!(!model.used_fallback_model_metadata);
     assert_eq!(
         model
             .supported_reasoning_levels
@@ -24,6 +25,20 @@ fn claude_opus_4_7_fallback_advertises_adaptive_reasoning_levels() {
             ReasoningEffort::Max,
         ]
     );
+}
+
+#[test]
+fn provider_listed_unknown_model_is_visible_without_fallback_warning_marker() {
+    let model = provider_listed_model_info_from_slug("provider-model");
+
+    assert_eq!(model.slug, "provider-model");
+    assert_eq!(model.display_name, "provider-model");
+    assert_eq!(
+        model.visibility,
+        codex_protocol::openai_models::ModelVisibility::List
+    );
+    assert!(!model.used_fallback_model_metadata);
+    assert!(!model.base_instructions.is_empty());
 }
 
 #[test]
