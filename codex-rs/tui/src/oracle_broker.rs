@@ -31,7 +31,11 @@ use tokio::time::timeout;
 
 const SUPERVISOR_RECOVERY_GRACE_PERIOD: Duration = Duration::from_secs(10);
 const SUPERVISOR_FOLLOWUP_RECOVERY_GRACE_PERIOD: Duration = Duration::from_secs(90);
-const ORACLE_BROKER_ABORT_GRACE_PERIOD: Duration = Duration::from_secs(2);
+// Broker aborts are asynchronous from the TUI's perspective. Keep the process
+// alive long enough for Oracle's SIGTERM handler to request Browserbase release
+// before falling back to SIGKILL.
+const ORACLE_BROKER_ABORT_GRACE_PERIOD: Duration = Duration::from_secs(10);
+const ORACLE_BROKER_SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(30);
 const ORACLE_BROKER_REQUEST_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const ORACLE_BROKER_STDERR_TAIL_LIMIT: usize = 20;
 #[cfg(not(windows))]
@@ -743,28 +747,32 @@ impl OracleBrokerClient {
 
     pub(crate) fn abort(&self) {
         self.mark_transport_unavailable();
-        let abort_handle = self.abort_handle.clone();
-        let process_group_id = self.process_group_id;
+        let broker = self.clone();
         tokio::spawn(async move {
-            if let Some(process_group_id) = process_group_id {
-                if let Err(error) = terminate_process_group(process_group_id) {
-                    tracing::warn!(
-                        process_group_id,
-                        %error,
-                        "failed to terminate Oracle broker process group"
-                    );
-                }
-                sleep(ORACLE_BROKER_ABORT_GRACE_PERIOD).await;
-                if let Err(error) = kill_process_group(process_group_id) {
-                    tracing::warn!(
-                        process_group_id,
-                        %error,
-                        "failed to kill Oracle broker process group"
-                    );
-                }
-            }
-            abort_handle.abort();
+            broker.abort_and_wait().await;
         });
+    }
+
+    pub(crate) async fn abort_and_wait(&self) {
+        self.mark_transport_unavailable();
+        if let Some(process_group_id) = self.process_group_id {
+            if let Err(error) = terminate_process_group(process_group_id) {
+                tracing::warn!(
+                    process_group_id,
+                    %error,
+                    "failed to terminate Oracle broker process group"
+                );
+            }
+            sleep(ORACLE_BROKER_ABORT_GRACE_PERIOD).await;
+            if let Err(error) = kill_process_group(process_group_id) {
+                tracing::warn!(
+                    process_group_id,
+                    %error,
+                    "failed to kill Oracle broker process group"
+                );
+            }
+        }
+        self.abort_handle.abort();
     }
 }
 
@@ -882,6 +890,7 @@ async fn run_broker_loop(
     stderr_task: tokio::task::JoinHandle<()>,
     stderr_tail: Arc<Mutex<VecDeque<String>>>,
 ) {
+    let mut shutdown_reply: Option<oneshot::Sender<()>> = None;
     while let Some(command) = rx.recv().await {
         match command {
             BrokerCommand::Request { payload, reply } => {
@@ -902,7 +911,7 @@ async fn run_broker_loop(
                                 let _ = reply.send(Err(error.clone()));
                             }
                             BrokerCommand::Shutdown { reply } => {
-                                let _ = reply.send(());
+                                shutdown_reply = Some(reply);
                                 break;
                             }
                         }
@@ -912,16 +921,22 @@ async fn run_broker_loop(
             }
             BrokerCommand::Shutdown { reply } => {
                 let _ = send_shutdown(&mut stdin).await;
-                let _ = reply.send(());
+                shutdown_reply = Some(reply);
                 break;
             }
         }
     }
     let _ = stdin.shutdown().await;
-    if timeout(Duration::from_secs(5), child.wait()).await.is_err() {
+    if timeout(ORACLE_BROKER_SHUTDOWN_GRACE_PERIOD, child.wait())
+        .await
+        .is_err()
+    {
         let _ = kill_child_process_group(&mut child);
         let _ = child.kill().await;
         let _ = child.wait().await;
+    }
+    if let Some(reply) = shutdown_reply {
+        let _ = reply.send(());
     }
     stderr_task.abort();
 }

@@ -186,6 +186,9 @@ impl ProcessHandle {
     /// Attempts to kill the child while leaving the reader/writer tasks alive
     /// so callers can still drain output until EOF.
     pub fn request_terminate(&self) {
+        if self.has_exited() {
+            return;
+        }
         if let Ok(mut killer_opt) = self.killer.lock()
             && let Some(mut killer) = killer_opt.take()
         {
@@ -406,5 +409,69 @@ pub fn spawn_from_driver(driver: ProcessDriver) -> SpawnedProcess {
         stdout_rx,
         stderr_rx,
         exit_rx: exit_rx_out,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn drop_after_process_exit_does_not_invoke_terminator() {
+        let (writer_tx, _writer_rx) = mpsc::channel(1);
+        let (stdout_tx, stdout_rx) = broadcast::channel(1);
+        drop(stdout_tx);
+        let (exit_tx, exit_rx) = oneshot::channel();
+        let terminate_count = Arc::new(AtomicUsize::new(0));
+        let terminate_count_for_closure = Arc::clone(&terminate_count);
+        let spawned = spawn_from_driver(ProcessDriver {
+            writer_tx,
+            stdout_rx,
+            stderr_rx: None,
+            exit_rx,
+            terminator: Some(Box::new(move || {
+                terminate_count_for_closure.fetch_add(1, Ordering::SeqCst);
+            })),
+            writer_handle: None,
+            resizer: None,
+        });
+
+        let _ = exit_tx.send(0);
+        let exit_code = spawned.exit_rx.await.expect("driver exit code");
+        assert_eq!(exit_code, 0);
+        drop(spawned.session);
+
+        assert_eq!(
+            terminate_count.load(Ordering::SeqCst),
+            0,
+            "dropping an already-exited process must not hard-kill its descendants"
+        );
+    }
+
+    #[tokio::test]
+    async fn terminate_before_process_exit_invokes_terminator() {
+        let (writer_tx, _writer_rx) = mpsc::channel(1);
+        let (stdout_tx, stdout_rx) = broadcast::channel(1);
+        drop(stdout_tx);
+        let (_exit_tx, exit_rx) = oneshot::channel();
+        let terminate_count = Arc::new(AtomicUsize::new(0));
+        let terminate_count_for_closure = Arc::clone(&terminate_count);
+        let spawned = spawn_from_driver(ProcessDriver {
+            writer_tx,
+            stdout_rx,
+            stderr_rx: None,
+            exit_rx,
+            terminator: Some(Box::new(move || {
+                terminate_count_for_closure.fetch_add(1, Ordering::SeqCst);
+            })),
+            writer_handle: None,
+            resizer: None,
+        });
+
+        spawned.session.terminate();
+
+        assert_eq!(terminate_count.load(Ordering::SeqCst), 1);
     }
 }

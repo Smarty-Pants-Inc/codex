@@ -2913,6 +2913,24 @@ impl App {
         }
     }
 
+    async fn shutdown_oracle_broker_gracefully(&mut self) {
+        if let Some((_repo, broker)) = self.oracle_broker.take()
+            && let Err(err) = broker.shutdown().await
+        {
+            tracing::warn!(%err, "failed to gracefully shut down Oracle broker");
+        }
+    }
+
+    async fn shutdown_oracle_broker_await(&mut self, abort_inflight: bool) {
+        if let Some((_repo, broker)) = self.oracle_broker.take() {
+            if abort_inflight {
+                broker.abort_and_wait().await;
+            } else if let Err(err) = broker.shutdown().await {
+                tracing::warn!(%err, "failed to gracefully shut down Oracle broker");
+            }
+        }
+    }
+
     fn oracle_interrupt_message(kind: OracleRequestKind) -> &'static str {
         match kind {
             OracleRequestKind::UserTurn => {
@@ -3208,7 +3226,8 @@ impl App {
             }
         }
         let model = self.oracle_state.model;
-        self.shutdown_oracle_broker(abort_inflight_oracle_run);
+        self.shutdown_oracle_broker_await(abort_inflight_oracle_run)
+            .await;
         self.oracle_state = OracleSupervisorState {
             model,
             phase: OracleSupervisorPhase::Disabled,
@@ -3252,7 +3271,7 @@ impl App {
                 if matches!(kind, OracleRequestKind::Checkpoint) {
                     self.requeue_active_oracle_checkpoint(thread_id);
                 }
-                self.shutdown_oracle_broker(true);
+                self.shutdown_oracle_broker_await(true).await;
                 if matches!(kind, OracleRequestKind::UserTurn)
                     && self.oracle_state.pending_turn_id.is_some()
                 {
@@ -5644,6 +5663,7 @@ impl App {
         {
             self.commit_active_oracle_checkpoint(result.oracle_thread_id);
         }
+        self.shutdown_oracle_broker_gracefully().await;
         self.persist_active_oracle_binding();
         self.maybe_process_pending_oracle_checkpoints(app_server, result.oracle_thread_id)
             .await?;
@@ -5686,7 +5706,7 @@ impl App {
             .filter(|request| Self::oracle_failure_supports_direct_retry(request, &error))
         {
             if Self::oracle_failure_requires_broker_reset(&error) {
-                self.shutdown_oracle_broker(false);
+                self.shutdown_oracle_broker_gracefully().await;
             }
             retry_request.followup_session = self
                 .oracle_followup_session_for_thread(visible_thread_id)
@@ -5728,7 +5748,7 @@ impl App {
             self.requeue_active_oracle_checkpoint(visible_thread_id);
         }
         if Self::oracle_failure_requires_broker_reset(&error) {
-            self.shutdown_oracle_broker(false);
+            self.shutdown_oracle_broker_gracefully().await;
         }
         if matches!(kind, OracleRequestKind::UserTurn) {
             self.complete_pending_oracle_turn(visible_thread_id, &message)
@@ -5738,6 +5758,7 @@ impl App {
                 .await;
         }
         self.chat_widget.add_error_message(message);
+        self.shutdown_oracle_broker_gracefully().await;
         self.persist_active_oracle_binding();
         self.maybe_process_pending_oracle_checkpoints(app_server, visible_thread_id)
             .await?;
@@ -6416,6 +6437,11 @@ impl App {
     }
 
     fn oracle_picker_remote_list_timeout(&self) -> Duration {
+        if let Some(timeout) =
+            Self::oracle_duration_from_env_ms("CODEX_ORACLE_PICKER_REMOTE_LIST_TIMEOUT_MS")
+        {
+            return timeout;
+        }
         if cfg!(test) {
             Duration::from_millis(50)
         } else {
@@ -6424,11 +6450,21 @@ impl App {
     }
 
     fn oracle_remote_thread_mutation_timeout(&self) -> Duration {
+        if let Some(timeout) =
+            Self::oracle_duration_from_env_ms("CODEX_ORACLE_REMOTE_THREAD_MUTATION_TIMEOUT_MS")
+        {
+            return timeout;
+        }
         if cfg!(test) {
             Duration::from_millis(50)
         } else {
             Duration::from_secs(20)
         }
+    }
+
+    fn oracle_duration_from_env_ms(key: &str) -> Option<Duration> {
+        let millis = std::env::var(key).ok()?.parse::<u64>().ok()?;
+        (millis > 0).then(|| Duration::from_millis(millis))
     }
 
     fn oracle_timeout_message(duration: Duration) -> String {
@@ -6491,7 +6527,7 @@ impl App {
         {
             Ok(result) => result,
             Err(_) => {
-                self.shutdown_oracle_broker(true);
+                self.shutdown_oracle_broker_await(true).await;
                 Err(color_eyre::eyre::eyre!(
                     "Timed out after {} while creating a remote Oracle thread.",
                     Self::oracle_timeout_message(timeout)
@@ -6556,7 +6592,7 @@ impl App {
         {
             Ok(result) => result,
             Err(_) => {
-                self.shutdown_oracle_broker(true);
+                self.shutdown_oracle_broker_await(true).await;
                 Err(color_eyre::eyre::eyre!(
                     "Timed out after {} while attaching a remote Oracle thread.",
                     Self::oracle_timeout_message(timeout)
@@ -6693,7 +6729,7 @@ impl App {
                 (Vec::new(), true)
             }
             Err(_) => {
-                self.shutdown_oracle_broker(true);
+                self.shutdown_oracle_broker_await(true).await;
                 self.chat_widget.add_info_message(
                     "Oracle remote threads are taking too long; showing local Oracle controls and keeping new-thread creation available."
                         .to_string(),
@@ -7298,6 +7334,8 @@ mod carried_tests {
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
     use ratatui::prelude::Line;
+    use serial_test::serial;
+    use std::ffi::OsString;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -7310,6 +7348,32 @@ mod carried_tests {
 
     fn test_absolute_path(path: &str) -> AbsolutePathBuf {
         AbsolutePathBuf::try_from(PathBuf::from(path)).expect("absolute test path")
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var_os(key);
+            unsafe {
+                std::env::set_var(key, value);
+            }
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.original {
+                    Some(value) => std::env::set_var(self.key, value),
+                    None => std::env::remove_var(self.key),
+                }
+            }
+        }
     }
 
     #[test]
@@ -11572,6 +11636,24 @@ guardian_approval = true
                 .expect("oracle test broker hooks")
                 .attach_thread_calls
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    #[serial(oracle_timeout_env)]
+    async fn oracle_remote_timeouts_honor_env_overrides() {
+        let _list_timeout = EnvVarGuard::set("CODEX_ORACLE_PICKER_REMOTE_LIST_TIMEOUT_MS", "90000");
+        let _mutation_timeout =
+            EnvVarGuard::set("CODEX_ORACLE_REMOTE_THREAD_MUTATION_TIMEOUT_MS", "120000");
+        let app = make_test_app().await;
+
+        assert_eq!(
+            app.oracle_picker_remote_list_timeout(),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            app.oracle_remote_thread_mutation_timeout(),
+            Duration::from_secs(120)
         );
     }
 

@@ -11,6 +11,7 @@ use anyhow::Context;
 use anyhow::Result;
 use codex_ansi_escape::ansi_escape_line;
 use serde_json::Value as JsonValue;
+use serde_json::json;
 use serial_test::serial;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
@@ -257,6 +258,268 @@ fn recent_oracle_meta_paths(
             (modified >= test_started_at).then_some(path)
         })
         .collect::<Vec<_>>())
+}
+
+#[derive(Debug, Clone)]
+struct BrowserbaseLiveEnv {
+    project_id: String,
+    context_id: String,
+}
+
+fn truthy_env_value(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+fn pass_oracle_live_env(env: &mut HashMap<String, String>) -> Result<Option<BrowserbaseLiveEnv>> {
+    let mut enabled = false;
+    for (key, value) in std::env::vars() {
+        if key.starts_with("ORACLE_BROWSERBASE_")
+            || key.starts_with("BROWSERBASE_")
+            || key == "CODEX_ORACLE_PICKER_REMOTE_LIST_TIMEOUT_MS"
+            || key == "CODEX_ORACLE_REMOTE_THREAD_MUTATION_TIMEOUT_MS"
+        {
+            if matches!(
+                key.as_str(),
+                "ORACLE_BROWSERBASE_ENABLED" | "BROWSERBASE_ENABLED"
+            ) {
+                enabled = truthy_env_value(&value);
+            }
+            env.insert(key, value);
+        }
+    }
+    if !enabled {
+        return Ok(None);
+    }
+    let project_id = env
+        .get("ORACLE_BROWSERBASE_PROJECT_ID")
+        .or_else(|| env.get("BROWSERBASE_PROJECT_ID"))
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context(
+            "Browserbase PTY proof requires ORACLE_BROWSERBASE_PROJECT_ID/BROWSERBASE_PROJECT_ID",
+        )?
+        .to_string();
+    let context_id = env
+        .get("ORACLE_BROWSERBASE_CONTEXT_ID")
+        .or_else(|| env.get("BROWSERBASE_CONTEXT_ID"))
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context(
+            "Browserbase PTY proof requires ORACLE_BROWSERBASE_CONTEXT_ID/BROWSERBASE_CONTEXT_ID",
+        )?
+        .to_string();
+    Ok(Some(BrowserbaseLiveEnv {
+        project_id,
+        context_id,
+    }))
+}
+
+fn assert_oracle_session_uses_browserbase(
+    meta_path: &Path,
+    expected: &BrowserbaseLiveEnv,
+) -> Result<()> {
+    let raw = fs::read_to_string(meta_path).with_context(|| {
+        format!(
+            "failed to read Oracle session metadata at {}",
+            meta_path.display()
+        )
+    })?;
+    let meta = serde_json::from_str::<JsonValue>(&raw).with_context(|| {
+        format!(
+            "failed to parse Oracle session metadata at {}",
+            meta_path.display()
+        )
+    })?;
+    let browser = meta.get("browser");
+    let runtime = browser.and_then(|value| value.get("runtime"));
+    let provider = runtime
+        .and_then(|value| value.get("browserProvider"))
+        .or_else(|| browser.and_then(|value| value.get("browserProvider")));
+    anyhow::ensure!(
+        provider.and_then(JsonValue::as_str) == Some("browserbase"),
+        "expected browserProvider=browserbase"
+    );
+    let session_id = runtime
+        .and_then(|value| value.get("browserbaseSessionId"))
+        .and_then(JsonValue::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("expected Browserbase session id in Oracle session metadata")?;
+    let project_id = runtime
+        .and_then(|value| value.get("browserbaseProjectId"))
+        .and_then(JsonValue::as_str)
+        .context("expected Browserbase project id in Oracle session metadata")?;
+    let context_id = runtime
+        .and_then(|value| value.get("browserbaseContextId"))
+        .and_then(JsonValue::as_str)
+        .context("expected Browserbase context id in Oracle session metadata")?;
+    let endpoint = runtime
+        .and_then(|value| value.get("chromeBrowserWSEndpoint"))
+        .and_then(JsonValue::as_str);
+    let keep_alive = runtime
+        .and_then(|value| value.get("browserbaseKeepAlive"))
+        .and_then(JsonValue::as_bool);
+    anyhow::ensure!(
+        project_id == expected.project_id,
+        "expected Browserbase project id {}, got {}",
+        expected.project_id,
+        project_id
+    );
+    anyhow::ensure!(
+        context_id == expected.context_id,
+        "expected Browserbase context id {}, got {}",
+        expected.context_id,
+        context_id
+    );
+    if let Some(endpoint) = endpoint {
+        anyhow::ensure!(
+            endpoint.starts_with("wss://"),
+            "expected Browserbase websocket endpoint to use wss://"
+        );
+    } else {
+        anyhow::ensure!(
+            keep_alive == Some(false),
+            "expected Browserbase websocket endpoint, or browserbaseKeepAlive=false after cleanup"
+        );
+    }
+    anyhow::ensure!(
+        runtime
+            .and_then(|value| value.get("chromePid"))
+            .is_none_or(JsonValue::is_null),
+        "Browserbase metadata must not include a local chromePid"
+    );
+    anyhow::ensure!(
+        runtime
+            .and_then(|value| value.get("userDataDir"))
+            .is_none_or(JsonValue::is_null),
+        "Browserbase metadata must not include a local userDataDir"
+    );
+    println!(
+        "Browserbase PTY metadata proof: {}",
+        json!({
+            "metadataPath": meta_path.display().to_string(),
+            "browserProvider": "browserbase",
+            "browserbaseSessionId": session_id,
+            "browserbaseProjectId": project_id,
+            "browserbaseContextId": context_id,
+            "browserbaseKeepAlive": keep_alive,
+            "chromeBrowserWSEndpointState": if endpoint.is_some() { "wss" } else { "released-cleared" },
+            "chromePidPresent": false,
+            "userDataDirPresent": false
+        })
+    );
+    Ok(())
+}
+
+async fn assert_no_running_browserbase_sessions(expected: &BrowserbaseLiveEnv) -> Result<()> {
+    let api_key = env::var("ORACLE_BROWSERBASE_API_KEY")
+        .or_else(|_| env::var("BROWSERBASE_API_KEY"))
+        .context(
+            "Browserbase cleanup proof requires ORACLE_BROWSERBASE_API_KEY/BROWSERBASE_API_KEY",
+        )?;
+    let client = reqwest::Client::new();
+    let mut running = running_browserbase_sessions(
+        &client,
+        &api_key,
+        &expected.project_id,
+        &expected.context_id,
+    )
+    .await?;
+    for _ in 0..20 {
+        if running.is_empty() {
+            println!(
+                "Browserbase PTY zero-running-sessions proof: {}",
+                json!({
+                    "checkedAt": chrono::Utc::now().to_rfc3339(),
+                    "projectId": expected.project_id.as_str(),
+                    "contextId": expected.context_id.as_str(),
+                    "runningSessionCount": 0,
+                    "runningSessionIds": []
+                })
+            );
+            return Ok(());
+        }
+        sleep(Duration::from_secs(1)).await;
+        running = running_browserbase_sessions(
+            &client,
+            &api_key,
+            &expected.project_id,
+            &expected.context_id,
+        )
+        .await?;
+    }
+    for session_id in &running {
+        release_browserbase_session(&client, &api_key, &expected.project_id, session_id).await?;
+    }
+    anyhow::bail!(
+        "Browserbase still had scoped running session(s) after PTY proof exit; requested release for {}",
+        running.join(", ")
+    );
+}
+
+async fn running_browserbase_sessions(
+    client: &reqwest::Client,
+    api_key: &str,
+    project_id: &str,
+    context_id: &str,
+) -> Result<Vec<String>> {
+    let response = client
+        .get("https://api.browserbase.com/v1/sessions?status=RUNNING")
+        .header("X-BB-API-Key", api_key)
+        .send()
+        .await
+        .context("failed to list running Browserbase sessions")?
+        .error_for_status()
+        .context("Browserbase running-session list returned an error")?;
+    let sessions: JsonValue = response
+        .json()
+        .await
+        .context("failed to parse Browserbase running-session list")?;
+    let Some(entries) = sessions.as_array() else {
+        return Ok(Vec::new());
+    };
+    Ok(entries
+        .iter()
+        .filter(|session| {
+            session.get("projectId").and_then(JsonValue::as_str) == Some(project_id)
+                && session.get("contextId").and_then(JsonValue::as_str) == Some(context_id)
+        })
+        .filter_map(|session| {
+            session
+                .get("id")
+                .and_then(JsonValue::as_str)
+                .map(ToOwned::to_owned)
+        })
+        .collect())
+}
+
+async fn release_browserbase_session(
+    client: &reqwest::Client,
+    api_key: &str,
+    project_id: &str,
+    session_id: &str,
+) -> Result<()> {
+    client
+        .post(format!(
+            "https://api.browserbase.com/v1/sessions/{}",
+            urlencoding::encode(session_id)
+        ))
+        .header("X-BB-API-Key", api_key)
+        .json(&json!({
+            "projectId": project_id,
+            "status": "REQUEST_RELEASE"
+        }))
+        .send()
+        .await
+        .with_context(|| format!("failed to request Browserbase release for {session_id}"))?
+        .error_for_status()
+        .with_context(|| format!("Browserbase release request failed for {session_id}"))?;
+    Ok(())
 }
 
 async fn send_key_burst(writer_tx: &Sender<Vec<u8>>, key: &[u8], repeats: usize, delay: Duration) {
@@ -611,6 +874,7 @@ async fn native_oracle_attach_and_pro_extended_roundtrip() -> Result<()> {
         "CODEX_TUI_SESSION_LOG_PATH".to_string(),
         session_log_path.display().to_string(),
     );
+    let expect_browserbase_metadata = pass_oracle_live_env(&mut env)?;
 
     let spawned = codex_utils_pty::spawn_pty_process(
         launcher.to_string_lossy().as_ref(),
@@ -811,20 +1075,27 @@ async fn native_oracle_attach_and_pro_extended_roundtrip() -> Result<()> {
         );
     }
 
-    let matched = fs::read_dir(&sessions_dir)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path().join("meta.json"))
-        .filter(|path| path.is_file())
-        .filter_map(|path| {
-            let modified = path.metadata().ok()?.modified().ok()?;
-            (modified >= test_started_at).then_some(path)
-        })
-        .any(|path| oracle_session_matches(&path, &thread_url, &conversation_id, &token));
-    if !matched {
+    let recent_meta_paths = recent_oracle_meta_paths(&sessions_dir, test_started_at)?;
+    let matched_path = recent_meta_paths
+        .iter()
+        .find(|path| oracle_session_matches(path, &thread_url, &conversation_id, &token));
+    let Some(matched_path) = matched_path else {
         anyhow::bail!(
             "expected a matching Oracle session for {conversation_id} containing {token}\n{}",
             failure_artifacts(&codex_home_path, &session_log_path, &output)
         );
+    };
+    if let Some(browserbase) = expect_browserbase_metadata.as_ref() {
+        assert_oracle_session_uses_browserbase(matched_path, browserbase).with_context(|| {
+            format!(
+                "expected matching Oracle session metadata to prove Browserbase usage at {}\n{}",
+                matched_path.display(),
+                failure_artifacts(&codex_home_path, &session_log_path, &output)
+            )
+        })?;
+    }
+    if let Some(browserbase) = expect_browserbase_metadata.as_ref() {
+        assert_no_running_browserbase_sessions(browserbase).await?;
     }
     Ok(())
 }
@@ -914,6 +1185,7 @@ async fn native_oracle_attach_fail_closed_for_missing_project_thread() -> Result
         "CODEX_TUI_SESSION_LOG_PATH".to_string(),
         session_log_path.display().to_string(),
     );
+    let _ = pass_oracle_live_env(&mut env)?;
 
     let spawned = codex_utils_pty::spawn_pty_process(
         launcher.to_string_lossy().as_ref(),
@@ -1161,6 +1433,7 @@ async fn native_oracle_interrupt_recovery_roundtrip() -> Result<()> {
         "CODEX_TUI_SESSION_LOG_PATH".to_string(),
         session_log_path.display().to_string(),
     );
+    let _ = pass_oracle_live_env(&mut env)?;
 
     let spawned = codex_utils_pty::spawn_pty_process(
         launcher.to_string_lossy().as_ref(),
@@ -2264,6 +2537,7 @@ async fn native_oracle_attach_with_import_history_roundtrip() -> Result<()> {
         "CODEX_TUI_SESSION_LOG_PATH".to_string(),
         session_log_path.display().to_string(),
     );
+    let _ = pass_oracle_live_env(&mut env)?;
 
     let spawned = codex_utils_pty::spawn_pty_process(
         launcher.to_string_lossy().as_ref(),
@@ -2647,6 +2921,7 @@ async fn native_oracle_model_matrix_roundtrip() -> Result<()> {
         "CODEX_TUI_SESSION_LOG_PATH".to_string(),
         session_log_path.display().to_string(),
     );
+    let _ = pass_oracle_live_env(&mut env)?;
 
     let spawned = codex_utils_pty::spawn_pty_process(
         launcher.to_string_lossy().as_ref(),
@@ -3056,6 +3331,7 @@ async fn native_oracle_file_upload_roundtrip() -> Result<()> {
         "CODEX_TUI_SESSION_LOG_PATH".to_string(),
         session_log_path.display().to_string(),
     );
+    let _ = pass_oracle_live_env(&mut env)?;
 
     let spawned = codex_utils_pty::spawn_pty_process(
         launcher.to_string_lossy().as_ref(),
@@ -3352,6 +3628,7 @@ async fn native_oracle_multi_file_upload_roundtrip() -> Result<()> {
         "CODEX_TUI_SESSION_LOG_PATH".to_string(),
         session_log_path.display().to_string(),
     );
+    let _ = pass_oracle_live_env(&mut env)?;
 
     let spawned = codex_utils_pty::spawn_pty_process(
         launcher.to_string_lossy().as_ref(),
@@ -3646,6 +3923,7 @@ async fn native_oracle_zip_upload_roundtrip() -> Result<()> {
         "CODEX_TUI_SESSION_LOG_PATH".to_string(),
         session_log_path.display().to_string(),
     );
+    let _ = pass_oracle_live_env(&mut env)?;
 
     let spawned = codex_utils_pty::spawn_pty_process(
         launcher.to_string_lossy().as_ref(),
@@ -3921,6 +4199,7 @@ async fn native_oracle_assistant_download_roundtrip() -> Result<()> {
         "CODEX_TUI_SESSION_LOG_PATH".to_string(),
         session_log_path.display().to_string(),
     );
+    let _ = pass_oracle_live_env(&mut env)?;
 
     let spawned = codex_utils_pty::spawn_pty_process(
         launcher.to_string_lossy().as_ref(),
