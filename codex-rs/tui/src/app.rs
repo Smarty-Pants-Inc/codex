@@ -6745,6 +6745,10 @@ impl App {
                 (Vec::new(), true)
             }
         };
+        // Listing remote threads is a browse-only operation. Do not keep the
+        // Browserbase supervisor session billable while the user is reading
+        // the picker; attach/new will start a fresh broker if selected.
+        self.shutdown_oracle_broker_gracefully().await;
         self.show_oracle_picker(remote_threads, include_new_thread);
         Ok(())
     }
@@ -9844,6 +9848,42 @@ guardian_approval = true
                 .expect("oracle test broker hooks")
                 .list_thread_calls,
             1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_oracle_picker_releases_browse_only_broker_after_remote_list() -> Result<()> {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        let oracle_repo = tempdir()?;
+        app.oracle_broker = Some((
+            oracle_repo.path().to_path_buf(),
+            OracleBrokerClient::new_hanging_test_client(),
+        ));
+        queue_test_oracle_list_threads_result(
+            &app,
+            Ok(vec![OracleBrokerThreadEntry {
+                title: "Browse Only".to_string(),
+                conversation_id: "browse-only".to_string(),
+                url: Some("https://chatgpt.com/c/browse-only".to_string()),
+                is_current: false,
+            }]),
+        );
+
+        app.open_oracle_picker().await?;
+
+        assert!(
+            app.oracle_broker.is_none(),
+            "browse-only picker should not keep the Oracle broker/browser alive"
+        );
+        app.chat_widget
+            .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_matches!(
+            app_event_rx.try_recv(),
+            Ok(AppEvent::OracleAttachThread {
+                conversation_id,
+                ..
+            }) if conversation_id == "browse-only"
         );
         Ok(())
     }
