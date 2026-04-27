@@ -260,6 +260,31 @@ fn recent_oracle_meta_paths(
         .collect::<Vec<_>>())
 }
 
+fn oracle_session_matches_browserbase_scope(
+    meta_path: &Path,
+    expected: &BrowserbaseLiveEnv,
+) -> bool {
+    let Ok(raw) = fs::read_to_string(meta_path) else {
+        return false;
+    };
+    let Ok(meta) = serde_json::from_str::<JsonValue>(&raw) else {
+        return false;
+    };
+    let runtime = meta.get("browser").and_then(|value| value.get("runtime"));
+    runtime
+        .and_then(|value| value.get("browserProvider"))
+        .and_then(JsonValue::as_str)
+        == Some("browserbase")
+        && runtime
+            .and_then(|value| value.get("browserbaseProjectId"))
+            .and_then(JsonValue::as_str)
+            == Some(expected.project_id.as_str())
+        && runtime
+            .and_then(|value| value.get("browserbaseContextId"))
+            .and_then(JsonValue::as_str)
+            == Some(expected.context_id.as_str())
+}
+
 #[derive(Debug, Clone)]
 struct BrowserbaseLiveEnv {
     project_id: String,
@@ -788,6 +813,207 @@ async fn submit_humanlike_with_delays(
     type_humanlike_with_delay(writer_tx, text, char_delay).await;
     sleep(enter_delay).await;
     let _ = writer_tx.send(b"\r".to_vec()).await;
+}
+
+#[tokio::test]
+#[serial(oracle_live_browser)]
+#[ignore = "live native Oracle picker proof; requires Browserbase env"]
+async fn native_oracle_picker_releases_browserbase_after_remote_list() -> Result<()> {
+    if cfg!(windows) {
+        return Ok(());
+    }
+
+    let project_url = std::env::var("ORACLE_SUPERVISOR_CHATGPT_URL")
+        .or_else(|_| std::env::var("ORACLE_CHATGPT_PROJECT_URL"))
+        .context("ORACLE_SUPERVISOR_CHATGPT_URL must point at the hidden Oracle ChatGPT project")?;
+    let codex_repo_root = codex_utils_cargo_bin::repo_root()?;
+    let smarty_root = find_smarty_root(&codex_repo_root)?;
+    let launcher = smarty_root.join("bin").join("smarty-codex");
+    let workspace = smarty_root.clone();
+    let sessions_dir = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".oracle").join("sessions"))
+        .context("HOME is unset; cannot inspect Oracle sessions")?;
+    let codex_home = tempfile::tempdir()?;
+    let codex_home_path = codex_home.path().to_path_buf();
+    let session_log_path = codex_home_path.join("native-oracle-picker-browserbase-release.jsonl");
+    let throttle_file_path = codex_home_path.join("oracle-supervisor-throttle.json");
+    fs::write(
+        codex_home_path.join("config.toml"),
+        format!(
+            "model_provider = \"ollama\"\ncheck_for_update_on_startup = false\n\n[tui]\nshow_tooltips = false\n\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n",
+            workspace.display()
+        ),
+    )?;
+
+    let args = vec![
+        "--no-alt-screen".to_string(),
+        "-C".to_string(),
+        workspace.display().to_string(),
+        "-c".to_string(),
+        "analytics.enabled=false".to_string(),
+    ];
+    let mut env = HashMap::new();
+    env.insert(
+        "CODEX_HOME".to_string(),
+        codex_home_path.display().to_string(),
+    );
+    env.insert("SMARTY_NO_UPSTREAM_CHECK".to_string(), "1".to_string());
+    env.insert(
+        "SMARTY_CODEX_NO_DANGEROUS_DEFAULT".to_string(),
+        "1".to_string(),
+    );
+    for key in ["PATH", "HOME", "SHELL", "TMPDIR"] {
+        if let Ok(value) = std::env::var(key) {
+            env.insert(key.to_string(), value);
+        }
+    }
+    env.insert("ORACLE_ALLOW_VISIBLE_CHROME".to_string(), "0".to_string());
+    env.insert(
+        "ORACLE_CHATGPT_PROJECT_URL".to_string(),
+        project_url.clone(),
+    );
+    env.insert("ORACLE_SUPERVISOR_CHATGPT_URL".to_string(), project_url);
+    env.insert(
+        "ORACLE_SUPERVISOR_THROTTLE_FILE".to_string(),
+        throttle_file_path.display().to_string(),
+    );
+    env.insert("CODEX_TUI_RECORD_SESSION".to_string(), "1".to_string());
+    env.insert(
+        "CODEX_TUI_SESSION_LOG_PATH".to_string(),
+        session_log_path.display().to_string(),
+    );
+    let browserbase = pass_oracle_live_env(&mut env)?
+        .context("live picker Browserbase proof requires ORACLE_BROWSERBASE_ENABLED=1")?;
+
+    let spawned = codex_utils_pty::spawn_pty_process(
+        launcher.to_string_lossy().as_ref(),
+        &args,
+        &workspace,
+        &env,
+        &None,
+        codex_utils_pty::TerminalSize::default(),
+    )
+    .await?;
+    let codex_utils_pty::SpawnedProcess {
+        session,
+        stdout_rx,
+        stderr_rx,
+        exit_rx,
+    } = spawned;
+    let mut output = Vec::new();
+    let mut output_rx = codex_utils_pty::combine_output_receivers(stdout_rx, stderr_rx);
+    let mut exit_rx = exit_rx;
+    let writer_tx = session.writer_sender();
+    let interrupt_writer = writer_tx.clone();
+    let test_started_at = SystemTime::now();
+    let mut sent_browse = false;
+    let mut saw_picker = false;
+    let mut last_nux_seen_at: Option<tokio::time::Instant> = None;
+    let mut last_nux_ack_at: Option<tokio::time::Instant> = None;
+    let mut startup_seen_at: Option<tokio::time::Instant> = None;
+    let mut loop_tick = tokio::time::interval(Duration::from_millis(250));
+    loop_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop_tick.tick().await;
+
+    let wait_result = timeout(oracle_live_timeout(Duration::from_secs(210), 1), async {
+        loop {
+            select! {
+                result = output_rx.recv() => match result {
+                    Ok(chunk) => {
+                        if chunk.windows(4).any(|window| window == b"\x1b[6n") {
+                            let _ = writer_tx.send(b"\x1b[1;1R".to_vec()).await;
+                        }
+                        let chunk_text = String::from_utf8_lossy(&chunk);
+                        if chunk_text.contains("Use ↑/↓ to move, press enter to confirm") {
+                            last_nux_seen_at = Some(tokio::time::Instant::now());
+                            if last_nux_ack_at
+                                .is_none_or(|instant| instant.elapsed() >= Duration::from_millis(500))
+                            {
+                                last_nux_ack_at = Some(tokio::time::Instant::now());
+                                let _ = writer_tx.send(b"\r".to_vec()).await;
+                            }
+                        }
+                        output.extend_from_slice(&chunk);
+                        let sanitized_output = sanitized_output_text(&output);
+                        if sent_browse
+                            && sanitized_output.contains("Oracle")
+                            && sanitized_output.contains("Hotkeys:")
+                        {
+                            saw_picker = true;
+                            break Ok(());
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break Err(anyhow::anyhow!("TUI exited before Oracle picker opened")),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                },
+                _ = loop_tick.tick() => {
+                    if session_log_path.is_file()
+                        && let Ok(log) = fs::read_to_string(&session_log_path)
+                        && startup_seen_at.is_none()
+                        && (log.contains("\"type\":\"list_skills\"")
+                            || log.contains("\"variant\":\"PluginMentionsLoaded"))
+                    {
+                        startup_seen_at = Some(tokio::time::Instant::now());
+                    }
+                    let startup_nux_settled = last_nux_seen_at
+                        .is_none_or(|instant| instant.elapsed() >= Duration::from_secs(1));
+                    if !sent_browse
+                        && startup_nux_settled
+                        && startup_seen_at
+                            .is_some_and(|instant| instant.elapsed() >= Duration::from_secs(2))
+                    {
+                        sent_browse = true;
+                        submit_humanlike(&writer_tx, "/oracle").await;
+                    }
+                }
+                result = &mut exit_rx => break Err(anyhow::anyhow!("TUI exited before Oracle picker opened: {result:?}")),
+            }
+        }
+    })
+    .await;
+
+    match wait_result {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            session.terminate();
+            let _ = assert_no_running_browserbase_sessions(&browserbase).await;
+            anyhow::bail!(
+                "failed waiting for Browserbase Oracle picker proof: {err}\n{}",
+                failure_artifacts(&codex_home_path, &session_log_path, &output)
+            );
+        }
+        Err(err) => {
+            session.terminate();
+            let _ = assert_no_running_browserbase_sessions(&browserbase).await;
+            anyhow::bail!(
+                "timed out waiting for Browserbase Oracle picker proof: {err}\n{}",
+                failure_artifacts(&codex_home_path, &session_log_path, &output)
+            );
+        }
+    }
+    anyhow::ensure!(
+        saw_picker,
+        "expected Oracle picker to open\n{}",
+        failure_artifacts(&codex_home_path, &session_log_path, &output)
+    );
+
+    let recent_meta_paths = recent_oracle_meta_paths(&sessions_dir, test_started_at)?;
+    let matched_path = recent_meta_paths
+        .iter()
+        .find(|path| oracle_session_matches_browserbase_scope(path, &browserbase))
+        .context("expected recent Browserbase Oracle session metadata from picker list")?;
+    assert_oracle_session_uses_browserbase(matched_path, &browserbase)?;
+
+    let cleanup_result = assert_no_running_browserbase_sessions(&browserbase).await;
+    for _ in 0..3 {
+        let _ = interrupt_writer.send(vec![3]).await;
+        sleep(Duration::from_millis(200)).await;
+    }
+    session.terminate();
+    let _ = timeout(Duration::from_secs(10), &mut exit_rx).await;
+    cleanup_result?;
+    Ok(())
 }
 
 #[tokio::test]
