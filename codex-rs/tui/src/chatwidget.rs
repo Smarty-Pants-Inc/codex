@@ -47,6 +47,7 @@ use self::realtime::PendingSteerCompareKey;
 use crate::app::app_server_requests::ResolvedAppServerRequest;
 use crate::app_command::AppCommand;
 use crate::app_event::RealtimeAudioDeviceKind;
+use crate::app_server_approval_conversions::file_update_changes_to_core;
 use crate::app_server_approval_conversions::network_approval_context_to_core;
 use crate::app_server_session::ThreadSessionState;
 #[cfg(not(target_os = "linux"))]
@@ -141,8 +142,12 @@ use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::models::local_image_label_text;
 use codex_protocol::parse_command::ParsedCommand;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::plan_tool::PlanItemArg as UpdatePlanItemArg;
 use codex_protocol::plan_tool::StepStatus as UpdatePlanItemStatus;
 #[cfg(test)]
@@ -1033,6 +1038,8 @@ pub(crate) struct ChatWidget {
     terminal_title_invalid_items_warned: Arc<AtomicBool>,
     // Last terminal title emitted, to avoid writing duplicate OSC updates.
     pub(crate) last_terminal_title: Option<String>,
+    // Last visible "action required" state observed by the terminal-title renderer.
+    last_terminal_title_requires_action: bool,
     // Original terminal-title config captured when the setup UI opens.
     //
     // The outer `Option` tracks whether a setup session is active (`Some`)
@@ -1773,36 +1780,6 @@ fn patch_approval_request_from_params(
     }
 }
 
-fn app_server_patch_changes_to_core(
-    changes: Vec<codex_app_server_protocol::FileUpdateChange>,
-) -> HashMap<PathBuf, codex_protocol::protocol::FileChange> {
-    changes
-        .into_iter()
-        .map(|change| {
-            let path = PathBuf::from(change.path);
-            let file_change = match change.kind {
-                codex_app_server_protocol::PatchChangeKind::Add => {
-                    codex_protocol::protocol::FileChange::Add {
-                        content: change.diff,
-                    }
-                }
-                codex_app_server_protocol::PatchChangeKind::Delete => {
-                    codex_protocol::protocol::FileChange::Delete {
-                        content: change.diff,
-                    }
-                }
-                codex_app_server_protocol::PatchChangeKind::Update { move_path } => {
-                    codex_protocol::protocol::FileChange::Update {
-                        unified_diff: change.diff,
-                        move_path,
-                    }
-                }
-            };
-            (path, file_change)
-        })
-        .collect()
-}
-
 fn app_server_collab_thread_id_to_core(thread_id: &str) -> Option<ThreadId> {
     match ThreadId::from_string(thread_id) {
         Ok(thread_id) => Some(thread_id),
@@ -2154,13 +2131,13 @@ impl ChatWidget {
                     .iter()
                     .any(|item| item == "run-state" || item == "status")
             });
-        let title_uses_spinner = self
-            .config
-            .tui_terminal_title
-            .as_ref()
-            .is_none_or(|items| items.iter().any(|item| item == "spinner"));
+        let title_uses_activity = self.config.tui_terminal_title.as_ref().is_none_or(|items| {
+            items
+                .iter()
+                .any(|item| item == "activity" || item == "spinner")
+        });
         if title_uses_status
-            || (title_uses_spinner
+            || (title_uses_activity
                 && self.terminal_title_status_kind == TerminalTitleStatusKind::Undoing)
         {
             self.refresh_status_surfaces();
@@ -2395,7 +2372,7 @@ impl ChatWidget {
             Some(permission_profile) => self
                 .config
                 .permissions
-                .set_permission_profile(permission_profile, event.cwd.as_path()),
+                .set_permission_profile(permission_profile),
             None => self
                 .config
                 .permissions
@@ -2403,11 +2380,16 @@ impl ChatWidget {
         };
         if let Err(err) = permission_sync {
             tracing::warn!(%err, "failed to sync permissions from SessionConfigured");
-            self.config.permissions.sandbox_policy =
-                Constrained::allow_only(event.sandbox_policy.clone());
             let permission_profile = event.permission_profile.clone().unwrap_or_else(|| {
-                codex_protocol::models::PermissionProfile::from_legacy_sandbox_policy(
-                    &event.sandbox_policy,
+                let file_system_sandbox_policy =
+                    FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
+                        &event.sandbox_policy,
+                        event.cwd.as_path(),
+                    );
+                PermissionProfile::from_runtime_permissions_with_enforcement(
+                    SandboxEnforcement::from_legacy_sandbox_policy(&event.sandbox_policy),
+                    &file_system_sandbox_policy,
+                    NetworkSandboxPolicy::from(&event.sandbox_policy),
                 )
             });
             self.config.permissions.permission_profile =
@@ -4960,7 +4942,12 @@ impl ChatWidget {
         self.schedule_hook_timer_if_needed();
         self.bottom_pane.pre_draw_tick();
         self.refresh_goal_status_indicator_for_time_tick();
-        if self.should_animate_terminal_title_spinner() {
+        if self.terminal_title_shows_action_required() != self.last_terminal_title_requires_action {
+            self.refresh_terminal_title();
+        }
+        if self.should_animate_terminal_title_spinner()
+            || self.should_animate_terminal_title_action_required()
+        {
             self.refresh_terminal_title();
         }
     }
@@ -5672,6 +5659,7 @@ impl ChatWidget {
             status_line_invalid_items_warned,
             terminal_title_invalid_items_warned,
             last_terminal_title: None,
+            last_terminal_title_requires_action: false,
             terminal_title_setup_original_items: None,
             terminal_title_animation_origin: Instant::now(),
             status_line_project_root_name_cache: None,
@@ -6189,9 +6177,26 @@ impl ChatWidget {
         }
     }
 
+    fn submit_shell_command_with_history(
+        &mut self,
+        command: &str,
+        history_text: &str,
+    ) -> QueueDrain {
+        let drain = self.submit_shell_command(command);
+        if drain == QueueDrain::Stop {
+            self.submit_op(Op::AddToHistory {
+                text: history_text.to_string(),
+            });
+        }
+        drain
+    }
+
     fn submit_queued_shell_prompt(&mut self, user_message: UserMessage) -> QueueDrain {
         match user_message.text.strip_prefix('!') {
-            Some(command) => self.submit_shell_command(command),
+            Some(command) => {
+                let history_text = user_message.text.clone();
+                self.submit_shell_command_with_history(command, &history_text)
+            }
             None => {
                 self.submit_user_message(user_message);
                 QueueDrain::Stop
@@ -6287,7 +6292,7 @@ impl ChatWidget {
         if shell_escape_policy == ShellEscapePolicy::Allow
             && let Some(stripped) = text.strip_prefix('!')
         {
-            let app_command = match self.submit_shell_command(stripped) {
+            let app_command = match self.submit_shell_command_with_history(stripped, &text) {
                 QueueDrain::Continue => None,
                 QueueDrain::Stop => Some(AppCommand::run_user_shell_command(
                     stripped.trim().to_string(),
@@ -6818,7 +6823,7 @@ impl ChatWidget {
                             status,
                             codex_app_server_protocol::PatchApplyStatus::Failed
                         ),
-                        changes: app_server_patch_changes_to_core(changes),
+                        changes: file_update_changes_to_core(changes),
                         status: match status {
                             codex_app_server_protocol::PatchApplyStatus::Completed => {
                                 codex_protocol::protocol::PatchApplyStatus::Completed
@@ -7382,7 +7387,7 @@ impl ChatWidget {
                     call_id: id,
                     turn_id: notification.turn_id,
                     auto_approved: false,
-                    changes: app_server_patch_changes_to_core(changes),
+                    changes: file_update_changes_to_core(changes),
                 });
             }
             ThreadItem::McpToolCall {

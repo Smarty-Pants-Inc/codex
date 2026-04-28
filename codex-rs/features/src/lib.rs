@@ -128,8 +128,6 @@ pub enum Feature {
     CodexGitCommit,
     /// Enable runtime metrics snapshots via a manual reader.
     RuntimeMetrics,
-    /// Enable thread lifecycle analytics emitted via the app-server analytics pipeline.
-    GeneralAnalytics,
     /// Persist rollout metadata to a local SQLite database.
     Sqlite,
     /// Enable startup memory extraction and file-backed memory consolidation.
@@ -148,6 +146,8 @@ pub enum Feature {
     SpawnCsv,
     /// Enable apps.
     Apps,
+    /// Enable MCP apps.
+    EnableMcpApps,
     /// Enable the tool_search tool for apps.
     ToolSearch,
     /// Always defer MCP tools behind tool_search instead of exposing small sets directly.
@@ -713,12 +713,6 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
-        id: Feature::GeneralAnalytics,
-        key: "general_analytics",
-        stage: Stage::Stable,
-        default_enabled: true,
-    },
-    FeatureSpec {
         id: Feature::Sqlite,
         key: "sqlite",
         stage: Stage::Removed,
@@ -841,6 +835,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "apps",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::EnableMcpApps,
+        key: "enable_mcp_apps",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::ToolSearch,

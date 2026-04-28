@@ -1515,7 +1515,9 @@ async fn session_configured_reports_permission_profile_for_external_sandbox() ->
     };
     let expected_sandbox_policy = sandbox_policy.clone();
     let mut builder = test_codex().with_config(move |config| {
-        config.permissions.sandbox_policy = codex_config::Constrained::allow_any(sandbox_policy);
+        config
+            .set_legacy_sandbox_policy(sandbox_policy)
+            .expect("set sandbox policy");
         config.permissions.permission_profile =
             codex_config::Constrained::allow_any(PermissionProfile::from_runtime_permissions(
                 &FileSystemSandboxPolicy::external_sandbox(),
@@ -2872,7 +2874,7 @@ async fn session_configuration_apply_preserves_profile_file_system_policy_on_cwd
     let file_system_sandbox_policy = FileSystemSandboxPolicy::restricted(vec![
         FileSystemSandboxEntry {
             path: FileSystemPath::Special {
-                value: FileSystemSpecialPath::CurrentWorkingDirectory,
+                value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
             },
             access: FileSystemAccessMode::Write,
         },
@@ -3185,7 +3187,7 @@ async fn session_configuration_apply_preserves_absolute_cwd_write_root_on_cwd_up
         !updated
             .file_system_sandbox_policy()
             .can_write_path_with_cwd(next_cwd.as_path(), updated.cwd.as_path()),
-        "cwd-only update must not reinterpret an absolute old-cwd grant as :cwd"
+        "cwd-only update must not reinterpret an absolute old-cwd grant as :project_roots"
     );
 }
 
@@ -3848,7 +3850,7 @@ async fn request_permissions_response_materializes_session_cwd_grants_before_rec
         file_system: Some(FileSystemPermissions {
             entries: vec![FileSystemSandboxEntry {
                 path: FileSystemPath::Special {
-                    value: FileSystemSpecialPath::CurrentWorkingDirectory,
+                    value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
                 },
                 access: FileSystemAccessMode::Write,
             }],
@@ -4187,7 +4189,7 @@ async fn user_turn_updates_approvals_reviewer() {
             cwd: config.cwd.to_path_buf(),
             approval_policy: config.permissions.approval_policy.value(),
             approvals_reviewer: Some(codex_config::types::ApprovalsReviewer::AutoReview),
-            sandbox_policy: config.permissions.sandbox_policy.get().clone(),
+            sandbox_policy: config.legacy_sandbox_policy(),
             permission_profile: None,
             model: turn_context.model_info.slug.clone(),
             effort: config.model_reasoning_effort,

@@ -2288,9 +2288,9 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "codex-app-server-protocol",
- "codex-exec-server",
  "codex-execpolicy",
  "codex-features",
+ "codex-file-system",
  "codex-git-utils",
  "codex-model-provider-info",
  "codex-network-proxy",
@@ -2370,6 +2370,8 @@ dependencies = [
  "codex-hooks",
  "codex-login",
  "codex-mcp",
+ "codex-memories-read",
+ "codex-memories-write",
  "codex-model-provider",
  "codex-model-provider-info",
  "codex-models-manager",
@@ -2607,6 +2609,7 @@ dependencies = [
  "bytes",
  "codex-app-server-protocol",
  "codex-client",
+ "codex-file-system",
  "codex-protocol",
  "codex-sandboxing",
  "codex-test-binary-support",
@@ -2718,13 +2721,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-file-system"
+version = "0.0.0"
+dependencies = [
+ "async-trait",
+ "codex-protocol",
+ "codex-utils-absolute-path",
+ "serde",
+]
+
+[[package]]
 name = "codex-git-utils"
 version = "0.120.0"
 dependencies = [
  "anyhow",
  "assert_matches",
  "chrono",
- "codex-exec-server",
+ "codex-file-system",
  "codex-protocol",
  "codex-utils-absolute-path",
  "futures",
@@ -2919,6 +2932,40 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wiremock",
+]
+
+[[package]]
+name = "codex-memories-read"
+version = "0.0.0"
+dependencies = [
+ "codex-protocol",
+ "codex-shell-command",
+ "codex-utils-absolute-path",
+ "codex-utils-output-truncation",
+ "codex-utils-template",
+ "pretty_assertions",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "codex-memories-write"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "codex-git-utils",
+ "codex-models-manager",
+ "codex-protocol",
+ "codex-state",
+ "codex-utils-absolute-path",
+ "codex-utils-output-truncation",
+ "codex-utils-template",
+ "pretty_assertions",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
