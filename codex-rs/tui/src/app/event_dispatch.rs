@@ -1599,6 +1599,12 @@ impl App {
             AppEvent::OraclePickerToggleModel => {
                 let _ = self.toggle_oracle_picker_model().await;
             }
+            AppEvent::OraclePickerRemoteListTick { request_id } => {
+                self.handle_oracle_picker_remote_list_tick(request_id);
+            }
+            AppEvent::OraclePickerRemoteThreadsLoaded { request_id, result } => {
+                self.handle_oracle_picker_remote_threads_loaded(request_id, result);
+            }
             AppEvent::OracleCreateThread => match self.create_oracle_thread_binding().await {
                 Ok(binding) => {
                     if self.active_thread_id != Some(binding.thread_id) {

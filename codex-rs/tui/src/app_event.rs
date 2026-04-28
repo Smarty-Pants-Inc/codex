@@ -36,6 +36,7 @@ use crate::bottom_pane::StatusLineItem;
 use crate::bottom_pane::TerminalTitleItem;
 use crate::chatwidget::UserMessage;
 use crate::history_cell::HistoryCell;
+use crate::oracle_broker::OracleBrokerThreadEntry;
 use crate::oracle_supervisor::OracleRequestKind;
 use crate::oracle_supervisor::OracleRunResult;
 use codex_config::types::ApprovalsReviewer;
@@ -698,6 +699,17 @@ pub(crate) enum AppEvent {
 
     /// Toggle the Oracle picker model preference in place.
     OraclePickerToggleModel,
+
+    /// Animate the Oracle picker while remote thread discovery is in flight.
+    OraclePickerRemoteListTick {
+        request_id: u64,
+    },
+
+    /// Remote Oracle thread discovery finished for the current picker request.
+    OraclePickerRemoteThreadsLoaded {
+        request_id: u64,
+        result: Result<Vec<OracleBrokerThreadEntry>, String>,
+    },
 
     /// Create a new Oracle remote thread from the `/oracle` picker.
     OracleCreateThread,

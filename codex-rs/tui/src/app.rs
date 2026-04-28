@@ -753,6 +753,10 @@ pub(crate) struct App {
     oracle_picker_show_info: bool,
     oracle_picker_remote_threads: Vec<OracleBrokerThreadEntry>,
     oracle_picker_include_new_thread: bool,
+    oracle_picker_remote_list_request_id: u64,
+    oracle_picker_remote_list_pending: bool,
+    oracle_picker_remote_list_tick: usize,
+    oracle_picker_remote_list_notice: Option<String>,
     oracle_broker: Option<(PathBuf, OracleBrokerClient)>,
     #[cfg(test)]
     oracle_test_broker_hooks: Arc<StdMutex<OracleTestBrokerHooks>>,
@@ -1131,6 +1135,10 @@ impl App {
             oracle_picker_show_info: false,
             oracle_picker_remote_threads: Vec::new(),
             oracle_picker_include_new_thread: false,
+            oracle_picker_remote_list_request_id: 0,
+            oracle_picker_remote_list_pending: false,
+            oracle_picker_remote_list_tick: 0,
+            oracle_picker_remote_list_notice: None,
             oracle_broker: None,
             #[cfg(test)]
             oracle_test_broker_hooks: Arc::new(StdMutex::new(OracleTestBrokerHooks::default())),
@@ -3745,6 +3753,10 @@ impl App {
                 attached_count,
                 remote_count,
             )
+        } else if self.oracle_picker_remote_list_pending {
+            "Fetching remote Oracle threads in the background. Pick a local thread or use the hotkeys below.".to_string()
+        } else if self.oracle_picker_remote_list_notice.is_some() {
+            "Remote Oracle threads are unavailable. Local controls are still available.".to_string()
         } else if attached_count + remote_count == 0 {
             "No Oracle threads yet. Use the hotkeys below.".to_string()
         } else {
@@ -6378,66 +6390,181 @@ impl App {
     async fn run_startup_ui_action(&mut self, action: StartupUiAction) -> Result<()> {
         match action {
             StartupUiAction::OpenOraclePicker => {
+                self.oracle_picker_remote_list_pending = false;
+                self.oracle_picker_remote_list_notice = None;
                 self.show_oracle_picker(Vec::new(), /*include_new_thread*/ true);
                 Ok(())
             }
         }
     }
 
-    async fn oracle_list_remote_threads(&mut self) -> Result<Vec<OracleBrokerThreadEntry>> {
-        #[cfg(test)]
-        let delay = self
-            .oracle_test_broker_hooks
-            .lock()
-            .expect("oracle test broker hooks")
-            .list_thread_delay
-            .take();
-        #[cfg(test)]
-        if let Some(delay) = delay {
-            tokio::time::sleep(delay).await;
-        }
-        #[cfg(test)]
-        if let Some(result) = {
-            let followup_session = self.preferred_oracle_followup_session();
-            let mut hooks = self
-                .oracle_test_broker_hooks
-                .lock()
-                .expect("oracle test broker hooks");
-            let result = hooks.list_thread_results.pop_front();
-            if result.is_some() {
-                hooks.list_thread_calls += 1;
-                hooks.list_thread_followup_sessions.push(followup_session);
-            }
-            result
-        } {
-            let mut remote_threads = result.map_err(|err| color_eyre::eyre::eyre!(err))?;
-            remote_threads.sort_by(|a, b| {
-                b.is_current
-                    .cmp(&a.is_current)
-                    .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
-            });
-            return Ok(remote_threads);
-        }
-        let Some(oracle_repo) = find_oracle_repo(self.chat_widget.config_ref().cwd.as_path())
-        else {
-            return Err(color_eyre::eyre::eyre!(
-                "{}",
-                Self::oracle_repo_not_found_message()
-            ));
-        };
-        let broker = self.ensure_oracle_broker(oracle_repo.as_path())?;
-        let mut remote_threads = broker
-            .list_threads(self.preferred_oracle_followup_session_for_anchor(
-                self.oracle_followup_session_anchor_thread_id(),
-            ))
-            .await
-            .map_err(|err| color_eyre::eyre::eyre!(err))?;
+    fn sort_oracle_thread_entries(remote_threads: &mut [OracleBrokerThreadEntry]) {
         remote_threads.sort_by(|a, b| {
             b.is_current
                 .cmp(&a.is_current)
                 .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
         });
-        Ok(remote_threads)
+    }
+
+    fn next_oracle_picker_remote_list_request_id(&mut self) -> u64 {
+        self.oracle_picker_remote_list_request_id =
+            self.oracle_picker_remote_list_request_id.wrapping_add(1);
+        if self.oracle_picker_remote_list_request_id == 0 {
+            self.oracle_picker_remote_list_request_id = 1;
+        }
+        self.oracle_picker_remote_list_request_id
+    }
+
+    fn schedule_oracle_picker_remote_list_tick(&self, request_id: u64) {
+        let tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            tx.send(AppEvent::OraclePickerRemoteListTick { request_id });
+        });
+    }
+
+    fn handle_oracle_picker_remote_list_tick(&mut self, request_id: u64) {
+        if request_id != self.oracle_picker_remote_list_request_id
+            || !self.oracle_picker_remote_list_pending
+        {
+            return;
+        }
+        self.oracle_picker_remote_list_tick = self.oracle_picker_remote_list_tick.wrapping_add(1);
+        if self.refresh_oracle_picker_if_open() {
+            self.schedule_oracle_picker_remote_list_tick(request_id);
+        } else {
+            self.oracle_picker_remote_list_pending = false;
+        }
+    }
+
+    fn handle_oracle_picker_remote_threads_loaded(
+        &mut self,
+        request_id: u64,
+        result: Result<Vec<OracleBrokerThreadEntry>, String>,
+    ) {
+        if request_id != self.oracle_picker_remote_list_request_id {
+            return;
+        }
+        self.oracle_picker_remote_list_pending = false;
+        match result {
+            Ok(remote_threads) => {
+                self.oracle_picker_remote_list_notice = None;
+                self.show_oracle_picker(remote_threads, /*include_new_thread*/ true);
+            }
+            Err(err) => {
+                self.oracle_picker_remote_list_notice = Some(err);
+                self.show_oracle_picker(Vec::new(), /*include_new_thread*/ true);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn spawn_oracle_picker_remote_list_task(&mut self, request_id: u64) {
+        let hooks = Arc::clone(&self.oracle_test_broker_hooks);
+        let followup_session = self.preferred_oracle_followup_session();
+        let list_timeout = self.oracle_picker_remote_list_timeout();
+        let tx = self.app_event_tx.clone();
+        if let Some((_repo, broker)) = self.oracle_broker.take() {
+            tokio::spawn(async move {
+                let _ = broker.shutdown().await;
+            });
+        }
+        tokio::spawn(async move {
+            let result = tokio::time::timeout(list_timeout, async move {
+                let delay = hooks
+                    .lock()
+                    .expect("oracle test broker hooks")
+                    .list_thread_delay
+                    .take();
+                if let Some(delay) = delay {
+                    tokio::time::sleep(delay).await;
+                }
+                let result = {
+                    let mut hooks = hooks.lock().expect("oracle test broker hooks");
+                    let result = hooks.list_thread_results.pop_front();
+                    if result.is_some() {
+                        hooks.list_thread_calls += 1;
+                        hooks.list_thread_followup_sessions.push(followup_session);
+                    }
+                    result
+                };
+                let mut remote_threads = match result {
+                    Some(result) => result?,
+                    None => Vec::new(),
+                };
+                Self::sort_oracle_thread_entries(remote_threads.as_mut_slice());
+                Ok(remote_threads)
+            })
+            .await
+            .unwrap_or_else(|_| {
+                Err(format!(
+                    "Timed out after {} while discovering remote Oracle threads.",
+                    Self::oracle_timeout_message(list_timeout)
+                ))
+            });
+            tx.send(AppEvent::OraclePickerRemoteThreadsLoaded { request_id, result });
+        });
+    }
+
+    #[cfg(not(test))]
+    fn spawn_oracle_picker_remote_list_task(&mut self, request_id: u64) {
+        let tx = self.app_event_tx.clone();
+        let list_timeout = self.oracle_picker_remote_list_timeout();
+        let followup_session = self.preferred_oracle_followup_session_for_anchor(
+            self.oracle_followup_session_anchor_thread_id(),
+        );
+        let oracle_repo_result = find_oracle_repo(self.chat_widget.config_ref().cwd.as_path())
+            .ok_or_else(|| Self::oracle_repo_not_found_message().to_string());
+        let broker_result = oracle_repo_result.and_then(|oracle_repo| {
+            let cached_broker = match self.oracle_broker.take() {
+                Some((cached_repo, broker))
+                    if Self::cached_oracle_broker_matches(
+                        cached_repo.as_path(),
+                        oracle_repo.as_path(),
+                        &broker,
+                    ) =>
+                {
+                    Some(broker)
+                }
+                Some((cached_repo, broker)) => {
+                    self.oracle_broker = Some((cached_repo, broker));
+                    None
+                }
+                None => None,
+            };
+            cached_broker
+                .map(Ok)
+                .unwrap_or_else(|| spawn_oracle_broker(oracle_repo.as_path()))
+        });
+        tokio::spawn(async move {
+            let result = match broker_result {
+                Ok(broker) => {
+                    let list_result =
+                        tokio::time::timeout(list_timeout, broker.list_threads(followup_session))
+                            .await;
+                    match list_result {
+                        Ok(Ok(mut remote_threads)) => {
+                            Self::sort_oracle_thread_entries(remote_threads.as_mut_slice());
+                            let _ = broker.shutdown().await;
+                            Ok(remote_threads)
+                        }
+                        Ok(Err(err)) => {
+                            let _ = broker.shutdown().await;
+                            Err(err)
+                        }
+                        Err(_) => {
+                            broker.abort_and_wait().await;
+                            Err(format!(
+                                "Timed out after {} while discovering remote Oracle threads.",
+                                Self::oracle_timeout_message(list_timeout)
+                            ))
+                        }
+                    }
+                }
+                Err(err) => Err(err),
+            };
+            tx.send(AppEvent::OraclePickerRemoteThreadsLoaded { request_id, result });
+        });
     }
 
     fn oracle_picker_remote_list_timeout(&self) -> Duration {
@@ -6449,7 +6576,7 @@ impl App {
         if cfg!(test) {
             Duration::from_millis(50)
         } else {
-            Duration::from_secs(15)
+            Duration::from_secs(120)
         }
     }
 
@@ -6707,7 +6834,9 @@ impl App {
     async fn open_oracle_picker(&mut self) -> Result<()> {
         self.persist_active_oracle_binding();
         self.oracle_picker_show_info = false;
+        self.oracle_picker_remote_list_notice = None;
         if self.oracle_browser_is_busy() {
+            self.oracle_picker_remote_list_pending = false;
             self.chat_widget.add_info_message(
                 "Oracle is mid-turn; showing attached local Oracle threads only until the current browser step finishes."
                     .to_string(),
@@ -6716,40 +6845,14 @@ impl App {
             self.show_oracle_picker(Vec::new(), /*include_new_thread*/ false);
             return Ok(());
         }
-        let list_timeout = self.oracle_picker_remote_list_timeout();
-        let (remote_threads, include_new_thread) = match tokio::time::timeout(
-            list_timeout,
-            self.oracle_list_remote_threads(),
-        )
-        .await
-        {
-            Ok(Ok(remote_threads)) => (remote_threads, true),
-            Ok(Err(err)) => {
-                self.chat_widget.add_info_message(
-                    "Oracle remote threads are unavailable; showing local Oracle controls and keeping new-thread creation available."
-                        .to_string(),
-                    Some(err.to_string()),
-                );
-                (Vec::new(), true)
-            }
-            Err(_) => {
-                self.shutdown_oracle_broker_await(true).await;
-                self.chat_widget.add_info_message(
-                    "Oracle remote threads are taking too long; showing local Oracle controls and keeping new-thread creation available."
-                        .to_string(),
-                    Some(format!(
-                        "Timed out after {} seconds while discovering remote Oracle threads.",
-                        list_timeout.as_secs()
-                    )),
-                );
-                (Vec::new(), true)
-            }
-        };
-        // Listing remote threads is a browse-only operation. Do not keep the
-        // Browserbase supervisor session billable while the user is reading
-        // the picker; attach/new will start a fresh broker if selected.
-        self.shutdown_oracle_broker_gracefully().await;
-        self.show_oracle_picker(remote_threads, include_new_thread);
+        let request_id = self.next_oracle_picker_remote_list_request_id();
+        self.oracle_picker_remote_threads.clear();
+        self.oracle_picker_include_new_thread = true;
+        self.oracle_picker_remote_list_pending = true;
+        self.oracle_picker_remote_list_tick = 0;
+        self.show_oracle_picker(Vec::new(), /*include_new_thread*/ true);
+        self.schedule_oracle_picker_remote_list_tick(request_id);
+        self.spawn_oracle_picker_remote_list_task(request_id);
         Ok(())
     }
 
@@ -6851,11 +6954,38 @@ impl App {
             visible_remote_count += 1;
         }
 
-        if initial_selected_idx.is_none() && !items.is_empty() {
-            initial_selected_idx = Some(0);
+        if self.oracle_picker_remote_list_pending {
+            let frames = ["|", "/", "-", "\\"];
+            let frame = frames[self.oracle_picker_remote_list_tick % frames.len()];
+            items.push(SelectionItem {
+                name: format!("Fetching remote threads {frame}"),
+                description: Some(
+                    "Browserbase/ChatGPT discovery is still running; local controls stay usable."
+                        .to_string(),
+                ),
+                is_disabled: true,
+                search_value: Some("fetching remote oracle threads".to_string()),
+                ..Default::default()
+            });
+        } else if let Some(notice) = self.oracle_picker_remote_list_notice.clone() {
+            items.push(SelectionItem {
+                name: "Remote threads unavailable".to_string(),
+                description: Some(notice),
+                is_disabled: true,
+                search_value: Some("remote oracle threads unavailable".to_string()),
+                ..Default::default()
+            });
         }
 
-        let search_enabled = !items.is_empty();
+        if initial_selected_idx.is_none() {
+            initial_selected_idx = items
+                .iter()
+                .position(|item| !item.is_disabled && item.disabled_reason.is_none());
+        }
+
+        let search_enabled = items
+            .iter()
+            .any(|item| !item.is_disabled && item.disabled_reason.is_none());
 
         let mut shortcuts = vec![
             SelectionShortcut {
@@ -6950,6 +7080,12 @@ impl App {
                 ..Default::default()
             });
         }
+        crate::session_log::log_oracle_picker_render(
+            Some(self.oracle_picker_remote_list_request_id),
+            self.oracle_picker_remote_list_pending,
+            visible_remote_count,
+            self.oracle_picker_include_new_thread,
+        );
     }
 
     fn oracle_remote_thread_mutation_blocked_message(&self) -> &'static str {
@@ -9781,6 +9917,36 @@ guardian_approval = true
             .push_back(result);
     }
 
+    async fn handle_next_oracle_picker_remote_list_result(
+        app: &mut App,
+        app_event_rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    ) -> Result<()> {
+        let (request_id, result) = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                match app_event_rx.recv().await {
+                    Some(AppEvent::OraclePickerRemoteListTick { request_id }) => {
+                        app.handle_oracle_picker_remote_list_tick(request_id);
+                    }
+                    Some(AppEvent::OraclePickerRemoteThreadsLoaded { request_id, result }) => {
+                        return Ok((request_id, result));
+                    }
+                    Some(_) => {}
+                    None => {
+                        return Err(color_eyre::eyre::eyre!(
+                            "app event channel closed before remote Oracle picker list completed"
+                        ));
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| {
+            color_eyre::eyre::eyre!("timed out waiting for remote Oracle picker list")
+        })??;
+        app.handle_oracle_picker_remote_threads_loaded(request_id, result);
+        Ok(())
+    }
+
     fn test_oracle_thread_open_response(
         session_id: &str,
         title: &str,
@@ -9829,6 +9995,7 @@ guardian_approval = true
         );
 
         app.open_oracle_picker().await?;
+        handle_next_oracle_picker_remote_list_result(&mut app, &mut app_event_rx).await?;
         app.chat_widget
             .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
@@ -9871,6 +10038,7 @@ guardian_approval = true
         );
 
         app.open_oracle_picker().await?;
+        handle_next_oracle_picker_remote_list_result(&mut app, &mut app_event_rx).await?;
 
         assert!(
             app.oracle_broker.is_none(),
@@ -11891,15 +12059,14 @@ guardian_approval = true
         queue_test_oracle_list_threads_result(&app, Err("broker offline".to_string()));
 
         app.open_oracle_picker().await?;
+        let initial_popup = render_bottom_popup(&app, /*width*/ 100);
+        assert!(initial_popup.contains("Fetching remote threads"));
+        assert!(initial_popup.contains("new"));
+        handle_next_oracle_picker_remote_list_result(&mut app, &mut app_event_rx).await?;
 
-        assert_matches!(
-            app_event_rx.try_recv(),
-            Ok(AppEvent::InsertHistoryCell(cell))
-                if cell
-                    .display_lines(/*width*/ 120)
-                    .iter()
-                    .any(|line| line.to_string().contains("remote threads are unavailable"))
-        );
+        let popup = render_bottom_popup(&app, /*width*/ 100);
+        assert!(popup.contains("Remote threads unavailable"));
+        assert!(popup.contains("broker offline"));
         app.chat_widget
             .handle_key_event(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
 
@@ -11907,10 +12074,45 @@ guardian_approval = true
             app_event_rx.try_recv(),
             Ok(AppEvent::OraclePickerToggleInfo)
         );
-        let popup = render_bottom_popup(&app, /*width*/ 100);
         assert!(popup.contains("Hotkeys:"));
         assert!(popup.contains("new"));
         assert!(!popup.contains("search"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn open_oracle_picker_renders_immediately_before_remote_threads_finish() -> Result<()> {
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        queue_test_oracle_list_threads_delay(&app, Duration::from_millis(25));
+        queue_test_oracle_list_threads_result(
+            &app,
+            Ok(vec![OracleBrokerThreadEntry {
+                title: "Slow Thread".to_string(),
+                conversation_id: "slow-1".to_string(),
+                url: Some("https://chatgpt.com/c/slow-1".to_string()),
+                is_current: false,
+            }]),
+        );
+
+        app.open_oracle_picker().await?;
+
+        let popup = render_bottom_popup(&app, /*width*/ 100);
+        assert!(popup.contains("Fetching remote threads"));
+        assert!(popup.contains("Hotkeys:"));
+        assert!(popup.contains("new"));
+        assert!(!popup.contains("Slow Thread"));
+        assert_eq!(
+            app.oracle_test_broker_hooks
+                .lock()
+                .expect("oracle test broker hooks")
+                .list_thread_calls,
+            0,
+            "remote list should not complete before the first picker render"
+        );
+
+        handle_next_oracle_picker_remote_list_result(&mut app, &mut app_event_rx).await?;
+        let popup = render_bottom_popup(&app, /*width*/ 100);
+        assert!(popup.contains("Remote: Slow Thread"));
         Ok(())
     }
 
@@ -11929,16 +12131,11 @@ guardian_approval = true
         );
 
         app.open_oracle_picker().await?;
+        handle_next_oracle_picker_remote_list_result(&mut app, &mut app_event_rx).await?;
 
-        assert_matches!(
-            app_event_rx.try_recv(),
-            Ok(AppEvent::InsertHistoryCell(cell))
-                if cell
-                    .display_lines(/*width*/ 120)
-                    .iter()
-                    .any(|line| line.to_string().contains("taking too long"))
-        );
         let popup = render_bottom_popup(&app, /*width*/ 100);
+        assert!(popup.contains("Remote threads unavailable"));
+        assert!(popup.contains("Timed out after 50 ms"));
         assert!(popup.contains("Hotkeys:"));
         assert!(popup.contains("new"));
         assert!(!popup.contains("Slow Thread"));
@@ -11947,7 +12144,7 @@ guardian_approval = true
 
     #[tokio::test]
     async fn open_oracle_picker_prefers_current_local_binding_for_remote_browse() -> Result<()> {
-        let mut app = make_test_app().await;
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
         let first_thread_id = app.create_visible_oracle_thread().await;
         app.set_oracle_thread_broker_session(first_thread_id, Some("runtime-a".to_string()), true);
         let current_thread_id = app.create_visible_oracle_thread().await;
@@ -11960,6 +12157,7 @@ guardian_approval = true
         queue_test_oracle_list_threads_result(&app, Ok(Vec::new()));
 
         app.open_oracle_picker().await?;
+        handle_next_oracle_picker_remote_list_result(&mut app, &mut app_event_rx).await?;
 
         assert_eq!(
             app.oracle_test_broker_hooks
@@ -11974,7 +12172,7 @@ guardian_approval = true
     #[tokio::test]
     async fn open_oracle_picker_does_not_borrow_another_binding_session_for_remote_browse()
     -> Result<()> {
-        let mut app = make_test_app().await;
+        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
         let attached_thread_id = app.create_visible_oracle_thread().await;
         app.set_oracle_thread_broker_session_id(attached_thread_id, Some("runtime-a".to_string()));
         let unattached_thread_id = app.create_visible_oracle_thread().await;
@@ -11982,6 +12180,7 @@ guardian_approval = true
         queue_test_oracle_list_threads_result(&app, Ok(Vec::new()));
 
         app.open_oracle_picker().await?;
+        handle_next_oracle_picker_remote_list_result(&mut app, &mut app_event_rx).await?;
 
         assert_eq!(
             app.oracle_test_broker_hooks
@@ -12000,8 +12199,8 @@ guardian_approval = true
         queue_test_oracle_list_threads_result(&app, Ok(Vec::new()));
 
         app.open_oracle_picker().await?;
+        handle_next_oracle_picker_remote_list_result(&mut app, &mut app_event_rx).await?;
 
-        assert!(app_event_rx.try_recv().is_err());
         let popup = render_bottom_popup(&app, /*width*/ 100);
         assert!(popup.contains("Hotkeys:"));
         assert!(popup.contains("new"));
@@ -19826,6 +20025,10 @@ guardian_approval = true
             oracle_picker_show_info: false,
             oracle_picker_remote_threads: Vec::new(),
             oracle_picker_include_new_thread: false,
+            oracle_picker_remote_list_request_id: 0,
+            oracle_picker_remote_list_pending: false,
+            oracle_picker_remote_list_tick: 0,
+            oracle_picker_remote_list_notice: None,
             oracle_broker: None,
             oracle_test_broker_hooks: Arc::new(StdMutex::new(OracleTestBrokerHooks::default())),
             pending_plugin_enabled_writes: HashMap::new(),
@@ -19892,6 +20095,10 @@ guardian_approval = true
                 oracle_picker_show_info: false,
                 oracle_picker_remote_threads: Vec::new(),
                 oracle_picker_include_new_thread: false,
+                oracle_picker_remote_list_request_id: 0,
+                oracle_picker_remote_list_pending: false,
+                oracle_picker_remote_list_tick: 0,
+                oracle_picker_remote_list_notice: None,
                 oracle_broker: None,
                 oracle_test_broker_hooks: Arc::new(StdMutex::new(OracleTestBrokerHooks::default())),
                 pending_plugin_enabled_writes: HashMap::new(),

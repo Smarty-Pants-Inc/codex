@@ -909,6 +909,7 @@ async fn native_oracle_picker_releases_browserbase_after_remote_list() -> Result
     let test_started_at = SystemTime::now();
     let mut sent_browse = false;
     let mut saw_picker = false;
+    let mut saw_remote_list_loaded = false;
     let mut last_nux_seen_at: Option<tokio::time::Instant> = None;
     let mut last_nux_ack_at: Option<tokio::time::Instant> = None;
     let mut startup_seen_at: Option<tokio::time::Instant> = None;
@@ -941,20 +942,23 @@ async fn native_oracle_picker_releases_browserbase_after_remote_list() -> Result
                             && sanitized_output.contains("Hotkeys:")
                         {
                             saw_picker = true;
-                            break Ok(());
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break Err(anyhow::anyhow!("TUI exited before Oracle picker opened")),
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
                 },
                 _ = loop_tick.tick() => {
-                    if session_log_path.is_file()
-                        && let Ok(log) = fs::read_to_string(&session_log_path)
-                        && startup_seen_at.is_none()
-                        && (log.contains("\"type\":\"list_skills\"")
-                            || log.contains("\"variant\":\"PluginMentionsLoaded"))
-                    {
-                        startup_seen_at = Some(tokio::time::Instant::now());
+                    if session_log_path.is_file() {
+                        if let Ok(log) = fs::read_to_string(&session_log_path)
+                            && startup_seen_at.is_none()
+                            && (log.contains("\"type\":\"list_skills\"")
+                                || log.contains("\"variant\":\"PluginMentionsLoaded"))
+                        {
+                            startup_seen_at = Some(tokio::time::Instant::now());
+                        }
+                        if oracle_picker_remote_list_loaded_logged(&session_log_path) {
+                            saw_remote_list_loaded = true;
+                        }
                     }
                     let startup_nux_settled = last_nux_seen_at
                         .is_none_or(|instant| instant.elapsed() >= Duration::from_secs(1));
@@ -965,6 +969,9 @@ async fn native_oracle_picker_releases_browserbase_after_remote_list() -> Result
                     {
                         sent_browse = true;
                         submit_humanlike(&writer_tx, "/oracle").await;
+                    }
+                    if saw_picker && saw_remote_list_loaded {
+                        break Ok(());
                     }
                 }
                 result = &mut exit_rx => break Err(anyhow::anyhow!("TUI exited before Oracle picker opened: {result:?}")),
@@ -996,6 +1003,16 @@ async fn native_oracle_picker_releases_browserbase_after_remote_list() -> Result
         saw_picker,
         "expected Oracle picker to open\n{}",
         failure_artifacts(&codex_home_path, &session_log_path, &output)
+    );
+    let (pending_render_index, loaded_index) = oracle_picker_async_render_proof(&session_log_path)
+        .with_context(|| {
+            format!(
+                "expected pending Oracle picker render before remote list completion in {}",
+                session_log_path.display()
+            )
+        })?;
+    eprintln!(
+        "Oracle picker async proof: pending render log index {pending_render_index}; remote list loaded index {loaded_index}"
     );
 
     let recent_meta_paths = recent_oracle_meta_paths(&sessions_dir, test_started_at)?;
@@ -2345,6 +2362,49 @@ fn session_log_entries(path: &Path) -> Result<Vec<JsonValue>> {
             })
         })
         .collect()
+}
+
+fn oracle_picker_remote_list_loaded_logged(path: &Path) -> bool {
+    let Ok(entries) = session_log_entries(path) else {
+        return false;
+    };
+    entries.iter().any(|entry| {
+        entry.get("kind").and_then(JsonValue::as_str) == Some("app_event")
+            && entry.get("variant").and_then(JsonValue::as_str)
+                == Some("OraclePickerRemoteThreadsLoaded")
+    })
+}
+
+fn oracle_picker_async_render_proof(path: &Path) -> Result<(usize, usize)> {
+    let entries = session_log_entries(path)?;
+    let pending_render_index = entries
+        .iter()
+        .enumerate()
+        .find_map(|(index, entry)| {
+            (entry.get("kind").and_then(JsonValue::as_str) == Some("oracle_picker_render")
+                && entry
+                    .get("payload")
+                    .and_then(|value| value.get("pending"))
+                    .and_then(JsonValue::as_bool)
+                    == Some(true))
+            .then_some(index)
+        })
+        .context("session log did not record a pending Oracle picker render")?;
+    let loaded_index = entries
+        .iter()
+        .enumerate()
+        .find_map(|(index, entry)| {
+            (entry.get("kind").and_then(JsonValue::as_str) == Some("app_event")
+                && entry.get("variant").and_then(JsonValue::as_str)
+                    == Some("OraclePickerRemoteThreadsLoaded"))
+            .then_some(index)
+        })
+        .context("session log did not record Oracle remote thread list completion")?;
+    anyhow::ensure!(
+        pending_render_index < loaded_index,
+        "Oracle picker rendered after remote list completion: render index {pending_render_index}, loaded index {loaded_index}"
+    );
+    Ok((pending_render_index, loaded_index))
 }
 
 fn oracle_attach_import_indices(entries: &[JsonValue], conversation_id: &str) -> Vec<usize> {

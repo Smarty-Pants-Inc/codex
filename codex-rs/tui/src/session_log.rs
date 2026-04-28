@@ -217,6 +217,26 @@ fn inbound_app_event_value(event: &AppEvent) -> Option<serde_json::Value> {
                     .any(|token| token == "--import-history"),
             },
         })),
+        AppEvent::OraclePickerRemoteListTick { request_id } => Some(json!({
+            "ts": now_ts(),
+            "dir": "to_tui",
+            "kind": "app_event",
+            "variant": "OraclePickerRemoteListTick",
+            "payload": {
+                "request_id": request_id,
+            },
+        })),
+        AppEvent::OraclePickerRemoteThreadsLoaded { request_id, result } => Some(json!({
+            "ts": now_ts(),
+            "dir": "to_tui",
+            "kind": "app_event",
+            "variant": "OraclePickerRemoteThreadsLoaded",
+            "payload": {
+                "request_id": request_id,
+                "status": if result.is_ok() { "ok" } else { "error" },
+                "remote_count": result.as_ref().map(|threads| threads.len()).unwrap_or(0),
+            },
+        })),
         AppEvent::OracleRunCompleted { .. } | AppEvent::OracleRunFailed { .. } => None,
         AppEvent::OracleCheckpoint {
             thread_id,
@@ -296,6 +316,28 @@ pub(crate) fn log_oracle_run_completed(result: &crate::oracle_supervisor::Oracle
         return;
     }
     LOGGER.write_json_line(oracle_run_completed_value(result));
+}
+
+pub(crate) fn log_oracle_picker_render(
+    request_id: Option<u64>,
+    pending: bool,
+    remote_count: usize,
+    include_new_thread: bool,
+) {
+    if !LOGGER.is_enabled() {
+        return;
+    }
+    LOGGER.write_json_line(json!({
+        "ts": now_ts(),
+        "dir": "to_tui",
+        "kind": "oracle_picker_render",
+        "payload": {
+            "request_id": request_id,
+            "pending": pending,
+            "remote_count": remote_count,
+            "include_new_thread": include_new_thread,
+        }
+    }));
 }
 
 pub(crate) fn log_oracle_history_import(
