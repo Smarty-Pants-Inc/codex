@@ -3385,7 +3385,9 @@ impl App {
                 service_tier: config.service_tier,
                 approval_policy: config.permissions.approval_policy.value(),
                 approvals_reviewer: config.approvals_reviewer,
-                sandbox_policy: config.permissions.sandbox_policy.get().clone(),
+                sandbox_policy: config
+                    .permissions
+                    .legacy_sandbox_policy(config.cwd.as_path()),
                 permission_profile: None,
                 cwd: config.cwd.clone(),
                 instruction_source_paths: Vec::new(),
@@ -4697,22 +4699,15 @@ impl App {
                 .features
                 .enabled(Feature::Personality)
         });
-        let permission_profile = if matches!(
-            self.chat_widget
-                .config_ref()
-                .permissions
-                .sandbox_policy
-                .get(),
-            SandboxPolicy::ExternalSandbox { .. }
-        ) {
+        let config = self.chat_widget.config_ref();
+        let sandbox_policy = config
+            .permissions
+            .legacy_sandbox_policy(config.cwd.as_path());
+        let permission_profile = if matches!(&sandbox_policy, SandboxPolicy::ExternalSandbox { .. })
+        {
             None
         } else {
-            Some(
-                self.chat_widget
-                    .config_ref()
-                    .permissions
-                    .permission_profile(),
-            )
+            Some(config.permissions.permission_profile())
         };
         let reminder = self
             .oracle_state
@@ -4725,23 +4720,14 @@ impl App {
                 text: reminder,
                 text_elements: Vec::new(),
             }],
-            self.chat_widget.config_ref().cwd.to_path_buf(),
-            self.chat_widget
-                .config_ref()
-                .permissions
-                .approval_policy
-                .value(),
-            self.chat_widget
-                .config_ref()
-                .permissions
-                .sandbox_policy
-                .get()
-                .clone(),
+            config.cwd.to_path_buf(),
+            config.permissions.approval_policy.value(),
+            sandbox_policy,
             permission_profile,
             routed_model,
             collaboration_mode.reasoning_effort(),
             /*summary*/ None,
-            self.chat_widget.config_ref().service_tier.map(Some),
+            config.service_tier.map(Some),
             /*final_output_json_schema*/ None,
             Some(collaboration_mode),
             personality,
@@ -9331,12 +9317,8 @@ mod carried_tests {
             auto_review.approval_policy
         );
         assert_eq!(
-            app.chat_widget
-                .config_ref()
-                .permissions
-                .sandbox_policy
-                .get(),
-            &auto_review.sandbox_policy
+            app.chat_widget.config_ref().legacy_sandbox_policy(),
+            auto_review.sandbox_policy
         );
         assert_eq!(
             app.chat_widget.config_ref().approvals_reviewer,
@@ -9408,9 +9390,7 @@ mod carried_tests {
             .approval_policy
             .set(AskForApproval::OnRequest)?;
         app.config
-            .permissions
-            .sandbox_policy
-            .set(SandboxPolicy::new_workspace_write_policy())?;
+            .set_legacy_sandbox_policy(SandboxPolicy::new_workspace_write_policy())?;
         app.chat_widget
             .set_approval_policy(AskForApproval::OnRequest);
         app.chat_widget
@@ -9509,12 +9489,8 @@ mod carried_tests {
             auto_review.approval_policy
         );
         assert_eq!(
-            app.chat_widget
-                .config_ref()
-                .permissions
-                .sandbox_policy
-                .get(),
-            &auto_review.sandbox_policy
+            app.chat_widget.config_ref().legacy_sandbox_policy(),
+            auto_review.sandbox_policy
         );
         assert_eq!(
             op_rx.try_recv(),
@@ -11207,12 +11183,7 @@ guardian_approval = true
                     .permissions
                     .approval_policy
                     .value(),
-                app.chat_widget
-                    .config_ref()
-                    .permissions
-                    .sandbox_policy
-                    .get()
-                    .clone(),
+                app.chat_widget.config_ref().legacy_sandbox_policy(),
                 Some(
                     app.chat_widget
                         .config_ref()
@@ -12497,12 +12468,7 @@ guardian_approval = true
                     .permissions
                     .approval_policy
                     .value(),
-                app.chat_widget
-                    .config_ref()
-                    .permissions
-                    .sandbox_policy
-                    .get()
-                    .clone(),
+                app.chat_widget.config_ref().legacy_sandbox_policy(),
                 Some(
                     app.chat_widget
                         .config_ref()
@@ -17871,12 +17837,7 @@ guardian_approval = true
                     .permissions
                     .approval_policy
                     .value(),
-                app.chat_widget
-                    .config_ref()
-                    .permissions
-                    .sandbox_policy
-                    .get()
-                    .clone(),
+                app.chat_widget.config_ref().legacy_sandbox_policy(),
                 Some(
                     app.chat_widget
                         .config_ref()
@@ -19206,7 +19167,7 @@ guardian_approval = true
         let mut app = make_test_app().await;
         app.config.developer_instructions = Some("Existing developer policy.".to_string());
         let original_approval_policy = app.config.permissions.approval_policy.value();
-        let original_sandbox_policy = app.config.permissions.sandbox_policy.get().clone();
+        let original_sandbox_policy = app.config.legacy_sandbox_policy();
 
         let fork_config = app.side_fork_config();
 
@@ -19215,10 +19176,7 @@ guardian_approval = true
             fork_config.permissions.approval_policy.value(),
             original_approval_policy
         );
-        assert_eq!(
-            fork_config.permissions.sandbox_policy.get(),
-            &original_sandbox_policy
-        );
+        assert_eq!(fork_config.legacy_sandbox_policy(), original_sandbox_policy);
         let developer_instructions = fork_config
             .developer_instructions
             .as_deref()
