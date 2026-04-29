@@ -680,6 +680,7 @@ pub async fn run_main(
     loader_overrides: LoaderOverrides,
     remote: Option<String>,
     remote_auth_token: Option<String>,
+    exit_after_turn: bool,
 ) -> std::io::Result<AppExitInfo> {
     let remote_url = remote;
     if let (Some(websocket_url), Some(_)) = (remote_url.as_deref(), remote_auth_token.as_ref()) {
@@ -1025,6 +1026,7 @@ pub async fn run_main(
         log_db,
         remote_url,
         remote_auth_token,
+        exit_after_turn,
         environment_manager,
     )
     .await
@@ -1046,6 +1048,7 @@ async fn run_ratatui_app(
     log_db: Option<log_db::LogDbLayer>,
     remote_url: Option<String>,
     remote_auth_token: Option<String>,
+    exit_after_turn: bool,
     environment_manager: Arc<EnvironmentManager>,
 ) -> color_eyre::Result<AppExitInfo> {
     let remote_mode = matches!(&app_server_target, AppServerTarget::Remote { .. });
@@ -1462,6 +1465,7 @@ async fn run_ratatui_app(
         should_prompt_windows_sandbox_nux_at_startup,
         remote_url,
         remote_auth_token,
+        exit_after_turn,
         environment_manager,
     )
     .await;

@@ -68,6 +68,10 @@ pub(super) async fn make_test_app() -> App {
         oracle_picker_remote_list_notice: None,
         oracle_broker: None,
         oracle_test_broker_hooks: Arc::new(StdMutex::new(OracleTestBrokerHooks::default())),
+        exit_after_turn: false,
+        exit_after_turn_observed_assistant_output: false,
+        exit_after_turn_thread_id: None,
+        exit_after_turn_turn_id: None,
         pending_plugin_enabled_writes: HashMap::new(),
     }
 }

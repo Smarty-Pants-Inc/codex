@@ -32,6 +32,7 @@ use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::FileChangeRequestApprovalParams;
 use codex_app_server_protocol::FileUpdateChange;
+use codex_app_server_protocol::ItemCompletedNotification;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::McpServerStartupState;
@@ -69,6 +70,7 @@ use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
 use codex_protocol::models::AdditionalPermissionProfile as CoreAdditionalPermissionProfile;
 use codex_protocol::models::FileSystemPermissions;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::NetworkPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
@@ -3754,6 +3756,10 @@ async fn make_test_app() -> App {
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         remote_app_server_url: None,
         remote_app_server_auth_token: None,
+        exit_after_turn: false,
+        exit_after_turn_observed_assistant_output: false,
+        exit_after_turn_thread_id: None,
+        exit_after_turn_turn_id: None,
         pending_update_action: None,
         pending_shutdown_exit_thread_id: None,
         windows_sandbox: WindowsSandboxState::default(),
@@ -3849,6 +3855,10 @@ async fn make_test_app_with_channels() -> (
             oracle_picker_remote_list_notice: None,
             oracle_broker: None,
             oracle_test_broker_hooks: Arc::new(StdMutex::new(OracleTestBrokerHooks::default())),
+            exit_after_turn: false,
+            exit_after_turn_observed_assistant_output: false,
+            exit_after_turn_thread_id: None,
+            exit_after_turn_turn_id: None,
             pending_plugin_enabled_writes: HashMap::new(),
         },
         rx,
@@ -5164,4 +5174,245 @@ async fn session_summary_uses_id_even_when_thread_has_name() {
         summary.resume_command,
         Some("codex resume 123e4567-e89b-12d3-a456-426614174000".to_string())
     );
+}
+
+#[tokio::test]
+async fn exit_after_turn_waits_for_completed_remote_turn_with_output() -> Result<()> {
+    let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    app.exit_after_turn = true;
+    let thread_id = ThreadId::new().to_string();
+    let turn_id = "turn-exit-after-output".to_string();
+
+    assert!(
+        app.exit_after_turn_control_for_event(&ThreadBufferedEvent::Notification(
+            ServerNotification::TurnStarted(TurnStartedNotification {
+                thread_id: thread_id.clone(),
+                turn: Turn {
+                    id: turn_id.clone(),
+                    items: Vec::new(),
+                    status: TurnStatus::InProgress,
+                    error: None,
+                    started_at: None,
+                    completed_at: None,
+                    duration_ms: None,
+                },
+            }),
+        ))
+        .is_none()
+    );
+
+    app.exit_after_turn_control_for_event(&ThreadBufferedEvent::Notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: thread_id.clone(),
+            turn_id: turn_id.clone(),
+            item: ThreadItem::AgentMessage {
+                id: "item-agent".to_string(),
+                text: "OK".to_string(),
+                phase: Some(MessagePhase::FinalAnswer),
+                memory_citation: None,
+            },
+        }),
+    ));
+
+    let event = ThreadBufferedEvent::Notification(ServerNotification::TurnCompleted(
+        TurnCompletedNotification {
+            thread_id,
+            turn: Turn {
+                id: turn_id,
+                items: Vec::new(),
+                status: TurnStatus::Completed,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: Some(1),
+            },
+        },
+    ));
+
+    assert!(matches!(
+        app.exit_after_turn_control_for_event(&event),
+        Some(ExitReason::UserRequested)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn exit_after_turn_fails_completed_remote_turn_without_output() -> Result<()> {
+    let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    app.exit_after_turn = true;
+    let event = ThreadBufferedEvent::Notification(ServerNotification::TurnCompleted(
+        TurnCompletedNotification {
+            thread_id: ThreadId::new().to_string(),
+            turn: Turn {
+                id: "turn-no-output".to_string(),
+                items: Vec::new(),
+                status: TurnStatus::Completed,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: Some(1),
+            },
+        },
+    ));
+
+    assert!(matches!(
+        app.exit_after_turn_control_for_event(&event),
+        Some(ExitReason::Fatal(message)) if message.contains("without assistant output")
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn exit_after_turn_allows_agent_message_completion_plus_idle_fallback() -> Result<()> {
+    let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    app.exit_after_turn = true;
+    let thread_id = ThreadId::new().to_string();
+    let turn_id = "turn-idle-fallback".to_string();
+
+    assert!(
+        app.exit_after_turn_control_for_event(&ThreadBufferedEvent::Notification(
+            ServerNotification::TurnStarted(TurnStartedNotification {
+                thread_id: thread_id.clone(),
+                turn: Turn {
+                    id: turn_id.clone(),
+                    items: Vec::new(),
+                    status: TurnStatus::InProgress,
+                    error: None,
+                    started_at: None,
+                    completed_at: None,
+                    duration_ms: None,
+                },
+            }),
+        ))
+        .is_none()
+    );
+
+    app.exit_after_turn_control_for_event(&ThreadBufferedEvent::Notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: thread_id.clone(),
+            turn_id,
+            item: ThreadItem::AgentMessage {
+                id: "item-agent-idle".to_string(),
+                text: "OK idle fallback".to_string(),
+                phase: Some(MessagePhase::FinalAnswer),
+                memory_citation: None,
+            },
+        }),
+    ));
+
+    let event = ThreadBufferedEvent::Notification(ServerNotification::ThreadStatusChanged(
+        codex_app_server_protocol::ThreadStatusChangedNotification {
+            thread_id,
+            status: codex_app_server_protocol::ThreadStatus::Idle,
+        },
+    ));
+
+    assert!(matches!(
+        app.exit_after_turn_control_for_event(&event),
+        Some(ExitReason::UserRequested)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn exit_after_turn_ignores_non_target_thread_completion() -> Result<()> {
+    let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    app.exit_after_turn = true;
+    let target_thread_id = ThreadId::new().to_string();
+    let other_thread_id = ThreadId::new().to_string();
+
+    assert!(
+        app.exit_after_turn_control_for_event(&ThreadBufferedEvent::Notification(
+            ServerNotification::TurnStarted(TurnStartedNotification {
+                thread_id: target_thread_id.clone(),
+                turn: Turn {
+                    id: "target-turn".to_string(),
+                    items: Vec::new(),
+                    status: TurnStatus::InProgress,
+                    error: None,
+                    started_at: None,
+                    completed_at: None,
+                    duration_ms: None,
+                },
+            }),
+        ))
+        .is_none()
+    );
+
+    assert!(
+        app.exit_after_turn_control_for_event(&ThreadBufferedEvent::Notification(
+            ServerNotification::ItemCompleted(ItemCompletedNotification {
+                thread_id: other_thread_id.clone(),
+                turn_id: "other-turn".to_string(),
+                item: ThreadItem::AgentMessage {
+                    id: "other-item".to_string(),
+                    text: "side output".to_string(),
+                    phase: Some(MessagePhase::FinalAnswer),
+                    memory_citation: None,
+                },
+            }),
+        ))
+        .is_none()
+    );
+
+    assert!(
+        app.exit_after_turn_control_for_event(&ThreadBufferedEvent::Notification(
+            ServerNotification::TurnCompleted(TurnCompletedNotification {
+                thread_id: other_thread_id,
+                turn: Turn {
+                    id: "other-turn".to_string(),
+                    items: Vec::new(),
+                    status: TurnStatus::Completed,
+                    error: None,
+                    started_at: None,
+                    completed_at: None,
+                    duration_ms: Some(1),
+                },
+            }),
+        ))
+        .is_none()
+    );
+
+    let target_completed = ThreadBufferedEvent::Notification(ServerNotification::TurnCompleted(
+        TurnCompletedNotification {
+            thread_id: target_thread_id,
+            turn: Turn {
+                id: "target-turn".to_string(),
+                items: Vec::new(),
+                status: TurnStatus::Completed,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: Some(1),
+            },
+        },
+    ));
+
+    assert!(matches!(
+        app.exit_after_turn_control_for_event(&target_completed),
+        Some(ExitReason::Fatal(message)) if message.contains("without assistant output")
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn normal_remote_mode_ignores_turn_completion_for_process_exit() -> Result<()> {
+    let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    let event = ThreadBufferedEvent::Notification(ServerNotification::TurnCompleted(
+        TurnCompletedNotification {
+            thread_id: ThreadId::new().to_string(),
+            turn: Turn {
+                id: "turn-normal-mode".to_string(),
+                items: Vec::new(),
+                status: TurnStatus::Completed,
+                error: None,
+                started_at: None,
+                completed_at: None,
+                duration_ms: Some(1),
+            },
+        },
+    ));
+
+    assert!(app.exit_after_turn_control_for_event(&event).is_none());
+    Ok(())
 }
