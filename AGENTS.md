@@ -21,6 +21,7 @@ In the codex-rs folder where the rust code lives:
 - Newly added traits should include doc comments that explain their role and how implementations are expected to use them.
 - When writing tests, prefer comparing the equality of entire objects over fields one by one.
 - When making a change that adds or changes an API, ensure that the documentation in the `docs/` folder is up to date if applicable.
+- When GitHub CI is red due only to documented infrastructure/no-runner, cancelled/no-evidence, or clean-baseline-reproduced failures, follow `docs/CI_MERGE_EXCEPTION_POLICY.md` and request explicit human merge-exception approval instead of rerunning indefinitely.
 - Prefer private modules and explicitly exported public crate API.
 - If you change `ConfigToml` or nested config types, run `just write-config-schema` to update `codex-rs/core/config.schema.json`.
 - When working with MCP tool calls, prefer using `codex-rs/codex-mcp/src/mcp_connection_manager.rs` to handle mutation of tools and tool calls. Aim to minimize the footprint of changes and leverage existing abstractions rather than plumbing code through multiple levels of function calls.
