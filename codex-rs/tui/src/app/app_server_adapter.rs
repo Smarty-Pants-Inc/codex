@@ -152,11 +152,26 @@ impl App {
         }
     }
 
+    fn note_exit_after_turn_server_notification(&mut self, notification: &ServerNotification) {
+        if let Some(exit_reason) = self.exit_after_turn_control_for_notification(notification) {
+            match exit_reason {
+                crate::ExitReason::UserRequested => {
+                    self.app_event_tx
+                        .send(AppEvent::Exit(crate::app_event::ExitMode::Immediate));
+                }
+                crate::ExitReason::Fatal(message) => {
+                    self.app_event_tx.send(AppEvent::FatalExitRequest(message));
+                }
+            }
+        }
+    }
+
     async fn handle_server_notification_event(
         &mut self,
         app_server_client: &AppServerSession,
         notification: ServerNotification,
     ) {
+        self.note_exit_after_turn_server_notification(&notification);
         match &notification {
             ServerNotification::ServerRequestResolved(notification) => {
                 if let Some(request) = self
@@ -1088,6 +1103,7 @@ mod tests {
     use codex_app_server_protocol::Turn;
     use codex_app_server_protocol::TurnCompletedNotification;
     use codex_app_server_protocol::TurnError;
+    #[cfg(test)]
     use codex_app_server_protocol::TurnStatus;
     use codex_app_server_protocol::WarningNotification;
     use codex_protocol::ThreadId;

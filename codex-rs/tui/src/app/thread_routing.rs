@@ -549,7 +549,7 @@ impl App {
                 }
                 if self
                     .maybe_route_natural_language_oracle_invocation(
-                        None, app_server, thread_id, items,
+                        /*tui*/ None, app_server, thread_id, items,
                     )
                     .await?
                 {
@@ -1480,6 +1480,139 @@ impl App {
                 self.handle_oracle_workflow_thread_event(event);
             }
         }
+    }
+
+    fn ensure_exit_after_turn_target(&mut self, thread_id: &str, turn_id: Option<&str>) -> bool {
+        if let Some(target_thread_id) = &self.exit_after_turn_thread_id
+            && target_thread_id != thread_id
+        {
+            return false;
+        }
+
+        if self.exit_after_turn_thread_id.is_none() {
+            self.exit_after_turn_thread_id = Some(thread_id.to_string());
+        }
+
+        if let Some(turn_id) = turn_id {
+            if let Some(target_turn_id) = &self.exit_after_turn_turn_id
+                && target_turn_id != turn_id
+            {
+                return false;
+            }
+            if self.exit_after_turn_turn_id.is_none() {
+                self.exit_after_turn_turn_id = Some(turn_id.to_string());
+            }
+        }
+
+        true
+    }
+
+    fn exit_after_turn_matches_target(&self, thread_id: &str, turn_id: Option<&str>) -> bool {
+        if self
+            .exit_after_turn_thread_id
+            .as_deref()
+            .is_some_and(|target_thread_id| target_thread_id != thread_id)
+        {
+            return false;
+        }
+        if let Some(turn_id) = turn_id
+            && self
+                .exit_after_turn_turn_id
+                .as_deref()
+                .is_some_and(|target_turn_id| target_turn_id != turn_id)
+        {
+            return false;
+        }
+        true
+    }
+
+    pub(super) fn exit_after_turn_control_for_notification(
+        &mut self,
+        notification: &ServerNotification,
+    ) -> Option<ExitReason> {
+        if !self.exit_after_turn {
+            return None;
+        }
+
+        match notification {
+            ServerNotification::TurnStarted(notification) => {
+                self.ensure_exit_after_turn_target(
+                    &notification.thread_id,
+                    Some(notification.turn.id.as_str()),
+                );
+                None
+            }
+            ServerNotification::ItemCompleted(notification) => {
+                if !self.exit_after_turn_matches_target(
+                    &notification.thread_id,
+                    Some(notification.turn_id.as_str()),
+                ) {
+                    return None;
+                }
+                if let codex_app_server_protocol::ThreadItem::AgentMessage { text, .. } =
+                    &notification.item
+                    && !text.trim().is_empty()
+                    && self.exit_after_turn_thread_id.is_some()
+                {
+                    self.exit_after_turn_observed_assistant_output = true;
+                }
+                None
+            }
+            ServerNotification::TurnCompleted(notification) => {
+                if !self.ensure_exit_after_turn_target(
+                    &notification.thread_id,
+                    Some(notification.turn.id.as_str()),
+                ) {
+                    return None;
+                }
+                match notification.turn.status {
+                    TurnStatus::Completed => {
+                        if self.exit_after_turn_observed_assistant_output {
+                            Some(ExitReason::UserRequested)
+                        } else {
+                            Some(ExitReason::Fatal(
+                                "Remote turn completed without assistant output.".to_string(),
+                            ))
+                        }
+                    }
+                    TurnStatus::Interrupted => Some(ExitReason::Fatal(
+                        "Remote turn was interrupted before completion.".to_string(),
+                    )),
+                    TurnStatus::Failed => Some(ExitReason::Fatal(
+                        notification
+                            .turn
+                            .error
+                            .as_ref()
+                            .map(|error| format!("Remote turn failed: {}", error.message))
+                            .unwrap_or_else(|| "Remote turn failed.".to_string()),
+                    )),
+                    TurnStatus::InProgress => None,
+                }
+            }
+            ServerNotification::ThreadStatusChanged(notification)
+                if matches!(
+                    notification.status,
+                    codex_app_server_protocol::ThreadStatus::Idle
+                ) && self.exit_after_turn_observed_assistant_output
+                    && self.exit_after_turn_matches_target(
+                        &notification.thread_id,
+                        /*turn_id*/ None,
+                    ) =>
+            {
+                Some(ExitReason::UserRequested)
+            }
+            _ => None,
+        }
+    }
+
+    pub(super) fn exit_after_turn_control_for_event(
+        &mut self,
+        event: &ThreadBufferedEvent,
+    ) -> Option<ExitReason> {
+        let ThreadBufferedEvent::Notification(notification) = event else {
+            return None;
+        };
+        self.exit_after_turn_control_for_notification(notification)
     }
 
     /// Handles an event emitted by the currently active thread.
