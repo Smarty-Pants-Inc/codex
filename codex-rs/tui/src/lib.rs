@@ -160,6 +160,7 @@ mod session_log;
 mod shimmer;
 mod skills_helpers;
 mod slash_command;
+mod smarty_setup;
 mod status;
 mod status_indicator_widget;
 mod streaming;
