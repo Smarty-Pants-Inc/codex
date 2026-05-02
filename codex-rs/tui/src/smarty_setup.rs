@@ -32,7 +32,10 @@ pub(crate) fn run(cwd: &Path) -> SmartySetupResult {
             Ok(output) if output.status.success() => {
                 return SmartySetupResult {
                     message: format_setup_output(true, &output.stdout, &output.stderr),
-                    hint: Some("Rerun `smarty-codex` to enter through Smarty Agents.".to_string()),
+                    hint: Some(
+                        "Restart `smarty-codex` from the new Smarty-enabled worktree to enter through Smarty Agents."
+                            .to_string(),
+                    ),
                 };
             }
             Ok(output) => failures.push(format_setup_output(false, &output.stdout, &output.stderr)),
