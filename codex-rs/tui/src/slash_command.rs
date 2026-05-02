@@ -27,6 +27,7 @@ pub enum SlashCommand {
     #[strum(to_string = "autoreview")]
     AutoReview,
     Memories,
+    Smarty,
     Skills,
     Hooks,
     Review,
@@ -128,6 +129,7 @@ impl SlashCommand {
             SlashCommand::Experimental => "toggle experimental features",
             SlashCommand::AutoReview => "approve one retry of a recent auto-review denial",
             SlashCommand::Memories => "configure memory use and generation",
+            SlashCommand::Smarty => "enable Smarty Agents for this git worktree",
             SlashCommand::Mcp => "list configured MCP tools; use /mcp verbose for details",
             SlashCommand::Apps => "manage apps",
             SlashCommand::Plugins => "browse plugins",
@@ -191,6 +193,7 @@ impl SlashCommand {
             | SlashCommand::SandboxReadRoot
             | SlashCommand::Experimental
             | SlashCommand::Memories
+            | SlashCommand::Smarty
             | SlashCommand::Review
             | SlashCommand::Plan
             | SlashCommand::Clear
@@ -279,5 +282,12 @@ mod tests {
             SlashCommand::from_str("autoreview"),
             Ok(SlashCommand::AutoReview)
         );
+    }
+
+    #[test]
+    fn smarty_command_is_visible_setup_command() {
+        assert_eq!(SlashCommand::Smarty.command(), "smarty");
+        assert_eq!(SlashCommand::from_str("smarty"), Ok(SlashCommand::Smarty));
+        assert!(!SlashCommand::Smarty.available_during_task());
     }
 }

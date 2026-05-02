@@ -326,6 +326,7 @@ fn managed_filesystem_sandbox_is_restricted(permission_profile: &PermissionProfi
 /// Smooth-mode streaming drains one line per tick, so this interval controls
 /// perceived typing speed for non-backlogged output.
 const COMMIT_ANIMATION_TICK: Duration = tui::TARGET_FRAME_INTERVAL;
+const EXIT_AFTER_TURN_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Clone)]
 pub struct AppExitInfo {
@@ -471,6 +472,10 @@ pub(crate) struct App {
     environment_manager: Arc<EnvironmentManager>,
     remote_app_server_url: Option<String>,
     remote_app_server_auth_token: Option<String>,
+    exit_after_turn: bool,
+    exit_after_turn_observed_assistant_output: bool,
+    exit_after_turn_thread_id: Option<String>,
+    exit_after_turn_turn_id: Option<String>,
     /// Set when the user confirms an update; propagated on exit.
     pub(crate) pending_update_action: Option<UpdateAction>,
 
@@ -608,6 +613,7 @@ impl App {
         should_prompt_windows_sandbox_nux_at_startup: bool,
         remote_app_server_url: Option<String>,
         remote_app_server_auth_token: Option<String>,
+        exit_after_turn: bool,
         environment_manager: Arc<EnvironmentManager>,
     ) -> Result<AppExitInfo> {
         use tokio_stream::StreamExt;
@@ -871,6 +877,10 @@ See the Codex keymap documentation for supported actions and examples."
             environment_manager,
             remote_app_server_url,
             remote_app_server_auth_token,
+            exit_after_turn,
+            exit_after_turn_observed_assistant_output: false,
+            exit_after_turn_thread_id: None,
+            exit_after_turn_turn_id: None,
             pending_update_action: None,
             pending_shutdown_exit_thread_id: None,
             windows_sandbox: WindowsSandboxState::default(),
@@ -979,13 +989,22 @@ See the Codex keymap documentation for supported actions and examples."
                         app.active_thread_rx.is_some()
                     ) => {
                         if let Some(event) = active {
+                            let exit_after_turn_event = event.clone();
                             if let Err(err) = app.handle_active_thread_event(tui, &mut app_server, event).await {
                                 break Err(err);
+                            }
+                            if let Some(exit_reason) = app.exit_after_turn_control_for_event(&exit_after_turn_event) {
+                                break Ok(exit_reason);
                             }
                         } else {
                             app.clear_active_thread().await;
                         }
                         AppRunControl::Continue
+                    }
+                    _ = tokio::time::sleep(EXIT_AFTER_TURN_TIMEOUT), if app.exit_after_turn => {
+                        AppRunControl::Exit(ExitReason::Fatal(
+                            "Remote turn did not complete before --exit-after-turn timeout.".to_string(),
+                        ))
                     }
                     event = tui_events.next() => {
                         if let Some(event) = event {

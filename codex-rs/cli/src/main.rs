@@ -666,6 +666,10 @@ struct InteractiveRemoteOptions {
     #[arg(long = "remote", value_name = "ADDR")]
     remote: Option<String>,
 
+    /// Exit after the initial remote turn completes.
+    #[arg(long = "exit-after-turn", default_value_t = false)]
+    exit_after_turn: bool,
+
     /// Name of the environment variable containing the bearer token to send to
     /// a remote app server websocket.
     #[arg(long = "remote-auth-token-env", value_name = "ENV_VAR")]
@@ -746,6 +750,15 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
     // Fold --enable/--disable into config overrides so they flow to all subcommands.
     let toggle_overrides = feature_toggles.to_overrides()?;
     root_config_overrides.raw_overrides.extend(toggle_overrides);
+    let root_exit_after_turn = remote.exit_after_turn;
+    if root_exit_after_turn
+        && !matches!(
+            subcommand,
+            None | Some(Subcommand::Resume(_)) | Some(Subcommand::Fork(_))
+        )
+    {
+        anyhow::bail!("`--exit-after-turn` is only supported for interactive TUI commands");
+    }
     let root_remote = remote.remote;
     let root_remote_auth_token_env = remote.remote_auth_token_env;
 
@@ -759,6 +772,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                 interactive,
                 root_remote.clone(),
                 root_remote_auth_token_env.clone(),
+                root_exit_after_turn,
                 arg0_paths.clone(),
             )
             .await?;
@@ -920,6 +934,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                 remote
                     .remote_auth_token_env
                     .or(root_remote_auth_token_env.clone()),
+                remote.exit_after_turn || root_exit_after_turn,
                 arg0_paths.clone(),
             )
             .await?;
@@ -946,6 +961,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                 remote
                     .remote_auth_token_env
                     .or(root_remote_auth_token_env.clone()),
+                remote.exit_after_turn || root_exit_after_turn,
                 arg0_paths.clone(),
             )
             .await?;
@@ -1529,6 +1545,7 @@ async fn run_interactive_tui(
     mut interactive: TuiCli,
     remote: Option<String>,
     remote_auth_token_env: Option<String>,
+    exit_after_turn: bool,
     arg0_paths: Arg0DispatchPaths,
 ) -> std::io::Result<AppExitInfo> {
     if let Some(prompt) = interactive.prompt.take() {
@@ -1564,6 +1581,16 @@ async fn run_interactive_tui(
             "`--remote-auth-token-env` requires `--remote`.",
         ));
     }
+    if exit_after_turn && normalized_remote.is_none() {
+        return Ok(AppExitInfo::fatal(
+            "`--exit-after-turn` requires `--remote`.",
+        ));
+    }
+    if exit_after_turn && interactive.prompt.is_none() {
+        return Ok(AppExitInfo::fatal(
+            "`--exit-after-turn` requires an initial prompt.",
+        ));
+    }
     let remote_auth_token = remote_auth_token_env
         .as_deref()
         .map(read_remote_auth_token_from_env_var)
@@ -1575,6 +1602,7 @@ async fn run_interactive_tui(
         codex_config::LoaderOverrides::default(),
         normalized_remote,
         remote_auth_token,
+        exit_after_turn,
     )
     .await
 }
@@ -2251,6 +2279,20 @@ mod tests {
         let app_server =
             app_server_from_args(["codex", "app-server", "--analytics-default-enabled"].as_ref());
         assert!(app_server.analytics_default_enabled);
+    }
+
+    #[test]
+    fn exit_after_turn_flag_parses_for_interactive_root() {
+        let cli = MultitoolCli::try_parse_from([
+            "codex",
+            "--remote",
+            "ws://127.0.0.1:4500",
+            "--exit-after-turn",
+            "hello",
+        ])
+        .expect("parse");
+        assert!(cli.remote.exit_after_turn);
+        assert_eq!(cli.interactive.prompt.as_deref(), Some("hello"));
     }
 
     #[test]

@@ -313,6 +313,14 @@ impl ChatWidget {
             SlashCommand::Memories => {
                 self.open_memories_popup();
             }
+            SlashCommand::Smarty => {
+                self.add_info_message(
+                    "Running Smarty setup for this worktree...".to_string(),
+                    Some("This is explicit opt-in; Codex will not create .smarty state unless /smarty is run.".to_string()),
+                );
+                let result = crate::smarty_setup::run(self.config.cwd.as_path());
+                self.add_info_message(result.message, result.hint);
+            }
             SlashCommand::Quit | SlashCommand::Exit => {
                 self.request_quit_without_confirmation();
             }
@@ -883,6 +891,7 @@ impl ChatWidget {
             | SlashCommand::Experimental
             | SlashCommand::AutoReview
             | SlashCommand::Memories
+            | SlashCommand::Smarty
             | SlashCommand::Quit
             | SlashCommand::Exit
             | SlashCommand::Logout
