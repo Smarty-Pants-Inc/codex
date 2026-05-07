@@ -5379,6 +5379,7 @@ async fn exit_after_turn_waits_for_completed_remote_turn_with_output() -> Result
                 turn: Turn {
                     id: turn_id.clone(),
                     items: Vec::new(),
+                    items_view: codex_app_server_protocol::TurnItemsView::NotLoaded,
                     status: TurnStatus::InProgress,
                     error: None,
                     started_at: None,
@@ -5400,6 +5401,7 @@ async fn exit_after_turn_waits_for_completed_remote_turn_with_output() -> Result
                 phase: None,
                 memory_citation: None,
             },
+            completed_at_ms: 0,
         }),
     ));
 
@@ -5409,6 +5411,7 @@ async fn exit_after_turn_waits_for_completed_remote_turn_with_output() -> Result
             turn: Turn {
                 id: turn_id,
                 items: Vec::new(),
+                items_view: codex_app_server_protocol::TurnItemsView::NotLoaded,
                 status: TurnStatus::Completed,
                 error: None,
                 started_at: None,
@@ -5435,6 +5438,7 @@ async fn exit_after_turn_fails_completed_remote_turn_without_output() -> Result<
             turn: Turn {
                 id: "turn-no-output".to_string(),
                 items: Vec::new(),
+                items_view: codex_app_server_protocol::TurnItemsView::NotLoaded,
                 status: TurnStatus::Completed,
                 error: None,
                 started_at: None,
@@ -5460,6 +5464,7 @@ async fn normal_remote_mode_ignores_turn_completion_for_process_exit() -> Result
             turn: Turn {
                 id: "turn-normal-mode".to_string(),
                 items: Vec::new(),
+                items_view: codex_app_server_protocol::TurnItemsView::NotLoaded,
                 status: TurnStatus::Completed,
                 error: None,
                 started_at: None,
