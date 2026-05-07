@@ -124,6 +124,14 @@ fn bootstrap_request_error(context: &'static str, err: TypedRequestError) -> col
     color_eyre::eyre::eyre!("{context}: {err}")
 }
 
+fn no_active_turn_interrupt_race(error: &TypedRequestError) -> bool {
+    matches!(
+        error,
+        TypedRequestError::Server { method, source }
+            if method == "turn/interrupt" && source.message == "no active turn to interrupt"
+    )
+}
+
 /// Data collected during the TUI bootstrap phase that the main event loop
 /// needs to configure the UI, telemetry, and initial rate-limit prefetch.
 ///
@@ -574,9 +582,9 @@ impl AppServerSession {
         turn_id: String,
     ) -> Result<()> {
         let request_id = self.next_request_id();
-        let _: TurnInterruptResponse = self
+        match self
             .client
-            .request_typed(ClientRequest::TurnInterrupt {
+            .request_typed::<TurnInterruptResponse>(ClientRequest::TurnInterrupt {
                 request_id,
                 params: TurnInterruptParams {
                     thread_id: thread_id.to_string(),
@@ -584,8 +592,17 @@ impl AppServerSession {
                 },
             })
             .await
-            .wrap_err("turn/interrupt failed in TUI")?;
-        Ok(())
+        {
+            Ok(_) => Ok(()),
+            Err(err) if no_active_turn_interrupt_race(&err) => {
+                tracing::debug!(
+                    %thread_id,
+                    "ignoring stale turn/interrupt response because the turn already completed"
+                );
+                Ok(())
+            }
+            Err(err) => Err(err).wrap_err("turn/interrupt failed in TUI"),
+        }
     }
 
     pub(crate) async fn startup_interrupt(&mut self, thread_id: ThreadId) -> Result<()> {
@@ -1532,6 +1549,39 @@ mod tests {
             .build()
             .await
             .expect("config should build")
+    }
+
+    #[test]
+    fn no_active_turn_interrupt_race_matches_completed_turn_error_only() {
+        let inactive_interrupt = TypedRequestError::Server {
+            method: "turn/interrupt".to_string(),
+            source: JSONRPCErrorError {
+                code: -32600,
+                message: "no active turn to interrupt".to_string(),
+                data: None,
+            },
+        };
+        assert!(no_active_turn_interrupt_race(&inactive_interrupt));
+
+        let wrong_method = TypedRequestError::Server {
+            method: "turn/steer".to_string(),
+            source: JSONRPCErrorError {
+                code: -32600,
+                message: "no active turn to interrupt".to_string(),
+                data: None,
+            },
+        };
+        assert!(!no_active_turn_interrupt_race(&wrong_method));
+
+        let different_interrupt_error = TypedRequestError::Server {
+            method: "turn/interrupt".to_string(),
+            source: JSONRPCErrorError {
+                code: -32600,
+                message: "expected active turn id turn-a but found turn-b".to_string(),
+                data: None,
+            },
+        };
+        assert!(!no_active_turn_interrupt_race(&different_interrupt_error));
     }
 
     #[tokio::test]
