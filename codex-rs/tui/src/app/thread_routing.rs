@@ -1468,17 +1468,25 @@ impl App {
                 None
             }
             ServerNotification::ItemCompleted(notification) => {
-                if !self.exit_after_turn_matches_target(
+                if !self.ensure_exit_after_turn_target(
                     &notification.thread_id,
                     Some(notification.turn_id.as_str()),
                 ) {
                     return None;
                 }
-                if let ThreadItem::AgentMessage { text, .. } = &notification.item
+                if let ThreadItem::AgentMessage { text, phase, .. } = &notification.item
                     && !text.trim().is_empty()
-                    && self.exit_after_turn_thread_id.is_some()
                 {
                     self.exit_after_turn_observed_assistant_output = true;
+                    if matches!(
+                        phase,
+                        Some(codex_protocol::models::MessagePhase::FinalAnswer)
+                    ) {
+                        return Some(ExitReason::UserRequested);
+                    }
+                    if self.exit_after_turn_observed_thread_idle {
+                        return Some(ExitReason::UserRequested);
+                    }
                 }
                 None
             }
@@ -1517,13 +1525,17 @@ impl App {
                 if matches!(
                     notification.status,
                     codex_app_server_protocol::ThreadStatus::Idle
-                ) && self.exit_after_turn_observed_assistant_output
-                    && self.exit_after_turn_matches_target(
-                        &notification.thread_id,
-                        /*turn_id*/ None,
-                    ) =>
+                ) && self.exit_after_turn_matches_target(
+                    &notification.thread_id,
+                    /*turn_id*/ None,
+                ) =>
             {
-                Some(ExitReason::UserRequested)
+                self.exit_after_turn_observed_thread_idle = true;
+                if self.exit_after_turn_observed_assistant_output {
+                    Some(ExitReason::UserRequested)
+                } else {
+                    None
+                }
             }
             _ => None,
         }

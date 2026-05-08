@@ -480,6 +480,7 @@ pub(crate) struct App {
     remote_app_server_auth_token: Option<String>,
     exit_after_turn: bool,
     exit_after_turn_observed_assistant_output: bool,
+    exit_after_turn_observed_thread_idle: bool,
     exit_after_turn_thread_id: Option<String>,
     exit_after_turn_turn_id: Option<String>,
     /// Set when the user confirms an update; propagated on exit.
@@ -901,6 +902,7 @@ See the Codex keymap documentation for supported actions and examples."
             remote_app_server_auth_token,
             exit_after_turn,
             exit_after_turn_observed_assistant_output: false,
+            exit_after_turn_observed_thread_idle: false,
             exit_after_turn_thread_id: None,
             exit_after_turn_turn_id: None,
             pending_update_action: None,

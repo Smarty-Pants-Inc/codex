@@ -3889,6 +3889,7 @@ async fn make_test_app() -> App {
         remote_app_server_auth_token: None,
         exit_after_turn: false,
         exit_after_turn_observed_assistant_output: false,
+        exit_after_turn_observed_thread_idle: false,
         exit_after_turn_thread_id: None,
         exit_after_turn_turn_id: None,
         pending_update_action: None,
@@ -3956,6 +3957,7 @@ async fn make_test_app_with_channels() -> (
             remote_app_server_auth_token: None,
             exit_after_turn: false,
             exit_after_turn_observed_assistant_output: false,
+            exit_after_turn_observed_thread_idle: false,
             exit_after_turn_thread_id: None,
             exit_after_turn_turn_id: None,
             pending_update_action: None,
@@ -5418,6 +5420,112 @@ async fn exit_after_turn_waits_for_completed_remote_turn_with_output() -> Result
                 completed_at: None,
                 duration_ms: Some(1),
             },
+        },
+    ));
+
+    assert!(matches!(
+        app.exit_after_turn_control_for_event(&event),
+        Some(ExitReason::UserRequested)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn exit_after_turn_exits_when_idle_precedes_completed_agent_message() -> Result<()> {
+    let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    app.exit_after_turn = true;
+    let thread_id = ThreadId::new().to_string();
+    let turn_id = "turn-idle-before-output".to_string();
+
+    assert!(
+        app.exit_after_turn_control_for_event(&ThreadBufferedEvent::Notification(
+            ServerNotification::TurnStarted(TurnStartedNotification {
+                thread_id: thread_id.clone(),
+                turn: Turn {
+                    id: turn_id.clone(),
+                    items: Vec::new(),
+                    items_view: codex_app_server_protocol::TurnItemsView::NotLoaded,
+                    status: TurnStatus::InProgress,
+                    error: None,
+                    started_at: None,
+                    completed_at: None,
+                    duration_ms: None,
+                },
+            }),
+        ))
+        .is_none()
+    );
+
+    assert!(
+        app.exit_after_turn_control_for_event(&ThreadBufferedEvent::Notification(
+            ServerNotification::ThreadStatusChanged(
+                codex_app_server_protocol::ThreadStatusChangedNotification {
+                    thread_id: thread_id.clone(),
+                    status: codex_app_server_protocol::ThreadStatus::Idle,
+                },
+            ),
+        ))
+        .is_none()
+    );
+
+    let event = ThreadBufferedEvent::Notification(ServerNotification::ItemCompleted(
+        ItemCompletedNotification {
+            thread_id,
+            turn_id,
+            item: ThreadItem::AgentMessage {
+                id: "item-agent".to_string(),
+                text: "OK".to_string(),
+                phase: None,
+                memory_citation: None,
+            },
+            completed_at_ms: 0,
+        },
+    ));
+
+    assert!(matches!(
+        app.exit_after_turn_control_for_event(&event),
+        Some(ExitReason::UserRequested)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn exit_after_turn_exits_on_completed_final_answer_without_turn_completed() -> Result<()> {
+    let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
+    app.exit_after_turn = true;
+    let thread_id = ThreadId::new().to_string();
+    let turn_id = "turn-final-answer".to_string();
+
+    assert!(
+        app.exit_after_turn_control_for_event(&ThreadBufferedEvent::Notification(
+            ServerNotification::TurnStarted(TurnStartedNotification {
+                thread_id: thread_id.clone(),
+                turn: Turn {
+                    id: turn_id.clone(),
+                    items: Vec::new(),
+                    items_view: codex_app_server_protocol::TurnItemsView::NotLoaded,
+                    status: TurnStatus::InProgress,
+                    error: None,
+                    started_at: None,
+                    completed_at: None,
+                    duration_ms: None,
+                },
+            }),
+        ))
+        .is_none()
+    );
+
+    let event = ThreadBufferedEvent::Notification(ServerNotification::ItemCompleted(
+        ItemCompletedNotification {
+            thread_id,
+            turn_id,
+            item: ThreadItem::AgentMessage {
+                id: "item-agent".to_string(),
+                text: "OK".to_string(),
+                phase: Some(codex_protocol::models::MessagePhase::FinalAnswer),
+                memory_citation: None,
+            },
+            completed_at_ms: 0,
         },
     ));
 

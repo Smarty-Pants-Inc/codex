@@ -48,6 +48,7 @@ pub(super) async fn make_test_app() -> App {
         remote_app_server_auth_token: None,
         exit_after_turn: false,
         exit_after_turn_observed_assistant_output: false,
+        exit_after_turn_observed_thread_idle: false,
         exit_after_turn_thread_id: None,
         exit_after_turn_turn_id: None,
         pending_update_action: None,
