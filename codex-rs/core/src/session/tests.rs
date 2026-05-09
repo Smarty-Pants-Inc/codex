@@ -167,8 +167,102 @@ use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
+use tracing::field::Field;
+use tracing::field::Visit;
+use tracing::subscriber::DefaultGuard;
+use tracing_subscriber::Layer;
+use tracing_subscriber::Registry;
+use tracing_subscriber::layer::Context as SubscriberContext;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
 
 mod guardian_tests;
+
+#[derive(Clone, Debug)]
+struct RecordedTurnSpan {
+    id: String,
+    parent_id: Option<String>,
+    turn_id: Option<String>,
+}
+
+#[derive(Clone, Default)]
+struct TurnSpanRecorder {
+    spans: Arc<std::sync::Mutex<Vec<RecordedTurnSpan>>>,
+}
+
+impl TurnSpanRecorder {
+    fn install() -> (Self, DefaultGuard) {
+        let recorder = Self::default();
+        let subscriber = Registry::default().with(recorder.clone());
+        let guard = tracing::subscriber::set_default(subscriber);
+        (recorder, guard)
+    }
+
+    fn recorded_spans(&self) -> Vec<RecordedTurnSpan> {
+        self.spans.lock().expect("recorder lock").clone()
+    }
+}
+
+#[derive(Default)]
+struct TurnSpanFieldVisitor {
+    otel_name: Option<String>,
+    turn_id: Option<String>,
+}
+
+impl TurnSpanFieldVisitor {
+    fn record_value(&mut self, field: &Field, value: String) {
+        match field.name() {
+            "otel.name" => self.otel_name = Some(value),
+            "turn.id" => self.turn_id = Some(value),
+            _ => {}
+        }
+    }
+}
+
+impl Visit for TurnSpanFieldVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.record_value(field, value.to_string());
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+        self.record_value(field, format!("{value:?}").trim_matches('"').to_string());
+    }
+}
+
+impl<S> Layer<S> for TurnSpanRecorder
+where
+    S: tracing::Subscriber,
+    S: for<'lookup> LookupSpan<'lookup>,
+{
+    fn on_new_span(
+        &self,
+        attrs: &tracing::span::Attributes<'_>,
+        id: &tracing::Id,
+        ctx: SubscriberContext<'_, S>,
+    ) {
+        if attrs.metadata().name() != "turn" {
+            return;
+        }
+        let mut visitor = TurnSpanFieldVisitor::default();
+        attrs.record(&mut visitor);
+        if visitor.otel_name.as_deref() != Some("session_task.turn") {
+            return;
+        }
+        let parent_id = attrs
+            .parent()
+            .cloned()
+            .or_else(|| ctx.current_span().id().cloned())
+            .map(|parent| format!("{parent:?}"));
+        self.spans
+            .lock()
+            .expect("recorder lock")
+            .push(RecordedTurnSpan {
+                id: format!("{id:?}"),
+                parent_id,
+                turn_id: visitor.turn_id,
+            });
+    }
+}
 
 fn permission_profile_for_sandbox_policy(sandbox_policy: &SandboxPolicy) -> PermissionProfile {
     PermissionProfile::from_legacy_sandbox_policy(sandbox_policy)
@@ -7629,6 +7723,18 @@ async fn interrupt_accounts_active_goal_before_pausing() -> anyhow::Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn active_goal_continuation_runs_again_after_no_tool_turn() -> anyhow::Result<()> {
+    run_active_goal_continuation_no_tool_turn().await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn active_goal_continuation_turn_spans_do_not_nest() -> anyhow::Result<()> {
+    let (turn_spans, _tracing_guard) = TurnSpanRecorder::install();
+    run_active_goal_continuation_no_tool_turn().await?;
+    assert_turn_spans_do_not_nest(&turn_spans);
+    Ok(())
+}
+
+async fn run_active_goal_continuation_no_tool_turn() -> anyhow::Result<()> {
     let server = start_mock_server().await;
     let mut builder = test_codex().with_config(|config| {
         config
@@ -7701,6 +7807,34 @@ async fn active_goal_continuation_runs_again_after_no_tool_turn() -> anyhow::Res
     .await??;
 
     Ok(())
+}
+
+fn assert_turn_spans_do_not_nest(turn_spans: &TurnSpanRecorder) {
+    let recorded_spans = turn_spans.recorded_spans();
+    let recorded_turn_ids = recorded_spans
+        .iter()
+        .filter_map(|span| span.turn_id.as_deref())
+        .collect::<Vec<_>>();
+    assert!(
+        recorded_spans.len() >= 3,
+        "expected to record at least three turn spans, got {recorded_turn_ids:?}"
+    );
+    let turn_span_ids = recorded_spans
+        .iter()
+        .map(|span| span.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let nested_turn_spans = recorded_spans
+        .iter()
+        .filter(|span| {
+            span.parent_id
+                .as_deref()
+                .is_some_and(|parent_id| turn_span_ids.contains(parent_id))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        nested_turn_spans.is_empty(),
+        "goal continuation turn spans must not be children of previous turn spans: {nested_turn_spans:#?}; all spans: {recorded_spans:#?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

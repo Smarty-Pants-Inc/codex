@@ -774,12 +774,22 @@ impl Session {
             if !cleared_active_turn {
                 return;
             }
-            if let Err(err) = self
-                .goal_runtime_apply(GoalRuntimeEvent::MaybeContinueIfIdle)
-                .await
-            {
-                warn!("failed to apply goal runtime maybe-continue event: {err}");
-            }
+            let session = Arc::clone(self);
+            // This runs while the completed turn span is still entered. Detach
+            // the idle continuation probe from that span so auto-started goal
+            // turns do not become children of prior turns and accumulate an
+            // ever-growing tracing scope.
+            tokio::spawn(
+                async move {
+                    if let Err(err) = session
+                        .goal_runtime_apply(GoalRuntimeEvent::MaybeContinueIfIdle)
+                        .await
+                    {
+                        warn!("failed to apply goal runtime maybe-continue event: {err}");
+                    }
+                }
+                .instrument(Span::none()),
+            );
         }
     }
 
