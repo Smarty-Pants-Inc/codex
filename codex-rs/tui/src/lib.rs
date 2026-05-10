@@ -126,6 +126,7 @@ mod frames;
 mod get_git_diff;
 mod goal_display;
 mod history_cell;
+mod hooks_rpc;
 mod ide_context;
 pub(crate) mod insert_history;
 pub use insert_history::insert_history_lines;
@@ -163,6 +164,7 @@ mod shimmer;
 mod skills_helpers;
 mod slash_command;
 mod smarty_setup;
+mod startup_hooks_review;
 mod status;
 mod status_indicator_widget;
 mod streaming;
@@ -257,6 +259,8 @@ pub(crate) mod test_support;
 
 use crate::onboarding::onboarding_screen::OnboardingScreenArgs;
 use crate::onboarding::onboarding_screen::run_onboarding_app;
+use crate::startup_hooks_review::StartupHooksReviewOutcome;
+use crate::startup_hooks_review::maybe_run_startup_hooks_review;
 use crate::tui::Tui;
 pub use cli::Cli;
 use codex_arg0::Arg0DispatchPaths;
@@ -1498,7 +1502,7 @@ async fn run_ratatui_app(
 
     let use_alt_screen = determine_alt_screen_mode(no_alt_screen, config.tui_alternate_screen);
     tui.set_alt_screen_enabled(use_alt_screen);
-    let app_server = match app_server {
+    let mut app_server = match app_server {
         Some(app_server) => app_server,
         None => match start_app_server(
             &app_server_target,
@@ -1524,6 +1528,12 @@ async fn run_ratatui_app(
         },
     };
 
+    let startup_hooks_browser =
+        match maybe_run_startup_hooks_review(&mut app_server, &mut tui, &config).await? {
+            StartupHooksReviewOutcome::Continue => None,
+            StartupHooksReviewOutcome::OpenHooksBrowser(data) => Some(data),
+        };
+
     let app_result = App::run(
         &mut tui,
         app_server,
@@ -1543,6 +1553,7 @@ async fn run_ratatui_app(
         exit_after_turn,
         state_db,
         environment_manager,
+        startup_hooks_browser,
     )
     .await;
 
