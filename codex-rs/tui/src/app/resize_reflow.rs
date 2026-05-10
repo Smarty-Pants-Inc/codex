@@ -228,6 +228,41 @@ impl App {
         crate::resize_reflow_cap::resize_reflow_max_rows(self.config.terminal_resize_reflow)
     }
 
+    /// Keep long-running inline sessions from growing terminal/multiplexer scrollback forever.
+    ///
+    /// Resize reflow already caps the rows Codex replays on resume/thread switch/resize, but a
+    /// session that stays open for days can still append unbounded live history. Once the live
+    /// scrollback has drifted past the configured cap plus a small hysteresis window, purge the
+    /// Codex-owned scrollback and queue a capped replay from `transcript_cells`.
+    pub(super) fn maybe_compact_live_scrollback_after_draw(
+        &mut self,
+        tui: &mut tui::Tui,
+    ) -> Result<()> {
+        if !self.terminal_resize_reflow_enabled()
+            || self.overlay.is_some()
+            || self.initial_history_replay_buffer.is_some()
+        {
+            return Ok(());
+        }
+
+        let Some(max_rows) = self.resize_reflow_max_rows() else {
+            return Ok(());
+        };
+        if tui.terminal.scrollback_history_rows()
+            <= Self::live_scrollback_reflow_threshold(max_rows)
+        {
+            return Ok(());
+        }
+
+        self.reflow_transcript_now(tui)?;
+        tui.frame_requester().schedule_frame();
+        Ok(())
+    }
+
+    pub(super) fn live_scrollback_reflow_threshold(max_rows: usize) -> usize {
+        max_rows.saturating_add(std::cmp::max(1, max_rows / 2))
+    }
+
     fn clear_terminal_for_resize_replay(&mut self, tui: &mut tui::Tui) -> Result<()> {
         if tui.is_alt_screen_active() {
             tui.terminal.clear_visible_screen()?;

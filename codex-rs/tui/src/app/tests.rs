@@ -4055,6 +4055,12 @@ async fn capped_resize_reflow_renders_recent_suffix_only() {
     );
 }
 
+#[test]
+fn live_scrollback_reflow_threshold_adds_hysteresis() {
+    assert_eq!(App::live_scrollback_reflow_threshold(1), 2);
+    assert_eq!(App::live_scrollback_reflow_threshold(1_000), 1_500);
+}
+
 #[tokio::test]
 async fn uncapped_resize_reflow_renders_all_cells_when_row_cap_absent() {
     let (mut app, _rx, _op_rx) = make_test_app_with_channels().await;

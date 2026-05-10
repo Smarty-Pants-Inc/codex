@@ -165,6 +165,8 @@ where
     pub last_known_cursor_pos: Position,
     /// Count of visible history rows rendered above the viewport in inline mode.
     visible_history_rows: u16,
+    /// Count of Codex-owned scrollback rows inserted since the last scrollback purge.
+    scrollback_history_rows: usize,
 }
 
 impl<B> Drop for Terminal<B>
@@ -242,6 +244,7 @@ where
             last_known_screen_size: screen_size,
             last_known_cursor_pos: cursor_pos,
             visible_history_rows: 0,
+            scrollback_history_rows: 0,
         }
     }
 
@@ -505,6 +508,7 @@ where
         queue!(self.backend, Clear(crossterm::terminal::ClearType::Purge))?;
         self.set_cursor_position(home)?;
         std::io::Write::flush(&mut self.backend)?;
+        self.scrollback_history_rows = 0;
         self.previous_buffer_mut().reset();
         Ok(())
     }
@@ -520,6 +524,7 @@ where
         self.set_cursor_position(home)?;
         std::io::Write::flush(&mut self.backend)?;
         self.visible_history_rows = 0;
+        self.scrollback_history_rows = 0;
         self.previous_buffer_mut().reset();
         Ok(())
     }
@@ -539,6 +544,7 @@ where
         std::io::Write::flush(&mut self.backend)?;
         self.last_known_cursor_pos = Position { x: 0, y: 0 };
         self.visible_history_rows = 0;
+        self.scrollback_history_rows = 0;
         self.previous_buffer_mut().reset();
         Ok(())
     }
@@ -547,11 +553,18 @@ where
         self.visible_history_rows
     }
 
+    pub fn scrollback_history_rows(&self) -> usize {
+        self.scrollback_history_rows
+    }
+
     pub(crate) fn note_history_rows_inserted(&mut self, inserted_rows: u16) {
         self.visible_history_rows = self
             .visible_history_rows
             .saturating_add(inserted_rows)
             .min(self.viewport_area.top());
+        self.scrollback_history_rows = self
+            .scrollback_history_rows
+            .saturating_add(inserted_rows as usize);
     }
 
     /// Clears the inactive buffer and swaps it with the current buffer
@@ -942,6 +955,23 @@ mod tests {
             actual.contains(&expected),
             "expected terminal output to contain cursor style {expected:?}, got {actual:?}"
         );
+    }
+
+    #[test]
+    fn terminal_tracks_total_scrollback_rows_separately_from_visible_rows() {
+        let mut terminal =
+            Terminal::with_options(CaptureBackend::new(/*width*/ 2, /*height*/ 4))
+                .expect("terminal");
+        terminal.set_viewport_area(Rect::new(0, 2, 2, 2));
+
+        terminal.note_history_rows_inserted(10);
+
+        assert_eq!(terminal.visible_history_rows(), 2);
+        assert_eq!(terminal.scrollback_history_rows(), 10);
+
+        terminal.clear_scrollback().expect("clear scrollback");
+
+        assert_eq!(terminal.scrollback_history_rows(), 0);
     }
 
     #[test]

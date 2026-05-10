@@ -1170,6 +1170,7 @@ See the Codex keymap documentation for supported actions and examples."
                             }
                         })?;
                     }
+                    self.maybe_compact_live_scrollback_after_draw(tui)?;
                     if self.chat_widget.external_editor_state() == ExternalEditorState::Requested {
                         self.chat_widget
                             .set_external_editor_state(ExternalEditorState::Active);
