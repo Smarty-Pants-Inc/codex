@@ -80,6 +80,7 @@ use crate::workspace_command::AppServerWorkspaceCommandRunner;
 use crate::workspace_command::WorkspaceCommandRunner;
 use codex_ansi_escape::ansi_escape_line;
 use codex_app_server_client::AppServerRequestHandle;
+use codex_app_server_client::RemoteAppServerEndpoint;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::AddCreditsNudgeCreditType;
 use codex_app_server_protocol::AskForApproval;
@@ -126,7 +127,6 @@ use codex_app_server_protocol::TurnStatus;
 use codex_config::ConfigLayerStackOrdering;
 use codex_config::types::ApprovalsReviewer;
 use codex_config::types::ModelAvailabilityNuxConfig;
-use codex_core_plugins::PluginsManager;
 use codex_exec_server::EnvironmentManager;
 use codex_features::Feature;
 use codex_model_provider::create_model_provider;
@@ -195,6 +195,7 @@ mod loaded_threads;
 mod pending_interactive_replay;
 mod pets;
 mod platform_actions;
+mod plugin_mentions;
 mod replay_filter;
 mod resize_reflow;
 mod session_lifecycle;
@@ -499,8 +500,7 @@ pub(crate) struct App {
     pub(crate) feedback: codex_feedback::CodexFeedback,
     feedback_audience: FeedbackAudience,
     environment_manager: Arc<EnvironmentManager>,
-    remote_app_server_url: Option<String>,
-    remote_app_server_auth_token: Option<String>,
+    remote_app_server_endpoint: Option<RemoteAppServerEndpoint>,
     exit_after_turn: bool,
     exit_after_turn_observed_assistant_output: bool,
     exit_after_turn_observed_thread_idle: bool,
@@ -643,8 +643,7 @@ impl App {
         is_first_run: bool,
         entered_trust_nux: bool,
         should_prompt_windows_sandbox_nux_at_startup: bool,
-        remote_app_server_url: Option<String>,
-        remote_app_server_auth_token: Option<String>,
+        remote_app_server_endpoint: Option<RemoteAppServerEndpoint>,
         exit_after_turn: bool,
         state_db: Option<StateDbHandle>,
         environment_manager: Arc<EnvironmentManager>,
@@ -763,12 +762,15 @@ impl App {
                 &initial_prompt,
                 &initial_images,
             );
+        let startup_tooltip_override =
+            if Self::should_prepare_startup_tooltip_override(&session_selection) {
+                prepare_startup_tooltip_override(&mut config, &available_models, is_first_run).await
+            } else {
+                None
+            };
         let (mut chat_widget, initial_started_thread) = match session_selection {
             SessionSelection::StartFresh | SessionSelection::Exit => {
                 let started = app_server.start_thread(&config).await?;
-                let startup_tooltip_override =
-                    prepare_startup_tooltip_override(&mut config, &available_models, is_first_run)
-                        .await;
                 let init = crate::chatwidget::ChatWidgetInit {
                     config: config.clone(),
                     environment_manager: environment_manager.clone(),
@@ -926,8 +928,7 @@ See the Codex keymap documentation for supported actions and examples."
             feedback: feedback.clone(),
             feedback_audience,
             environment_manager,
-            remote_app_server_url,
-            remote_app_server_auth_token,
+            remote_app_server_endpoint,
             exit_after_turn,
             exit_after_turn_observed_assistant_output: false,
             exit_after_turn_observed_thread_idle: false,

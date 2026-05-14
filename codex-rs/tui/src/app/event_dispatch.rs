@@ -57,11 +57,8 @@ impl App {
             AppEvent::OpenResumePicker => {
                 let picker_app_server = match crate::start_app_server_for_picker(
                     &self.config,
-                    &match self.remote_app_server_url.clone() {
-                        Some(websocket_url) => crate::AppServerTarget::Remote {
-                            websocket_url,
-                            auth_token: self.remote_app_server_auth_token.clone(),
-                        },
+                    &match self.remote_app_server_endpoint.clone() {
+                        Some(endpoint) => crate::AppServerTarget::Remote { endpoint },
                         None => crate::AppServerTarget::Embedded,
                     },
                     self.state_db.clone(),
@@ -759,9 +756,6 @@ impl App {
             AppEvent::UpdateModel(model) => {
                 self.chat_widget.set_model(&model);
             }
-            AppEvent::UpdateCollaborationMode(mask) => {
-                self.chat_widget.set_collaboration_mask(mask);
-            }
             AppEvent::UpdatePersonality(personality) => {
                 self.on_update_personality(personality);
             }
@@ -1256,7 +1250,7 @@ impl App {
                 }
             }
             AppEvent::RefreshPluginMentions => {
-                self.refresh_plugin_mentions();
+                self.refresh_plugin_mentions(app_server);
             }
             AppEvent::PluginMentionsLoaded { mut plugins } => {
                 if !self.config.features.enabled(Feature::Plugins) {
