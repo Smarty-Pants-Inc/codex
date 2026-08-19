@@ -1,0 +1,44 @@
+name: smarty-ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'mergify/merge-queue/**'
+      - 'tmp-mergify/merge-queue/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smarty-ci:
+    name: smarty-ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-ci
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: just fmt-check
+      - name: Check parity crates
+        run: >-
+          cargo check
+          -p codex-context-fragments
+          -p codex-prompts
+          -p codex-state
+          -p codex-goal-extension
+          -p codex-app-server-protocol
+          -p codex-core
+          -p codex-cli
+      - name: Test parity state and prompt crates
+        run: cargo test -p codex-prompts -p codex-state
