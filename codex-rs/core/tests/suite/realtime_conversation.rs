@@ -1952,7 +1952,7 @@ async fn assert_transport_close_tail_flush(
             assert!(tokio::time::Instant::now() < deadline);
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(response_mock.single_request().message_input_texts("user").iter().any(|text| text
+        assert!(response_mock.single_request().message_input_texts("developer").iter().any(|text| text
             == "<realtime_delegation>\n  <source>transcript_tail_flush</source>\n  <input>The user just ended their realtime session. Here is the remaining handoff/transcript tail. You probably do not have to do anything; acknowledge the handoff unless the transcript itself asks for something.</input>\n  <transcript_delta>user: transport tail</transcript_delta>\n</realtime_delegation>"));
     } else {
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -4177,8 +4177,8 @@ async fn inbound_handoff_request_starts_turn() -> Result<()> {
     .await;
 
     let request = response_mock.single_request();
-    let user_texts = request.message_input_texts("user");
-    assert!(user_texts.iter().any(|text| text
+    let developer_texts = request.message_input_texts("developer");
+    assert!(developer_texts.iter().any(|text| text
         == "<realtime_delegation>\n  <input>text from realtime</input>\n  <transcript_delta>user: text from realtime</transcript_delta>\n</realtime_delegation>"));
 
     realtime_server.shutdown().await;
@@ -4277,8 +4277,8 @@ async fn inbound_handoff_request_uses_active_transcript() -> Result<()> {
     .await;
 
     let request = response_mock.single_request();
-    let user_texts = request.message_input_texts("user");
-    assert!(user_texts.iter().any(|text| text
+    let developer_texts = request.message_input_texts("developer");
+    assert!(developer_texts.iter().any(|text| text
         == "<realtime_delegation>\n  <input>ignored</input>\n  <transcript_delta>assistant: assistant context\nuser: delegated query\nassistant: assist confirm\nuser: ignored</transcript_delta>\n</realtime_delegation>"));
 
     realtime_server.shutdown().await;
@@ -4410,14 +4410,14 @@ async fn inbound_handoff_request_sends_transcript_delta_after_each_handoff() -> 
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 2);
 
-    let first_user_texts = requests[0].message_input_texts("user");
-    assert!(first_user_texts.iter().any(|text| text
+    let first_developer_texts = requests[0].message_input_texts("developer");
+    assert!(first_developer_texts.iter().any(|text| text
         == "<realtime_delegation>\n  <input>first question</input>\n  <transcript_delta>user: first question</transcript_delta>\n</realtime_delegation>"));
 
-    let second_user_texts = requests[1].message_input_texts("user");
-    assert!(second_user_texts.iter().any(|text| text
+    let second_developer_texts = requests[1].message_input_texts("developer");
+    assert!(second_developer_texts.iter().any(|text| text
         == "<realtime_delegation>\n  <input>second question</input>\n  <transcript_delta>user: second question</transcript_delta>\n</realtime_delegation>"));
-    assert!(!second_user_texts.iter().any(|text| text
+    assert!(!second_developer_texts.iter().any(|text| text
         == "<realtime_delegation>\n  <input>second question</input>\n  <transcript_delta>user: first question\nuser: second question</transcript_delta>\n</realtime_delegation>"));
 
     realtime_server.shutdown().await;
@@ -4530,9 +4530,9 @@ async fn conversation_close_routes_only_remaining_transcript_tail_once() -> Resu
 
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 2);
-    assert!(requests[0].message_input_texts("user").iter().any(|text| text
+    assert!(requests[0].message_input_texts("developer").iter().any(|text| text
         == "<realtime_delegation>\n  <input>already handed off</input>\n  <transcript_delta>user: already handed off</transcript_delta>\n</realtime_delegation>"));
-    assert!(requests[1].message_input_texts("user").iter().any(|text| text
+    assert!(requests[1].message_input_texts("developer").iter().any(|text| text
         == "<realtime_delegation>\n  <source>transcript_tail_flush</source>\n  <input>The user just ended their realtime session. Here is the remaining handoff/transcript tail. You probably do not have to do anything; acknowledge the handoff unless the transcript itself asks for something.</input>\n  <transcript_delta>assistant: remaining answer\nuser: remaining question</transcript_delta>\n</realtime_delegation>"));
 
     realtime_server.shutdown().await;
@@ -5115,19 +5115,24 @@ async fn inbound_handoff_request_steers_active_turn() -> Result<()> {
 
     let first_body: Value = serde_json::from_slice(&requests[0]).expect("parse first request");
     let second_body: Value = serde_json::from_slice(&requests[1]).expect("parse second request");
-    let first_texts = message_input_texts(&first_body, "user");
-    let second_texts = message_input_texts(&second_body, "user");
+    let first_user_texts = message_input_texts(&first_body, "user");
+    let second_user_texts = message_input_texts(&second_body, "user");
+    let first_developer_texts = message_input_texts(&first_body, "developer");
+    let second_developer_texts = message_input_texts(&second_body, "developer");
+    let expected_delegation = "<realtime_delegation>\n  <input>steer via realtime</input>\n  <transcript_delta>user: steer via realtime</transcript_delta>\n</realtime_delegation>";
 
-    assert!(first_texts.iter().any(|text| text == "first prompt"));
+    assert!(first_user_texts.iter().any(|text| text == "first prompt"));
     assert!(
-        !first_texts
+        !first_developer_texts
             .iter()
-            .any(|text| text
-                == "<realtime_delegation>\n  <input>steer via realtime</input>\n  <transcript_delta>user: steer via realtime</transcript_delta>\n</realtime_delegation>")
+            .any(|text| text == expected_delegation)
     );
-    assert!(second_texts.iter().any(|text| text == "first prompt"));
-    assert!(second_texts.iter().any(|text| text
-        == "<realtime_delegation>\n  <input>steer via realtime</input>\n  <transcript_delta>user: steer via realtime</transcript_delta>\n</realtime_delegation>"));
+    assert!(second_user_texts.iter().any(|text| text == "first prompt"));
+    assert!(
+        second_developer_texts
+            .iter()
+            .any(|text| text == expected_delegation)
+    );
 
     realtime_server.shutdown().await;
     api_server.shutdown().await;
@@ -5259,11 +5264,15 @@ async fn inbound_handoff_request_starts_turn_and_does_not_block_realtime_audio()
     let requests = api_server.requests().await;
     assert_eq!(requests.len(), 1);
     let first_body: Value = serde_json::from_slice(&requests[0]).expect("parse first request");
-    let first_texts = message_input_texts(&first_body, "user");
+    let first_developer_texts = message_input_texts(&first_body, "developer");
     let expected_text = format!(
         "<realtime_delegation>\n  <input>{delegated_text}</input>\n  <transcript_delta>user: {delegated_text}</transcript_delta>\n</realtime_delegation>"
     );
-    assert!(first_texts.iter().any(|text| text == &expected_text));
+    assert!(
+        first_developer_texts
+            .iter()
+            .any(|text| text == &expected_text)
+    );
 
     realtime_server.shutdown().await;
     api_server.shutdown().await;

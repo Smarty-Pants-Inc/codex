@@ -2203,7 +2203,7 @@ async fn handle_handoff_output(
         RealtimeEventParser::RealtimeV2 => match handoff_output {
             RealtimeOutbound::StandaloneHandoff { text, phase: _ } => {
                 if let Err(err) = writer
-                    .send_conversation_item_create(text, ConversationTextRole::User)
+                    .send_conversation_item_create(text, ConversationTextRole::Developer)
                     .await
                 {
                     Err(err)
@@ -2215,7 +2215,7 @@ async fn handle_handoff_output(
             }
             RealtimeOutbound::StandaloneSpeech { text } => {
                 if let Err(err) = writer
-                    .send_conversation_item_create(text, ConversationTextRole::User)
+                    .send_conversation_item_create(text, ConversationTextRole::Developer)
                     .await
                 {
                     Err(err)
@@ -2244,7 +2244,7 @@ async fn handle_handoff_output(
                     }
                 }
                 writer
-                    .send_conversation_item_create(text, ConversationTextRole::User)
+                    .send_conversation_item_create(text, ConversationTextRole::Developer)
                     .await
             }
             RealtimeOutbound::CompletedHandoff {

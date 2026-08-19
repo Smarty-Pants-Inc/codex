@@ -21,7 +21,7 @@ impl AdditionalContextUserFragment {
 
 impl ContextualUserFragment for AdditionalContextUserFragment {
     fn role(&self) -> &'static str {
-        "user"
+        "developer"
     }
 
     fn content_kind(&self) -> ContentItemKind {

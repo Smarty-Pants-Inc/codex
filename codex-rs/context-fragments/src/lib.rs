@@ -7,3 +7,4 @@ pub use additional_context::AdditionalContextUserFragment;
 pub use annotated_content::AnnotatedContent;
 pub use fragment::ContextualUserFragment;
 pub use fragment::RenderedFragment;
+pub use fragment::normalize_contextual_role;

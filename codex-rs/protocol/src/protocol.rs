@@ -646,6 +646,8 @@ pub enum Op {
     RequestPermissionsResponse {
         /// Call id for the in-flight request.
         id: String,
+        /// Turn that originated the request.
+        turn_id: String,
         /// User-granted permissions.
         response: RequestPermissionsResponse,
     },

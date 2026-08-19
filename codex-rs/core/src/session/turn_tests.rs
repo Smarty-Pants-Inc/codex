@@ -5,7 +5,6 @@ use codex_protocol::ResponseItemId;
 use codex_protocol::items::AgentMessageContent;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
-use tracing_subscriber::prelude::*;
 
 struct RewriteAgentMessageContributor;
 
@@ -41,21 +40,14 @@ fn assistant_output_text(text: &str) -> ResponseItem {
 
 #[test]
 fn post_sampling_token_estimate_is_disabled_by_always_on_sinks() {
-    let feedback = codex_feedback::CodexFeedback::new();
-    let subscriber = tracing_subscriber::registry()
-        .with(feedback.logger_layer())
-        .with(tracing_subscriber::fmt::layer().with_filter(codex_state::log_db::default_filter()));
-
-    tracing::subscriber::with_default(subscriber, || {
-        tracing::callsite::rebuild_interest_cache();
-        assert!(!tracing::event_enabled!(
-            target: POST_SAMPLING_TOKEN_ESTIMATE_TARGET,
-            tracing::Level::TRACE,
-            turn_id,
-            estimated_token_count,
-            message
-        ));
-    });
+    assert!(
+        !codex_feedback::CodexFeedback::logger_filter()
+            .would_enable(POST_SAMPLING_TOKEN_ESTIMATE_TARGET, &tracing::Level::TRACE,)
+    );
+    assert!(
+        !codex_state::log_db::default_filter()
+            .would_enable(POST_SAMPLING_TOKEN_ESTIMATE_TARGET, &tracing::Level::TRACE,)
+    );
 }
 
 #[tokio::test]

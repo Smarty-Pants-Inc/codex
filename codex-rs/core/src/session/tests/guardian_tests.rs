@@ -197,7 +197,7 @@ async fn request_permissions_routes_to_guardian_when_reviewer_is_enabled() {
     let guardian_request = &guardian_requests[0];
     assert_eq!(guardian_request.path(), "/v1/responses");
     for request in &guardian_requests {
-        assert_eq!(request.message_input_image_urls("user"), [image_url]);
+        assert_eq!(request.message_input_image_urls("developer"), [image_url]);
     }
     assert!(guardian_request.body_contains_text("request_permissions"));
     assert!(guardian_request.body_contains_text("need network"));

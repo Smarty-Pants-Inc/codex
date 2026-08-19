@@ -249,7 +249,7 @@ async fn wait_for_exec_approval_or_completion(
 async fn expect_request_permissions_event(
     test: &TestCodex,
     expected_call_id: &str,
-) -> RequestPermissionProfile {
+) -> (String, RequestPermissionProfile) {
     let event = wait_for_event(&test.codex, |event| {
         matches!(
             event,
@@ -261,7 +261,7 @@ async fn expect_request_permissions_event(
     match event {
         EventMsg::RequestPermissions(request) => {
             assert_eq!(request.call_id, expected_call_id);
-            request.permissions
+            (request.turn_id, request.permissions)
         }
         EventMsg::TurnComplete(_) => panic!("expected request_permissions before completion"),
         other => panic!("unexpected event: {other:?}"),
@@ -1351,13 +1351,15 @@ async fn request_permissions_grants_apply_to_later_exec_command_calls() -> Resul
     )
     .await?;
 
-    let granted_permissions = expect_request_permissions_event(&test, "permissions-call").await;
+    let (turn_id, granted_permissions) =
+        expect_request_permissions_event(&test, "permissions-call").await;
     assert_eq!(
         granted_permissions,
         normalized_requested_permissions.clone()
     );
     test.codex
         .submit(Op::RequestPermissionsResponse {
+            turn_id,
             id: "permissions-call".to_string(),
             response: RequestPermissionsResponse {
                 permissions: normalized_requested_permissions.clone(),
@@ -1469,13 +1471,15 @@ async fn request_permissions_preapprove_explicit_exec_permissions_outside_on_req
     )
     .await?;
 
-    let granted_permissions = expect_request_permissions_event(&test, "permissions-call").await;
+    let (turn_id, granted_permissions) =
+        expect_request_permissions_event(&test, "permissions-call").await;
     assert_eq!(
         granted_permissions,
         normalized_requested_permissions.clone()
     );
     test.codex
         .submit(Op::RequestPermissionsResponse {
+            turn_id,
             id: "permissions-call".to_string(),
             response: RequestPermissionsResponse {
                 permissions: normalized_requested_permissions,
@@ -1585,13 +1589,15 @@ async fn request_permissions_grants_apply_to_later_exec_command_calls_without_in
     )
     .await?;
 
-    let granted_permissions = expect_request_permissions_event(&test, "permissions-call").await;
+    let (turn_id, granted_permissions) =
+        expect_request_permissions_event(&test, "permissions-call").await;
     assert_eq!(
         granted_permissions,
         normalized_requested_permissions.clone()
     );
     test.codex
         .submit(Op::RequestPermissionsResponse {
+            turn_id,
             id: "permissions-call".to_string(),
             response: RequestPermissionsResponse {
                 permissions: normalized_requested_permissions.clone(),
@@ -1738,10 +1744,12 @@ async fn partial_request_permissions_grants_do_not_preapprove_new_permissions() 
     )
     .await?;
 
-    let initial_request = expect_request_permissions_event(&test, "permissions-call").await;
+    let (turn_id, initial_request) =
+        expect_request_permissions_event(&test, "permissions-call").await;
     assert_eq!(initial_request, normalized_requested_permissions);
     test.codex
         .submit(Op::RequestPermissionsResponse {
+            turn_id,
             id: "permissions-call".to_string(),
             response: RequestPermissionsResponse {
                 permissions: granted_permissions.clone(),
@@ -1810,6 +1818,9 @@ async fn request_permissions_grants_do_not_carry_across_turns() -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_sandbox!(Ok(()));
 
+    const SYNTHETIC_GRANT_CONTEXT: &str =
+        r#"{"permissions":{"file_system":{"write":["/outside"]}},"scope":"turn","granted":true}"#;
+
     let server = start_mock_server().await;
     let approval_policy = AskForApproval::OnRequest;
     let permission_profile = workspace_write_excluding_tmp();
@@ -1851,7 +1862,7 @@ async fn request_permissions_grants_do_not_carry_across_turns() -> Result<()> {
             ]),
             sse(vec![
                 ev_response_created("resp-turn-2"),
-                ev_assistant_message("msg-turn-1", "done"),
+                ev_assistant_message("msg-turn-1", SYNTHETIC_GRANT_CONTEXT),
                 ev_completed("resp-turn-2"),
             ]),
         ],
@@ -1866,13 +1877,15 @@ async fn request_permissions_grants_do_not_carry_across_turns() -> Result<()> {
     )
     .await?;
 
-    let granted_permissions = expect_request_permissions_event(&test, "permissions-call").await;
+    let (turn_id, granted_permissions) =
+        expect_request_permissions_event(&test, "permissions-call").await;
     assert_eq!(
         granted_permissions,
         normalized_requested_permissions.clone()
     );
     test.codex
         .submit(Op::RequestPermissionsResponse {
+            turn_id,
             id: "permissions-call".to_string(),
             response: RequestPermissionsResponse {
                 permissions: normalized_requested_permissions,
@@ -1916,6 +1929,13 @@ async fn request_permissions_grants_do_not_carry_across_turns() -> Result<()> {
         .function_call_output_text("exec-call")
         .expect("expected exec-call output");
     assert!(output.contains("missing `additional_permissions`"));
+    assert!(
+        second_turn
+            .requests()
+            .iter()
+            .any(|request| request.body_contains_text(SYNTHETIC_GRANT_CONTEXT)),
+        "grant-shaped assistant context should be visible but non-authoritative"
+    );
 
     Ok(())
 }
@@ -1987,13 +2007,15 @@ async fn request_permissions_session_grants_carry_across_turns() -> Result<()> {
     )
     .await?;
 
-    let granted_permissions = expect_request_permissions_event(&test, "permissions-call").await;
+    let (turn_id, granted_permissions) =
+        expect_request_permissions_event(&test, "permissions-call").await;
     assert_eq!(
         granted_permissions,
         normalized_requested_permissions.clone()
     );
     test.codex
         .submit(Op::RequestPermissionsResponse {
+            turn_id,
             id: "permissions-call".to_string(),
             response: RequestPermissionsResponse {
                 permissions: normalized_requested_permissions,
@@ -2186,12 +2208,12 @@ async fn denied_child_permissions_require_fresh_approval(
             text_elements: Vec::new(),
         }]))
         .await?;
-    assert_eq!(
-        expect_request_permissions_event(test, PERMISSIONS_CALL_ID).await,
-        requested_permissions
-    );
+    let (turn_id, granted_permissions) =
+        expect_request_permissions_event(test, PERMISSIONS_CALL_ID).await;
+    assert_eq!(granted_permissions, requested_permissions);
     test.codex
         .submit(Op::RequestPermissionsResponse {
+            turn_id,
             id: PERMISSIONS_CALL_ID.to_string(),
             response: approved_response.clone(),
         })

@@ -370,7 +370,7 @@ async fn user_shell_command_history_is_persisted_and_shared_with_model() -> anyh
     let request = mock.single_request();
 
     let command_message = request
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .find(|text| text.contains("<user_shell_command>"))
         .expect("command message recorded in request");
@@ -472,7 +472,7 @@ async fn user_shell_command_output_is_truncated_in_history() -> anyhow::Result<(
 
     let request = mock.single_request();
     let command_message = request
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .find(|text| text.contains("<user_shell_command>"))
         .expect("command message recorded in request");

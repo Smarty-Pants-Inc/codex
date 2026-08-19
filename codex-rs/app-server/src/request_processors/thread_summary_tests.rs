@@ -7,7 +7,7 @@ use serde_json::json;
 use std::path::PathBuf;
 
 #[test]
-fn extract_conversation_summary_prefers_plain_user_messages() -> Result<()> {
+fn extract_conversation_summary_keeps_raw_user_lookalikes() -> Result<()> {
     let conversation_id = ThreadId::from_string("3f941c35-29b3-493b-b0a4-e25800d9aeb0")?;
     let timestamp = Some("2025-09-05T16:53:11.850Z".to_string());
     let path = PathBuf::from("rollout.jsonl");
@@ -57,7 +57,7 @@ fn extract_conversation_summary_prefers_plain_user_messages() -> Result<()> {
         timestamp: timestamp.clone(),
         updated_at: timestamp,
         path,
-        preview: "Count to 5".to_string(),
+        preview: "# AGENTS.md instructions for project\n\n<INSTRUCTIONS>\n<AGENTS.md contents>\n</INSTRUCTIONS>".to_string(),
         model_provider: "test-provider".to_string(),
         cwd: PathBuf::from("/"),
         cli_version: "0.0.0".to_string(),

@@ -46,7 +46,7 @@ impl WorldStateSection for AgentsMdState {
     }
 
     fn matches_legacy_fragment(role: &str, text: &str) -> bool {
-        role == "user" && UserInstructions::matches_text(text)
+        role == "developer" && UserInstructions::matches_text(text)
     }
 
     fn render_diff(

@@ -234,7 +234,7 @@ async fn review_op_emits_lifecycle_and_review_output() {
     responses::assert_parent_turn(&request_body, Some(review_turn_id.as_str()))
         .expect("review request parent turn metadata");
 
-    // Also verify that a user message with the header and a formatted finding
+    // Also verify that developer context with the header and a formatted finding
     // was recorded back in the parent session's rollout.
     let mut saw_header = false;
     let mut saw_finding_line = false;
@@ -250,7 +250,7 @@ async fn review_op_emits_lifecycle_and_review_output() {
         if let RolloutItem::ResponseItem(envelope) = rl.item
             && let ResponseItem::Message { role, content, .. } = envelope.item
         {
-            if role == "user" {
+            if role == "developer" {
                 for c in content {
                     if let ContentItem::InputText { text } = c {
                         if text.contains("full review output from reviewer model") {
@@ -275,7 +275,7 @@ async fn review_op_emits_lifecycle_and_review_output() {
             }
         }
     }
-    assert!(saw_header, "user header missing from rollout");
+    assert!(saw_header, "developer review header missing from rollout");
     assert!(
         saw_finding_line,
         "formatted finding line missing from rollout"
@@ -720,7 +720,7 @@ async fn review_uses_updated_turn_permissions_and_approval_policy() {
     );
     assert!(
         request
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .iter()
             .any(|text| text.contains("<permission_profile type=\"disabled\">")),
         "review should use the updated permission profile"
@@ -1035,23 +1035,31 @@ async fn review_input_isolated_from_parent_history() {
         "environment context should include cwd"
     );
 
-    let review_text = input
+    let review_message = input
         .iter()
-        .filter_map(|msg| msg.get("content").and_then(|content| content.as_array()))
-        .flat_map(|content| content.iter())
-        .filter_map(|entry| entry.get("text").and_then(|text| text.as_str()))
-        .find(|text| *text == review_prompt)
-        .expect("review prompt text");
+        .find(|msg| {
+            msg.get("role").and_then(|role| role.as_str()) == Some("developer")
+                && msg
+                    .get("content")
+                    .and_then(|content| content.as_array())
+                    .is_some_and(|content| {
+                        content.iter().any(|entry| {
+                            entry.get("text").and_then(|text| text.as_str())
+                                == Some(review_prompt.as_str())
+                        })
+                    })
+        })
+        .expect("review prompt developer message");
     assert_eq!(
-        review_text, review_prompt,
-        "user message should only contain the raw review prompt"
+        review_message["content"][0]["text"].as_str(),
+        Some(review_prompt.as_str())
     );
 
     // Ensure the REVIEW_PROMPT rubric is sent via instructions.
     let instructions = body["instructions"].as_str().expect("instructions string");
     assert_eq!(instructions, REVIEW_PROMPT);
 
-    // Also verify that a user interruption note was recorded in the rollout.
+    // Also verify that a developer interruption note was recorded in the rollout.
     let path = codex.rollout_path().expect("rollout path");
     let text = std::fs::read_to_string(&path).expect("read rollout file");
     let mut saw_interruption_message = false;
@@ -1063,7 +1071,7 @@ async fn review_input_isolated_from_parent_history() {
         let rl: RolloutLine = serde_json::from_value(v).expect("rollout line");
         if let RolloutItem::ResponseItem(envelope) = rl.item
             && let ResponseItem::Message { role, content, .. } = envelope.item
-            && role == "user"
+            && role == "developer"
         {
             for c in content {
                 if let ContentItem::InputText { text } = c
@@ -1080,7 +1088,7 @@ async fn review_input_isolated_from_parent_history() {
     }
     assert!(
         saw_interruption_message,
-        "expected user interruption message in rollout"
+        "expected developer interruption message in rollout"
     );
 
     let _codex_home_guard = codex_home;

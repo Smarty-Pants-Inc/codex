@@ -3547,7 +3547,7 @@ fn assert_v2_progress_update(request: &Value, expected_text: &str) {
             "type": "conversation.item.create",
             "item": {
                 "type": "message",
-                "role": "user",
+                "role": "developer",
                 "content": [{
                     "type": "input_text",
                     "text": format!("[BACKEND] {expected_text}")

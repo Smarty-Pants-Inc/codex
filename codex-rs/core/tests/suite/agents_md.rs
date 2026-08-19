@@ -77,7 +77,7 @@ async fn agents_instructions(mut builder: TestCodexBuilder) -> Result<String> {
 
     let request = resp_mock.single_request();
     request
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .find(|text| text.starts_with("# AGENTS.md instructions"))
         .ok_or_else(|| anyhow::anyhow!("instructions message not found"))
@@ -121,7 +121,7 @@ fn remove_agents_md_world_state_section(rollout_path: &Path) -> Result<()> {
 
 fn instruction_fragments(request: &responses::ResponsesRequest) -> Vec<String> {
     request
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .filter(|text| text.starts_with("# AGENTS.md instructions"))
         .collect()
@@ -408,7 +408,7 @@ async fn symlinked_cwd_uses_logical_parent_for_agents_discovery() -> Result<()> 
     test.submit_turn("hello").await?;
     let instructions = resp_mock
         .single_request()
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .find(|text| text.starts_with("# AGENTS.md instructions"))
         .expect("instructions message");
@@ -458,7 +458,7 @@ async fn selected_environment_sources_match_model_visible_instructions() -> Resu
     test.submit_turn("hello").await?;
     let instructions = resp_mock
         .single_request()
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .find(|text| text.starts_with("# AGENTS.md instructions"))
         .expect("instructions message");
@@ -1479,7 +1479,7 @@ async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()> 
         loop {
             if let Some(request) = child_mock.requests().into_iter().find(|request| {
                 request
-                    .message_input_texts("user")
+                    .message_input_texts("developer")
                     .iter()
                     .any(|text| text == SPAWN_CHILD_PROMPT)
             }) {
@@ -1515,22 +1515,18 @@ async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()> 
             "forked subagent should replay the parent's original structured input prefix"
         );
     } else {
-        let child_user_texts = child_request.message_input_texts("user");
-        assert_eq!(
-            child_user_texts
-                .iter()
-                .filter(|text| text.as_str() == SPAWN_SEED_PROMPT)
-                .count(),
-            0,
-            "fresh-context subagent should omit parent user history; observed: {child_user_texts:?}"
+        assert!(
+            child_request.message_input_texts("user").is_empty(),
+            "fresh-context subagent must not contain provider user messages"
         );
+        let child_developer_texts = child_request.message_input_texts("developer");
         assert_eq!(
-            child_user_texts
+            child_developer_texts
                 .iter()
                 .filter(|text| text.as_str() == SPAWN_CHILD_PROMPT)
                 .count(),
             1,
-            "fresh-context subagent should contain its own prompt exactly once; observed: {child_user_texts:?}"
+            "fresh-context subagent should contain its own developer prompt exactly once; observed: {child_developer_texts:?}"
         );
     }
 

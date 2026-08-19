@@ -592,7 +592,7 @@ fn assert_selected_skill_is_injected(request: &ResponsesRequest, expected_count:
     assert_selected_skill_catalog_available(request);
 
     let skill_fragments = request
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .filter(|text| text.starts_with("<skill>"))
         .collect::<Vec<_>>();

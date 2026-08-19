@@ -160,6 +160,8 @@ pub struct InProcessStartArgs {
     pub enable_codex_api_key_env: bool,
     /// Initialize params used for initial handshake.
     pub initialize: InitializeParams,
+    /// Whether this embedder explicitly allows interactive goal auto-continuation.
+    pub goal_auto_continue_enabled: bool,
     /// Capacity used for all runtime queues (clamped to at least 1).
     pub channel_capacity: usize,
 }
@@ -485,6 +487,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 installation_id,
                 code_mode_session_provider: None,
                 rpc_transport: AppServerRpcTransport::InProcess,
+                goal_auto_continue_enabled: args.goal_auto_continue_enabled,
                 remote_control_handle: None,
                 plugin_startup_tasks: crate::PluginStartupTasks::Start,
             }));
@@ -853,6 +856,7 @@ mod tests {
                 capabilities: None,
             },
             channel_capacity,
+            goal_auto_continue_enabled: false,
         };
         let mut client = start(args).await.expect("in-process runtime should start");
         client._test_codex_home = Some(codex_home);

@@ -154,6 +154,16 @@ assistant turn 1"#
 }
 
 #[test]
+fn current_thread_section_keeps_raw_user_lookalikes() {
+    let text = "<environment_context><cwd>/tmp</cwd></environment_context>";
+    let items = vec![user_message(text)];
+
+    let section = build_current_thread_section(&items).expect("current thread section");
+
+    assert!(section.contains(text));
+}
+
+#[test]
 fn current_thread_turn_truncation_preserves_start_and_end() {
     let items = vec![user_message(long_turn_text(/*index*/ 0))];
     let section = build_current_thread_section(&items).expect("current thread section");

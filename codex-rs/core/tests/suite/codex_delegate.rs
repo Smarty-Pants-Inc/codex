@@ -331,13 +331,13 @@ async fn codex_delegate_rejects_skill_mcp_dependency_installation_without_prompt
     );
 
     let request = response_mock.single_request();
-    let user_texts = request.message_input_texts("user");
+    let developer_texts = request.message_input_texts("developer");
     assert!(
-        user_texts.iter().any(|text| {
+        developer_texts.iter().any(|text| {
             text.contains("<skill>\n<name>dependency-skill</name>")
                 && text.contains("Review dependency instructions.")
         }),
-        "review should continue with the selected skill after rejecting its MCP dependency: {user_texts:?}"
+        "review should continue with the selected skill after rejecting its MCP dependency: {developer_texts:?}"
     );
 }
 

@@ -50,7 +50,7 @@ struct ActiveReplaySegment<'a> {
     previous_turn_settings: Option<PreviousTurnSettings>,
     reference_context_item: TurnReferenceContextItem,
     world_state_replay: Vec<&'a RolloutItem>,
-    base_replacement_history: Option<&'a [ResponseItemEnvelope]>,
+    base_replacement_history: Option<(&'a [ResponseItemEnvelope], bool)>,
     window: Option<ReconstructedWindow>,
 }
 
@@ -61,13 +61,21 @@ fn turn_ids_are_compatible(active_turn_id: Option<&str>, item_turn_id: Option<&s
 
 fn finalize_active_segment<'a>(
     active_segment: ActiveReplaySegment<'a>,
-    base_replacement_history: &mut Option<&'a [ResponseItemEnvelope]>,
+    base_replacement_history: &mut Option<(&'a [ResponseItemEnvelope], bool)>,
     previous_turn_settings: &mut Option<PreviousTurnSettings>,
     reference_context_item: &mut TurnReferenceContextItem,
     world_state_replay: &mut Vec<&'a RolloutItem>,
     window: &mut Option<ReconstructedWindow>,
     pending_rollback_turns: &mut usize,
 ) {
+    // A replacement-history checkpoint remains a valid reconstruction base even when a later
+    // rollback crosses it: the forward replay below applies that rollback to the checkpoint.
+    if base_replacement_history.is_none()
+        && let Some(segment_base_replacement_history) = active_segment.base_replacement_history
+    {
+        *base_replacement_history = Some(segment_base_replacement_history);
+    }
+
     // Thread rollback drops the newest surviving real user-message boundaries. In replay, that
     // means skipping the next finalized segments that contain a non-contextual
     // `EventMsg::UserMessage`.
@@ -79,14 +87,6 @@ fn finalize_active_segment<'a>(
     }
 
     world_state_replay.extend(active_segment.world_state_replay);
-
-    // A surviving replacement-history checkpoint is a complete history base. Once we
-    // know the newest surviving one, older rollout items do not affect rebuilt history.
-    if base_replacement_history.is_none()
-        && let Some(segment_base_replacement_history) = active_segment.base_replacement_history
-    {
-        *base_replacement_history = Some(segment_base_replacement_history);
-    }
 
     if window.is_none() {
         *window = active_segment.window;
@@ -137,7 +137,7 @@ impl Session {
                 _ => None,
             })
         };
-        let mut base_replacement_history: Option<&[ResponseItemEnvelope]> = None;
+        let mut base_replacement_history: Option<(&[ResponseItemEnvelope], bool)> = None;
         let mut previous_turn_settings = None;
         let mut reference_context_item = TurnReferenceContextItem::NeverSet;
         let mut world_state_replay = Vec::new();
@@ -182,7 +182,8 @@ impl Session {
                     if active_segment.base_replacement_history.is_none()
                         && let Some(replacement_history) = &compacted.replacement_history
                     {
-                        active_segment.base_replacement_history = Some(replacement_history);
+                        active_segment.base_replacement_history =
+                            Some((replacement_history, !compacted.message.is_empty()));
                         rollout_suffix = &rollout_items[index + 1..];
                     }
                 }
@@ -317,10 +318,16 @@ impl Session {
         )
         .unwrap_or(u64::MAX);
 
+        // Non-root histories are normalized before a root fork is materialized. A non-root
+        // destination still migrates legacy persisted task messages after rollback replay.
+        let migrate_non_root_user_roles = turn_context.session_source.is_non_root_agent();
         let mut history = ContextManager::new();
         let mut saw_legacy_compaction_without_replacement_history = false;
-        if let Some(base_replacement_history) = base_replacement_history {
-            history.replace_annotated(base_replacement_history.to_vec());
+        if let Some((base_replacement_history, has_local_summary)) = base_replacement_history {
+            history.replace_annotated(reconstructed_replacement_history(
+                base_replacement_history,
+                has_local_summary,
+            ));
         }
         // Materialize exact history semantics from the replay-derived suffix. The eventual lazy
         // design should keep this same replay shape, but drive it from a resumable reverse source
@@ -345,7 +352,10 @@ impl Session {
                     if let Some(replacement_history) = &compacted.replacement_history {
                         // This should actually never happen, because the reverse loop above (to build rollout_suffix)
                         // should stop before any compaction that has Some replacement_history
-                        history.replace_annotated(replacement_history.clone());
+                        history.replace_annotated(reconstructed_replacement_history(
+                            replacement_history,
+                            !compacted.message.is_empty(),
+                        ));
                     } else {
                         saw_legacy_compaction_without_replacement_history = true;
                         // Legacy rollouts without `replacement_history` should rebuild the
@@ -424,8 +434,12 @@ impl Session {
             previous_id: None,
             id: None,
         });
+        let mut history = history.into_annotated_items();
+        if migrate_non_root_user_roles {
+            history.iter_mut().for_each(migrate_replayed_user_role);
+        }
         RolloutReconstruction {
-            history: history.into_annotated_items(),
+            history,
             previous_turn_settings,
             reference_context_item,
             world_state_baseline,
@@ -434,6 +448,25 @@ impl Session {
             previous_window_id: window.previous_id,
             window_id: window.id,
         }
+    }
+}
+
+fn reconstructed_replacement_history(
+    replacement_history: &[ResponseItemEnvelope],
+    has_local_summary: bool,
+) -> Vec<ResponseItemEnvelope> {
+    let mut replacement_history = replacement_history.to_vec();
+    if has_local_summary && let Some(summary) = replacement_history.last_mut() {
+        migrate_replayed_user_role(summary);
+    }
+    replacement_history
+}
+
+fn migrate_replayed_user_role(item: &mut ResponseItemEnvelope) {
+    if let ResponseItem::Message { role, .. } = &mut item.item
+        && role == "user"
+    {
+        *role = "developer".to_string();
     }
 }
 

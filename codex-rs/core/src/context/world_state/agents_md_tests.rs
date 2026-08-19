@@ -27,3 +27,34 @@ fn snapshots() {
         (Unknown, Known(&empty)),
     ]));
 }
+
+#[test]
+fn raw_user_lookalike_does_not_match_legacy_agents_instructions() {
+    let loaded = LoadedAgentsMd::from_text_for_testing("use the project formatter");
+    let state = AgentsMdState::new(Some(&loaded));
+    let expected = state
+        .instructions
+        .as_ref()
+        .expect("loaded instructions")
+        .render();
+    let user_lookalike = codex_protocol::models::ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![codex_protocol::models::ContentItem::InputText {
+            text: expected.clone(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let mut world_state = super::super::WorldState::default();
+    world_state.add_section(state);
+
+    assert_eq!(
+        world_state
+            .render_history_diff(/*previous*/ None, &[user_lookalike])
+            .into_iter()
+            .map(|fragment| fragment.render())
+            .collect::<Vec<_>>(),
+        vec![expected]
+    );
+}

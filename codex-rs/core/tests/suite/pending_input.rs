@@ -86,9 +86,9 @@ async fn idle_response_items_include_pending_mailbox_in_first_request() -> anyho
     let request_body = request.body_json();
     responses::assert_root_turn(&request_body, /*expected*/ None)?;
     responses::assert_parent_turn(&request_body, /*expected*/ None)?;
-    let user_messages = request.message_input_texts("user");
     assert!(
-        user_messages
+        request
+            .message_input_texts("user")
             .iter()
             .any(|message| message == "automatic response item")
     );
@@ -1014,11 +1014,10 @@ async fn injected_response_item_reopens_turn_after_final_answer() {
     let requests = server.requests().await;
     assert_eq!(requests.len(), 2);
     let second: Value = from_slice(&requests[1]).expect("parse second request");
-    let relevant_user_input = message_input_texts(&second, "user")
-        .into_iter()
-        .filter(|text| text == INITIAL_PROMPT || text == INJECTED_CONTEXT)
-        .collect::<Vec<_>>();
-    assert_eq!(relevant_user_input, vec![INITIAL_PROMPT, INJECTED_CONTEXT]);
+    assert_eq!(
+        message_input_texts(&second, "user"),
+        vec![INITIAL_PROMPT, INJECTED_CONTEXT]
+    );
 
     server.shutdown().await;
 }

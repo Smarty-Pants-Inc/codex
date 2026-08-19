@@ -5,22 +5,25 @@ expression: "context_snapshot::format_labeled_requests_snapshot(\"rollback past 
 Scenario: rollback past compaction replay after rollback
 
 ## compaction request
-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-02:message/user:hello world
-03:message/assistant:FIRST_REPLY
-04:message/user:<SUMMARIZATION_PROMPT>
+00:message/developer[2]:
+    [01] <PERMISSIONS_INSTRUCTIONS>
+    [02] <ENVIRONMENT_CONTEXT:cwd=<CWD>>
+01:message/user:hello world
+02:message/assistant:FIRST_REPLY
+03:message/developer:<SUMMARIZATION_PROMPT>
 
 ## before rollback
 00:message/user:hello world
-01:message/user:<COMPACTION_SUMMARY>\nSUMMARY_ONLY_CONTEXT
-02:message/developer:<PERMISSIONS_INSTRUCTIONS>
-03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-04:message/user:EDITED_AFTER_COMPACT
+01:message/developer:<COMPACTION_SUMMARY>\nSUMMARY_ONLY_CONTEXT
+02:message/developer[2]:
+    [01] <PERMISSIONS_INSTRUCTIONS>
+    [02] <ENVIRONMENT_CONTEXT:cwd=<CWD>>
+03:message/user:EDITED_AFTER_COMPACT
 
 ## after rollback
 00:message/user:hello world
-01:message/user:<COMPACTION_SUMMARY>\nSUMMARY_ONLY_CONTEXT
-02:message/developer:<PERMISSIONS_INSTRUCTIONS>
-03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-04:message/user:AFTER_ROLLBACK
+01:message/developer:<COMPACTION_SUMMARY>\nSUMMARY_ONLY_CONTEXT
+02:message/developer[2]:
+    [01] <PERMISSIONS_INSTRUCTIONS>
+    [02] <ENVIRONMENT_CONTEXT:cwd=<CWD>>
+03:message/user:AFTER_ROLLBACK

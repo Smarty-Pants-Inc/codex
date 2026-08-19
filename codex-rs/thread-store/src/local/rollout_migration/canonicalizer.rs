@@ -123,7 +123,7 @@ impl LegacyRolloutCanonicalizer {
                 let hook = match &response.item {
                     ResponseItem::Message {
                         role, content, id, ..
-                    } if role == "user" => parse_hook_prompt_message(id.as_deref(), content),
+                    } if role == "developer" => parse_hook_prompt_message(id.as_deref(), content),
                     _ => None,
                 };
                 self.write_item(writer, &timestamp, RolloutItem::ResponseItem(response))

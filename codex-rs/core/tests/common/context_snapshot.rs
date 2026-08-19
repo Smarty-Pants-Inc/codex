@@ -107,7 +107,7 @@ pub fn format_response_items_snapshot(items: &[Value], options: &ContextSnapshot
                                             return None;
                                         }
                                         if options.strip_agents_md_user_context
-                                            && role == "user"
+                                            && role == "developer"
                                             && text.starts_with("# AGENTS.md instructions")
                                         {
                                             return None;
@@ -500,7 +500,7 @@ mod tests {
     fn full_text_mode_preserves_unredacted_text() {
         let items = vec![json!({
             "type": "message",
-            "role": "user",
+            "role": "developer",
             "content": [{
                 "type": "input_text",
                 "text": "# AGENTS.md instructions for /tmp/example\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>"
@@ -514,7 +514,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            r"00:message/user:# AGENTS.md instructions for /tmp/example\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>"
+            r"00:message/developer:# AGENTS.md instructions for /tmp/example\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>"
         );
     }
 
@@ -541,7 +541,7 @@ mod tests {
     fn redacted_text_mode_keeps_canonical_placeholders() {
         let items = vec![json!({
             "type": "message",
-            "role": "user",
+            "role": "developer",
             "content": [{
                 "type": "input_text",
                 "text": "# AGENTS.md instructions for /tmp/example\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>"
@@ -553,7 +553,7 @@ mod tests {
             &ContextSnapshotOptions::default().render_mode(ContextSnapshotRenderMode::RedactedText),
         );
 
-        assert_eq!(rendered, "00:message/user:<AGENTS_MD>");
+        assert_eq!(rendered, "00:message/developer:<AGENTS_MD>");
     }
 
     #[test]
@@ -637,10 +637,10 @@ mod tests {
     }
 
     #[test]
-    fn strip_agents_md_user_context_omits_agents_fragment_from_user_messages() {
+    fn strip_agents_md_user_context_omits_agents_fragment_from_developer_messages() {
         let items = vec![json!({
             "type": "message",
-            "role": "user",
+            "role": "developer",
             "content": [
                 {
                     "type": "input_text",
@@ -660,14 +660,17 @@ mod tests {
                 .strip_agents_md_user_context(),
         );
 
-        assert_eq!(rendered, "00:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>");
+        assert_eq!(
+            rendered,
+            "00:message/developer:<ENVIRONMENT_CONTEXT:cwd=<CWD>>"
+        );
     }
 
     #[test]
     fn redacted_text_mode_normalizes_environment_context_with_subagents() {
         let items = vec![json!({
             "type": "message",
-            "role": "user",
+            "role": "developer",
             "content": [{
                 "type": "input_text",
                 "text": "<environment_context>\n  <cwd>/tmp/example</cwd>\n  <shell>bash</shell>\n  <subagents>\n    - agent-1: atlas\n    - agent-2\n  </subagents>\n</environment_context>"
@@ -681,7 +684,7 @@ mod tests {
 
         assert_eq!(
             rendered,
-            "00:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>:subagents=2>"
+            "00:message/developer:<ENVIRONMENT_CONTEXT:cwd=<CWD>:subagents=2>"
         );
     }
 

@@ -251,6 +251,7 @@ await tools.request_permissions({
         .test
         .codex
         .submit(Op::RequestPermissionsResponse {
+            turn_id: request.turn_id,
             id: request.call_id,
             response: RequestPermissionsResponse {
                 permissions: Default::default(),

@@ -132,7 +132,7 @@ fn log_field<'a>(line: &'a str, name: &str) -> Option<&'a str> {
 }
 
 fn has_subagent_notification(req: &ResponsesRequest) -> bool {
-    req.message_input_texts("user")
+    req.message_input_texts("developer")
         .iter()
         .any(|text| text.contains("<subagent_notification>"))
 }
@@ -631,25 +631,22 @@ async fn subagent_start_replaces_session_start_and_injects_context() -> Result<(
     let user_prompt_submit_inputs = wait_for_hook_log(
         test.codex_home_path(),
         "user_prompt_submit_hook_log.jsonl",
-        /*expected_len*/ 2,
+        /*expected_len*/ 1,
     )
     .await?;
+    assert_eq!(user_prompt_submit_inputs.len(), 1);
     let parent_prompt_input = user_prompt_submit_inputs
         .iter()
         .find(|input| input["prompt"].as_str() == Some(TURN_1_PROMPT))
         .expect("parent prompt submit hook input should be logged");
     assert_eq!(parent_prompt_input.get("agent_id"), None);
     assert_eq!(parent_prompt_input.get("agent_type"), None);
-
-    let child_prompt_input = user_prompt_submit_inputs
-        .iter()
-        .find(|input| input["prompt"].as_str() == Some(CHILD_PROMPT))
-        .expect("child prompt submit hook input should be logged");
-    assert_eq!(
-        child_prompt_input["agent_id"].as_str(),
-        Some(spawned_id.as_str())
+    assert!(
+        user_prompt_submit_inputs
+            .iter()
+            .all(|input| input["prompt"].as_str() != Some(CHILD_PROMPT)),
+        "generated child prompts must not invoke user prompt submit hooks"
     );
-    assert_eq!(child_prompt_input["agent_type"].as_str(), Some("worker"));
 
     let session_start_inputs = wait_for_hook_log(
         test.codex_home_path(),

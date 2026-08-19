@@ -534,8 +534,8 @@ async fn agent_plugin_skills_use_shared_catalog_and_direct_child_discovery() -> 
         .single_request()
         .message_input_texts("user")
         .join("\n");
-    assert!(user_text.contains("acme.tools:review"));
-    assert!(!user_text.contains("AGENT_SKILL_TRUNCATED_TAIL"));
+    assert!(user_text.is_empty());
+    assert!(!developer_text.contains("AGENT_SKILL_TRUNCATED_TAIL"));
     let EventMsg::Warning(warning) = warning else {
         unreachable!("wait_for_event matched an Agent skill truncation warning")
     };
@@ -676,11 +676,11 @@ async fn legacy_plugin_skill_prompt_remains_complete() -> Result<()> {
     })
     .await;
 
-    let user_text = resp_mock
+    let developer_text = resp_mock
         .single_request()
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .join("\n");
-    assert!(user_text.contains(&skill_contents));
+    assert!(developer_text.contains(&skill_contents));
     Ok(())
 }
 
@@ -1293,12 +1293,11 @@ async fn explicitly_requested_mcp_waits_for_startup(request: ExplicitMcpRequest)
         );
     }
     if matches!(request, ExplicitMcpRequest::PluginSkill) {
-        let user_messages = model_request.message_input_texts("user");
         assert!(
-            user_messages
+            developer_messages
                 .iter()
                 .any(|message| message.contains("sample:sample-search")),
-            "expected explicitly requested skill instructions: {user_messages:?}"
+            "expected explicitly requested skill instructions: {developer_messages:?}"
         );
     }
     assert!(

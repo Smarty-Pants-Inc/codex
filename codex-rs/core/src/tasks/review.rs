@@ -33,12 +33,14 @@ use codex_thread_store::PersistContext;
 use super::SessionTask;
 use super::SessionTaskResult;
 
-#[derive(Clone, Copy)]
-pub(crate) struct ReviewTask;
+#[derive(Clone)]
+pub(crate) struct ReviewTask {
+    prompt: String,
+}
 
 impl ReviewTask {
-    pub(crate) fn new() -> Self {
-        Self
+    pub(crate) fn new(prompt: String) -> Self {
+        Self { prompt }
     }
 }
 
@@ -55,7 +57,7 @@ impl SessionTask for ReviewTask {
         self: Arc<Self>,
         session: Arc<Session>,
         ctx: Arc<TurnContext>,
-        input: Vec<TurnInput>,
+        _input: Vec<TurnInput>,
         cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
         session
@@ -63,19 +65,16 @@ impl SessionTask for ReviewTask {
             .session_telemetry
             .counter("codex.task.review", /*inc*/ 1, &[]);
 
-        let mut user_input = Vec::new();
-        for item in input {
-            match item {
-                TurnInput::UserInput { mut content, .. } => user_input.append(&mut content),
-                TurnInput::ResponseItem(_) | TurnInput::InterAgentCommunication(_) => {}
-            }
-        }
+        let prompt_input = vec![UserInput::Text {
+            text: self.prompt.clone(),
+            text_elements: Vec::new(),
+        }];
 
         // Start sub-codex conversation and get the receiver for events.
         let output = match start_review_conversation(
             session.clone(),
             ctx.clone(),
-            user_input,
+            prompt_input,
             cancellation_token.clone(),
         )
         .await
@@ -238,7 +237,7 @@ pub(crate) async fn exit_review_mode(
             &ctx,
             &[ResponseItem::Message {
                 id: Some(ResponseItemId::new("msg")),
-                role: "user".to_string(),
+                role: "developer".to_string(),
                 content: vec![ContentItem::InputText { text: user_message }],
                 phase: None,
                 internal_chat_message_metadata_passthrough: None,

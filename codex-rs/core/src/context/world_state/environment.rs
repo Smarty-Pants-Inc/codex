@@ -160,7 +160,7 @@ impl ContextualUserFragment for EnvironmentsState {
     }
 
     fn role(&self) -> &'static str {
-        "user"
+        "developer"
     }
 
     fn markers(&self) -> (&'static str, &'static str) {
@@ -198,7 +198,7 @@ impl ContextualUserFragment for RenderedEnvironments {
     }
 
     fn role(&self) -> &'static str {
-        "user"
+        "developer"
     }
 
     fn markers(&self) -> (&'static str, &'static str) {

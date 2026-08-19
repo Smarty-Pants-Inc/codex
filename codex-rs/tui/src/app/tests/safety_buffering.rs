@@ -298,18 +298,26 @@ async fn drive_until_request_count(
     }
 }
 
-fn user_input_texts(body: &Value) -> Vec<String> {
+fn input_texts(body: &Value, role: &str) -> Vec<String> {
     body.get("input")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter(|item| item.get("type").and_then(Value::as_str) == Some("message"))
-        .filter(|item| item.get("role").and_then(Value::as_str) == Some("user"))
+        .filter(|item| item.get("role").and_then(Value::as_str) == Some(role))
         .filter_map(|item| item.get("content").and_then(Value::as_array))
         .flatten()
         .filter(|span| span.get("type").and_then(Value::as_str) == Some("input_text"))
         .filter_map(|span| span.get("text").and_then(Value::as_str).map(str::to_owned))
         .collect()
+}
+
+fn user_input_texts(body: &Value) -> Vec<String> {
+    input_texts(body, "user")
+}
+
+fn developer_input_texts(body: &Value) -> Vec<String> {
+    input_texts(body, "developer")
 }
 
 fn user_message_count(thread: &Thread, prompt: &str) -> usize {
@@ -894,10 +902,16 @@ goals = true
         retry_request_index + 1
     };
     assert!(
-        user_input_texts(&request_bodies[goal_continuation_request_index])
+        developer_input_texts(&request_bodies[goal_continuation_request_index])
             .iter()
             .any(|text| text.contains(RETRY_GOAL)),
         "inherited goal continuation should resume after the explicit retry"
+    );
+    assert!(
+        !user_input_texts(&request_bodies[goal_continuation_request_index])
+            .iter()
+            .any(|text| text.contains(RETRY_GOAL)),
+        "goal continuation must not be serialized as user input"
     );
 
     if let Some(release_active_response) = release_active_response.take() {

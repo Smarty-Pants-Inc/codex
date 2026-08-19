@@ -74,7 +74,7 @@ pub(crate) enum ResolvedAppServerRequest {
 pub(super) struct PendingAppServerRequests {
     exec_approvals: HashMap<(String, String), AppServerRequestId>,
     file_change_approvals: HashMap<(String, String), AppServerRequestId>,
-    permissions_approvals: HashMap<(String, String), AppServerRequestId>,
+    permissions_approvals: HashMap<(String, String), (String, AppServerRequestId)>,
     user_inputs: HashMap<String, VecDeque<PendingUserInputRequest>>,
     mcp_requests: HashMap<McpRequestKey, AppServerRequestId>,
 }
@@ -138,7 +138,7 @@ impl PendingAppServerRequests {
                         Self::canonical_thread_id(&params.thread_id),
                         params.item_id.clone(),
                     ),
-                    request_id.clone(),
+                    (params.turn_id.clone(), request_id.clone()),
                 );
                 None
             }
@@ -241,25 +241,38 @@ impl PendingAppServerRequests {
                     })
                 })
                 .transpose()?,
-            AppCommand::RequestPermissionsResponse { id, response } => self
-                .permissions_approvals
-                .remove(&(thread_id, id.clone()))
-                .map(|request_id| {
-                    Ok::<AppServerRequestResolution, String>(AppServerRequestResolution {
-                        request_id,
-                        result: serde_json::to_value(PermissionsRequestApprovalResponse {
-                            permissions: granted_permission_profile_from_request(
-                                response.permissions.clone(),
-                            ),
-                            scope: response.scope.into(),
-                            strict_auto_review: response.strict_auto_review.then_some(true),
+            AppCommand::RequestPermissionsResponse {
+                id,
+                turn_id,
+                response,
+            } => {
+                let key = (thread_id, id.clone());
+                let request_id = self
+                    .permissions_approvals
+                    .get(&key)
+                    .filter(|(pending_turn_id, _)| pending_turn_id == turn_id)
+                    .map(|(_, request_id)| request_id.clone());
+                if request_id.is_some() {
+                    self.permissions_approvals.remove(&key);
+                }
+                request_id
+                    .map(|request_id| {
+                        Ok::<AppServerRequestResolution, String>(AppServerRequestResolution {
+                            request_id,
+                            result: serde_json::to_value(PermissionsRequestApprovalResponse {
+                                permissions: granted_permission_profile_from_request(
+                                    response.permissions.clone(),
+                                ),
+                                scope: response.scope.into(),
+                                strict_auto_review: response.strict_auto_review.then_some(true),
+                            })
+                            .map_err(|err| {
+                                format!("failed to serialize permissions approval response: {err}")
+                            })?,
                         })
-                        .map_err(|err| {
-                            format!("failed to serialize permissions approval response: {err}")
-                        })?,
                     })
-                })
-                .transpose()?,
+                    .transpose()?
+            }
             AppCommand::UserInputAnswer { id, response } => self
                 .pop_user_input_request_for_turn(id)
                 .map(|pending| {
@@ -328,9 +341,13 @@ impl PendingAppServerRequests {
             });
         }
 
-        if let Some(key) = self.permissions_approvals.iter().find_map(|(key, value)| {
-            (key.0 == thread_id && value == request_id).then(|| key.clone())
-        }) {
+        if let Some(key) =
+            self.permissions_approvals
+                .iter()
+                .find_map(|(key, (_, pending_request_id))| {
+                    (key.0 == thread_id && pending_request_id == request_id).then(|| key.clone())
+                })
+        {
             self.permissions_approvals.remove(&key);
             return Some(ResolvedAppServerRequest::PermissionsApproval {
                 thread_id: key.0,
@@ -372,7 +389,7 @@ impl PendingAppServerRequests {
             ServerRequest::PermissionsRequestApproval { request_id, .. } => self
                 .permissions_approvals
                 .values()
-                .any(|pending_request_id| pending_request_id == request_id),
+                .any(|(_, pending_request_id)| pending_request_id == request_id),
             ServerRequest::ToolRequestUserInput { request_id, .. } => {
                 self.user_inputs.values().any(|queue| {
                     queue
@@ -541,6 +558,7 @@ mod tests {
                 "item/permissions/requestApproval",
                 Op::RequestPermissionsResponse {
                     id: "shared-id".to_string(),
+                    turn_id: "turn-1".to_string(),
                     response: codex_protocol::request_permissions::RequestPermissionsResponse {
                         permissions: RequestPermissionProfile::default(),
                         scope: codex_protocol::request_permissions::PermissionGrantScope::Turn,
@@ -700,6 +718,7 @@ mod tests {
                 "thread-1",
                 &Op::RequestPermissionsResponse {
                     id: "perm-1".to_string(),
+                    turn_id: "turn-1".to_string(),
                     response: codex_protocol::request_permissions::RequestPermissionsResponse {
                         permissions: RequestPermissionProfile {
                             network: Some(NetworkPermissions {
@@ -782,6 +801,61 @@ mod tests {
                 ))
                 .collect(),
             }
+        );
+    }
+
+    #[test]
+    fn reused_permission_call_id_does_not_bind_delayed_response_to_new_turn() {
+        let mut pending = PendingAppServerRequests::default();
+        let cwd = AbsolutePathBuf::try_from(PathBuf::from(if cfg!(windows) {
+            r"C:\tmp"
+        } else {
+            "/tmp"
+        }))
+        .expect("path must be absolute");
+        let request = |request_id, turn_id: &str| ServerRequest::PermissionsRequestApproval {
+            request_id: AppServerRequestId::Integer(request_id),
+            params: PermissionsRequestApprovalParams {
+                thread_id: "thread-1".to_string(),
+                turn_id: turn_id.to_string(),
+                item_id: "perm-1".to_string(),
+                environment_id: None,
+                started_at_ms: 0,
+                cwd: cwd.clone(),
+                reason: None,
+                permissions: codex_app_server_protocol::RequestPermissionProfile {
+                    network: None,
+                    file_system: None,
+                },
+            },
+        };
+        let response = |turn_id: &str| Op::RequestPermissionsResponse {
+            id: "perm-1".to_string(),
+            turn_id: turn_id.to_string(),
+            response: codex_protocol::request_permissions::RequestPermissionsResponse {
+                permissions: Default::default(),
+                scope: codex_protocol::request_permissions::PermissionGrantScope::Turn,
+                strict_auto_review: false,
+            },
+        };
+
+        assert_eq!(pending.note_server_request(&request(7, "turn-a")), None);
+        let current = request(8, "turn-b");
+        assert_eq!(pending.note_server_request(&current), None);
+        assert_eq!(
+            pending
+                .take_resolution("thread-1", response("turn-a"))
+                .unwrap(),
+            None
+        );
+        assert!(pending.contains_server_request(&current));
+        assert_eq!(
+            pending
+                .take_resolution("thread-1", response("turn-b"))
+                .unwrap()
+                .expect("turn-b request should remain pending")
+                .request_id,
+            AppServerRequestId::Integer(8)
         );
     }
 

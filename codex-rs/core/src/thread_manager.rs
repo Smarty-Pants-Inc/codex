@@ -52,6 +52,7 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
@@ -190,6 +191,47 @@ struct ForkHistory {
     snapshot: ForkSnapshot,
     initial_history: InitialHistory,
     persistence: ForkPersistence,
+}
+
+fn initial_history_session_source(history: &InitialHistory) -> Option<&SessionSource> {
+    let items = match history {
+        InitialHistory::Resumed(resumed) => resumed.history.as_slice(),
+        InitialHistory::Forked(items) => items.as_slice(),
+        InitialHistory::New | InitialHistory::Cleared => return None,
+    };
+    items.iter().find_map(|item| match item {
+        RolloutItem::SessionMeta(meta_line) => Some(&meta_line.meta.source),
+        _ => None,
+    })
+}
+
+fn normalize_non_root_fork_history(history: &mut InitialHistory) {
+    let InitialHistory::Forked(items) = history else {
+        return;
+    };
+    items.retain_mut(|item| {
+        match item {
+            RolloutItem::ResponseItem(item) => migrate_user_role_to_developer(&mut item.item),
+            RolloutItem::Compacted(compacted) => {
+                if let Some(replacement_history) = &mut compacted.replacement_history {
+                    for item in replacement_history {
+                        migrate_user_role_to_developer(&mut item.item);
+                    }
+                }
+            }
+            RolloutItem::EventMsg(EventMsg::UserMessage(_)) => return false,
+            _ => {}
+        }
+        true
+    });
+}
+
+fn migrate_user_role_to_developer(item: &mut ResponseItem) {
+    if let ResponseItem::Message { role, .. } = item
+        && role == "user"
+    {
+        *role = "developer".to_string();
+    }
 }
 
 /// Preserve legacy `fork_thread(usize, ...)` callsites by mapping them to the
@@ -1256,14 +1298,26 @@ impl ThreadManager {
         client_mcp_extensions: ClientMcpExtensions,
         reserved_thread_id: Option<ThreadId>,
     ) -> CodexResult<NewThread> {
+        let source_is_non_root = prepared
+            .model_context
+            .iter()
+            .find_map(|item| match item {
+                RolloutItem::SessionMeta(meta_line) => Some(&meta_line.meta.source),
+                _ => None,
+            })
+            .is_some_and(SessionSource::is_non_root_agent);
         let history = InitialHistory::Resumed(ResumedHistory {
             conversation_id: prepared.source_thread_id,
             history: Arc::clone(&prepared.model_context),
             rollout_path: None,
         });
-        let fork_persistence = ForkPersistence::Referenced {
-            history_base: prepared.history_base,
-            inherited_item_count: prepared.model_context.len(),
+        let fork_persistence = if source_is_non_root {
+            ForkPersistence::Copied
+        } else {
+            ForkPersistence::Referenced {
+                history_base: prepared.history_base,
+                inherited_item_count: prepared.model_context.len(),
+            }
         };
         let result = self
             .fork_thread_with_initial_history(
@@ -1297,6 +1351,8 @@ impl ThreadManager {
             initial_history: history,
             persistence: fork_persistence,
         } = fork_history;
+        let source_is_non_root =
+            initial_history_session_source(&history).is_some_and(SessionSource::is_non_root_agent);
         // `forked_from_id()` describes this history's existing lineage. When
         // forking a resumed thread, the child copies the resumed thread itself.
         let source_thread_id = match &history {
@@ -1316,7 +1372,10 @@ impl ThreadManager {
             .await;
         let interrupted_marker =
             InterruptedTurnHistoryMarker::from_config_and_version(&config, multi_agent_version);
-        let history = fork_history_from_snapshot(snapshot, history, interrupted_marker);
+        let mut history = fork_history_from_snapshot(snapshot, history, interrupted_marker);
+        if source_is_non_root {
+            normalize_non_root_fork_history(&mut history);
+        }
         let agent_control = self.agent_control_for_config(&config);
         let options = StartThreadOptions {
             initial_history: history,

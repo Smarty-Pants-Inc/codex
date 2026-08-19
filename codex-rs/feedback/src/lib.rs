@@ -199,6 +199,19 @@ impl CodexFeedback {
         }
     }
 
+    pub fn logger_filter() -> Targets {
+        Targets::new()
+            .with_default(Level::TRACE)
+            .with_target("codex_http_client::transport", LevelFilter::DEBUG)
+            .with_target("codex_api::sse", LevelFilter::DEBUG)
+            // `tracing-log` checks legacy log records against their original
+            // target before re-emitting them as `log`; tungstenite TRACE
+            // includes full websocket frames and authenticated handshakes.
+            .with_target("tungstenite", LevelFilter::DEBUG)
+            .with_target("codex_api::responses_websocket_timing", LevelFilter::OFF)
+            .with_target("codex_core::post_sampling_token_estimate", LevelFilter::OFF)
+    }
+
     /// Returns a [`tracing_subscriber`] layer that captures diagnostic logs into this feedback
     /// ring buffer.
     ///
@@ -215,18 +228,7 @@ impl CodexFeedback {
             .with_target(false)
             // Capture diagnostics independently of `RUST_LOG` without filling the feedback ring
             // with high-volume request and response payloads.
-            .with_filter(
-                Targets::new()
-                    .with_default(Level::TRACE)
-                    .with_target("codex_http_client::transport", LevelFilter::DEBUG)
-                    .with_target("codex_api::sse", LevelFilter::DEBUG)
-                    // `tracing-log` checks legacy log records against their original
-                    // target before re-emitting them as `log`; tungstenite TRACE
-                    // includes full websocket frames and authenticated handshakes.
-                    .with_target("tungstenite", LevelFilter::DEBUG)
-                    .with_target("codex_api::responses_websocket_timing", LevelFilter::OFF)
-                    .with_target("codex_core::post_sampling_token_estimate", LevelFilter::OFF),
-            )
+            .with_filter(Self::logger_filter())
     }
 
     /// Returns a [`tracing_subscriber`] layer that collects structured metadata for feedback.

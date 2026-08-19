@@ -159,7 +159,7 @@ async fn environment_context_uses_external_current_time_on_each_turn() -> Result
             .with_timezone(&Local)
             .format("%Y-%m-%d")
             .to_string();
-        assert!(request.message_input_texts("user").iter().any(|text| {
+        assert!(request.message_input_texts("developer").iter().any(|text| {
             text.contains("<environment_context>")
                 && text.contains(&format!("<current_date>{current_date}</current_date>"))
         }));

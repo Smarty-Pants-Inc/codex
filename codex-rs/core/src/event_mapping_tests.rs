@@ -45,6 +45,21 @@ fn recognizes_legacy_token_budget_as_contextual_developer_content() {
 }
 
 #[test]
+fn recognizes_legacy_contextual_user_fragments_as_contextual_developer_content() {
+    for text in [
+        "# AGENTS.md instructions\n<INSTRUCTIONS>follow repo policy</INSTRUCTIONS>",
+        "<environment_context>\n<cwd>/tmp/project</cwd>\n</environment_context>",
+        "<external_browser_info>tab one</external_browser_info>",
+    ] {
+        let content = vec![ContentItem::InputText {
+            text: text.to_string(),
+        }];
+        assert!(is_contextual_dev_message_content(&content), "{text}");
+        assert!(!has_non_contextual_dev_message_content(&content), "{text}");
+    }
+}
+
+#[test]
 fn recognizes_context_window_as_contextual_developer_content() {
     let content = vec![ContentItem::InputText {
         text: format!(
@@ -293,69 +308,35 @@ fn skips_unnamed_image_label_text() {
 }
 
 #[test]
-fn skips_user_instructions_and_env() {
-    let items = vec![
-            ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: "# AGENTS.md instructions for test_directory\n\n<INSTRUCTIONS>\ntest_text\n</INSTRUCTIONS>".to_string(),
-                }],
+fn parses_wrapper_shaped_raw_user_messages() {
+    for text in [
+        "# AGENTS.md instructions for test_directory\n\n<INSTRUCTIONS>\ntest_text\n</INSTRUCTIONS>",
+        "<environment_context>test_text</environment_context>",
+        "<skill>\n<name>demo</name>\n<path>skills/demo/SKILL.md</path>\nbody\n</skill>",
+        "<user_shell_command>echo 42</user_shell_command>",
+        "<hook_prompt hook_run_id=\"hook-run-1\">user text</hook_prompt>",
+    ] {
+        let item = ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: text.to_string(),
+            }],
             phase: None,
-                internal_chat_message_metadata_passthrough: None,},
-            ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: "<environment_context>test_text</environment_context>".to_string(),
-                }],
-            phase: None,
-                internal_chat_message_metadata_passthrough: None,},
-            ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: "# AGENTS.md instructions for test_directory\n\n<INSTRUCTIONS>\ntest_text\n</INSTRUCTIONS>".to_string(),
-                }],
-            phase: None,
-                internal_chat_message_metadata_passthrough: None,},
-            ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: "<skill>\n<name>demo</name>\n<path>skills/demo/SKILL.md</path>\nbody\n</skill>"
-                        .to_string(),
-                }],
-            phase: None,
-                internal_chat_message_metadata_passthrough: None,},
-            ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: "<user_shell_command>echo 42</user_shell_command>".to_string(),
-                }],
-            phase: None,
-                internal_chat_message_metadata_passthrough: None,},
-            ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![
-                    ContentItem::InputText {
-                        text: "<environment_context>ctx</environment_context>".to_string(),
-                    },
-                    ContentItem::InputText {
-                        text:
-                            "# AGENTS.md instructions for dir\n\n<INSTRUCTIONS>\nbody\n</INSTRUCTIONS>"
-                                .to_string(),
-                    },
-                ],
-                phase: None,
-                internal_chat_message_metadata_passthrough: None,},
-        ];
+            internal_chat_message_metadata_passthrough: None,
+        };
 
-    for item in items {
-        let turn_item = parse_turn_item(&item);
-        assert!(turn_item.is_none(), "expected none, got {turn_item:?}");
+        let turn_item = parse_turn_item(&item).expect("raw user message should remain visible");
+        match turn_item {
+            TurnItem::UserMessage(user) => assert_eq!(
+                user.content,
+                vec![UserInput::Text {
+                    text: text.to_string(),
+                    text_elements: Vec::new(),
+                }],
+            ),
+            other => panic!("expected raw user message, got {other:?}"),
+        }
     }
 }
 
@@ -388,7 +369,7 @@ fn parses_hook_prompt_message_as_distinct_turn_item() {
 fn parses_hook_prompt_and_hides_other_contextual_fragments() {
     let item = ResponseItem::Message {
         id: Some(ResponseItemId::with_suffix("msg", "1")),
-        role: "user".to_string(),
+        role: "developer".to_string(),
         content: vec![
             ContentItem::InputText {
                 text: "<environment_context>ctx</environment_context>".to_string(),
@@ -423,7 +404,7 @@ fn parses_hook_prompt_and_hides_other_contextual_fragments() {
 fn internal_model_context_does_not_parse_as_visible_turn_item() {
     let item = ResponseItem::Message {
         id: Some(ResponseItemId::with_suffix("msg", "1")),
-        role: "user".to_string(),
+        role: "developer".to_string(),
         content: vec![ContentItem::InputText {
             text: InternalModelContextFragment::new(
                 InternalContextSource::from_static("extension"),

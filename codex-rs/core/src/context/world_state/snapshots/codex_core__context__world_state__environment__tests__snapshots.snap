@@ -5,7 +5,7 @@ expression: "render_section_cases(&[(Absent, Absent), (Absent, Known(&full)),\n(
 Absent -> Absent
 None
 
-Absent -> {"environments":{"devbox":{"cwd":"/workspace","shell":"bash","status":"available"},"laptop":{"cwd":"/repo","is_primary":true,"shell":"zsh","status":"available"}}} (role - user)
+Absent -> {"environments":{"devbox":{"cwd":"/workspace","shell":"bash","status":"available"},"laptop":{"cwd":"/repo","is_primary":true,"shell":"zsh","status":"available"}}} (role - developer)
 <environment_context>
   <environments>
     <environment id="devbox" primary="false">
@@ -19,7 +19,7 @@ Absent -> {"environments":{"devbox":{"cwd":"/workspace","shell":"bash","status":
   </environments>
 </environment_context>
 
-Unknown -> {"environments":{"devbox":{"cwd":"/workspace","shell":"bash","status":"available"},"laptop":{"cwd":"/repo","is_primary":true,"shell":"zsh","status":"available"}}} (role - user)
+Unknown -> {"environments":{"devbox":{"cwd":"/workspace","shell":"bash","status":"available"},"laptop":{"cwd":"/repo","is_primary":true,"shell":"zsh","status":"available"}}} (role - developer)
 <environment_context>
   <environments>
     <environment id="devbox" primary="false">
@@ -33,7 +33,7 @@ Unknown -> {"environments":{"devbox":{"cwd":"/workspace","shell":"bash","status"
   </environments>
 </environment_context>
 
-{"environments":{"devbox":{"cwd":"/workspace","status":"starting"},"laptop":{"cwd":"/repo","is_primary":true,"shell":"bash","status":"available"},"old":{"cwd":"/old","shell":"sh","status":"available"}}} -> {"environments":{"devbox":{"cwd":"/workspace","shell":"powershell","status":"available"},"laptop":{"cwd":"/repo","is_primary":true,"shell":"zsh","status":"available"},"remote":{"cwd":"/remote","status":"starting"}}} (role - user)
+{"environments":{"devbox":{"cwd":"/workspace","status":"starting"},"laptop":{"cwd":"/repo","is_primary":true,"shell":"bash","status":"available"},"old":{"cwd":"/old","shell":"sh","status":"available"}}} -> {"environments":{"devbox":{"cwd":"/workspace","shell":"powershell","status":"available"},"laptop":{"cwd":"/repo","is_primary":true,"shell":"zsh","status":"available"},"remote":{"cwd":"/remote","status":"starting"}}} (role - developer)
 <environment_context>
   <environments>
     <environment id="devbox" primary="false">
@@ -52,7 +52,7 @@ Unknown -> {"environments":{"devbox":{"cwd":"/workspace","shell":"bash","status"
   </environments>
 </environment_context>
 
-{"current_date":"2026-06-19","environments":{"local":{"cwd":"/repo","shell":"zsh","status":"available"}},"filesystem":"<filesystem><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>","network":"<network enabled=\"true\"><allowed>old.example.com</allowed></network>","timezone":"UTC"} -> {"current_date":"2026-06-20","environments":{"local":{"cwd":"/repo","shell":"zsh","status":"available"}},"filesystem":"<filesystem><permission_profile type=\"external\"><file_system type=\"external\" /></permission_profile></filesystem>","network":"<network enabled=\"true\"><allowed>new.example.com</allowed><denied>blocked.example.com</denied></network>","timezone":"America/Los_Angeles"} (role - user)
+{"current_date":"2026-06-19","environments":{"local":{"cwd":"/repo","shell":"zsh","status":"available"}},"filesystem":"<filesystem><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>","network":"<network enabled=\"true\"><allowed>old.example.com</allowed></network>","timezone":"UTC"} -> {"current_date":"2026-06-20","environments":{"local":{"cwd":"/repo","shell":"zsh","status":"available"}},"filesystem":"<filesystem><permission_profile type=\"external\"><file_system type=\"external\" /></permission_profile></filesystem>","network":"<network enabled=\"true\"><allowed>new.example.com</allowed><denied>blocked.example.com</denied></network>","timezone":"America/Los_Angeles"} (role - developer)
 <environment_context>
   <current_date>2026-06-20</current_date>
   <timezone>America/Los_Angeles</timezone>
@@ -60,7 +60,7 @@ Unknown -> {"environments":{"devbox":{"cwd":"/workspace","shell":"bash","status"
   <filesystem><permission_profile type="external"><file_system type="external" /></permission_profile></filesystem>
 </environment_context>
 
-Absent -> {"environments":{"remote":{"cwd":"C:\\windows","shell":"powershell","status":"available"}},"filesystem":"<filesystem><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>"} (role - user)
+Absent -> {"environments":{"remote":{"cwd":"C:\\windows","shell":"powershell","status":"available"}},"filesystem":"<filesystem><permission_profile type=\"disabled\"><file_system type=\"unrestricted\" /></permission_profile></filesystem>"} (role - developer)
 <environment_context>
   <cwd>C:\windows</cwd>
   <shell>powershell</shell>
@@ -70,7 +70,7 @@ Absent -> {"environments":{"remote":{"cwd":"C:\\windows","shell":"powershell","s
 {"environments":{"local":{"cwd":"/repo","status":"available"}}} -> {"environments":{"local":{"cwd":"/repo","shell":"zsh","status":"available"}}}
 None
 
-{"environments":{"local":{"cwd":"/repo","shell":"bash","status":"available"}}} -> {"environments":{}} (role - user)
+{"environments":{"local":{"cwd":"/repo","shell":"bash","status":"available"}}} -> {"environments":{}} (role - developer)
 <environment_context>
   <environments>
     <environment id="local" status="unavailable" />

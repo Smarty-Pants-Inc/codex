@@ -569,6 +569,7 @@ async fn remote_model_override_uses_catalog_model_for_strict_auto_review() -> Re
     assert_eq!(permissions_request.call_id, permissions_call_id);
     codex
         .submit(Op::RequestPermissionsResponse {
+            turn_id: permissions_request.turn_id,
             id: permissions_request.call_id,
             response: RequestPermissionsResponse {
                 permissions: permissions_request.permissions,

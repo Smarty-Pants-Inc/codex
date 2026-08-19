@@ -145,6 +145,7 @@ async fn permission_request_holds_an_elicitation_until_response() {
     session
         .notify_request_permissions_response(
             "call-1",
+            &turn_context.sub_id,
             RequestPermissionsResponse {
                 permissions: RequestPermissionProfile::default(),
                 scope: PermissionGrantScope::Turn,

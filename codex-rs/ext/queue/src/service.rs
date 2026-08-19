@@ -396,12 +396,12 @@ impl QueuedItemService {
         Ok(submission)
     }
 
-    async fn dispatch_if_idle(&self, thread_id: ThreadId) -> Result<(), QueueServiceError> {
+    async fn dispatch_if_idle(&self, thread_id: ThreadId) -> Result<bool, QueueServiceError> {
         let Some(manager) = self.thread_manager.upgrade() else {
-            return Ok(());
+            return Ok(false);
         };
         let Ok(thread) = manager.get_thread(thread_id).await else {
-            return Ok(());
+            return Ok(false);
         };
 
         loop {
@@ -412,7 +412,7 @@ impl QueuedItemService {
                 .into_iter()
                 .next()
             else {
-                return Ok(());
+                return Ok(true);
             };
             let queued_item_id = record.id.clone();
 
@@ -436,7 +436,7 @@ impl QueuedItemService {
             {
                 Ok(StartIfIdleSubmission::Started { .. }) => {
                     self.delete_locked(thread_id, queued_item_id).await?;
-                    return Ok(());
+                    return Ok(true);
                 }
                 Ok(StartIfIdleSubmission::NotSubmitted { reason }) => {
                     tracing::warn!(
@@ -445,7 +445,7 @@ impl QueuedItemService {
                         ?reason,
                         "core could not start queued user input"
                     );
-                    return Ok(());
+                    return Ok(false);
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -454,7 +454,7 @@ impl QueuedItemService {
                         %error,
                         "core could not start queued user input"
                     );
-                    return Ok(());
+                    return Ok(false);
                 }
             }
         }
@@ -547,11 +547,17 @@ where
                     level_id = input.thread_store.level_id(),
                     "queue extension received an invalid thread id"
                 );
+                input.continuation.block();
                 return;
             };
             let _guard = self.dispatch_guard(thread_id).await;
-            if let Err(error) = self.dispatch_if_idle(thread_id).await {
-                tracing::warn!(%thread_id, %error, "failed to dispatch queued user input");
+            match self.dispatch_if_idle(thread_id).await {
+                Ok(true) => {}
+                Ok(false) => input.continuation.block(),
+                Err(error) => {
+                    input.continuation.block();
+                    tracing::warn!(%thread_id, %error, "failed to dispatch queued user input");
+                }
             }
         })
     }

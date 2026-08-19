@@ -35,7 +35,6 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
-use codex_protocol::items::TurnItem;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::BaseInstructionsProvenance;
@@ -54,7 +53,6 @@ use codex_protocol::protocol::FileSystemPath;
 use codex_protocol::protocol::FileSystemSandboxEntry;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
 use codex_protocol::protocol::InterAgentCommunication;
-use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::NetworkSandboxPolicy;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SandboxPolicy;
@@ -107,25 +105,30 @@ fn parse_agent_id(id: &str) -> ThreadId {
     ThreadId::from_string(id).expect("agent id should be valid")
 }
 
-async fn wait_for_recorded_user_input(thread: &crate::CodexThread, expected: &[UserInput]) {
+async fn wait_for_recorded_developer_message(thread: &crate::CodexThread, expected_text: &str) {
     timeout(Duration::from_secs(5), async {
         loop {
-            let event = thread
-                .next_event()
-                .await
-                .expect("event stream should stay open");
-            if let EventMsg::ItemCompleted(ItemCompletedEvent {
-                item: TurnItem::UserMessage(item),
-                ..
-            }) = event.msg
-            {
-                assert_eq!(item.content, expected);
+            let history = thread.session.clone_history().await;
+            if history.raw_items().any(|item| {
+                let ResponseItem::Message { role, content, .. } = item else {
+                    return false;
+                };
+                role == "developer"
+                    && content.iter().any(|input| {
+                        matches!(
+                            input,
+                            ContentItem::InputText { text } | ContentItem::OutputText { text }
+                                if text == expected_text
+                        )
+                    })
+            }) {
                 return;
             }
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
     })
     .await
-    .expect("timed out waiting for recorded user input");
+    .expect("timed out waiting for developer message recording");
 }
 
 fn thread_manager() -> ThreadManager {
@@ -2636,14 +2639,7 @@ async fn send_input_interrupts_before_prompt() {
         .collect();
     assert_eq!(ops_for_agent.len(), 1);
     assert!(matches!(ops_for_agent[0], Op::Interrupt));
-    wait_for_recorded_user_input(
-        thread.thread.as_ref(),
-        &[UserInput::Text {
-            text: "hi".to_string(),
-            text_elements: Vec::new(),
-        }],
-    )
-    .await;
+    wait_for_recorded_developer_message(thread.thread.as_ref(), "hi").await;
 
     let _ = thread
         .thread
@@ -2680,20 +2676,7 @@ async fn send_input_accepts_structured_items() {
         .await
         .expect("send_input should succeed");
 
-    wait_for_recorded_user_input(
-        thread.thread.as_ref(),
-        &[
-            UserInput::Mention {
-                name: "drive".to_string(),
-                path: "app://google_drive".to_string(),
-            },
-            UserInput::Text {
-                text: "read the folder".to_string(),
-                text_elements: Vec::new(),
-            },
-        ],
-    )
-    .await;
+    wait_for_recorded_developer_message(thread.thread.as_ref(), "read the folder").await;
 
     let _ = thread
         .thread

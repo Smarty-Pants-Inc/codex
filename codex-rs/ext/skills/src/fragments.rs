@@ -75,7 +75,7 @@ pub(crate) struct SkillResourceAccess {
 
 impl ContextualUserFragment for SkillInstructions {
     fn role(&self) -> &'static str {
-        "user"
+        "developer"
     }
 
     fn content_kind(&self) -> ContentItemKind {

@@ -87,11 +87,12 @@ impl AppEventSender {
         &self,
         thread_id: ThreadId,
         id: String,
+        turn_id: String,
         response: RequestPermissionsResponse,
     ) {
         self.send(AppEvent::SubmitThreadOp {
             thread_id,
-            op: AppCommand::request_permissions_response(id, response),
+            op: AppCommand::request_permissions_response(id, turn_id, response),
         });
     }
 

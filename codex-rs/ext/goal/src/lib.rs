@@ -17,6 +17,7 @@ pub use api::GoalServiceError;
 pub use api::GoalSetOutcome;
 pub use api::GoalSetRequest;
 pub use api::GoalTokenBudgetUpdate;
+pub use extension::GoalAutoContinueCapability;
 pub use extension::GoalExtension;
 pub use extension::GoalExtensionConfig;
 pub use extension::install_with_backend;

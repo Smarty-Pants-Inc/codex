@@ -76,6 +76,7 @@ use codex_core::config::Config;
 use codex_core::config::ThreadStoreConfig;
 use codex_exec_server::EnvironmentManager;
 use codex_feedback::CodexFeedback;
+use codex_goal_extension::GoalAutoContinueCapability;
 use codex_goal_extension::GoalService;
 use codex_home::CodexHomeUserInstructionsProvider;
 use codex_login::AuthManager;
@@ -257,6 +258,7 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) installation_id: String,
     pub(crate) code_mode_session_provider: Option<Arc<dyn CodeModeSessionProvider>>,
     pub(crate) rpc_transport: AppServerRpcTransport,
+    pub(crate) goal_auto_continue_enabled: bool,
     pub(crate) remote_control_handle: Option<RemoteControlHandle>,
     pub(crate) plugin_startup_tasks: crate::PluginStartupTasks,
 }
@@ -281,6 +283,7 @@ impl MessageProcessor {
             installation_id,
             code_mode_session_provider,
             rpc_transport,
+            goal_auto_continue_enabled,
             remote_control_handle,
             plugin_startup_tasks,
         } = args;
@@ -306,6 +309,11 @@ impl MessageProcessor {
                 restriction_product,
             ),
         );
+        let goal_auto_continue_capability = if goal_auto_continue_enabled {
+            GoalAutoContinueCapability::Interactive
+        } else {
+            GoalAutoContinueCapability::Disabled
+        };
         let goal_service = Arc::new(GoalService::new());
         let extension_event_sink =
             app_server_extension_event_sink(outgoing.clone(), thread_state_manager.clone());
@@ -334,6 +342,7 @@ impl MessageProcessor {
                         analytics_events_client: analytics_events_client.clone(),
                         thread_manager: thread_manager.clone(),
                         goal_service: Arc::clone(&goal_service),
+                        goal_auto_continue_capability,
                         environment_manager: Arc::clone(&environment_manager_for_extensions),
                         executor_skill_provider: Arc::clone(&executor_skill_provider),
                         git_attribution_base_url: config.chatgpt_base_url.clone(),
@@ -473,6 +482,8 @@ impl MessageProcessor {
             thread_state_manager.clone(),
             state_db.clone(),
             Arc::clone(&goal_service),
+            goal_auto_continue_capability,
+            queue_service.clone(),
         );
         let thread_queue_processor = ThreadQueueRequestProcessor::new(
             Arc::clone(&thread_manager),

@@ -1984,6 +1984,18 @@ impl ResponseInputItem {
             phase: None,
         }
     }
+
+    pub fn from_developer_input(
+        items: Vec<UserInput>,
+        local_image_preparation: LocalImagePreparation,
+    ) -> Self {
+        let mut input = Self::from_user_input(items, local_image_preparation);
+        let Self::Message { role, .. } = &mut input else {
+            unreachable!("user input conversion always produces a message");
+        };
+        *role = "developer".to_string();
+        input
+    }
 }
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 pub struct SearchToolCallParams {

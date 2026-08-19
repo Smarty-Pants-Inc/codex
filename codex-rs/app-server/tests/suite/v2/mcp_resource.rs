@@ -288,7 +288,7 @@ async fn orchestrator_skill_can_read_referenced_resource_without_an_executor() -
     );
     assert!(
         first_request
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .into_iter()
             .all(|text| !text.starts_with("<skill>"))
     );
@@ -384,7 +384,7 @@ async fn orchestrator_skill_can_read_referenced_resource_without_an_executor() -
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 6);
     let skill_fragments = requests[5]
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .filter(|text| text.starts_with("<skill>"))
         .collect::<Vec<_>>();
@@ -466,7 +466,7 @@ async fn local_executor_does_not_expose_orchestrator_skills() -> Result<()> {
     );
     assert!(
         request
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .iter()
             .all(|text| !text.contains(SKILL_MARKER))
     );
@@ -538,7 +538,7 @@ enabled = false
     );
     assert!(
         request
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .iter()
             .all(|text| !text.contains(SKILL_MARKER))
     );
@@ -669,6 +669,7 @@ async fn mcp_resource_read_returns_error_for_unknown_thread() -> Result<()> {
             capabilities: None,
         },
         channel_capacity: in_process::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+        goal_auto_continue_enabled: false,
     })
     .await?;
 

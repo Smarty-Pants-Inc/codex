@@ -247,7 +247,11 @@ async fn run_compact_task_inner_impl(
     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
     sess.emit_turn_item_started(&turn_context, &compaction_item)
         .await;
-    let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
+    let mut initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
+    let ResponseInputItem::Message { role, .. } = &mut initial_input_for_turn else {
+        unreachable!("user input conversion always produces a message")
+    };
+    *role = "developer".to_string();
 
     let mut history = sess.clone_history().await;
     history.record_items(
@@ -548,9 +552,6 @@ fn compacted_user_message(
     let Some(TurnItem::UserMessage(user)) = crate::event_mapping::parse_turn_item(item) else {
         return None;
     };
-    if is_summary_message(&user.message()) {
-        return None;
-    }
     Some(CompactedUserMessage {
         message: user.message(),
         internal_chat_message_metadata_passthrough: match item {
@@ -566,6 +567,15 @@ fn compacted_user_message(
 
 pub(crate) fn is_summary_message(message: &str) -> bool {
     message.starts_with(format!("{SUMMARY_PREFIX}\n").as_str())
+}
+
+fn is_summary_item(item: &ResponseItem) -> bool {
+    matches!(
+        item,
+        ResponseItem::Message { role, content, .. }
+            if role == "developer"
+                && content_items_to_text(content).is_some_and(|text| is_summary_message(&text))
+    )
 }
 
 /// Inserts canonical initial context into compacted replacement history at the
@@ -595,18 +605,18 @@ pub(crate) fn insert_initial_context_before_last_real_user_or_summary(
             last_real_user_index = Some(i);
             break;
         }
-        let Some(TurnItem::UserMessage(user)) = crate::event_mapping::parse_turn_item(&item.item)
+        if is_summary_item(&item.item) {
+            last_user_or_summary_index.get_or_insert(i);
+            continue;
+        }
+        let Some(TurnItem::UserMessage(_)) = crate::event_mapping::parse_turn_item(&item.item)
         else {
             continue;
         };
-        // Compaction summaries are encoded as user messages, so track both:
-        // the last real user message (preferred insertion point) and the last
-        // user-message-like item (fallback summary insertion point).
+        // Raw user text remains a real user boundary even when it resembles a summary marker.
         last_user_or_summary_index.get_or_insert(i);
-        if !is_summary_message(&user.message()) {
-            last_real_user_index = Some(i);
-            break;
-        }
+        last_real_user_index = Some(i);
+        break;
     }
     let last_compaction_index = compacted_history
         .iter()
@@ -707,7 +717,7 @@ fn build_compacted_history_with_limit(
 
     history.push(ResponseItemEnvelope::new(ResponseItem::Message {
         id: None,
-        role: "user".to_string(),
+        role: "developer".to_string(),
         content: vec![ContentItem::InputText { text: summary_text }],
         phase: None,
         internal_chat_message_metadata_passthrough: None,

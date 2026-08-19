@@ -118,7 +118,7 @@ clock_source = "external"
         .with_timezone(&Local)
         .format("%Y-%m-%d")
         .to_string();
-    assert!(request.message_input_texts("user").iter().any(|text| {
+    assert!(request.message_input_texts("developer").iter().any(|text| {
         text.contains("<environment_context>")
             && text.contains(&format!("<current_date>{current_date}</current_date>"))
     }));

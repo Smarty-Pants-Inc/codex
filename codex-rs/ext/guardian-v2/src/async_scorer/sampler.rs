@@ -458,7 +458,7 @@ impl LunaSampler {
         }
         input.push(ResponseItem::Message {
             id: None,
-            role: "user".to_owned(),
+            role: "developer".to_owned(),
             content: request
                 .input
                 .into_iter()

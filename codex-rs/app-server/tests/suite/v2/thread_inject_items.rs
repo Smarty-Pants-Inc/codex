@@ -224,7 +224,7 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history() -> Resu
         .collect::<Vec<_>>();
     assert_eq!(
         persisted_additional_context,
-        vec![("developer", Some(true)), ("user", None)]
+        vec![("developer", Some(true)), ("developer", Some(true))]
     );
 
     let injected_value = serde_json::to_value(&injected_item)?;

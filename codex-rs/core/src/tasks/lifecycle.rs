@@ -1,5 +1,6 @@
 use codex_extension_api::ExtensionData;
 use codex_extension_api::ThreadIdleCause;
+use codex_extension_api::ThreadIdleContinuation;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TurnAbortReason;
@@ -55,13 +56,14 @@ impl Session {
         if self.input_queue.has_trigger_turn_mailbox_items().await {
             return;
         }
-
+        let continuation = ThreadIdleContinuation::default();
         for contributor in self.services.extensions.thread_lifecycle_contributors() {
             contributor
                 .on_thread_idle(codex_extension_api::ThreadIdleInput {
                     cause,
                     session_store: &self.services.session_extension_data,
                     thread_store: &self.services.thread_extension_data,
+                    continuation: &continuation,
                 })
                 .await;
         }

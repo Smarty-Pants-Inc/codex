@@ -774,6 +774,7 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_managed_config()
+        .with_goal_auto_continue()
         .build_initialized()
         .await?;
 
@@ -808,6 +809,7 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_managed_config()
+        .with_goal_auto_continue()
         .build_initialized()
         .await?;
 
@@ -911,6 +913,7 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_managed_config()
+        .with_goal_auto_continue()
         .build_initialized()
         .await?;
     let resume_id = mcp

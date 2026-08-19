@@ -2815,6 +2815,7 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_managed_config()
+        .with_goal_auto_continue()
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT.saturating_mul(2))
         .await?;
 

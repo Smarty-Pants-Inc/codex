@@ -860,7 +860,7 @@ impl ElicitationRoundTripFixture {
         );
         for guardian_request in requests.iter().skip(2).take(review_outcomes.len()) {
             let action = guardian_request
-                .message_input_texts("user")
+                .message_input_texts("developer")
                 .into_iter()
                 .find_map(|text| serde_json::from_str::<Value>(&text).ok())
                 .expect("Guardian prompt must include the reviewed action JSON");

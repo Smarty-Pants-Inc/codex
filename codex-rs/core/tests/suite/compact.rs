@@ -327,7 +327,7 @@ fn write_global_file(
 
 fn instruction_fragments(request: &responses::ResponsesRequest) -> Vec<String> {
     request
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .filter(|text| text.starts_with("# AGENTS.md instructions"))
         .collect()
@@ -338,7 +338,7 @@ fn instruction_fragments_in_items(items: &[Value]) -> Vec<String> {
         .iter()
         .filter(|item| {
             item.get("type").and_then(Value::as_str) == Some("message")
-                && item.get("role").and_then(Value::as_str) == Some("user")
+                && item.get("role").and_then(Value::as_str) == Some("developer")
         })
         .filter_map(|item| item.get("content").and_then(Value::as_array))
         .flatten()
@@ -592,10 +592,10 @@ async fn summarize_context_three_requests_and_instructions() {
         has_compact_prompt,
         "compaction request should include the summarize trigger"
     );
-    // The last item is the user message created from the injected input.
+    // The last item is the synthesized compaction prompt.
     let last2 = input2.last().unwrap();
     assert_eq!(last2.get("type").unwrap().as_str().unwrap(), "message");
-    assert_eq!(last2.get("role").unwrap().as_str().unwrap(), "user");
+    assert_eq!(last2.get("role").unwrap().as_str().unwrap(), "developer");
     let text2 = last2["content"][0]["text"].as_str().unwrap();
     assert_eq!(
         text2, SUMMARIZATION_PROMPT,
@@ -650,7 +650,7 @@ async fn summarize_context_three_requests_and_instructions() {
     assert!(
         messages
             .iter()
-            .any(|(r, t)| r == "user" && t == &expected_summary_message),
+            .any(|(r, t)| r == "developer" && t == &expected_summary_message),
         "third request should include the summary message"
     );
     assert!(
@@ -1171,7 +1171,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
     let body = requests_payloads[0].body_json();
     let input = body.get("input").and_then(|v| v.as_array()).unwrap();
 
-    fn strip_agents_parts_from_user_message(
+    fn strip_cached_parts_from_developer_message(
         value: &serde_json::Value,
     ) -> Option<serde_json::Value> {
         let content = value
@@ -1183,7 +1183,10 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
                 !item
                     .get("text")
                     .and_then(|text| text.as_str())
-                    .is_some_and(|text| text.starts_with("# AGENTS.md instructions"))
+                    .is_some_and(|text| {
+                        text.starts_with("# AGENTS.md instructions")
+                            || text.contains("`sandbox_mode`")
+                    })
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -1208,25 +1211,11 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
                     return None;
                 }
 
-                let texts = value
-                    .get("content")
-                    .and_then(|content| content.as_array())
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|item| item.get("text").and_then(|text| text.as_str()));
-
-                // Ignore cached prefix messages (project docs + permissions) since they are not
+                // Ignore cached prefix fragments (project docs + permissions) since they are not
                 // relevant to compaction behavior and can change as bundled prompts evolve.
                 let role = value.get("role").and_then(|role| role.as_str());
-                if role == Some("developer")
-                    && texts
-                        .into_iter()
-                        .any(|text| text.contains("`sandbox_mode`"))
-                {
-                    return None;
-                }
-                if role == Some("user") {
-                    return strip_agents_parts_from_user_message(&value);
+                if role == Some("developer") {
+                    return strip_cached_parts_from_developer_message(&value);
                 }
                 Some(value)
             })
@@ -1236,7 +1225,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
     let initial_input = normalize_inputs(input);
     let environment_message = initial_input[0]["content"][0]["text"].as_str().unwrap();
 
-    // test 1: after compaction, we should have one environment message, one user message, and one user message with summary prefix
+    // After compaction, retain one environment message, one user message, and one summary.
     let compaction_indices = [2, 4, 6];
     let expected_summaries = [
         prefixed_first_summary.as_str(),
@@ -1248,10 +1237,10 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
         let input = body.get("input").and_then(|v| v.as_array()).unwrap();
         let input = normalize_inputs(input);
         assert_eq!(input.len(), 3);
-        let environment_message = input[0]["content"][0]["text"].as_str().unwrap();
+        let current_environment_message = input[0]["content"][0]["text"].as_str().unwrap();
         let user_message_received = input[1]["content"][0]["text"].as_str().unwrap();
         let summary_message = input[2]["content"][0]["text"].as_str().unwrap();
-        assert_eq!(environment_message, environment_message);
+        assert_eq!(current_environment_message, environment_message);
         assert_eq!(user_message_received, user_message);
         assert_eq!(
             summary_message, expected_summary,
@@ -1270,7 +1259,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
             "type": "input_text"
           }
         ],
-        "role": "user",
+        "role": "developer",
         "type": "message"
       },
       {
@@ -1294,7 +1283,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
             "type": "input_text"
           }
         ],
-        "role": "user",
+        "role": "developer",
         "type": "message"
       },
       {
@@ -1336,7 +1325,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
             "type": "input_text"
           }
         ],
-        "role": "user",
+        "role": "developer",
         "type": "message"
       }
     ]
@@ -1350,7 +1339,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
             "type": "input_text"
           }
         ],
-        "role": "user",
+        "role": "developer",
         "type": "message"
       },
       {
@@ -1370,7 +1359,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
             "type": "input_text"
           }
         ],
-        "role": "user",
+        "role": "developer",
         "type": "message"
       }
     ]
@@ -1384,7 +1373,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
             "type": "input_text"
           }
         ],
-        "role": "user",
+        "role": "developer",
         "type": "message"
       },
       {
@@ -1404,7 +1393,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
             "type": "input_text"
           }
         ],
-        "role": "user",
+        "role": "developer",
         "type": "message"
       },
       {
@@ -1436,7 +1425,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
             "type": "input_text"
           }
         ],
-        "role": "user",
+        "role": "developer",
         "type": "message"
       }
     ]
@@ -1450,7 +1439,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
             "type": "input_text"
           }
         ],
-        "role": "user",
+        "role": "developer",
         "type": "message"
       },
       {
@@ -1470,7 +1459,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
             "type": "input_text"
           }
         ],
-        "role": "user",
+        "role": "developer",
         "type": "message"
       }
     ]
@@ -1484,7 +1473,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
             "type": "input_text"
           }
         ],
-        "role": "user",
+        "role": "developer",
         "type": "message"
       },
       {
@@ -1504,7 +1493,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
             "type": "input_text"
           }
         ],
-        "role": "user",
+        "role": "developer",
         "type": "message"
       },
       {
@@ -1536,7 +1525,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
             "type": "input_text"
           }
         ],
-        "role": "user",
+        "role": "developer",
         "type": "message"
       }
     ]
@@ -1550,7 +1539,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
             "type": "input_text"
           }
         ],
-        "role": "user",
+        "role": "developer",
         "type": "message"
       },
       {
@@ -1570,7 +1559,7 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
             "type": "input_text"
           }
         ],
-        "role": "user",
+        "role": "developer",
         "type": "message"
       }
     ]
@@ -1716,12 +1705,15 @@ async fn auto_compact_runs_after_token_limit_hit() {
     let input_auto = body_auto.get("input").and_then(|v| v.as_array()).unwrap();
     let last_auto = input_auto
         .last()
-        .expect("auto compact request should append a user message");
+        .expect("auto compact request should append a synthesized prompt");
     assert_eq!(
         last_auto.get("type").and_then(|v| v.as_str()),
         Some("message")
     );
-    assert_eq!(last_auto.get("role").and_then(|v| v.as_str()), Some("user"));
+    assert_eq!(
+        last_auto.get("role").and_then(|v| v.as_str()),
+        Some("developer")
+    );
     let last_text = last_auto
         .get("content")
         .and_then(|v| v.as_array())
@@ -1731,7 +1723,7 @@ async fn auto_compact_runs_after_token_limit_hit() {
         .unwrap_or_default();
     assert_eq!(
         last_text, SUMMARIZATION_PROMPT,
-        "auto compact should send the summarization prompt as a user message",
+        "auto compact should send the summarization prompt as developer context",
     );
 
     let input_follow_up = body_follow_up
@@ -1764,9 +1756,10 @@ async fn auto_compact_runs_after_token_limit_hit() {
         "auto compact follow-up request should include the new user message"
     );
     assert!(
-        user_texts
-            .iter()
-            .any(|text| text.contains(prefixed_auto_summary)),
+        input_follow_up.iter().any(|item| {
+            item.get("role").and_then(|value| value.as_str()) == Some("developer")
+                && item.to_string().contains(prefixed_auto_summary)
+        }),
         "auto compact follow-up request should include the summary message"
     );
 }
@@ -3774,26 +3767,26 @@ async fn manual_compact_twice_preserves_latest_user_messages() {
         5,
         "expected exactly 5 requests (user turn, compact, user turn, compact, final turn)"
     );
-    let contains_user_text = |request: &core_test_support::responses::ResponsesRequest,
-                              expected: &str| {
+    let contains_developer_text = |request: &core_test_support::responses::ResponsesRequest,
+                                   expected: &str| {
         request
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .iter()
             .any(|text| text == expected)
     };
 
-    assert!(
-        contains_user_text(&requests[0], first_user_message),
-        "first turn request missing first user message"
+    assert_eq!(
+        requests[0].message_input_texts("user"),
+        vec![first_user_message]
     );
     assert!(
-        !contains_user_text(&requests[0], SUMMARIZATION_PROMPT),
+        !contains_developer_text(&requests[0], SUMMARIZATION_PROMPT),
         "first turn request should not include summarization prompt"
     );
 
-    assert!(
-        contains_user_text(&requests[1], first_user_message),
-        "first compact request should include history before compaction"
+    assert_eq!(
+        requests[1].message_input_texts("user"),
+        vec![first_user_message]
     );
     let compact_metadata: Value = serde_json::from_str(
         &requests[1]
@@ -3820,9 +3813,9 @@ async fn manual_compact_twice_preserves_latest_user_messages() {
         })
     );
 
-    assert!(
-        contains_user_text(&requests[2], second_user_message),
-        "second turn request missing second user message"
+    assert_eq!(
+        requests[2].message_input_texts("user"),
+        vec![first_user_message, second_user_message]
     );
     let next_turn_metadata: Value = serde_json::from_str(
         &requests[2]
@@ -3847,14 +3840,10 @@ async fn manual_compact_twice_preserves_latest_user_messages() {
         next_turn_metadata.get("compaction").is_none(),
         "regular requests after compaction should not be marked as compact requests"
     );
-    assert!(
-        contains_user_text(&requests[2], first_user_message),
-        "second turn request should include the compacted user history"
-    );
 
-    assert!(
-        contains_user_text(&requests[3], second_user_message),
-        "second compact request should include latest history"
+    assert_eq!(
+        requests[3].message_input_texts("user"),
+        vec![first_user_message, second_user_message]
     );
 
     insta::assert_snapshot!(
@@ -3868,32 +3857,17 @@ async fn manual_compact_twice_preserves_latest_user_messages() {
         )
     );
 
-    let first_compact_has_prompt = contains_user_text(&requests[1], SUMMARIZATION_PROMPT);
-    let second_compact_has_prompt = contains_user_text(&requests[3], SUMMARIZATION_PROMPT);
+    let first_compact_has_prompt = contains_developer_text(&requests[1], SUMMARIZATION_PROMPT);
+    let second_compact_has_prompt = contains_developer_text(&requests[3], SUMMARIZATION_PROMPT);
     assert_eq!(
         first_compact_has_prompt, second_compact_has_prompt,
         "compact requests should consistently include or omit the summarization prompt"
     );
 
-    let first_request_user_texts = requests[0].message_input_texts("user");
-    let first_turn_user_index = first_request_user_texts
-        .len()
-        .checked_sub(1)
-        .expect("first turn request missing user messages");
-    assert_eq!(
-        first_request_user_texts[first_turn_user_index], first_user_message,
-        "first turn request should end with the submitted user message"
-    );
-    let initial_seeded_user_prefix = &first_request_user_texts[..first_turn_user_index];
-
     let final_request_user_texts = requests
         .last()
         .expect("final turn request missing")
         .message_input_texts("user");
-    assert!(
-        !initial_seeded_user_prefix.is_empty(),
-        "first turn should include seeded user prefix before the submitted user message"
-    );
     let (final_request_last_user_text, final_request_before_last_user) = final_request_user_texts
         .split_last()
         .expect("final turn request missing user messages");
@@ -3901,15 +3875,21 @@ async fn manual_compact_twice_preserves_latest_user_messages() {
         final_request_last_user_text, final_user_message,
         "final turn request should end with the submitted user message"
     );
-    let history_before_seeded_prefix = final_request_before_last_user
-        .strip_suffix(initial_seeded_user_prefix)
-        .expect("final request should end with the seeded user prefix from the first request");
+    let final_request_developer_texts = requests
+        .last()
+        .expect("final turn request missing")
+        .message_input_texts("developer");
+    assert!(
+        final_request_developer_texts
+            .iter()
+            .any(|text| text == &expected_second_summary),
+        "final turn request should retain the generated summary as developer context"
+    );
     let expected_history = vec![
         first_user_message.to_string(),
         second_user_message.to_string(),
-        expected_second_summary,
     ];
-    assert_eq!(history_before_seeded_prefix, expected_history.as_slice());
+    assert_eq!(final_request_before_last_user, expected_history.as_slice());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4712,24 +4692,20 @@ async fn snapshot_request_shape_pre_turn_compaction_including_incoming_user_mess
             ]
         )
     );
-    let compact_request_user_texts = requests[2].message_input_texts("user");
-    assert!(
-        !compact_request_user_texts
-            .iter()
-            .any(|text| text == "USER_THREE"),
+    assert_eq!(
+        requests[2].message_input_texts("user"),
+        vec!["USER_ONE", "USER_TWO"],
         "current behavior excludes incoming user message from pre-turn compaction input"
     );
-    let follow_up_user_texts = requests[3].message_input_texts("user");
-    assert!(
-        follow_up_user_texts.iter().any(|text| text == "USER_THREE"),
-        "expected post-compaction follow-up request to keep incoming user text"
+    assert_eq!(
+        requests[3].message_input_texts("user"),
+        vec!["USER_ONE", "USER_TWO", "USER_THREE"],
+        "post-compaction request should contain only direct user text"
     );
-    let follow_up_user_images = requests[3].message_input_image_urls("user");
-    assert!(
-        follow_up_user_images
-            .iter()
-            .any(|url| url == image_url.as_str()),
-        "expected post-compaction follow-up request to keep incoming user image content"
+    assert_eq!(
+        requests[3].message_input_image_urls("user"),
+        vec![image_url],
+        "post-compaction request should contain the direct user image exactly once"
     );
 }
 
@@ -4850,7 +4826,7 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
     ]);
     let mut responses = vec![first_turn];
     responses.extend(
-        (0..5).map(|_| {
+        (0..4).map(|_| {
             sse_failed(
                 "compact-failed",
                 "context_length_exceeded",

@@ -1155,7 +1155,7 @@ async fn run_review_on_session(
 
     let parent_turn = params.parent_context.turn();
     let submission = review_session.io.submit_turn_input(
-        TurnInputRequest::user_input(prompt_items.items)
+        TurnInputRequest::developer_input(prompt_items.items)
             .with_thread_settings(codex_protocol::protocol::ThreadSettingsOverrides {
                 environments: Some(codex_protocol::protocol::TurnEnvironmentSelections::new(
                     parent_turn_legacy_fallback_cwd,

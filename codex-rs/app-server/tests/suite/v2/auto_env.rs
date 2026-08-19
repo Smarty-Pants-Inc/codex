@@ -133,7 +133,7 @@ async fn thread_start_with_auto_env_exposes_fixture_cwd_to_model() -> Result<()>
 
     let environment_context = response_mock
         .single_request()
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .find(|text| text.starts_with("<environment_context>"))
         .context("environment context should be model visible")?;

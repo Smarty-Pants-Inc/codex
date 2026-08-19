@@ -896,7 +896,7 @@ mod tests {
         let input = vec![
             old.clone(),
             message("developer", &huge_developer_message, /*phase*/ None),
-            message("user", &huge_contextual_message, /*phase*/ None),
+            message("developer", &huge_contextual_message, /*phase*/ None),
             new.clone(),
         ];
         let output = ResponseItem::Compaction {

@@ -316,6 +316,7 @@ async fn strict_auto_review_routes_network_approval_to_guardian_when_user_review
     assert_eq!(request.call_id, permission_call_id);
     test.codex
         .submit(Op::RequestPermissionsResponse {
+            turn_id: request.turn_id,
             id: permission_call_id.to_string(),
             response: RequestPermissionsResponse {
                 permissions: request.permissions,
@@ -796,6 +797,7 @@ async fn background_network_approval_uses_active_turn_after_original_turn_comple
     assert_eq!(request.call_id, permission_call_id);
     test.codex
         .submit(Op::RequestPermissionsResponse {
+            turn_id: request.turn_id,
             id: permission_call_id.to_string(),
             response: RequestPermissionsResponse {
                 permissions: request.permissions,
@@ -2444,11 +2446,13 @@ fn guardian_request_is_for(request: &wiremock::Request, call_id: &str) -> bool {
                     input
                         .iter()
                         .rev()
-                        .find(|item| item.get("role").and_then(Value::as_str) == Some("user"))
+                        .find(|item| item.get("role").and_then(Value::as_str) == Some("developer"))
                 })
                 .cloned()
         })
-        .is_some_and(|latest_user_message| latest_user_message.to_string().contains(call_id))
+        .is_some_and(|latest_developer_message| {
+            latest_developer_message.to_string().contains(call_id)
+        })
 }
 
 fn guardian_network_triggers(responses: &[&ResponseMock]) -> Result<Vec<(String, String)>> {
@@ -2459,9 +2463,9 @@ fn guardian_network_triggers(responses: &[&ResponseMock]) -> Result<Vec<(String,
             request.body_json()["client_metadata"]["x-openai-subagent"].as_str() == Some("guardian")
         })
         .map(|request| {
-            let user_texts = request.message_input_texts("user");
+            let developer_texts = request.message_input_texts("developer");
             let action: Value = serde_json::from_str(
-                user_texts
+                developer_texts
                     .iter()
                     .rev()
                     .find(|text| text.contains("\"tool\": \"network_access\""))
@@ -2491,14 +2495,14 @@ fn guardian_network_actions(responses: &ResponseMock) -> Result<Vec<Value>> {
         .filter(|request| {
             request.body_json()["client_metadata"]["x-openai-subagent"].as_str() == Some("guardian")
                 && request
-                    .message_input_texts("user")
+                    .message_input_texts("developer")
                     .iter()
                     .any(|text| text.contains("\"tool\": \"network_access\""))
         })
         .map(|request| {
-            let user_texts = request.message_input_texts("user");
+            let developer_texts = request.message_input_texts("developer");
             serde_json::from_str(
-                user_texts
+                developer_texts
                     .iter()
                     .rev()
                     .find(|text| text.contains("\"tool\": \"network_access\""))

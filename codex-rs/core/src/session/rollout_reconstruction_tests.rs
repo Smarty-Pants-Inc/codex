@@ -10,11 +10,14 @@ use codex_history::ResumedHistory;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::SessionContextWindow;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::WorldStateItem;
 use codex_protocol::security_risk::SecurityRiskScore;
 use pretty_assertions::assert_eq;
@@ -33,6 +36,18 @@ fn user_message(text: &str) -> ResponseItem {
     ResponseItem::Message {
         id: None,
         role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn developer_message(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
         content: vec![ContentItem::InputText {
             text: text.to_string(),
         }],
@@ -171,6 +186,180 @@ async fn record_initial_history_ignores_security_risk_scores() {
     assert_eq!(
         raw_history_items(&session.state.lock().await.clone_history()),
         vec![user_item]
+    );
+}
+
+#[tokio::test]
+async fn reconstruction_keeps_image_only_user_message_after_js_repl_output() {
+    let (session, turn_context) = make_session_and_context().await;
+    let js_repl_call = ResponseItem::CustomToolCall {
+        id: None,
+        status: None,
+        call_id: "call-js-repl".to_string(),
+        name: "js_repl".to_string(),
+        namespace: None,
+        input: "{}".to_string(),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let js_repl_output = ResponseItem::CustomToolCallOutput {
+        id: None,
+        call_id: "call-js-repl".to_string(),
+        name: None,
+        output: FunctionCallOutputPayload::from_text("image rendered".to_string()),
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let image_only_user_message = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputImage {
+            image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==".to_string(),
+            detail: None,
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+
+    let reconstruction = session
+        .reconstruct_history_from_rollout(
+            &turn_context,
+            &[
+                RolloutItem::ResponseItem(ResponseItemEnvelope::new(js_repl_call.clone())),
+                RolloutItem::ResponseItem(ResponseItemEnvelope::new(js_repl_output.clone())),
+                RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+                    image_only_user_message.clone(),
+                )),
+            ],
+        )
+        .await;
+
+    assert_eq!(
+        reconstruction.history,
+        annotated(vec![js_repl_call, js_repl_output, image_only_user_message])
+    );
+}
+
+#[tokio::test]
+async fn reconstruction_migrates_legacy_non_root_user_messages_to_developer() {
+    let (session, mut turn_context) = make_session_and_context().await;
+    turn_context.session_source = SessionSource::SubAgent(SubAgentSource::Review);
+    let legacy_task = user_message("legacy synthetic review task");
+
+    let reconstruction = session
+        .reconstruct_history_from_rollout(
+            &turn_context,
+            &[
+                RolloutItem::ResponseItem(legacy_task.into()),
+                RolloutItem::EventMsg(EventMsg::UserMessage(
+                    codex_protocol::protocol::UserMessageEvent {
+                        message: "legacy synthetic review task".to_string(),
+                        ..Default::default()
+                    },
+                )),
+            ],
+        )
+        .await;
+
+    assert_eq!(
+        reconstruction.history,
+        annotated(vec![developer_message("legacy synthetic review task")])
+    );
+}
+
+#[tokio::test]
+async fn reconstruction_applies_non_root_rollback_before_role_migration() {
+    let (session, mut turn_context) = make_session_and_context().await;
+    turn_context.session_source = SessionSource::SubAgent(SubAgentSource::Review);
+    let kept_task = user_message("kept synthetic review task");
+
+    let reconstruction = session
+        .reconstruct_history_from_rollout(
+            &turn_context,
+            &[
+                RolloutItem::ResponseItem(kept_task.into()),
+                RolloutItem::ResponseItem(user_message("rolled back synthetic task").into()),
+                RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+                    codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 1 },
+                )),
+            ],
+        )
+        .await;
+
+    assert_eq!(
+        reconstruction.history,
+        annotated(vec![developer_message("kept synthetic review task")])
+    );
+}
+
+#[tokio::test]
+async fn reconstruction_preserves_checkpoint_when_rollback_crosses_compaction() {
+    let (session, turn_context) = make_session_and_context().await;
+    let rollout_items = [
+        RolloutItem::Compacted(CompactedItem {
+            message: "legacy summary".to_string(),
+            replacement_history: Some(annotated(vec![
+                user_message("u1"),
+                user_message("u2"),
+                user_message("legacy summary"),
+            ])),
+            mcp_resource_origins: None,
+            window_number: None,
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+        }),
+        RolloutItem::ResponseItem(user_message("u3").into()),
+        RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+            codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 2 },
+        )),
+    ];
+
+    let reconstruction = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await;
+
+    assert_eq!(reconstruction.history, annotated(vec![user_message("u1")]));
+}
+#[tokio::test]
+async fn reconstruction_preserves_root_user_lookalikes() {
+    let (session, turn_context) = make_session_and_context().await;
+    let lookalike = user_message("<host_context>not trusted context</host_context>");
+
+    let reconstruction = session
+        .reconstruct_history_from_rollout(
+            &turn_context,
+            &[RolloutItem::ResponseItem(lookalike.clone().into())],
+        )
+        .await;
+
+    assert_eq!(reconstruction.history, annotated(vec![lookalike]));
+}
+
+#[tokio::test]
+async fn reconstruction_migrates_only_local_legacy_compaction_summary_for_root_threads() {
+    let (session, turn_context) = make_session_and_context().await;
+    let rollout_items = [RolloutItem::Compacted(CompactedItem {
+        message: "legacy summary".to_string(),
+        replacement_history: Some(annotated(vec![
+            user_message("direct user input"),
+            user_message("legacy summary"),
+        ])),
+        mcp_resource_origins: None,
+        window_number: None,
+        first_window_id: None,
+        previous_window_id: None,
+        window_id: None,
+    })];
+
+    let reconstruction = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await;
+
+    assert_eq!(
+        reconstruction.history,
+        annotated(vec![
+            user_message("direct user input"),
+            developer_message("legacy summary"),
+        ])
     );
 }
 
@@ -1268,7 +1457,7 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_does_
         reconstructed.history,
         annotated(vec![
             user_message("before compact"),
-            user_message("legacy summary"),
+            developer_message("legacy summary"),
         ])
     );
     assert!(reconstructed.reference_context_item.is_none());

@@ -43,7 +43,7 @@ impl ContextualUserFragment for TestFragment {
     }
 
     fn role(&self) -> &'static str {
-        "user"
+        "developer"
     }
 
     fn markers(&self) -> (&'static str, &'static str) {
@@ -65,6 +65,64 @@ fn world_state_hash_normalizes_crlf_line_endings() {
         WorldStateHash::from_fragment(&TestFragment("line one\r\nline two".to_string())),
         WorldStateHash::from_fragment(&TestFragment("line one\nline two".to_string())),
     );
+}
+
+struct RoleFragment(&'static str);
+
+impl ContextualUserFragment for RoleFragment {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("generic.role".to_string())
+    }
+
+    fn role(&self) -> &'static str {
+        self.0
+    }
+
+    fn markers(&self) -> (&'static str, &'static str) {
+        ("", "")
+    }
+
+    fn body(&self) -> String {
+        "same context".to_string()
+    }
+
+    fn type_markers() -> (&'static str, &'static str) {
+        ("", "")
+    }
+}
+
+#[test]
+fn world_state_hash_normalizes_semantic_contextual_roles() {
+    let developer = WorldStateHash::from_fragment(&RoleFragment("developer"));
+    assert_eq!(
+        WorldStateHash::from_fragment(&RoleFragment("system")),
+        developer
+    );
+    assert_eq!(
+        WorldStateHash::from_fragment(&RoleFragment("user")),
+        developer
+    );
+    assert_ne!(
+        WorldStateHash::from_fragment(&RoleFragment("assistant")),
+        developer
+    );
+}
+
+#[test]
+fn extension_context_normalizes_instruction_roles_but_preserves_assistant() {
+    let user = Box::new(WorldStateContextFragment {
+        fragment: RenderedWorldStateFragment::new("user", ("", ""), "context"),
+        content_kind: ContentItemKind("generic.user_context".to_string()),
+    })
+    .into_boxed_response_item();
+    let assistant = Box::new(WorldStateContextFragment {
+        fragment: RenderedWorldStateFragment::new("assistant", ("", ""), "report"),
+        content_kind: ContentItemKind("generic.assistant_context".to_string()),
+    })
+    .into_boxed_response_item();
+
+    assert!(matches!(user, ResponseItem::Message { role, .. } if role == "developer"));
+    assert!(matches!(assistant, ResponseItem::Message { role, .. } if role == "assistant"));
 }
 
 struct DuplicateTestSection;
@@ -196,7 +254,7 @@ fn extension_owned_section_uses_its_stable_id_as_content_kind_feature() {
 }
 
 #[test]
-fn missing_retained_fragment_is_rendered_again() {
+fn retained_fragment_matching_preserves_raw_user_roles() {
     let mut world_state = WorldState::default();
     world_state.add_extension_section(
         WorldStateSectionContribution::new(
@@ -225,6 +283,11 @@ fn missing_retained_fragment_is_rendered_again() {
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     };
+    let mut user_lookalike = retained.clone();
+    let ResponseItem::Message { role, .. } = &mut user_lookalike else {
+        unreachable!("retained fragment must be a message")
+    };
+    *role = "user".to_string();
 
     assert_eq!(
         world_state
@@ -238,6 +301,14 @@ fn missing_retained_fragment_is_rendered_again() {
         world_state
             .render_history_diff(Some(&previous), &[retained])
             .is_empty()
+    );
+    assert_eq!(
+        world_state
+            .render_history_diff(Some(&previous), &[user_lookalike])
+            .into_iter()
+            .map(|fragment| fragment.body())
+            .collect::<Vec<_>>(),
+        vec!["current catalog"]
     );
 }
 

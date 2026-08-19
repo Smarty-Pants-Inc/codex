@@ -278,6 +278,7 @@ async fn approved_mcp_tool_call_metadata_records_prior_user_input_request(
         assert_eq!(request.call_id, "calendar-strict-permissions");
         test.codex
             .submit(Op::RequestPermissionsResponse {
+                turn_id: request.turn_id,
                 id: request.call_id,
                 response: RequestPermissionsResponse {
                     permissions: request.permissions,

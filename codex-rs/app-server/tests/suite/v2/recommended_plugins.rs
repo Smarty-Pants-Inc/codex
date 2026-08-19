@@ -170,9 +170,9 @@ async fn recommended_plugins_after_external_login(
                 .any(|text| text.contains("suggest a plugin"))
         })
         .expect("turn request");
-    let contextual_user_message = request.message_input_texts("user").join("\n");
-    assert!(contextual_user_message.contains("<recommended_plugins>"));
-    assert!(contextual_user_message.contains("- GitHub (github@openai-curated-remote)"));
+    let contextual_developer_message = request.message_input_texts("developer").join("\n");
+    assert!(contextual_developer_message.contains("<recommended_plugins>"));
+    assert!(contextual_developer_message.contains("- GitHub (github@openai-curated-remote)"));
     let body = request.body_json();
     let tool_names = body
         .get("tools")

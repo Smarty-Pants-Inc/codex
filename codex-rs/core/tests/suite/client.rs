@@ -995,14 +995,14 @@ async fn resume_includes_initial_messages_and_sends_prior_items() {
     let pos_user_instructions = messages
         .iter()
         .position(|(role, text)| {
-            role == "user"
+            role == "developer"
                 && text.contains("be nice")
                 && text.starts_with("# AGENTS.md instructions")
         })
-        .expect("user instructions");
+        .expect("developer instructions");
     let pos_environment = messages
         .iter()
-        .position(|(role, text)| role == "user" && text.contains("<environment_context>"))
+        .position(|(role, text)| role == "developer" && text.contains("<environment_context>"))
         .expect("environment context");
     let pos_new_user = messages
         .iter()
@@ -1010,9 +1010,9 @@ async fn resume_includes_initial_messages_and_sends_prior_items() {
         .expect("new user message");
 
     assert!(pos_prior_user < pos_prior_assistant);
-    assert!(pos_prior_assistant < pos_permissions);
-    assert!(pos_permissions < pos_user_instructions);
-    assert!(pos_user_instructions < pos_environment);
+    assert!(pos_prior_assistant < pos_user_instructions);
+    assert!(pos_user_instructions < pos_permissions);
+    assert!(pos_permissions < pos_environment);
     assert!(pos_environment < pos_new_user);
 }
 
@@ -1143,7 +1143,7 @@ async fn resume_replays_legacy_js_repl_image_rollout_shapes() {
                         })
                     })
         })
-        .expect("legacy injected image message should be replayed");
+        .expect("legacy injected image should replay as root user input");
 
     let new_user_index = input
         .iter()
@@ -1165,6 +1165,12 @@ async fn resume_replays_legacy_js_repl_image_rollout_shapes() {
 
     assert!(legacy_output_index < new_user_index);
     assert!(legacy_image_index < new_user_index);
+    let user_texts = input
+        .iter()
+        .filter(|item| item.get("role").and_then(|value| value.as_str()) == Some("user"))
+        .flat_map(message_input_texts)
+        .collect::<Vec<_>>();
+    assert_eq!(user_texts, vec!["after resume"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1841,28 +1847,27 @@ async fn includes_user_instructions_message_in_request() {
         "expected permissions message to mention sandbox_mode, got {developer_texts:?}"
     );
 
-    assert_message_role(&request_body["input"][1], "user");
-    let user_context_texts = message_input_texts(&request_body["input"][1]);
     assert!(
-        user_context_texts
+        developer_texts
             .iter()
-            .any(|text| text.starts_with("# AGENTS.md instructions")),
-        "expected AGENTS text in contextual user message, got {user_context_texts:?}"
+            .any(|text| text.starts_with("# AGENTS.md instructions") && text.contains("be nice")),
+        "expected AGENTS text in developer messages, got {developer_texts:?}"
     );
-    let ui_text = user_context_texts
-        .iter()
-        .copied()
-        .find(|text| text.contains("<INSTRUCTIONS>"))
-        .expect("invalid message content");
-    assert!(ui_text.contains("<INSTRUCTIONS>"));
-    assert!(ui_text.contains("be nice"));
     assert!(
-        user_context_texts
+        developer_texts
             .iter()
             .any(|text| text.starts_with("<environment_context>")
                 && text.ends_with("</environment_context>")),
-        "expected environment context in contextual user message, got {user_context_texts:?}"
+        "expected environment context in developer messages, got {developer_texts:?}"
     );
+    let user_texts = request_body["input"]
+        .as_array()
+        .expect("input array")
+        .iter()
+        .filter(|item| item.get("role").and_then(|role| role.as_str()) == Some("user"))
+        .flat_map(message_input_texts)
+        .collect::<Vec<_>>();
+    assert_eq!(user_texts, vec!["hello"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2875,15 +2880,13 @@ async fn includes_developer_instructions_message_in_request() {
         "expected developer instructions in a developer message, got {developer_texts:?}"
     );
 
-    assert_message_role(&request_body["input"][1], "user");
-    let user_context_texts = message_input_texts(&request_body["input"][1]);
     assert!(
-        user_context_texts
+        developer_texts
             .iter()
             .any(|text| text.starts_with("# AGENTS.md instructions")),
-        "expected AGENTS text in contextual user message, got {user_context_texts:?}"
+        "expected AGENTS text in developer context, got {developer_texts:?}"
     );
-    let ui_text = user_context_texts
+    let ui_text = developer_texts
         .iter()
         .copied()
         .find(|text| text.contains("<INSTRUCTIONS>"))
@@ -2891,11 +2894,11 @@ async fn includes_developer_instructions_message_in_request() {
     assert!(ui_text.contains("<INSTRUCTIONS>"));
     assert!(ui_text.contains("be nice"));
     assert!(
-        user_context_texts
+        developer_texts
             .iter()
             .any(|text| text.starts_with("<environment_context>")
                 && text.ends_with("</environment_context>")),
-        "expected environment context in contextual user message, got {user_context_texts:?}"
+        "expected environment context in developer context"
     );
 }
 

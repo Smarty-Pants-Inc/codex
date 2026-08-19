@@ -3,6 +3,13 @@ use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::models::ResponseItem;
 
+pub fn normalize_contextual_role(role: &str) -> &str {
+    match role {
+        "system" | "user" | "developer" => "developer",
+        _ => role,
+    }
+}
+
 /// A rendered contextual fragment and the role that owns its annotated content.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RenderedFragment {
@@ -39,7 +46,7 @@ impl From<RenderedFragment> for ResponseItem {
 
         Self::Message {
             id: None,
-            role: role.to_string(),
+            role: normalize_contextual_role(role).to_string(),
             content: vec![content],
             phase: None,
             internal_chat_message_metadata_passthrough: Some(
@@ -66,6 +73,10 @@ pub trait ContextualUserFragment {
 
     /// Returns a stable `<feature>.<name>` classification, using `generic` for shared fragments.
     fn content_kind(&self) -> ContentItemKind;
+
+    fn semantic_role(&self) -> &'static str {
+        normalize_contextual_role(self.role())
+    }
 
     /// Whether this fragment must be recorded as its own response item.
     fn requires_separate_message(&self) -> bool {
@@ -101,7 +112,7 @@ pub trait ContextualUserFragment {
     /// Renders the role, model-visible content, and classification together.
     fn render_fragment(&self) -> RenderedFragment {
         RenderedFragment::new(
-            self.role(),
+            normalize_contextual_role(self.role()),
             AnnotatedContent::input_text(self.render(), self.content_kind()),
         )
     }

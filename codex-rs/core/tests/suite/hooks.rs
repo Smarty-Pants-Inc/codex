@@ -1140,7 +1140,7 @@ fn rollout_hook_prompt_texts(text: &str) -> Result<Vec<String>> {
         let rollout: RolloutLine = serde_json::from_str(trimmed).context("parse rollout line")?;
         if let RolloutItem::ResponseItem(envelope) = rollout.item
             && let ResponseItem::Message { role, content, .. } = envelope.item
-            && role == "user"
+            && role == "developer"
         {
             for item in content {
                 if let ContentItem::InputText { text } = item
@@ -1158,7 +1158,7 @@ fn request_hook_prompt_texts(
     request: &core_test_support::responses::ResponsesRequest,
 ) -> Vec<String> {
     request
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .filter_map(|text| parse_hook_prompt_fragment(&text).map(|fragment| fragment.text))
         .collect()
@@ -2950,6 +2950,7 @@ async fn permission_request_hook_allow_bypasses_strict_auto_review() -> Result<(
     assert_eq!(request.call_id, permission_call_id);
     test.codex
         .submit(Op::RequestPermissionsResponse {
+            turn_id: request.turn_id,
             id: permission_call_id.to_string(),
             response: RequestPermissionsResponse {
                 permissions: request.permissions,

@@ -739,23 +739,6 @@ fn developer_message_texts(items: &[ResponseItem]) -> Vec<Vec<&str>> {
         .collect()
 }
 
-fn user_input_texts(items: &[ResponseItem]) -> Vec<&str> {
-    items
-        .iter()
-        .filter_map(|item| match item {
-            ResponseItem::Message { role, content, .. } if role == "user" => {
-                Some(content.as_slice())
-            }
-            _ => None,
-        })
-        .flat_map(|content| content.iter())
-        .filter_map(|item| match item {
-            ContentItem::InputText { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect()
-}
-
 fn write_project_hooks(dot_codex: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dot_codex)?;
     std::fs::write(
@@ -2488,29 +2471,38 @@ async fn prepares_resumed_history_before_installing_it() {
     let history = session.state.lock().await.clone_history();
     assert_eq!(
         raw_history_items(&history),
-        vec![ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![
-                ContentItem::InputText {
-                    text: "image content omitted because it could not be processed".to_string(),
-                },
-                ContentItem::InputText {
-                    text: "image content omitted because remote image URLs are not supported"
-                        .to_string(),
-                },
-                ContentItem::InputText {
+        vec![
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
                     text: "keep me".to_string(),
-                },
-            ],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        }]
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "developer".to_string(),
+                content: vec![
+                    ContentItem::InputText {
+                        text: "image content omitted because it could not be processed".to_string(),
+                    },
+                    ContentItem::InputText {
+                        text: "image content omitted because remote image URLs are not supported"
+                            .to_string(),
+                    },
+                ],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ]
     );
     assert_eq!(
         history.annotated_items()[0].metadata,
         Some(CodexHarnessMetadata::default())
     );
+    assert_eq!(history.annotated_items()[1].metadata, None);
 }
 
 #[test]
@@ -3883,10 +3875,11 @@ async fn thread_rollback_restores_cleared_reference_context_item_after_compactio
         .expect("thread settings should have turn_id");
     let compact_turn_id = "compact-turn".to_string();
     let rolled_back_turn_id = "rolled-back-turn".to_string();
-    let compacted_history = vec![
-        user_message("turn 1 user"),
-        user_message("summary after compaction"),
-    ];
+    let mut compacted_summary = user_message("summary after compaction");
+    if let ResponseItem::Message { role, .. } = &mut compacted_summary {
+        *role = "developer".to_string();
+    }
+    let compacted_history = vec![user_message("turn 1 user"), compacted_summary];
     let first_window_id = Uuid::now_v7();
     let previous_window_id = Uuid::now_v7();
     let compacted_window_id = Uuid::now_v7();
@@ -6408,6 +6401,7 @@ async fn notify_request_permissions_response_ignores_unmatched_call_id() {
     session
         .notify_request_permissions_response(
             "missing",
+            "turn-1",
             codex_protocol::request_permissions::RequestPermissionsResponse {
                 permissions: RequestPermissionProfile {
                     network: Some(codex_protocol::models::NetworkPermissions {
@@ -6427,6 +6421,53 @@ async fn notify_request_permissions_response_ignores_unmatched_call_id() {
             .await,
         None
     );
+}
+
+#[tokio::test]
+async fn request_permissions_response_is_bound_to_originating_turn() {
+    let (session, turn_context) = make_session_and_context().await;
+    let environment = turn_context
+        .environments
+        .primary()
+        .expect("primary environment")
+        .selection();
+    let active_turn = ActiveTurn::default();
+    let (tx_response, mut rx_response) = tokio::sync::oneshot::channel();
+    assert!(
+        active_turn
+            .turn_state
+            .lock()
+            .await
+            .insert_pending_request_permissions(
+                "permissions-call".to_string(),
+                crate::state::PendingRequestPermissions {
+                    turn_id: "turn-b".to_string(),
+                    tx_response,
+                    requested_permissions: RequestPermissionProfile::default(),
+                    environment,
+                },
+            )
+            .is_none()
+    );
+    *session.active_turn.lock().await = Some(active_turn);
+    let response = codex_protocol::request_permissions::RequestPermissionsResponse {
+        permissions: RequestPermissionProfile::default(),
+        scope: PermissionGrantScope::Turn,
+        strict_auto_review: false,
+    };
+
+    session
+        .notify_request_permissions_response("permissions-call", "turn-a", response.clone())
+        .await;
+    assert!(matches!(
+        rx_response.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    session
+        .notify_request_permissions_response("permissions-call", "turn-b", response.clone())
+        .await;
+    assert_eq!(rx_response.await.expect("permission response"), response);
 }
 
 #[tokio::test]
@@ -6674,7 +6715,11 @@ async fn request_permissions_emits_event_when_granular_policy_allows_requests() 
     assert_eq!(request.cwd, Some(turn_cwd));
 
     session
-        .notify_request_permissions_response(&request.call_id, expected_response.clone())
+        .notify_request_permissions_response(
+            &request.call_id,
+            &request.turn_id,
+            expected_response.clone(),
+        )
         .await;
 
     let response = tokio::time::timeout(StdDuration::from_secs(1), handle)
@@ -6796,6 +6841,7 @@ async fn request_permissions_tool_resolves_relative_paths_against_selected_envir
     session
         .notify_request_permissions_response(
             &request.call_id,
+            &request.turn_id,
             codex_protocol::request_permissions::RequestPermissionsResponse {
                 permissions: request.permissions,
                 scope: PermissionGrantScope::Turn,
@@ -6922,6 +6968,7 @@ async fn request_permissions_response_materializes_session_cwd_grants_before_rec
     session
         .notify_request_permissions_response(
             &request.call_id,
+            &request.turn_id,
             codex_protocol::request_permissions::RequestPermissionsResponse {
                 permissions: request.permissions,
                 scope: PermissionGrantScope::Session,
@@ -8934,7 +8981,7 @@ async fn record_context_updates_emits_environment_item_for_network_changes() {
     let update_items =
         record_context_update_items(&session, previous_context, current_context).await;
 
-    let environment_update = user_input_texts(&update_items)
+    let environment_update = developer_input_texts(&update_items)
         .into_iter()
         .find(|text| text.contains("<environment_context>"))
         .expect("environment update item should be emitted");
@@ -8976,7 +9023,7 @@ async fn record_context_updates_emits_environment_item_for_cwd_changes() {
     let update_items =
         record_context_update_items(&session, previous_context, current_context).await;
 
-    let environment_update = user_input_texts(&update_items)
+    let environment_update = developer_input_texts(&update_items)
         .into_iter()
         .find(|text| text.contains("<environment_context>"))
         .expect("environment update item should be emitted");
@@ -9043,7 +9090,7 @@ async fn record_context_updates_use_environment_permission_profile_and_workspace
         permissions_update.contains(workspace_root.to_string_lossy().as_ref()),
         "selected workspace root should be visible in permissions: {permissions_update}"
     );
-    let environment_update = user_input_texts(&update_items)
+    let environment_update = developer_input_texts(&update_items)
         .into_iter()
         .find(|text| text.contains("<environment_context>"))
         .expect("environment update should be emitted");
@@ -9069,7 +9116,7 @@ async fn record_context_updates_emits_environment_item_for_time_changes() {
     let update_items =
         record_context_update_items(&session, previous_context, current_context).await;
 
-    let environment_update = user_input_texts(&update_items)
+    let environment_update = developer_input_texts(&update_items)
         .into_iter()
         .find(|text| text.contains("<environment_context>"))
         .expect("environment update item should be emitted");
@@ -9113,7 +9160,7 @@ async fn record_context_updates_omits_environment_item_when_disabled() {
     let update_items =
         record_context_update_items(&session, previous_context, current_context).await;
 
-    let user_texts = user_input_texts(&update_items);
+    let user_texts = developer_input_texts(&update_items);
     assert!(
         !user_texts
             .iter()
@@ -10611,8 +10658,9 @@ async fn task_finish_emits_turn_item_lifecycle_for_leftover_pending_user_input()
     ));
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn task_finish_emits_thread_idle_lifecycle_after_active_turn_clears() {
+#[tokio::test(flavor = "current_thread")]
+async fn task_finish_emits_detached_thread_idle_lifecycle_after_active_turn_clears() {
+    let _tracing = install_test_tracing("thread_idle_lifecycle_span");
     struct ThreadIdleRecorder {
         calls: Arc<std::sync::atomic::AtomicUsize>,
         idle_tx: async_channel::Sender<()>,
@@ -10628,6 +10676,11 @@ async fn task_finish_emits_thread_idle_lifecycle_after_active_turn_clears() {
                 assert_eq!(
                     self.expected_thread_id.to_string(),
                     input.thread_store.level_id()
+                );
+                assert!(input.continuation.is_allowed());
+                assert!(
+                    Span::current().id().is_none(),
+                    "thread idle lifecycle must not inherit the completed turn span"
                 );
                 self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 self.idle_tx.send(()).await.expect("idle receiver open");
@@ -11016,15 +11069,12 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
     let (sess, tc, rx) = make_session_and_context_with_rx().await;
-    let input = vec![TurnInput::UserInput {
-        content: vec![UserInput::Text {
-            text: "start review".to_string(),
-            text_elements: Vec::new(),
-        }],
-        client_id: None,
-    }];
-    sess.spawn_task(Arc::clone(&tc), input, ReviewTask::new())
-        .await;
+    sess.spawn_task(
+        Arc::clone(&tc),
+        Vec::new(),
+        ReviewTask::new("start review".to_string()),
+    )
+    .await;
 
     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
 
@@ -11076,7 +11126,7 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
             let ResponseItem::Message { role, content, .. } = item else {
                 return false;
             };
-            if role != "user" {
+            if role != "developer" {
                 return false;
             }
             content.iter().any(|content_item| {

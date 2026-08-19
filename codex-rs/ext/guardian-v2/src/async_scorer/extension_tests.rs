@@ -1837,7 +1837,7 @@ async fn contributor_uses_catalog_policy_without_a_configured_override() -> Resu
             }],
         })
     );
-    assert_eq!(request["input"][2]["role"], "user");
+    assert_eq!(request["input"][2]["role"], "developer");
     assert!(
         !request["input"][2]["content"]
             .as_array()
@@ -2123,7 +2123,7 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
         request["input"][2],
         serde_json::to_value(&latest_compaction)?
     );
-    assert_eq!(request["input"][3]["role"], "user");
+    assert_eq!(request["input"][3]["role"], "developer");
 
     let previous_score = tokio::time::timeout(Duration::from_secs(5), async {
         loop {

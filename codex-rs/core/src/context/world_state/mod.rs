@@ -18,6 +18,7 @@ mod test_support;
 mod tools;
 
 use crate::context::ContextualUserFragment;
+use codex_context_fragments::normalize_contextual_role;
 use codex_extension_api::PreviousWorldStateSection;
 use codex_extension_api::RenderedWorldStateFragment;
 use codex_extension_api::WorldStateSectionContribution;
@@ -181,7 +182,6 @@ struct WorldStateContextFragment {
     fragment: RenderedWorldStateFragment,
     content_kind: ContentItemKind,
 }
-
 impl ContextualUserFragment for WorldStateContextFragment {
     fn content_kind(&self) -> ContentItemKind {
         self.content_kind.clone()
@@ -268,7 +268,7 @@ impl WorldStateHash {
     pub(crate) fn from_fragment(fragment: &(impl ContextualUserFragment + ?Sized)) -> Self {
         let mut hasher = Sha1::new();
         hasher.update(b"codex-world-state-fragment-v1\0");
-        hash_component(&mut hasher, fragment.role());
+        hash_component(&mut hasher, normalize_contextual_role(fragment.role()));
         hash_component(&mut hasher, &fragment.render());
         Self(format!("{:x}", hasher.finalize()))
     }

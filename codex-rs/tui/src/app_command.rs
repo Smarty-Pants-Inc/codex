@@ -79,6 +79,7 @@ pub(crate) enum AppCommand {
     },
     RequestPermissionsResponse {
         id: String,
+        turn_id: String,
         response: RequestPermissionsResponse,
     },
     ReloadUserConfig,
@@ -210,9 +211,14 @@ impl AppCommand {
 
     pub(crate) fn request_permissions_response(
         id: String,
+        turn_id: String,
         response: RequestPermissionsResponse,
     ) -> Self {
-        Self::RequestPermissionsResponse { id, response }
+        Self::RequestPermissionsResponse {
+            id,
+            turn_id,
+            response,
+        }
     }
 
     pub(crate) fn reload_user_config() -> Self {

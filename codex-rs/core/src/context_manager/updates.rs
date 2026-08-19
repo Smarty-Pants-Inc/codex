@@ -26,8 +26,10 @@ pub(crate) fn build_developer_update_item(text_sections: Vec<String>) -> Option<
 }
 
 pub(crate) fn build_rendered_message(fragments: Vec<RenderedFragment>) -> Option<ResponseItem> {
-    let role = fragments.first()?.role();
-    debug_assert!(fragments.iter().all(|fragment| fragment.role() == role));
+    let role = codex_context_fragments::normalize_contextual_role(fragments.first()?.role());
+    debug_assert!(fragments.iter().all(|fragment| {
+        codex_context_fragments::normalize_contextual_role(fragment.role()) == role
+    }));
     let (content, content_item_kinds): (Vec<_>, Vec<_>) = fragments
         .into_iter()
         .map(|fragment| fragment.into_parts().1.into_parts())
@@ -57,7 +59,7 @@ pub(crate) fn merge_contextual_fragments(
             MessageGroup::Mergeable
         };
         let rendered = fragment.render_fragment();
-        let role = rendered.role();
+        let role = codex_context_fragments::normalize_contextual_role(rendered.role());
         match messages.last_mut() {
             Some((previous_role, previous_group, rendered_fragments))
                 if *previous_role == role

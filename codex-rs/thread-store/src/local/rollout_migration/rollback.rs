@@ -1,12 +1,10 @@
 //! Defines which persisted history entries count as rollbackable user turns.
 //!
 //! Legacy `ThreadRolledBack { num_turns }` does not mean “drop the last N JSONL records.” A turn
-//! can include contextual user/developer messages, paired `ResponseItem` + `UserMessage` records,
-//! inter-agent communication, or compaction replacement history.
+//! can include developer context, paired `ResponseItem` + `UserMessage` records, inter-agent
+//! communication, or compaction replacement history.
 //!
 //! This module mirrors the legacy cold-resume rollback boundary rules for persisted rollout shapes.
-//! It stays local to migration because core's live predicate also knows about dynamically
-//! registered contextual fragments that thread-store should not depend on.
 
 use codex_protocol::items::parse_hook_prompt_fragment;
 use codex_protocol::models::ContentItem;
@@ -15,10 +13,7 @@ use codex_protocol::protocol::InterAgentCommunication;
 use std::borrow::Borrow;
 
 /// Match the rollback boundaries used by legacy history reconstruction without
-/// treating every persisted lifecycle as a user turn. This intentionally stays
-/// local to the frozen migration adapter: the full core predicate also knows
-/// about dynamically registered contextual fragments that thread-store cannot
-/// depend on.
+/// treating developer context as a user turn.
 pub(super) fn counts_as_boundary(response: &ResponseItem) -> bool {
     if matches!(response, ResponseItem::AgentMessage { .. }) {
         return true;
@@ -26,21 +21,18 @@ pub(super) fn counts_as_boundary(response: &ResponseItem) -> bool {
     let ResponseItem::Message { role, content, .. } = response else {
         return false;
     };
-    (role == "user" && !is_known_contextual_user_message_content(content))
-        || (role == "assistant" && InterAgentCommunication::is_message_content(content))
+    role == "user" || (role == "assistant" && InterAgentCommunication::is_message_content(content))
 }
 
 pub(super) fn is_pre_turn_context_update(response: &ResponseItem) -> bool {
     let ResponseItem::Message { role, content, .. } = response else {
         return false;
     };
-    (role == "user" && is_known_contextual_user_message_content(content))
-        || (role == "developer" && is_known_contextual_developer_message_content(content))
+    role == "developer" && is_known_contextual_developer_message_content(content)
 }
 
 /// Apply the same response-history cut used by legacy cold resume to a persisted
-/// compaction checkpoint. The migration adapter uses a frozen contextual-fragment
-/// matcher because thread-store cannot depend on core's runtime fragment registry.
+/// compaction checkpoint.
 pub(super) fn drop_last_n_user_turns<T>(history: &mut Vec<T>, num_turns: u32)
 where
     T: Borrow<ResponseItem>,
@@ -70,22 +62,21 @@ where
     history.truncate(cut_index);
 }
 
-fn is_known_contextual_user_message_content(content: &[ContentItem]) -> bool {
-    content.iter().any(|item| {
-        let ContentItem::InputText { text } = item else {
-            return false;
-        };
-        is_known_contextual_user_text(text)
-    })
-}
-
 fn is_known_contextual_developer_message_content(content: &[ContentItem]) -> bool {
     content.iter().any(|item| {
         let ContentItem::InputText { text } = item else {
             return false;
         };
-        let text = text.trim_start();
-        [
+        is_known_contextual_developer_text(text)
+    })
+}
+
+// Keep this frozen alongside the legacy migration adapter. Core's live predicate also knows
+// about dynamically registered developer fragments.
+fn is_known_contextual_developer_text(text: &str) -> bool {
+    let text = text.trim();
+    parse_hook_prompt_fragment(text).is_some()
+        || [
             "<permissions instructions>",
             "<model_switch>",
             "<managed_developer_instructions>",
@@ -109,14 +100,6 @@ fn is_known_contextual_developer_message_content(content: &[ContentItem]) -> boo
             text.get(..prefix.len())
                 .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
         })
-    })
-}
-
-// Keep this frozen alongside the legacy migration adapter. Core's live predicate also knows
-// about dynamically registered fragments, but legacy rollouts only need these persisted shapes.
-fn is_known_contextual_user_text(text: &str) -> bool {
-    let text = text.trim();
-    parse_hook_prompt_fragment(text).is_some()
         || [
             ("# AGENTS.md instructions", "</INSTRUCTIONS>"),
             ("<environment_context>", "</environment_context>"),

@@ -584,6 +584,7 @@ where
         mcp_server_openai_form_elicitation: false,
         opt_out_notification_methods: Vec::new(),
         channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+        goal_auto_continue_enabled: true,
     })
     .await
     .wrap_err("failed to start embedded app server")?;
@@ -3170,7 +3171,10 @@ mod tests {
             /*log_db*/ None,
             /*state_db*/ None,
             Arc::new(EnvironmentManager::default_for_tests()),
-            |_args| async { Err(std::io::Error::other("boom")) },
+            |args| async move {
+                assert!(args.goal_auto_continue_enabled);
+                Err(std::io::Error::other("boom"))
+            },
         )
         .await;
         let err = match result {

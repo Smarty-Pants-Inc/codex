@@ -26,6 +26,8 @@ use codex_otel::HOOK_RUN_DURATION_METRIC;
 use codex_otel::HOOK_RUN_METRIC;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
+use codex_protocol::models::LocalImagePreparation;
+use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CodexErrorInfo;
@@ -587,11 +589,9 @@ pub(crate) async fn inspect_pending_input(
             )
             .await
         }
-        TurnInput::ResponseItem(_) => HookRuntimeOutcome {
-            should_stop: false,
-            additional_contexts: Vec::new(),
-        },
-        TurnInput::InterAgentCommunication(_) => HookRuntimeOutcome {
+        TurnInput::DeveloperInput { .. }
+        | TurnInput::ResponseItem(_)
+        | TurnInput::InterAgentCommunication(_) => HookRuntimeOutcome {
             should_stop: false,
             additional_contexts: Vec::new(),
         },
@@ -614,6 +614,14 @@ pub(crate) async fn record_pending_input(
                 persist_context,
             )
             .await;
+        }
+        TurnInput::DeveloperInput { content } => {
+            let response_item = ResponseItem::from(ResponseInputItem::from_developer_input(
+                content,
+                LocalImagePreparation::Defer,
+            ));
+            sess.record_conversation_items(turn_context, &[response_item])
+                .await;
         }
         TurnInput::ResponseItem(item) => {
             sess.record_annotated_conversation_items(turn_context, vec![item])
@@ -914,13 +922,17 @@ fn compaction_trigger_label(value: CompactionTrigger) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use codex_history::ResponseItemEnvelope;
     use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
     use codex_protocol::protocol::HookEventName;
     use codex_protocol::protocol::HookExecutionMode;
     use codex_protocol::protocol::HookHandlerType;
     use codex_protocol::protocol::HookRunStatus;
     use codex_protocol::protocol::HookScope;
     use codex_protocol::protocol::HookSource;
+    use codex_protocol::user_input::UserInput;
+    use codex_thread_store::PersistContext;
     use pretty_assertions::assert_eq;
 
     use super::additional_context_messages;
@@ -928,6 +940,8 @@ mod tests {
     use super::emit_hook_started_events;
     use super::hook_run_analytics_payload;
     use super::hook_run_metric_tags;
+    use super::record_pending_input;
+    use crate::session::TurnInput;
     use crate::session::tests::make_session_and_context;
     use crate::session::tests::make_session_and_context_with_rx;
     use codex_protocol::protocol::HookCompletedEvent;
@@ -968,6 +982,72 @@ mod tests {
                 ("developer", "first tide note".to_string()),
                 ("developer", "second tide note".to_string()),
             ],
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_response_items_do_not_promote_client_roles() {
+        let (session, turn_context, _events) = make_session_and_context_with_rx().await;
+
+        for (role, text) in [("user", "client user"), ("system", "client system")] {
+            record_pending_input(
+                &session,
+                &turn_context,
+                TurnInput::ResponseItem(ResponseItemEnvelope::new(ResponseItem::Message {
+                    id: None,
+                    role: role.to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: text.to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                })),
+                Vec::new(),
+                PersistContext::Standard,
+            )
+            .await;
+        }
+        record_pending_input(
+            &session,
+            &turn_context,
+            TurnInput::DeveloperInput {
+                content: vec![UserInput::Text {
+                    text: "internal developer".to_string(),
+                    text_elements: Vec::new(),
+                }],
+            },
+            Vec::new(),
+            PersistContext::Standard,
+        )
+        .await;
+
+        let roles_and_texts = session
+            .clone_history()
+            .await
+            .raw_items()
+            .map(|item| {
+                let ResponseItem::Message { role, content, .. } = item else {
+                    panic!("expected message, got {item:?}");
+                };
+                let [ContentItem::InputText { text }] = content.as_slice() else {
+                    panic!("expected one input text item, got {content:?}");
+                };
+                (role.clone(), text.clone())
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            roles_and_texts,
+            vec![
+                ("user".to_string(), "client user".to_string()),
+                ("developer".to_string(), "internal developer".to_string()),
+            ]
+        );
+        assert!(
+            !roles_and_texts
+                .iter()
+                .any(|(role, text)| role == "developer" && text == "client system"),
+            "client system input may be filtered, but must never be promoted to developer"
         );
     }
 

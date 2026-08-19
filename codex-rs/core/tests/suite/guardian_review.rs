@@ -606,11 +606,11 @@ async fn guardian_node_repl_policy_follows_production_approval_path(scenario: &s
                         })
                 })
                 .expect("Node REPL developer policy");
-            let user_index = input
+            let request_index = input
                 .iter()
-                .rposition(|item| item["role"] == "user")
+                .rposition(|item| item["role"] == "developer")
                 .expect("Node REPL approval request");
-            assert_eq!(policy_index + 1, user_index);
+            assert_eq!(policy_index + 1, request_index);
         }
     }
 

@@ -185,7 +185,7 @@ async fn wait_for_completion(test: &TestCodex) {
 async fn expect_request_permissions_event(
     test: &TestCodex,
     expected_call_id: &str,
-) -> RequestPermissionProfile {
+) -> (String, RequestPermissionProfile) {
     let event = wait_for_event(&test.codex, |event| {
         matches!(
             event,
@@ -197,7 +197,7 @@ async fn expect_request_permissions_event(
     match event {
         EventMsg::RequestPermissions(request) => {
             assert_eq!(request.call_id, expected_call_id);
-            request.permissions
+            (request.turn_id, request.permissions)
         }
         EventMsg::TurnComplete(_) => panic!("expected request_permissions before completion"),
         other => panic!("unexpected event: {other:?}"),
@@ -278,13 +278,15 @@ async fn approved_folder_write_request_permissions_unblocks_later_exec_without_s
     )
     .await?;
 
-    let granted_permissions = expect_request_permissions_event(&test, "permissions-call").await;
+    let (turn_id, granted_permissions) =
+        expect_request_permissions_event(&test, "permissions-call").await;
     assert_eq!(
         granted_permissions,
         normalized_requested_permissions.clone()
     );
     test.codex
         .submit(Op::RequestPermissionsResponse {
+            turn_id,
             id: "permissions-call".to_string(),
             response: RequestPermissionsResponse {
                 permissions: normalized_requested_permissions,
@@ -440,13 +442,15 @@ async fn apply_patch_after_request_permissions(strict_auto_review: bool) -> Resu
     )
     .await?;
 
-    let granted_permissions = expect_request_permissions_event(&test, "permissions-call").await;
+    let (turn_id, granted_permissions) =
+        expect_request_permissions_event(&test, "permissions-call").await;
     assert_eq!(
         granted_permissions,
         normalized_requested_permissions.clone()
     );
     test.codex
         .submit(Op::RequestPermissionsResponse {
+            turn_id,
             id: "permissions-call".to_string(),
             response: RequestPermissionsResponse {
                 permissions: normalized_requested_permissions,

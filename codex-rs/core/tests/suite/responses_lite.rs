@@ -275,16 +275,16 @@ async fn responses_lite_prepares_images() -> Result<()> {
         .context("request should contain user content")?;
     assert_eq!(
         user_content,
-        vec![
-            serde_json::json!({
-                "type": "input_image",
-                "image_url": image_url
-            }),
-            serde_json::json!({
-                "type": "input_text",
-                "text": "image content omitted because remote image URLs are not supported"
-            }),
-        ]
+        vec![serde_json::json!({
+            "type": "input_image",
+            "image_url": image_url
+        })]
+    );
+    assert!(
+        request
+            .message_input_texts("developer")
+            .iter()
+            .any(|text| text == "image content omitted because remote image URLs are not supported")
     );
     assert!(!request.body_json().to_string().contains(remote_image_url));
 

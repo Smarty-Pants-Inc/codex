@@ -121,9 +121,9 @@ pub(crate) fn prepare_response_items(
             })
         };
     for mut item in std::mem::take(items) {
-        let resize_notice = match &mut item {
+        let (resize_notice, image_error_notice) = match &mut item {
             ResponseItem::Message { role, content, .. } => {
-                let resized_images = prepare_message_content(
+                let (resized_images, image_error_content) = prepare_message_content(
                     content,
                     ImageOrigin {
                         message_role: Some(role),
@@ -137,9 +137,18 @@ pub(crate) fn prepare_response_items(
                     &mut metadata,
                     mode,
                 );
-                (!resized_images.is_empty()).then(|| {
+                let resize_notice = (!resized_images.is_empty()).then(|| {
                     ImageResizeNotice::new(ImageResizeNoticeSource::UserMessage, resized_images)
-                })
+                });
+                let image_error_notice =
+                    (!image_error_content.is_empty()).then(|| ResponseItem::Message {
+                        id: None,
+                        role: "developer".to_string(),
+                        content: image_error_content,
+                        phase: None,
+                        internal_chat_message_metadata_passthrough: None,
+                    });
+                (resize_notice, image_error_notice)
             }
             ResponseItem::FunctionCallOutput {
                 call_id, output, ..
@@ -160,9 +169,12 @@ pub(crate) fn prepare_response_items(
             | ResponseItem::Compaction { .. }
             | ResponseItem::CompactionTrigger { .. }
             | ResponseItem::ContextCompaction { .. }
-            | ResponseItem::Other => None,
+            | ResponseItem::Other => (None, None),
         };
         prepared_items.push(item);
+        if let Some(image_error_notice) = image_error_notice {
+            prepared_items.push(image_error_notice);
+        }
         if let Some(resize_notice) = resize_notice {
             prepared_items.push(ContextualUserFragment::into(resize_notice));
         }
@@ -172,43 +184,59 @@ pub(crate) fn prepare_response_items(
 }
 
 fn prepare_message_content(
-    items: &mut [ContentItem],
+    items: &mut Vec<ContentItem>,
     origin: ImageOrigin<'_>,
     resize_notice_mode: ImageResizeNoticeMode,
     metadata: &mut Vec<ImagePreparationMetadata>,
     mode: ImagePreparationMode,
-) -> Vec<ResizedImage> {
+) -> (Vec<ResizedImage>, Vec<ContentItem>) {
     let image_count = items
         .iter()
         .filter(|item| matches!(item, ContentItem::InputImage { .. }))
         .count();
     let mut image_number = 0;
     let mut resized_images = Vec::new();
-    for item in items {
-        if let ContentItem::InputImage { image_url, detail } = item {
-            image_number += 1;
-            match prepare_image(image_url, detail, origin, metadata, mode) {
-                Ok(Some(resize)) if resize_notice_mode == ImageResizeNoticeMode::Enabled => {
-                    resized_images.push(ResizedImage {
-                        image_number,
-                        image_count,
-                        source_width: resize.source_width,
-                        source_height: resize.source_height,
-                        prepared_width: resize.prepared_width,
-                        prepared_height: resize.prepared_height,
-                    });
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    warn!(%error, "failed to prepare message image");
-                    *item = ContentItem::InputText {
-                        text: error.placeholder().to_string(),
-                    };
+    let mut image_error_content = Vec::new();
+    let mut prepared_content = Vec::with_capacity(items.len());
+    for mut item in std::mem::take(items) {
+        let error_placeholder = match &mut item {
+            ContentItem::InputImage { image_url, detail } => {
+                image_number += 1;
+                match prepare_image(image_url, detail, origin, metadata, mode) {
+                    Ok(Some(resize)) if resize_notice_mode == ImageResizeNoticeMode::Enabled => {
+                        resized_images.push(ResizedImage {
+                            image_number,
+                            image_count,
+                            source_width: resize.source_width,
+                            source_height: resize.source_height,
+                            prepared_width: resize.prepared_width,
+                            prepared_height: resize.prepared_height,
+                        });
+                        None
+                    }
+                    Ok(_) => None,
+                    Err(error) => {
+                        warn!(%error, "failed to prepare message image");
+                        Some(error.placeholder())
+                    }
                 }
             }
+            _ => None,
+        };
+        if let Some(error_placeholder) = error_placeholder {
+            let placeholder = ContentItem::InputText {
+                text: error_placeholder.to_string(),
+            };
+            if origin.message_role == Some("user") {
+                image_error_content.push(placeholder);
+                continue;
+            }
+            item = placeholder;
         }
+        prepared_content.push(item);
     }
-    resized_images
+    *items = prepared_content;
+    (resized_images, image_error_content)
 }
 
 fn prepare_tool_output_content(

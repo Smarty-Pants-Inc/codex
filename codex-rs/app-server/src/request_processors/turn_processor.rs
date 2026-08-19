@@ -1269,24 +1269,10 @@ impl TurnRequestProcessor {
         Ok(Some(ThreadRealtimeStopResponse::default()))
     }
 
-    fn build_review_turn(turn_id: String, display_text: &str) -> Turn {
-        let items = if display_text.is_empty() {
-            Vec::new()
-        } else {
-            vec![ThreadItem::UserMessage {
-                id: turn_id.clone(),
-                client_id: None,
-                content: vec![V2UserInput::Text {
-                    text: display_text.to_string(),
-                    // Review prompt display text is synthesized; no UI element ranges to preserve.
-                    text_elements: Vec::new(),
-                }],
-            }]
-        };
-
+    fn build_review_turn(turn_id: String) -> Turn {
         Turn {
             id: turn_id,
-            items,
+            items: Vec::new(),
             items_view: TurnItemsView::NotLoaded,
             error: None,
             status: TurnStatus::InProgress,
@@ -1316,7 +1302,6 @@ impl TurnRequestProcessor {
         request_id: &ConnectionRequestId,
         parent_thread: Arc<CodexThread>,
         review_request: ReviewRequest,
-        display_text: &str,
         parent_thread_id: String,
     ) -> std::result::Result<(), JSONRPCErrorError> {
         let turn_id = self
@@ -1327,7 +1312,7 @@ impl TurnRequestProcessor {
             )
             .await
             .map_err(|err| internal_error(format!("failed to start review: {err}")))?;
-        let turn = Self::build_review_turn(turn_id, display_text);
+        let turn = Self::build_review_turn(turn_id);
         self.emit_review_started(request_id, turn, parent_thread_id)
             .await;
         Ok(())
@@ -1419,7 +1404,7 @@ impl TurnRequestProcessor {
             "review thread",
         );
 
-        let turn = Self::build_review_turn(turn_id, prompt);
+        let turn = Self::build_review_turn(turn_id);
         let review_thread_id = thread_id.to_string();
         self.emit_review_started(request_id, turn, review_thread_id)
             .await;
@@ -1439,18 +1424,12 @@ impl TurnRequestProcessor {
         } = params;
 
         let (_, parent_thread) = self.load_thread(&thread_id).await?;
-        let (review_request, display_text, target_prompt) =
+        let (review_request, _display_text, target_prompt) =
             Self::review_request_from_target(target)?;
         match delivery.unwrap_or(ApiReviewDelivery::Inline).to_core() {
             CoreReviewDelivery::Inline => {
-                self.start_inline_review(
-                    request_id,
-                    parent_thread,
-                    review_request,
-                    &display_text,
-                    thread_id,
-                )
-                .await?;
+                self.start_inline_review(request_id, parent_thread, review_request, thread_id)
+                    .await?;
             }
             CoreReviewDelivery::Detached => {
                 let review_skill_path = system_cache_root_dir(&self.config.codex_home)

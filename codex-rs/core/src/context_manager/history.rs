@@ -5,7 +5,6 @@ use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::normalize;
 use crate::event_mapping::has_non_contextual_dev_message_content;
 use crate::event_mapping::is_contextual_dev_message_content;
-use crate::event_mapping::is_contextual_user_message_content;
 use crate::session::turn_context::TurnContext;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -78,14 +77,16 @@ impl ConversationHistorySnapshot for SharedConversationHistory {
         Box::new(
             self.items
                 .iter()
-                .map(|envelope| &envelope.item)
-                .filter(|item| {
+                .filter(|envelope| {
                     !matches!(
-                        item,
-                        ResponseItem::Message { role, content, .. }
-                            if role == "user" && is_contextual_user_message_content(content)
+                        (&envelope.item, envelope.metadata.as_ref()),
+                        (ResponseItem::Message { role, content, .. }, metadata)
+                            if role == "developer"
+                                && !metadata.is_some_and(|metadata| metadata.client_authored)
+                                && is_contextual_dev_message_content(content)
                     )
-                }),
+                })
+                .map(|envelope| &envelope.item),
         )
     }
 }
@@ -461,6 +462,7 @@ impl ContextManager {
 
         // strip audio when model does not support it
         normalize::strip_audio_when_unsupported(input_modalities, items);
+        normalize::move_generated_media_placeholders_out_of_user_messages(items);
     }
 
     fn process_item(item: &ResponseItem, policy: TruncationPolicy) -> ResponseItem {
@@ -514,8 +516,8 @@ impl ContextManager {
 
     /// Walk backward from a rollback cut and trim contiguous pre-turn context-update items.
     ///
-    /// Returns the adjusted cut index after removing contextual developer/user items immediately
-    /// above the rolled-back turn boundary.
+    /// Returns the adjusted cut index after removing contextual developer items immediately above
+    /// the rolled-back turn boundary.
     ///
     /// `first_instruction_turn_idx` is the earliest rollback-eligible instruction-turn boundary
     /// in `snapshot`; the trim walk never crosses it so any session-prefix items that predate the
@@ -546,11 +548,6 @@ impl ContextManager {
                         // reinject context instead of diffing against a stale baseline.
                         self.reference_context_item = None;
                     }
-                    cut_idx -= 1;
-                }
-                ResponseItem::Message { role, content, .. }
-                    if role == "user" && is_contextual_user_message_content(content) =>
-                {
                     cut_idx -= 1;
                 }
                 _ => break,
@@ -925,8 +922,7 @@ pub(crate) fn is_user_turn_boundary(item: &ResponseItem) -> bool {
         return false;
     };
 
-    (role == "user" && !is_contextual_user_message_content(content))
-        || (role == "assistant" && is_inter_agent_instruction_content(content))
+    role == "user" || (role == "assistant" && is_inter_agent_instruction_content(content))
 }
 
 fn is_inter_agent_instruction_content(content: &[ContentItem]) -> bool {

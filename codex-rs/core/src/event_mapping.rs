@@ -60,10 +60,6 @@ const CONTEXTUAL_DEVELOPER_PREFIXES: &[&str] = &[
     "<rollout_budget>",
 ];
 
-pub(crate) fn is_contextual_user_message_content(message: &[ContentItem]) -> bool {
-    message.iter().any(is_contextual_user_fragment)
-}
-
 /// Returns true when a developer message contains any rollback-trimmable contextual fragment.
 ///
 /// `build_initial_context` can bundle these fragments together with persistent developer text in a
@@ -82,6 +78,9 @@ pub(crate) fn has_non_contextual_dev_message_content(message: &[ContentItem]) ->
 }
 
 fn is_contextual_dev_fragment(content_item: &ContentItem) -> bool {
+    if is_contextual_user_fragment(content_item) {
+        return true;
+    }
     let ContentItem::InputText { text } = content_item else {
         return false;
     };
@@ -95,10 +94,6 @@ fn is_contextual_dev_fragment(content_item: &ContentItem) -> bool {
 }
 
 fn parse_user_message(message: &[ContentItem]) -> Option<UserMessageItem> {
-    if is_contextual_user_message_content(message) {
-        return None;
-    }
-
     let mut content: Vec<UserInput> = Vec::new();
 
     for (idx, content_item) in message.iter().enumerate() {
@@ -185,9 +180,10 @@ pub fn parse_turn_item(item: &ResponseItem) -> Option<TurnItem> {
             phase,
             ..
         } => match role.as_str() {
-            "user" => parse_visible_hook_prompt_message(id.as_deref(), content)
-                .map(TurnItem::HookPrompt)
-                .or_else(|| parse_user_message(content).map(TurnItem::UserMessage)),
+            "user" => parse_user_message(content).map(TurnItem::UserMessage),
+            "developer" => {
+                parse_visible_hook_prompt_message(id.as_deref(), content).map(TurnItem::HookPrompt)
+            }
             "assistant" => Some(TurnItem::AgentMessage(parse_agent_message(
                 id.as_deref(),
                 content,

@@ -313,6 +313,7 @@ async fn thread_unarchive_preserves_pathless_store_metadata() -> Result<()> {
                 ..Default::default()
             }),
         },
+        goal_auto_continue_enabled: false,
         channel_capacity: in_process::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
     })
     .await?;

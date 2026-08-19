@@ -133,17 +133,7 @@ async fn review_start_runs_review_turn_and_emits_code_review_item() -> Result<()
     let turn_id = turn.id.clone();
     assert_eq!(turn.status, TurnStatus::InProgress);
     assert_eq!(turn.items_view, TurnItemsView::NotLoaded);
-    assert_eq!(
-        turn.items,
-        vec![ThreadItem::UserMessage {
-            id: turn_id.clone(),
-            client_id: None,
-            content: vec![V2UserInput::Text {
-                text: "commit 1234567: Tidy UI colors".to_string(),
-                text_elements: Vec::new(),
-            }],
-        }]
-    );
+    assert!(turn.items.is_empty());
 
     // Confirm we see the EnteredReviewMode marker on the main thread.
     let mut saw_entered_review_mode = false;
@@ -236,17 +226,7 @@ async fn review_start_exec_approval_item_id_matches_command_execution_item() -> 
         .await?;
     let turn_id = turn.id.clone();
     assert_eq!(turn.items_view, TurnItemsView::NotLoaded);
-    assert_eq!(
-        turn.items,
-        vec![ThreadItem::UserMessage {
-            id: turn_id.clone(),
-            client_id: None,
-            content: vec![V2UserInput::Text {
-                text: "commit 1234567: Check review approvals".to_string(),
-                text_elements: Vec::new(),
-            }],
-        }]
-    );
+    assert!(turn.items.is_empty());
 
     let server_req = timeout(
         DEFAULT_READ_TIMEOUT,
@@ -385,17 +365,7 @@ async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<(
 
     assert_eq!(turn.status, TurnStatus::InProgress);
     assert_eq!(turn.items_view, TurnItemsView::NotLoaded);
-    assert_eq!(
-        turn.items,
-        vec![ThreadItem::UserMessage {
-            id: turn.id.clone(),
-            client_id: None,
-            content: vec![V2UserInput::Text {
-                text: expected_prompt.clone(),
-                text_elements: Vec::new(),
-            }],
-        }]
-    );
+    assert!(turn.items.is_empty());
     assert_ne!(
         review_thread_id, thread_id,
         "detached review should run on a different thread"
@@ -438,13 +408,22 @@ async fn review_start_with_detached_delivery_returns_new_thread_id() -> Result<(
     let review_request = &requests[1];
     assert_eq!(review_request.header("x-openai-subagent"), None);
     assert!(review_request.body_contains_text("Colliding user review skill."));
-    let user_messages = review_request.message_input_texts("user");
-    assert!(user_messages.iter().any(|text| text == &expected_prompt));
-    assert!(user_messages.iter().any(|text| {
-        text.starts_with("<skill>")
-            && text.contains("<name>review-agent</name>")
-            && text.contains("Do not modify files")
-    }));
+    let developer_messages = review_request.message_input_texts("developer");
+    assert!(
+        developer_messages
+            .iter()
+            .any(|text| text == &expected_prompt)
+    );
+    assert!(
+        review_request
+            .message_input_texts("developer")
+            .iter()
+            .any(|text| {
+                text.starts_with("<skill>")
+                    && text.contains("<name>review-agent</name>")
+                    && text.contains("Do not modify files")
+            })
+    );
     assert!(!review_request.body_contains_text(COLLIDING_REVIEW_SKILL_MARKER));
 
     Ok(())

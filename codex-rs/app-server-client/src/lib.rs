@@ -206,6 +206,8 @@ pub struct InProcessClientStartArgs {
     pub mcp_server_openai_form_elicitation: bool,
     /// Notification methods this client opts out of receiving.
     pub opt_out_notification_methods: Vec<String>,
+    /// Whether this embedder explicitly allows interactive goal auto-continuation.
+    pub goal_auto_continue_enabled: bool,
     /// Queue capacity for command and embedded-runtime channels (clamped to at least 1).
     pub channel_capacity: usize,
 }
@@ -253,6 +255,7 @@ impl InProcessClientStartArgs {
             session_source: self.session_source,
             enable_codex_api_key_env: self.enable_codex_api_key_env,
             initialize,
+            goal_auto_continue_enabled: self.goal_auto_continue_enabled,
             channel_capacity: self.channel_capacity,
         }
     }
@@ -862,6 +865,7 @@ mod tests {
             client_name: "codex-app-server-client-test".to_string(),
             client_version: "0.0.0-test".to_string(),
             experimental_api: true,
+            goal_auto_continue_enabled: false,
             mcp_server_openai_form_elicitation: false,
             opt_out_notification_methods: Vec::new(),
             channel_capacity,
@@ -1978,6 +1982,7 @@ mod tests {
             client_name: "codex-app-server-client-test".to_string(),
             client_version: "0.0.0-test".to_string(),
             experimental_api: true,
+            goal_auto_continue_enabled: false,
             mcp_server_openai_form_elicitation: true,
             opt_out_notification_methods: Vec::new(),
             channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
@@ -1985,6 +1990,7 @@ mod tests {
         .into_runtime_start_args();
 
         assert_eq!(runtime_args.config, config);
+        assert!(!runtime_args.goal_auto_continue_enabled);
         assert!(
             runtime_args
                 .initialize

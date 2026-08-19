@@ -16,6 +16,7 @@ use crate::accounting::GoalAccountingState;
 use crate::analytics::GoalAnalytics;
 use crate::analytics::GoalEventAttribution;
 use crate::events::GoalEventEmitter;
+use crate::extension::GoalAutoContinueCapability;
 use crate::metrics::GoalMetrics;
 use crate::steering::continuation_steering_item;
 use crate::steering::objective_updated_steering_item;
@@ -32,6 +33,7 @@ pub(crate) struct GoalRuntimeConfig {
     pub(crate) analytics: GoalAnalytics,
     pub(crate) enabled: bool,
     pub(crate) tools_available_for_thread: bool,
+    pub(crate) auto_continue_capability: GoalAutoContinueCapability,
 }
 
 pub(crate) enum ActiveGoalStopReason {
@@ -49,6 +51,7 @@ struct GoalRuntimeInner {
     accounting_state: Arc<GoalAccountingState>,
     enabled: AtomicBool,
     tools_available_for_thread: bool,
+    auto_continue_capability: GoalAutoContinueCapability,
     goal_state_lock: Semaphore,
 }
 
@@ -101,6 +104,7 @@ impl GoalRuntimeHandle {
                 accounting_state,
                 enabled: AtomicBool::new(config.enabled),
                 tools_available_for_thread: config.tools_available_for_thread,
+                auto_continue_capability: config.auto_continue_capability,
                 goal_state_lock: Semaphore::new(/*permits*/ 1),
             }),
         }
@@ -360,6 +364,10 @@ impl GoalRuntimeHandle {
     }
 
     pub(crate) async fn continue_if_idle(&self) -> Result<(), String> {
+        if self.inner.auto_continue_capability != GoalAutoContinueCapability::Interactive {
+            return Ok(());
+        }
+
         if !self.tools_visible() {
             self.inner.accounting_state.clear_active_goal();
             return Ok(());

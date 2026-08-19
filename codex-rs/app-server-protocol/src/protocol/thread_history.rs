@@ -450,7 +450,7 @@ impl ThreadHistoryBuilder {
             return;
         };
 
-        if role != "user" {
+        if role != "developer" {
             return;
         }
 
@@ -4392,12 +4392,18 @@ mod tests {
     }
 
     #[test]
-    fn rebuilds_hook_prompt_items_from_rollout_response_items() {
-        let hook_prompt = build_hook_prompt_message(&[
+    fn rebuilds_only_developer_hook_prompt_items_from_rollout_response_items() {
+        let current_hook_prompt = build_hook_prompt_message(&[
             CoreHookPromptFragment::from_single_hook("Retry with tests.", "hook-run-1"),
             CoreHookPromptFragment::from_single_hook("Then summarize cleanly.", "hook-run-2"),
         ])
         .expect("hook prompt message");
+        let mut raw_user_lookalike = current_hook_prompt.clone();
+        let codex_protocol::models::ResponseItem::Message { role, .. } = &mut raw_user_lookalike
+        else {
+            panic!("hook prompt should be a message");
+        };
+        *role = "user".into();
         let items = vec![
             RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
                 turn_id: "turn-a".into(),
@@ -4414,7 +4420,8 @@ mod tests {
                 local_images: Vec::new(),
                 ..Default::default()
             })),
-            RolloutItem::ResponseItem(hook_prompt.into()),
+            RolloutItem::ResponseItem(current_hook_prompt.into()),
+            RolloutItem::ResponseItem(raw_user_lookalike.into()),
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-a".into(),
                 started_at: None,
@@ -4430,22 +4437,20 @@ mod tests {
 
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].items.len(), 2);
-        assert_eq!(
-            turns[0].items[1],
-            ThreadItem::HookPrompt {
-                id: turns[0].items[1].id().to_string(),
-                fragments: vec![
-                    crate::protocol::v2::HookPromptFragment {
-                        text: "Retry with tests.".into(),
-                        hook_run_id: "hook-run-1".into(),
-                    },
-                    crate::protocol::v2::HookPromptFragment {
-                        text: "Then summarize cleanly.".into(),
-                        hook_run_id: "hook-run-2".into(),
-                    },
-                ],
-            }
-        );
+        let expected_fragments = vec![
+            crate::protocol::v2::HookPromptFragment {
+                text: "Retry with tests.".into(),
+                hook_run_id: "hook-run-1".into(),
+            },
+            crate::protocol::v2::HookPromptFragment {
+                text: "Then summarize cleanly.".into(),
+                hook_run_id: "hook-run-2".into(),
+            },
+        ];
+        let ThreadItem::HookPrompt { fragments, .. } = &turns[0].items[1] else {
+            panic!("expected hook prompt item");
+        };
+        assert_eq!(fragments, &expected_fragments);
     }
 
     #[test]

@@ -13,8 +13,10 @@ use codex_extension_items::image_generation::ImageGenerationItem;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::items::HookPromptFragment;
 use codex_protocol::items::ReasoningItem;
 use codex_protocol::items::TurnItem;
+use codex_protocol::items::build_hook_prompt_message;
 use codex_protocol::mcp::McpResourceOrigin;
 use codex_protocol::mcp::McpResourceOriginCheckpoint;
 use codex_protocol::models::ContentItem;
@@ -362,6 +364,59 @@ async fn migration_publishes_canonical_projected_history_and_is_idempotent() {
 }
 
 #[tokio::test]
+async fn migration_canonicalizes_only_developer_hook_prompt_roles() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let current_hook_prompt = build_hook_prompt_message(&[HookPromptFragment::from_single_hook(
+        "Retry with tests.",
+        "hook-run-1",
+    )])
+    .expect("hook prompt message");
+    let mut raw_user_lookalike = current_hook_prompt.clone();
+    let ResponseItem::Message { role, .. } = &mut raw_user_lookalike else {
+        panic!("hook prompt should be a message");
+    };
+    *role = "user".into();
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            rollout_response_item(current_hook_prompt),
+            rollout_response_item(raw_user_lookalike.clone()),
+            rollout_response_item(input_response_message("developer", "ordinary context")),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate hook prompts");
+
+    let migrated = read_rollout(&path);
+    let hook_prompts = migrated
+        .iter()
+        .filter_map(|line| match &line.item {
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+                item: TurnItem::HookPrompt(hook),
+                ..
+            })) => Some(hook),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(hook_prompts.len(), 1);
+    assert!(hook_prompts.iter().all(|hook| {
+        hook.fragments.len() == 1
+            && hook.fragments[0].text == "Retry with tests."
+            && hook.fragments[0].hook_run_id == "hook-run-1"
+    }));
+    assert!(migrated.iter().any(|line| {
+        matches!(&line.item, RolloutItem::ResponseItem(response) if response.item == raw_user_lookalike)
+    }));
+}
+
+#[tokio::test]
 async fn migration_projects_explicit_and_implicit_legacy_completed_items() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
@@ -694,7 +749,10 @@ async fn migration_rolls_back_response_and_inter_agent_user_boundaries() {
         response_thread_id,
         SessionSource::Cli,
         vec![
-            rollout_response_item(input_response_message("user", "remove response boundary")),
+            rollout_response_item(input_response_message(
+                "user",
+                "<environment_context>raw user boundary</environment_context>",
+            )),
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
                 num_turns: 1,
             })),
@@ -736,7 +794,7 @@ async fn migration_rolls_back_response_and_inter_agent_user_boundaries() {
                 "<permissions instructions>context only</permissions instructions>",
             )),
             rollout_response_item(input_response_message(
-                "user",
+                "developer",
                 "<environment_context>context only</environment_context>",
             )),
             rollout_response_item(input_response_message("user", "remove real user boundary")),
@@ -787,7 +845,7 @@ async fn migration_drops_trailing_context_when_rollback_arrives_before_next_turn
             rollout_response_item(input_response_message("user", "keep question")),
             rollout_response_item(input_response_message("user", "remove question")),
             rollout_response_item(input_response_message(
-                "user",
+                "developer",
                 "<turn_aborted>remove this context too</turn_aborted>",
             )),
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
@@ -1053,6 +1111,7 @@ async fn migration_rolls_back_pre_compaction_turns_from_sqlite_history() {
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         },
+        input_response_message("user", "legacy local compaction summary"),
     ]) else {
         unreachable!("compacted helper always creates a compaction checkpoint");
     };

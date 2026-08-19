@@ -351,7 +351,7 @@ async fn remote_test_env_exposes_target_shell_to_model() -> Result<()> {
     let tools = tool_names(&request.body_json());
     assert!(!tools.contains(&"exec_command".to_string()));
     let environment_context = request
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .find(|text| text.starts_with("<environment_context>"))
         .context("environment context should be model visible")?;
@@ -689,11 +689,11 @@ async fn step_world_state_gates_deferred_prompt_independently_of_host_config() -
             test.submit_turn("report the environment").await?;
 
             let request = response_mock.single_request();
-            let user_context = request.message_input_texts("user");
+            let user_context = request.message_input_texts("developer");
             assert_eq!(
                 user_context
                     .iter()
-                    .filter(|text| text.contains("<environment_context>"))
+                    .filter(|text| text.starts_with("<environment_context>"))
                     .count(),
                 1,
                 "deferred executor enabled: {deferred_executor_enabled}; host config present: {host_config_present}",
@@ -842,7 +842,7 @@ async fn settings_update_does_not_retarget_active_turn_environment() -> Result<(
     let request_texts = response_mock
         .requests()
         .iter()
-        .map(|request| request.message_input_texts("user").join("\n"))
+        .map(|request| request.message_input_texts("developer").join("\n"))
         .collect::<Vec<_>>();
     let initial_cwd = format!("<cwd>{}</cwd>", initial_cwd.as_path().display());
     let next_cwd = format!("<cwd>{}</cwd>", next_cwd.as_path().display());
@@ -951,9 +951,9 @@ async fn deferred_executor_promotes_primary_environment_when_startup_completes()
 
     let requests = response_mock.requests();
     let initial_context = requests[1]
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
-        .rfind(|text| text.contains("<environment_context>"))
+        .rfind(|text| text.starts_with("<environment_context>"))
         .context("starting environment context")?;
     assert!(initial_context.contains("<environment id=\"local\" primary=\"true\">"));
     assert!(initial_context.contains("<environment id=\"remote\" primary=\"false\">"));
@@ -980,9 +980,9 @@ async fn deferred_executor_promotes_primary_environment_when_startup_completes()
 
     let requests = response_mock.requests();
     let updated_context = requests[2]
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
-        .rfind(|text| text.contains("<environment_context>"))
+        .rfind(|text| text.starts_with("<environment_context>"))
         .context("updated primary environment context")?;
     assert!(updated_context.contains("<environment id=\"local\" primary=\"false\">"));
     assert!(updated_context.contains("<environment id=\"remote\" primary=\"true\">"));
@@ -1388,7 +1388,7 @@ async fn shared_executor_keeps_ready_capability_roots_scoped_to_each_attachment(
         .iter()
         .map(|request| {
             request
-                .message_input_texts("user")
+                .message_input_texts("developer")
                 .into_iter()
                 .rfind(|text| text.contains("<ready_capability_roots>"))
                 .context("ready capability roots should be model-visible")
@@ -1687,7 +1687,7 @@ async fn pending_attachment_installs_configuration_before_waiting_turn_resumes()
     );
     assert_eq!(
         ready_request
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .into_iter()
             .rfind(|text| text.contains("<ready_capability_roots>")),
         Some("<ready_capability_roots>waiting-root</ready_capability_roots>".to_string())
@@ -1938,10 +1938,10 @@ async fn ready_before_selection_resolves_resumed_thread_capability_root_after_wa
     // The first request may legally see either Starting or Ready; the wait makes step two ready.
     let first_tools = tool_names(&requests[0].body_json());
     assert!(first_tools.contains(&"wait_for_environment".to_string()));
-    let first_user_context = requests[0].message_input_texts("user");
+    let first_user_context = requests[0].message_input_texts("developer");
     let first_environment_context = first_user_context
         .iter()
-        .rfind(|text| text.contains("<environment_context>"))
+        .rfind(|text| text.starts_with("<environment_context>"))
         .context("initial environment context should be model visible")?;
     let first_has_ready_root = first_user_context
         .iter()
@@ -1960,10 +1960,10 @@ async fn ready_before_selection_resolves_resumed_thread_capability_root_after_wa
         .context("wait_for_environment output should be model visible")?;
     assert_ne!(wait_succeeded, Some(false));
     assert!(tool_names(&requests[1].body_json()).contains(&"exec_command".to_string()));
-    let user_context = requests[1].message_input_texts("user");
+    let user_context = requests[1].message_input_texts("developer");
     let environment_context = user_context
         .iter()
-        .rfind(|text| text.contains("<environment_context>"))
+        .rfind(|text| text.starts_with("<environment_context>"))
         .context("ready environment context should be model visible")?;
     assert!(!environment_context.contains("status=\"unavailable\""));
     assert!(!environment_context.contains("<status>starting</status>"));
@@ -2386,7 +2386,7 @@ async fn deferred_executor_guardian_uses_newly_ready_step_environment() -> Resul
             request.body_json()["client_metadata"]["x-openai-subagent"].as_str() == Some("guardian")
         })
         .context("expected Guardian review request")?;
-    let guardian_context = guardian_request.message_input_texts("user").join("\n");
+    let guardian_context = guardian_request.message_input_texts("developer").join("\n");
     for expected in [
         "<environment id=\"remote\" primary=\"true\">".to_string(),
         format!("<cwd>{}</cwd>", remote_cwd.display()),
@@ -2499,7 +2499,7 @@ async fn deferred_executor_loads_agents_md_when_environment_becomes_ready() -> R
 
 fn agents_md_occurrences(request: &ResponsesRequest, contents: &str) -> usize {
     request
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .iter()
         .filter(|text| text.contains(contents))
         .count()
@@ -2608,14 +2608,14 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once() 
 
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 3);
-    let initial_context = requests[0].message_input_texts("user");
+    let initial_context = requests[0].message_input_texts("developer");
     assert!(
         initial_context
             .iter()
             .any(|text| text.contains("<status>starting</status>"))
     );
 
-    let post_compaction_context = requests[2].message_input_texts("user");
+    let post_compaction_context = requests[2].message_input_texts("developer");
     assert_eq!(
         post_compaction_context
             .iter()
@@ -3172,6 +3172,7 @@ async fn remote_request_permissions_grant_unblocks_later_remote_exec() -> Result
 
     test.codex
         .submit(Op::RequestPermissionsResponse {
+            turn_id: request.turn_id,
             id: "permissions-call".to_string(),
             response: approved_response.clone(),
         })

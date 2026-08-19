@@ -1,5 +1,4 @@
 use crate::compact::content_items_to_text;
-use crate::event_mapping::is_contextual_user_message_content;
 use crate::session::session::Session;
 use chrono::Utc;
 use codex_exec_server::LOCAL_FS;
@@ -220,9 +219,6 @@ fn build_current_thread_section<'a>(
     for item in items {
         match item {
             ResponseItem::Message { role, content, .. } if role == "user" => {
-                if is_contextual_user_message_content(content) {
-                    continue;
-                }
                 let Some(text) = content_items_to_text(content)
                     .map(|text| text.trim().to_string())
                     .filter(|text| !text.is_empty())

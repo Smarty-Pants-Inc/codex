@@ -996,15 +996,15 @@ async fn model_change_from_multimodal_to_text_strips_prior_media_content() -> Re
         second_request.message_input_audio_urls("user").is_empty(),
         "second request should strip unsupported audio content"
     );
-    let second_user_texts = second_request.message_input_texts("user");
+    let second_developer_texts = second_request.message_input_texts("developer");
     assert!(
-        second_user_texts
+        second_developer_texts
             .iter()
             .any(|text| text == "image content omitted because you do not support image input"),
         "second request should include the image-omitted placeholder text"
     );
     assert!(
-        second_user_texts
+        second_developer_texts
             .iter()
             .any(|text| text == "audio content omitted because you do not support audio input"),
         "second request should include the audio-omitted placeholder text"
@@ -1185,10 +1185,12 @@ async fn model_change_from_generated_image_to_text_preserves_prior_generated_ima
 
     let second_request = requests.last().expect("expected second request");
     let image_generation_calls = second_request.inputs_of_type("image_generation_call");
-    assert!(
-        second_request.message_input_image_urls("user").is_empty(),
-        "second request should not rewrite generated images into message input images"
-    );
+    for role in ["user", "developer"] {
+        assert!(
+            second_request.message_input_image_urls(role).is_empty(),
+            "second request should not rewrite generated images into {role} message input images"
+        );
+    }
     assert!(
         image_generation_calls.len() == 1,
         "second request should preserve the generated image call for text-only models"
@@ -1199,10 +1201,8 @@ async fn model_change_from_generated_image_to_text_preserves_prior_generated_ima
         "second request should strip generated image bytes for text-only models"
     );
     assert!(
-        second_request
-            .message_input_texts("user")
-            .iter()
-            .all(|text| text != "image content omitted because you do not support image input"),
+        !second_request
+            .body_contains_text("image content omitted because you do not support image input"),
         "second request should not inject the image-omitted placeholder text"
     );
     Ok(())

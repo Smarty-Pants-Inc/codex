@@ -97,18 +97,20 @@ async fn additional_context_is_model_visible_but_not_a_user_message_item() -> Re
     let developer_context_texts = request
         .message_input_texts("developer")
         .into_iter()
-        .filter(|text| text.starts_with("<automation_info>"))
+        .filter(|text| {
+            text.starts_with("<automation_info>") || text.starts_with("<external_browser_info>")
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         developer_context_texts,
-        vec!["<automation_info>run one</automation_info>"]
+        vec![
+            "<automation_info>run one</automation_info>",
+            "<external_browser_info>tab one</external_browser_info>",
+        ]
     );
     assert_eq!(
         request.message_input_texts("user"),
-        vec![
-            "<external_browser_info>tab one</external_browser_info>",
-            "inspect the active tab",
-        ]
+        vec!["inspect the active tab"]
     );
 
     Ok(())
@@ -201,24 +203,25 @@ async fn additional_context_trust_controls_message_role() -> Result<()> {
     })
     .await;
 
-    let request = request.single_request();
     let developer_context_texts = request
+        .single_request()
         .message_input_texts("developer")
         .into_iter()
-        .filter(|text| text.starts_with("<automation_info>"))
+        .filter(|text| {
+            text.starts_with("<automation_info>") || text.starts_with("<external_browser_info>")
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         developer_context_texts,
-        vec!["<automation_info>run one</automation_info>"]
-    );
-    assert_eq!(
-        request.message_input_texts("user"),
         vec![
+            "<automation_info>run one</automation_info>",
             "<external_browser_info>tab one</external_browser_info>",
-            "inspect context",
         ]
     );
-
+    assert_eq!(
+        request.single_request().message_input_texts("user"),
+        vec!["inspect context"]
+    );
     Ok(())
 }
 
@@ -278,19 +281,30 @@ async fn additional_context_is_deduplicated_between_turns_while_retained() -> Re
     .await;
 
     assert_eq!(
+        first_request
+            .single_request()
+            .message_input_texts("developer")
+            .into_iter()
+            .filter(|text| text.starts_with("<external_browser_info>"))
+            .collect::<Vec<_>>(),
+        vec!["<external_browser_info>same tab</external_browser_info>"]
+    );
+    assert_eq!(
         first_request.single_request().message_input_texts("user"),
-        vec![
-            "<external_browser_info>same tab</external_browser_info>",
-            "first turn",
-        ]
+        vec!["first turn"]
+    );
+    assert_eq!(
+        second_request
+            .single_request()
+            .message_input_texts("developer")
+            .into_iter()
+            .filter(|text| text.starts_with("<external_browser_info>"))
+            .collect::<Vec<_>>(),
+        vec!["<external_browser_info>same tab</external_browser_info>"]
     );
     assert_eq!(
         second_request.single_request().message_input_texts("user"),
-        vec![
-            "<external_browser_info>same tab</external_browser_info>",
-            "first turn",
-            "second turn",
-        ]
+        vec!["first turn", "second turn"]
     );
 
     Ok(())
@@ -416,34 +430,55 @@ async fn additional_context_removes_one_value_while_adding_another() -> Result<(
     .await;
 
     assert_eq!(
-        first_request.single_request().message_input_texts("user"),
+        first_request
+            .single_request()
+            .message_input_texts("developer")
+            .into_iter()
+            .filter(|text| text.starts_with("<external_"))
+            .collect::<Vec<_>>(),
         vec![
             "<external_automation_info>run one</external_automation_info>",
             "<external_browser_info>tab one</external_browser_info>",
-            "first turn",
+        ]
+    );
+    assert_eq!(
+        first_request.single_request().message_input_texts("user"),
+        vec!["first turn"]
+    );
+    assert_eq!(
+        second_request
+            .single_request()
+            .message_input_texts("developer")
+            .into_iter()
+            .filter(|text| text.starts_with("<external_"))
+            .collect::<Vec<_>>(),
+        vec![
+            "<external_automation_info>run one</external_automation_info>",
+            "<external_browser_info>tab one</external_browser_info>",
+            "<external_terminal_info>pty one</external_terminal_info>",
         ]
     );
     assert_eq!(
         second_request.single_request().message_input_texts("user"),
+        vec!["first turn", "second turn"]
+    );
+    assert_eq!(
+        third_request
+            .single_request()
+            .message_input_texts("developer")
+            .into_iter()
+            .filter(|text| text.starts_with("<external_"))
+            .collect::<Vec<_>>(),
         vec![
             "<external_automation_info>run one</external_automation_info>",
             "<external_browser_info>tab one</external_browser_info>",
-            "first turn",
             "<external_terminal_info>pty one</external_terminal_info>",
-            "second turn",
+            "<external_browser_info>tab one</external_browser_info>",
         ]
     );
     assert_eq!(
         third_request.single_request().message_input_texts("user"),
-        vec![
-            "<external_automation_info>run one</external_automation_info>",
-            "<external_browser_info>tab one</external_browser_info>",
-            "first turn",
-            "<external_terminal_info>pty one</external_terminal_info>",
-            "second turn",
-            "<external_browser_info>tab one</external_browser_info>",
-            "third turn",
-        ]
+        vec!["first turn", "second turn", "third turn"]
     );
 
     Ok(())
@@ -523,11 +558,18 @@ async fn additional_context_values_are_truncated_before_model_input() -> Result<
         automation_text.len()
     );
 
-    let user_texts = request.message_input_texts("user");
-    let [external_text, user_text] = user_texts.as_slice() else {
-        panic!("expected external context plus user input, got {user_texts:?}");
+    let external_texts = request
+        .message_input_texts("developer")
+        .into_iter()
+        .filter(|text| text.starts_with("<external_browser_info>"))
+        .collect::<Vec<_>>();
+    let [external_text] = external_texts.as_slice() else {
+        panic!("expected truncated external context, got {external_texts:?}");
     };
-    assert_eq!(user_text, "summarize context");
+    assert_eq!(
+        request.message_input_texts("user"),
+        vec!["summarize context"]
+    );
     assert!(external_text.starts_with(&format!(
         "<external_browser_info>browser-head-{}",
         "b".repeat(1024)

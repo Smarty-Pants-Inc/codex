@@ -12,7 +12,6 @@ use crate::compact::content_items_to_text;
 use crate::context::NodeReplReviewEvidence;
 use crate::context::NodeReplReviewEvidenceMode;
 use crate::context::node_repl_review_evidence_mode;
-use crate::event_mapping::is_contextual_user_message_content;
 use crate::session::session::Session;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_bytes_for_tokens;
@@ -519,11 +518,7 @@ pub(crate) fn collect_guardian_transcript_entries<'a>(
     for item in items {
         let entry = match item {
             ResponseItem::Message { role, content, .. } if role == "user" => {
-                if is_contextual_user_message_content(content) {
-                    None
-                } else {
-                    content_entry(GuardianTranscriptEntryKind::User, content)
-                }
+                content_entry(GuardianTranscriptEntryKind::User, content)
             }
             ResponseItem::Message { role, content, .. } if role == "developer" => {
                 content_items_to_text(content).and_then(|text| {

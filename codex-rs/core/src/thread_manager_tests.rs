@@ -34,6 +34,7 @@ use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
@@ -628,12 +629,11 @@ async fn ignores_session_prefix_messages_when_truncating() {
     );
     let got_items = truncated.get_rollout_items();
 
-    let expected: Vec<RolloutItem> = vec![
-        RolloutItem::ResponseItem(items[0].clone().into()),
-        RolloutItem::ResponseItem(items[1].clone().into()),
-        RolloutItem::ResponseItem(items[2].clone().into()),
-        RolloutItem::ResponseItem(items[3].clone().into()),
-    ];
+    let expected: Vec<RolloutItem> = items[..items.len() - 2]
+        .iter()
+        .cloned()
+        .map(|item| RolloutItem::ResponseItem(item.into()))
+        .collect();
 
     assert_eq!(
         serde_json::to_value(got_items).unwrap(),
@@ -1251,6 +1251,101 @@ async fn selected_capability_roots_round_trip_through_fork() {
         inherited_history.get_selected_capability_roots(),
         selected_roots
     );
+}
+
+#[tokio::test]
+async fn prepared_root_fork_from_non_root_copies_normalized_history() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let source_thread_id = ThreadId::new();
+    let task = "legacy synthetic review task";
+    let prepared = codex_thread_store::PreparedFork::new(
+        source_thread_id,
+        None,
+        Arc::new(vec![
+            RolloutItem::SessionMeta(SessionMetaLine {
+                meta: SessionMeta {
+                    session_id: source_thread_id.into(),
+                    id: source_thread_id,
+                    source: SessionSource::SubAgent(SubAgentSource::Review),
+                    history_mode: ThreadHistoryMode::Paginated,
+                    ..SessionMeta::default()
+                },
+                git: None,
+            }),
+            RolloutItem::ResponseItem(user_msg(task).into()),
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                message: task.to_string(),
+                ..Default::default()
+            })),
+        ]),
+        (),
+    );
+
+    let forked = manager
+        .fork_prepared_thread(
+            config,
+            prepared,
+            None,
+            None,
+            ClientMcpExtensions::default(),
+            None,
+        )
+        .await
+        .expect("fork prepared non-root history");
+    forked.thread.ensure_rollout_materialized().await;
+    forked
+        .thread
+        .flush_rollout()
+        .await
+        .expect("flush normalized fork");
+    let InitialHistory::Resumed(persisted) = RolloutRecorder::get_rollout_history(
+        &forked
+            .thread
+            .rollout_path()
+            .expect("normalized fork rollout path"),
+    )
+    .await
+    .expect("read normalized fork rollout") else {
+        panic!("expected persisted fork history");
+    };
+
+    assert!(persisted.history.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::ResponseItem(envelope)
+                if matches!(
+                    &envelope.item,
+                    ResponseItem::Message { role, content, .. }
+                        if role == "developer"
+                            && content.iter().any(|content| matches!(
+                                content,
+                                ContentItem::InputText { text } | ContentItem::OutputText { text }
+                                    if text == task
+                            ))
+                )
+        )
+    }));
+    assert!(!persisted.history.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::ResponseItem(envelope)
+                if matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "user")
+        ) || matches!(
+            item,
+            RolloutItem::EventMsg(EventMsg::UserMessage(event)) if event.message == task
+        )
+    }));
 }
 
 #[tokio::test]

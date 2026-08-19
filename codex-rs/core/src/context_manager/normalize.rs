@@ -325,97 +325,125 @@ where
     }
 }
 
-/// Strip image content from messages and tool outputs when the model does not support images.
-/// When `input_modalities` contains `InputModality::Image`, no stripping is performed.
+/// Strip unsupported media from messages and tool outputs.
+///
+/// Both public entry points use the same idempotent pass because a user message can contain both
+/// media types, and generated notices must retain their source order.
 pub(crate) fn strip_images_when_unsupported(
     input_modalities: &[InputModality],
-    items: &mut [ResponseItemEnvelope],
+    items: &mut Vec<ResponseItemEnvelope>,
+) {
+    strip_unsupported_media(input_modalities, items);
+}
+
+/// Strip unsupported media from messages and tool outputs.
+pub(crate) fn strip_audio_when_unsupported(
+    input_modalities: &[InputModality],
+    items: &mut Vec<ResponseItemEnvelope>,
+) {
+    strip_unsupported_media(input_modalities, items);
+}
+
+fn strip_unsupported_media(
+    input_modalities: &[InputModality],
+    items: &mut Vec<ResponseItemEnvelope>,
 ) {
     let supports_images = input_modalities.contains(&InputModality::Image);
-    if supports_images {
+    let supports_audio = input_modalities.contains(&InputModality::Audio);
+    if supports_images && supports_audio {
         return;
     }
 
-    for envelope in items.iter_mut() {
-        match &mut envelope.item {
-            ResponseItem::Message { content, .. } => {
-                let mut normalized_content = Vec::with_capacity(content.len());
-                for content_item in content.iter() {
+    let mut normalized_items = Vec::with_capacity(items.len());
+    for mut envelope in std::mem::take(items) {
+        let omitted_content = match &mut envelope.item {
+            ResponseItem::Message { role, content, .. } if role == "user" => {
+                let mut direct_content = Vec::with_capacity(content.len());
+                let mut omitted_content = Vec::new();
+                for content_item in std::mem::take(content) {
                     match content_item {
-                        ContentItem::InputImage { .. } => {
-                            normalized_content.push(ContentItem::InputText {
+                        ContentItem::InputImage { .. } if !supports_images => {
+                            omitted_content.push(ContentItem::InputText {
                                 text: IMAGE_CONTENT_OMITTED_PLACEHOLDER.to_string(),
                             });
                         }
-                        _ => normalized_content.push(content_item.clone()),
-                    }
-                }
-                *content = normalized_content;
-            }
-            ResponseItem::FunctionCallOutput { output, .. }
-            | ResponseItem::CustomToolCallOutput { output, .. } => {
-                if let Some(content_items) = output.content_items_mut() {
-                    let mut normalized_content_items = Vec::with_capacity(content_items.len());
-                    for content_item in content_items.iter() {
-                        match content_item {
-                            FunctionCallOutputContentItem::InputImage { .. } => {
-                                normalized_content_items.push(
-                                    FunctionCallOutputContentItem::InputText {
-                                        text: IMAGE_CONTENT_OMITTED_PLACEHOLDER.to_string(),
-                                    },
-                                );
-                            }
-                            _ => normalized_content_items.push(content_item.clone()),
+                        ContentItem::InputAudio { .. } if !supports_audio => {
+                            omitted_content.push(ContentItem::InputText {
+                                text: AUDIO_CONTENT_OMITTED_PLACEHOLDER.to_string(),
+                            });
                         }
+                        content_item => direct_content.push(content_item),
                     }
-                    *content_items = normalized_content_items;
                 }
+                *content = direct_content;
+                omitted_content
             }
-            ResponseItem::ImageGenerationCall { result, .. } => {
-                result.clear();
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Strip audio content from messages and tool outputs when the model does not support audio.
-/// When `input_modalities` contains `InputModality::Audio`, no stripping is performed.
-pub(crate) fn strip_audio_when_unsupported(
-    input_modalities: &[InputModality],
-    items: &mut [ResponseItemEnvelope],
-) {
-    if input_modalities.contains(&InputModality::Audio) {
-        return;
-    }
-
-    for envelope in items.iter_mut() {
-        match &mut envelope.item {
             ResponseItem::Message { content, .. } => {
-                for content_item in content.iter_mut() {
-                    if matches!(content_item, ContentItem::InputAudio { .. }) {
-                        *content_item = ContentItem::InputText {
-                            text: AUDIO_CONTENT_OMITTED_PLACEHOLDER.to_string(),
-                        };
-                    }
-                }
-            }
-            ResponseItem::FunctionCallOutput { output, .. }
-            | ResponseItem::CustomToolCallOutput { output, .. } => {
-                if let Some(content_items) = output.content_items_mut() {
-                    for content_item in content_items.iter_mut() {
-                        if matches!(
-                            content_item,
-                            FunctionCallOutputContentItem::InputAudio { .. }
-                        ) {
-                            *content_item = FunctionCallOutputContentItem::InputText {
+                for content_item in content {
+                    match content_item {
+                        ContentItem::InputImage { .. } if !supports_images => {
+                            *content_item = ContentItem::InputText {
+                                text: IMAGE_CONTENT_OMITTED_PLACEHOLDER.to_string(),
+                            };
+                        }
+                        ContentItem::InputAudio { .. } if !supports_audio => {
+                            *content_item = ContentItem::InputText {
                                 text: AUDIO_CONTENT_OMITTED_PLACEHOLDER.to_string(),
                             };
                         }
+                        _ => {}
                     }
                 }
+                Vec::new()
             }
-            _ => {}
+            ResponseItem::FunctionCallOutput { output, .. }
+            | ResponseItem::CustomToolCallOutput { output, .. } => {
+                if let Some(content_items) = output.content_items_mut() {
+                    for content_item in content_items {
+                        match content_item {
+                            FunctionCallOutputContentItem::InputImage { .. }
+                                if !supports_images =>
+                            {
+                                *content_item = FunctionCallOutputContentItem::InputText {
+                                    text: IMAGE_CONTENT_OMITTED_PLACEHOLDER.to_string(),
+                                };
+                            }
+                            FunctionCallOutputContentItem::InputAudio { .. } if !supports_audio => {
+                                *content_item = FunctionCallOutputContentItem::InputText {
+                                    text: AUDIO_CONTENT_OMITTED_PLACEHOLDER.to_string(),
+                                };
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                Vec::new()
+            }
+            ResponseItem::ImageGenerationCall { result, .. } => {
+                if !supports_images {
+                    result.clear();
+                }
+                Vec::new()
+            }
+            _ => Vec::new(),
+        };
+        normalized_items.push(envelope);
+        if !omitted_content.is_empty() {
+            normalized_items.push(ResponseItemEnvelope::new(ResponseItem::Message {
+                id: None,
+                role: "developer".to_string(),
+                content: omitted_content,
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }));
         }
     }
+    *items = normalized_items;
+}
+
+/// Kept for existing normalization callers. Generated notices now have developer authority at
+/// their creation point, so literal text never establishes provenance.
+pub(crate) fn move_generated_media_placeholders_out_of_user_messages(
+    _items: &mut Vec<ResponseItemEnvelope>,
+) {
 }

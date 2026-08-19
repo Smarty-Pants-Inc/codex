@@ -487,7 +487,7 @@ stream_max_retries = 0
             .any(|text| text.contains(SKILL_NAME))
     );
     let skill_fragments = request
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .filter(|text| text.starts_with("<skill>"))
         .collect::<Vec<_>>();

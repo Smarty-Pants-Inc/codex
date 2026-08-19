@@ -11561,10 +11561,31 @@ max_concurrent_threads_per_session = 17
             let hint = hint.expect("default usage hints should be present").body();
             assert!(hint.contains(concurrency_guidance));
             assert_eq!(
-                hint.contains("When calling `wait_agent`, prefer longer waits"),
+                hint.contains("When a provided collaboration wait tool supports long waits"),
                 wait_agent_enabled
             );
         }
+    }
+
+    let subagent_hint = resolve_usage_hints(&config, /*catalog*/ None)
+        .subagent
+        .expect("default subagent usage hint should be present")
+        .body();
+    assert!(subagent_hint.contains(
+        "Always use your final response to report your result, blocker, or inability to proceed"
+    ));
+    for unavailable_tool in [
+        "spawn_agent",
+        "send_message",
+        "followup_task",
+        "wait_agent",
+        "interrupt_agent",
+        "list_agents",
+    ] {
+        assert!(
+            !subagent_hint.contains(unavailable_tool),
+            "subagent hint must not claim concrete tool {unavailable_tool}"
+        );
     }
 
     let usage_hints = resolve_usage_hints(

@@ -23,6 +23,9 @@ pub enum TurnInput {
         content: Vec<UserInput>,
         client_id: Option<String>,
     },
+    DeveloperInput {
+        content: Vec<UserInput>,
+    },
     // Preserve the existing serialized format while carrying injection API metadata
     // through the in-memory queue.
     ResponseItem(#[serde(with = "turn_input_response_item")] ResponseItemEnvelope),
@@ -104,7 +107,7 @@ impl InputQueue {
     ) {
         let activity_rx = self.activity_tx.subscribe();
         let has_pending_steer = if let Some(turn_state) = turn_state {
-            turn_state.lock().await.pending_input.has_user_input()
+            turn_state.lock().await.pending_input.has_steer_input()
         } else {
             false
         };
@@ -364,10 +367,13 @@ impl InputQueue {
 }
 
 impl TurnInputQueue {
-    fn has_user_input(&self) -> bool {
-        self.items
-            .iter()
-            .any(|input| matches!(input, TurnInput::UserInput { .. }))
+    fn has_steer_input(&self) -> bool {
+        self.items.iter().any(|input| {
+            matches!(
+                input,
+                TurnInput::UserInput { .. } | TurnInput::DeveloperInput { .. }
+            )
+        })
     }
 }
 

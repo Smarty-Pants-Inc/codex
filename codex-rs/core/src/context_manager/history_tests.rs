@@ -143,28 +143,96 @@ fn conversation_history_snapshot_shares_response_items_until_history_changes() {
 }
 
 #[test]
-fn conversation_history_snapshot_excludes_contextual_user_messages() {
+fn conversation_history_snapshot_excludes_only_internal_developer_context() {
     let contextual_message = crate::context::ContextualUserFragment::into(UserInstructions {
         directory: None,
         text: "Follow the repository instructions.".to_string(),
     });
+    let mut legacy_user_context = contextual_message.clone();
+    let ResponseItem::Message { role, .. } = &mut legacy_user_context else {
+        unreachable!("context fragment must be a message")
+    };
+    *role = "user".to_string();
+    let expected_legacy_user_context = legacy_user_context.clone();
+    let mut legacy_system_context = contextual_message.clone();
+    let ResponseItem::Message { role, .. } = &mut legacy_system_context else {
+        unreachable!("context fragment must be a message")
+    };
+    *role = "system".to_string();
     let user_message = user_input_text_msg("Review this repository.");
     let assistant_message = assistant_msg("I will inspect the repository.");
     let developer_message = developer_msg(
         "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nDeveloper context\n</INSTRUCTIONS>",
     );
-    let history = create_history_with_items(vec![
-        contextual_message,
-        user_message.clone(),
-        assistant_message.clone(),
-        developer_message.clone(),
-    ]);
+    let mut history = ContextManager::new();
+    history.record_annotated_items(
+        &[
+            ResponseItemEnvelope::new(contextual_message),
+            ResponseItemEnvelope::new(legacy_user_context),
+            ResponseItemEnvelope::new(legacy_system_context),
+            ResponseItemEnvelope::new(user_message.clone()),
+            ResponseItemEnvelope::new(assistant_message.clone()),
+            ResponseItemEnvelope {
+                item: developer_message.clone(),
+                metadata: Some(CodexHarnessMetadata {
+                    client_authored: true,
+                }),
+            },
+        ],
+        TruncationPolicy::Tokens(10_000),
+    );
     let snapshot = history.conversation_history_snapshot();
 
     assert_eq!(
         snapshot.items().cloned().collect::<Vec<_>>(),
-        vec![user_message, assistant_message, developer_message],
+        vec![
+            expected_legacy_user_context,
+            user_message,
+            assistant_message,
+            developer_message,
+        ],
     );
+}
+
+#[test]
+fn prompt_normalization_preserves_known_synthetic_developers_and_raw_user_lookalikes() {
+    let known_synthetic = crate::context::ContextualUserFragment::into(UserInstructions {
+        directory: None,
+        text: "Follow the repository instructions.".to_string(),
+    });
+    let mut unproven_legacy_context = known_synthetic.clone();
+    let ResponseItem::Message { role, .. } = &mut unproven_legacy_context else {
+        unreachable!("context fragment must be a message")
+    };
+    *role = "user".to_string();
+
+    let summary_lookalike = user_input_text_msg(&format!(
+        "{}\nuser-supplied summary",
+        crate::compact::SUMMARY_PREFIX
+    ));
+    let realtime_lookalike = user_input_text_msg(
+        "<realtime_delegation>\n  <input>user-supplied</input>\n</realtime_delegation>",
+    );
+    let node_review_lookalike = user_input_text_msg(
+        "<node_repl_review_evidence>\n  <input>user-supplied</input>\n</node_repl_review_evidence>",
+    );
+    let side_thread_lookalike =
+        user_input_text_msg("Review the following side-thread task: user-supplied.");
+    let media_placeholder_lookalike =
+        user_input_text_msg("image content omitted because you do not support image input");
+    let items = vec![
+        known_synthetic,
+        unproven_legacy_context,
+        summary_lookalike,
+        realtime_lookalike,
+        node_review_lookalike,
+        side_thread_lookalike,
+        media_placeholder_lookalike,
+    ];
+
+    let history = create_history_with_items(items.clone());
+
+    assert_eq!(history.for_prompt(&default_input_modalities()), items);
 }
 
 struct TestWorldStateSection;
@@ -178,7 +246,7 @@ impl WorldStateSection for TestWorldStateSection {
     }
 
     fn matches_legacy_fragment(role: &str, text: &str) -> bool {
-        role == "user" && UserInstructions::matches_text(text)
+        role == "developer" && UserInstructions::matches_text(text)
     }
 
     fn render_diff(
@@ -601,9 +669,24 @@ fn for_prompt_annotated_preserves_metadata_while_normalizing_item() {
 
     let normalized = history.for_prompt_annotated(&[InputModality::Text]);
 
-    assert_eq!(normalized.len(), 1);
+    assert_eq!(normalized.len(), 2);
     assert_eq!(normalized[0].metadata, envelope.metadata);
+    assert_eq!(normalized[1].metadata, None);
     assert_ne!(normalized[0].item, envelope.item);
+    assert!(matches!(
+        &normalized[0].item,
+        ResponseItem::Message { role, content, .. }
+            if role == "user"
+                && content == &[ContentItem::InputText { text: "keep".to_string() }]
+    ));
+    assert!(matches!(
+        &normalized[1].item,
+        ResponseItem::Message { role, content, .. }
+            if role == "developer"
+                && content == &[ContentItem::InputText {
+                    text: "image content omitted because you do not support image input".to_string()
+                }]
+    ));
 }
 
 #[test]
@@ -751,15 +834,23 @@ fn for_prompt_strips_media_when_model_does_not_support_it() {
                     text: "look at this".to_string(),
                 },
                 ContentItem::InputText {
+                    text: "caption".to_string(),
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![
+                ContentItem::InputText {
                     text: "image content omitted because you do not support image input"
                         .to_string(),
                 },
                 ContentItem::InputText {
                     text: "audio content omitted because you do not support audio input"
                         .to_string(),
-                },
-                ContentItem::InputText {
-                    text: "caption".to_string(),
                 },
             ],
             phase: None,
@@ -1106,103 +1197,21 @@ fn drop_last_n_user_turns_preserves_prefix() {
 }
 
 #[test]
-fn drop_last_n_user_turns_ignores_session_prefix_user_messages() {
-    let items = vec![
-        user_input_text_msg("<environment_context>ctx</environment_context>"),
-        user_input_text_msg(
-            "# AGENTS.md instructions for test_directory\n\n<INSTRUCTIONS>\ntest_text\n</INSTRUCTIONS>",
-        ),
-        user_input_text_msg(
-            "<skill>\n<name>demo</name>\n<path>skills/demo/SKILL.md</path>\nbody\n</skill>",
-        ),
-        user_input_text_msg("<user_shell_command>echo 42</user_shell_command>"),
-        user_input_text_msg(
-            "<subagent_notification>{\"agent_id\":\"a\",\"status\":\"completed\"}</subagent_notification>",
-        ),
-        user_input_text_msg("turn 1 user"),
-        assistant_msg("turn 1 assistant"),
-        user_input_text_msg("turn 2 user"),
-        assistant_msg("turn 2 assistant"),
-    ];
+fn drop_last_n_user_turns_counts_raw_user_lookalikes_as_turns() {
+    let lookalike = user_input_text_msg("<environment_context>ctx</environment_context>");
+    let lookalike_reply = assistant_msg("first reply");
+    let mut history = create_history_with_items(vec![
+        lookalike.clone(),
+        lookalike_reply.clone(),
+        user_input_text_msg("second turn"),
+        assistant_msg("second reply"),
+    ]);
 
-    let modalities = default_input_modalities();
-    let mut history = create_history_with_items(items);
     history.drop_last_n_user_turns(/*num_turns*/ 1);
+    assert_eq!(raw_items(&history), vec![lookalike, lookalike_reply]);
 
-    let expected_prefix_and_first_turn = vec![
-        user_input_text_msg("<environment_context>ctx</environment_context>"),
-        user_input_text_msg(
-            "# AGENTS.md instructions for test_directory\n\n<INSTRUCTIONS>\ntest_text\n</INSTRUCTIONS>",
-        ),
-        user_input_text_msg(
-            "<skill>\n<name>demo</name>\n<path>skills/demo/SKILL.md</path>\nbody\n</skill>",
-        ),
-        user_input_text_msg("<user_shell_command>echo 42</user_shell_command>"),
-        user_input_text_msg(
-            "<subagent_notification>{\"agent_id\":\"a\",\"status\":\"completed\"}</subagent_notification>",
-        ),
-        user_input_text_msg("turn 1 user"),
-        assistant_msg("turn 1 assistant"),
-    ];
-
-    assert_eq!(
-        history.for_prompt(&modalities),
-        expected_prefix_and_first_turn
-    );
-
-    let expected_prefix_only = vec![
-        user_input_text_msg("<environment_context>ctx</environment_context>"),
-        user_input_text_msg(
-            "# AGENTS.md instructions for test_directory\n\n<INSTRUCTIONS>\ntest_text\n</INSTRUCTIONS>",
-        ),
-        user_input_text_msg(
-            "<skill>\n<name>demo</name>\n<path>skills/demo/SKILL.md</path>\nbody\n</skill>",
-        ),
-        user_input_text_msg("<user_shell_command>echo 42</user_shell_command>"),
-        user_input_text_msg(
-            "<subagent_notification>{\"agent_id\":\"a\",\"status\":\"completed\"}</subagent_notification>",
-        ),
-    ];
-
-    let mut history = create_history_with_items(vec![
-        user_input_text_msg("<environment_context>ctx</environment_context>"),
-        user_input_text_msg(
-            "# AGENTS.md instructions for test_directory\n\n<INSTRUCTIONS>\ntest_text\n</INSTRUCTIONS>",
-        ),
-        user_input_text_msg(
-            "<skill>\n<name>demo</name>\n<path>skills/demo/SKILL.md</path>\nbody\n</skill>",
-        ),
-        user_input_text_msg("<user_shell_command>echo 42</user_shell_command>"),
-        user_input_text_msg(
-            "<subagent_notification>{\"agent_id\":\"a\",\"status\":\"completed\"}</subagent_notification>",
-        ),
-        user_input_text_msg("turn 1 user"),
-        assistant_msg("turn 1 assistant"),
-        user_input_text_msg("turn 2 user"),
-        assistant_msg("turn 2 assistant"),
-    ]);
-    history.drop_last_n_user_turns(/*num_turns*/ 2);
-    assert_eq!(history.for_prompt(&modalities), expected_prefix_only);
-
-    let mut history = create_history_with_items(vec![
-        user_input_text_msg("<environment_context>ctx</environment_context>"),
-        user_input_text_msg(
-            "# AGENTS.md instructions for test_directory\n\n<INSTRUCTIONS>\ntest_text\n</INSTRUCTIONS>",
-        ),
-        user_input_text_msg(
-            "<skill>\n<name>demo</name>\n<path>skills/demo/SKILL.md</path>\nbody\n</skill>",
-        ),
-        user_input_text_msg("<user_shell_command>echo 42</user_shell_command>"),
-        user_input_text_msg(
-            "<subagent_notification>{\"agent_id\":\"a\",\"status\":\"completed\"}</subagent_notification>",
-        ),
-        user_input_text_msg("turn 1 user"),
-        assistant_msg("turn 1 assistant"),
-        user_input_text_msg("turn 2 user"),
-        assistant_msg("turn 2 assistant"),
-    ]);
-    history.drop_last_n_user_turns(/*num_turns*/ 3);
-    assert_eq!(history.for_prompt(&modalities), expected_prefix_only);
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
+    assert!(raw_items(&history).is_empty());
 }
 
 #[test]
@@ -1226,7 +1235,7 @@ fn drop_last_n_user_turns_trims_context_updates_above_rolled_back_turn() {
         developer_msg("<collaboration_mode>ROLLED_BACK_DEV_INSTRUCTIONS</collaboration_mode>"),
         developer_msg("<multi_agent_role>ROLLED_BACK_MULTI_AGENT_ROLE</multi_agent_role>"),
         developer_msg("<multi_agent_mode>ROLLED_BACK_MULTI_AGENT_MODE</multi_agent_mode>"),
-        user_input_text_msg(
+        developer_msg(
             "<environment_context><cwd>PRETURN_CONTEXT_DIFF_CWD</cwd></environment_context>",
         ),
         user_input_text_msg("turn 2 user"),
@@ -1291,7 +1300,7 @@ fn drop_last_n_user_turns_clears_reference_context_for_mixed_developer_context_b
             "<permissions instructions>contextual permissions</permissions instructions>",
             "persistent plugin instructions",
         ]),
-        user_input_text_msg(
+        developer_msg(
             "<environment_context><cwd>PRETURN_CONTEXT_DIFF_CWD</cwd></environment_context>",
         ),
         user_input_text_msg("turn 2 user"),

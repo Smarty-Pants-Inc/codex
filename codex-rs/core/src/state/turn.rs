@@ -103,6 +103,7 @@ pub(crate) struct TurnState {
 }
 
 pub(crate) struct PendingRequestPermissions {
+    pub(crate) turn_id: String,
     pub(crate) tx_response: oneshot::Sender<RequestPermissionsResponse>,
     pub(crate) requested_permissions: RequestPermissionProfile,
     pub(crate) environment: TurnEnvironmentSelection,
@@ -147,6 +148,19 @@ impl TurnState {
         key: &str,
     ) -> Option<PendingRequestPermissions> {
         self.pending_request_permissions.remove(key)
+    }
+
+    pub(crate) fn remove_pending_request_permissions_for_turn(
+        &mut self,
+        key: &str,
+        turn_id: &str,
+    ) -> Option<PendingRequestPermissions> {
+        (self
+            .pending_request_permissions
+            .get(key)
+            .is_some_and(|pending| pending.turn_id == turn_id))
+        .then(|| self.pending_request_permissions.remove(key))
+        .flatten()
     }
 
     pub(crate) fn insert_pending_user_input(

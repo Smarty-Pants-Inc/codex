@@ -34,7 +34,7 @@ fn decoded_image(image_url: &str) -> (Vec<u8>, DynamicImage) {
 }
 
 #[test]
-fn preparation_preserves_small_image_bytes_and_replaces_remote_urls() {
+fn preparation_preserves_small_image_bytes_and_emits_remote_url_notice_as_developer() {
     let (data_url, original_bytes) = png_data_url(/*width*/ 64, /*height*/ 32);
     let mut items = vec![ResponseItem::Message {
         id: None,
@@ -43,6 +43,9 @@ fn preparation_preserves_small_image_bytes_and_replaces_remote_urls() {
             ContentItem::InputImage {
                 image_url: data_url,
                 detail: Some(ImageDetail::High),
+            },
+            ContentItem::InputText {
+                text: REMOTE_IMAGE_URL_PLACEHOLDER.to_string(),
             },
             ContentItem::InputImage {
                 image_url: "https://example.com/image.png".to_string(),
@@ -59,18 +62,32 @@ fn preparation_preserves_small_image_bytes_and_replaces_remote_urls() {
         ImageResizeNoticeMode::Disabled,
     );
 
-    let ResponseItem::Message { content, .. } = &items[0] else {
+    assert_eq!(items.len(), 2);
+    let ResponseItem::Message { role, content, .. } = &items[0] else {
         panic!("expected message");
     };
+    assert_eq!(role, "user");
     let [
         ContentItem::InputImage { image_url, .. },
         ContentItem::InputText { text },
     ] = content.as_slice()
     else {
-        panic!("expected two images");
+        panic!("expected one image and direct client text");
     };
     assert_eq!(decoded_image(image_url).0, original_bytes);
     assert_eq!(text, REMOTE_IMAGE_URL_PLACEHOLDER);
+    assert_eq!(
+        items[1],
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: REMOTE_IMAGE_URL_PLACEHOLDER.to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+    );
 }
 
 #[test]
@@ -231,16 +248,15 @@ fn resize_notices_preserve_original_image_positions_and_skip_failed_images() {
         "</image_resize_notice>"
     );
 
-    let ResponseItem::Message { content, .. } = &items[0] else {
+    assert_eq!(items.len(), 5);
+    let ResponseItem::Message { role, content, .. } = &items[0] else {
         panic!("expected message");
     };
+    assert_eq!(role, "user");
     let [
         ContentItem::InputImage {
             image_url: small_message_image_url,
             ..
-        },
-        ContentItem::InputText {
-            text: failed_message_image,
         },
         ContentItem::InputImage {
             image_url: resized_message_image_url,
@@ -248,21 +264,31 @@ fn resize_notices_preserve_original_image_positions_and_skip_failed_images() {
         },
     ] = content.as_slice()
     else {
-        panic!("expected unchanged image, failed image placeholder, and resized image");
+        panic!("expected unchanged and resized images");
     };
     assert_eq!(
         decoded_image(small_message_image_url).1.dimensions(),
         (64, 32)
     );
-    assert_eq!(failed_message_image, IMAGE_PROCESSING_ERROR_PLACEHOLDER);
     assert_eq!(
         decoded_image(resized_message_image_url).1.dimensions(),
         (1600, 1600)
     );
-
     assert_eq!(
-        &items[1],
-        &ResponseItem::Message {
+        items[1],
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: IMAGE_PROCESSING_ERROR_PLACEHOLDER.to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+    );
+    assert_eq!(
+        items[2],
+        ResponseItem::Message {
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
@@ -280,7 +306,7 @@ fn resize_notices_preserve_original_image_positions_and_skip_failed_images() {
         }
     );
 
-    let ResponseItem::FunctionCallOutput { output, .. } = &items[2] else {
+    let ResponseItem::FunctionCallOutput { output, .. } = &items[3] else {
         panic!("expected function call output");
     };
     let [
@@ -301,8 +327,8 @@ fn resize_notices_preserve_original_image_positions_and_skip_failed_images() {
         (1600, 1600)
     );
     assert_eq!(
-        &items[3],
-        &ResponseItem::Message {
+        items[4],
+        ResponseItem::Message {
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {

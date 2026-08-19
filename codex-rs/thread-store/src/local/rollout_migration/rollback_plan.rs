@@ -317,6 +317,7 @@ impl RollbackPlanner {
             let post_compaction_turns = depth_before.saturating_sub(frame.boundary_depth);
             let remaining = count.saturating_sub(post_compaction_turns);
             if remaining > 0 {
+                let has_local_summary = !frame.item.message.is_empty();
                 frame.item.mcp_resource_origins = None;
                 let replacement_history =
                     frame.item.replacement_history.as_mut().ok_or_else(|| {
@@ -324,6 +325,13 @@ impl RollbackPlanner {
                             "legacy rollback crosses a compaction without replacement history",
                         )
                     })?;
+                if has_local_summary
+                    && let Some(summary) = replacement_history.last_mut()
+                    && let ResponseItem::Message { role, .. } = &mut summary.item
+                    && role == "user"
+                {
+                    *role = "developer".to_string();
+                }
                 rollback::drop_last_n_user_turns(
                     replacement_history,
                     u32::try_from(remaining).unwrap_or(u32::MAX),

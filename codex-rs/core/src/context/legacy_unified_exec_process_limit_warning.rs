@@ -11,7 +11,7 @@ impl ContextualUserFragment for LegacyUnifiedExecProcessLimitWarning {
     }
 
     fn role(&self) -> &'static str {
-        "user"
+        "developer"
     }
 
     fn markers(&self) -> (&'static str, &'static str) {

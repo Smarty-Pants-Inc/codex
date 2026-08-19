@@ -646,7 +646,9 @@ fn turn_user_input(input: &[TurnInput]) -> Vec<UserInput> {
     input
         .iter()
         .filter_map(|item| match item {
-            TurnInput::UserInput { content, .. } => Some(content.as_slice()),
+            TurnInput::UserInput { content, .. } | TurnInput::DeveloperInput { content } => {
+                Some(content.as_slice())
+            }
             TurnInput::ResponseItem(_) | TurnInput::InterAgentCommunication(_) => None,
         })
         .flatten()
@@ -975,7 +977,8 @@ async fn track_turn_resolved_config_analytics(
             num_input_images: input
                 .iter()
                 .filter_map(|item| match item {
-                    TurnInput::UserInput { content, .. } => Some(content.as_slice()),
+                    TurnInput::UserInput { content, .. }
+                    | TurnInput::DeveloperInput { content } => Some(content.as_slice()),
                     TurnInput::ResponseItem(_) | TurnInput::InterAgentCommunication(_) => None,
                 })
                 .flatten()

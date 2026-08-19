@@ -37,7 +37,7 @@ impl ContextualUserFragment for RealtimeDelegation<'_> {
     }
 
     fn role(&self) -> &'static str {
-        "user"
+        "developer"
     }
 
     fn markers(&self) -> (&'static str, &'static str) {

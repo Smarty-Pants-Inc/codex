@@ -167,6 +167,7 @@ pub struct TestAppServer {
 
 pub const DEFAULT_CLIENT_NAME: &str = "codex-app-server-tests";
 pub const DISABLE_PLUGIN_STARTUP_TASKS_ARG: &str = "--disable-plugin-startup-tasks-for-tests";
+pub const ENABLE_GOAL_AUTO_CONTINUE_FOR_TESTS_ARG: &str = "--enable-goal-auto-continue-for-tests";
 const DISABLE_MANAGED_CONFIG_ENV_VAR: &str = "CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG";
 #[cfg(windows)]
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
@@ -1871,6 +1872,13 @@ impl TestAppServerBuilder {
     pub fn with_plugin_startup_tasks(mut self) -> Self {
         self.args
             .retain(|argument| argument != DISABLE_PLUGIN_STARTUP_TASKS_ARG);
+        self
+    }
+
+    /// Enables interactive goal auto-continuation for focused tests.
+    pub fn with_goal_auto_continue(mut self) -> Self {
+        self.args
+            .push(ENABLE_GOAL_AUTO_CONTINUE_FOR_TESTS_ARG.to_string());
         self
     }
 

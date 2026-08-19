@@ -104,7 +104,7 @@ fn format_labeled_requests_snapshot(
 
 fn user_instructions_wrapper_count(request: &ResponsesRequest) -> usize {
     request
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .iter()
         .filter(|text| text.starts_with("# AGENTS.md instructions"))
         .count()
@@ -123,7 +123,7 @@ fn format_environment_context_subagents_snapshot(subagents: &[&str]) -> String {
     };
     let items = vec![json!({
         "type": "message",
-        "role": "user",
+        "role": "developer",
         "content": [{
             "type": "input_text",
             "text": format!(
@@ -233,7 +233,7 @@ async fn model_visible_environment_context_preserves_foreign_workspace_roots() -
 
     let environment_context = response_mock
         .single_request()
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .find(|text| text.contains("<environment_context>"))
         .expect("model-visible environment context");

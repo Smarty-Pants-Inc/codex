@@ -95,6 +95,7 @@ pub(crate) struct PermissionsApprovalRequest {
     pub thread_id: ThreadId,
     pub thread_label: Option<String>,
     pub call_id: String,
+    pub turn_id: String,
     pub environment_id: Option<String>,
     pub reason: Option<String>,
     pub permissions: RequestPermissionProfile,
@@ -325,6 +326,7 @@ impl ApprovalOverlay {
                 ) => {
                     self.handle_permissions_decision(
                         &request.call_id,
+                        &request.turn_id,
                         &request.permissions,
                         *decision,
                     );
@@ -392,6 +394,7 @@ impl ApprovalOverlay {
     fn handle_permissions_decision(
         &self,
         call_id: &str,
+        turn_id: &str,
         permissions: &RequestPermissionProfile,
         decision: PermissionsDecision,
     ) {
@@ -431,6 +434,7 @@ impl ApprovalOverlay {
         self.app_event_tx.request_permissions_response(
             thread_id,
             call_id.to_string(),
+            turn_id.to_string(),
             codex_protocol::request_permissions::RequestPermissionsResponse {
                 permissions: granted_permissions,
                 scope,
@@ -500,6 +504,7 @@ impl ApprovalOverlay {
                 ApprovalRequest::Permissions(request) => {
                     self.handle_permissions_decision(
                         &request.call_id,
+                        &request.turn_id,
                         &request.permissions,
                         PermissionsDecision::Deny,
                     );
@@ -1207,6 +1212,7 @@ mod tests {
             thread_id: ThreadId::new(),
             thread_label: None,
             call_id: "test".to_string(),
+            turn_id: "turn-1".to_string(),
             environment_id: None,
             reason: Some("need workspace access".to_string()),
             permissions: RequestPermissionProfile {

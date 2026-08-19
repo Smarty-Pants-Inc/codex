@@ -32,6 +32,9 @@ pub enum TurnInput {
         content: Vec<UserInput>,
         client_id: Option<String>,
     },
+    DeveloperInput {
+        content: Vec<UserInput>,
+    },
     ResponseItem(ResponseItem),
     InterAgentCommunication(InterAgentCommunication),
 }
@@ -80,6 +83,11 @@ impl TurnInputRequest {
             content,
             client_id: None,
         })
+    }
+
+    /// Creates generated internal input without a user turn boundary.
+    pub fn developer_input(content: Vec<UserInput>) -> Self {
+        Self::new(TurnInput::DeveloperInput { content })
     }
 
     /// Persistent thread settings applied when Core accepts this input.

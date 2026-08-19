@@ -356,26 +356,19 @@ pub(crate) async fn process_annotated_compacted_history(
 /// Called while processing the model-provided compacted transcript, before we
 /// append fresh canonical context from the current session.
 ///
-/// We drop:
-/// - `developer` messages because remote output can include stale/duplicated
-///   instruction content.
-/// - non-user-content `user` messages (session prefix/instruction wrappers),
-///   while preserving real user messages and persisted hook prompts.
+/// We drop ordinary `developer` messages because remote output can include stale/duplicated
+/// instruction content, while preserving persisted hook prompts.
 ///
-/// This intentionally keeps:
-/// - `assistant` messages (future remote compaction models may emit them)
-/// - `user`-role warnings that parse as `TurnItem::UserMessage` and compaction-generated summary
-///   messages. Legacy warning fragments are filtered by `parse_turn_item` before they reach this
-///   check.
+/// Raw `user` messages are always retained. Their text is not evidence that they were synthetic;
+/// trusted rollout reconstruction must migrate known legacy synthetic input before this point.
+/// Assistant messages and compaction items are also retained.
 pub(crate) fn should_keep_compacted_history_item(item: &ResponseItem) -> bool {
     match item {
-        ResponseItem::Message { role, .. } if role == "developer" => false,
-        ResponseItem::Message { role, .. } if role == "user" => {
-            matches!(
-                crate::event_mapping::parse_turn_item(item),
-                Some(TurnItem::UserMessage(_) | TurnItem::HookPrompt(_))
-            )
-        }
+        ResponseItem::Message { role, .. } if role == "developer" => matches!(
+            crate::event_mapping::parse_turn_item(item),
+            Some(TurnItem::HookPrompt(_))
+        ),
+        ResponseItem::Message { role, .. } if role == "user" => true,
         ResponseItem::Message { role, .. } if role == "assistant" => true,
         ResponseItem::Message { .. } => false,
         ResponseItem::AgentMessage { .. } => true,

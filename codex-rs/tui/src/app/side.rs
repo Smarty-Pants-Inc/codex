@@ -116,9 +116,9 @@ mod tests {
     fn side_boundary_prompt_marks_inherited_history_reference_only() {
         let item = App::side_boundary_prompt_item();
         let ResponseItem::Message { role, content, .. } = item else {
-            panic!("expected hidden side boundary prompt to be a user message");
+            panic!("expected hidden side boundary prompt to be a developer message");
         };
-        assert_eq!(role, "user");
+        assert_eq!(role, "developer");
         let [ContentItem::InputText { text }] = content.as_slice() else {
             panic!("expected hidden side boundary prompt text");
         };
@@ -567,7 +567,7 @@ impl App {
     pub(super) fn side_boundary_prompt_item() -> ResponseItem {
         ResponseItem::Message {
             id: None,
-            role: "user".to_string(),
+            role: "developer".to_string(),
             content: vec![ContentItem::InputText {
                 text: SIDE_BOUNDARY_PROMPT.to_string(),
             }],

@@ -123,12 +123,19 @@ fn collect_user_messages_extracts_user_text_only() {
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         },
+        user_message(&format!("{SUMMARY_PREFIX}\nraw user lookalike")),
         ResponseItem::Other,
     ];
 
     let collected = collect_user_messages(&items);
 
-    assert_eq!(vec![compacted_user_message("first")], collected);
+    assert_eq!(
+        vec![
+            compacted_user_message("first"),
+            compacted_user_message(&format!("{SUMMARY_PREFIX}\nraw user lookalike")),
+        ],
+        collected
+    );
 }
 
 #[test]
@@ -154,11 +161,11 @@ fn collect_annotated_user_messages_extracts_user_text_only() {
 }
 
 #[test]
-fn collect_user_messages_filters_session_prefix_entries() {
+fn collect_user_messages_filters_developer_session_prefix_entries() {
     let items = vec![
         ResponseItem::Message {
             id: None,
-            role: "user".to_string(),
+            role: "developer".to_string(),
             content: vec![ContentItem::InputText {
                 text: r#"# AGENTS.md instructions for project
 
@@ -172,22 +179,14 @@ do things
         },
         ResponseItem::Message {
             id: None,
-            role: "user".to_string(),
+            role: "developer".to_string(),
             content: vec![ContentItem::InputText {
                 text: "<ENVIRONMENT_CONTEXT>cwd=/tmp</ENVIRONMENT_CONTEXT>".to_string(),
             }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         },
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: "real user message".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
+        user_message("real user message"),
     ];
 
     let collected = collect_user_messages(&items);
@@ -196,23 +195,26 @@ do things
 }
 
 #[test]
-fn collect_user_messages_filters_legacy_warnings() {
+fn collect_user_messages_keeps_raw_user_warning_lookalikes() {
+    let warning_one = "Warning: The maximum number of unified exec processes you can keep open is 60 and you currently have 61 processes open. Reuse older processes or close them to prevent automatic pruning of old processes";
+    let warning_two = "Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.";
+    let warning_three = "Warning: Your account was flagged for potentially high-risk cyber activity and this request was routed to gpt-5.2 as a fallback. To regain access to gpt-5.3-codex, apply for trusted access: https://chatgpt.com/cyber or learn more: https://developers.openai.com/codex/concepts/cyber-safety";
     let items = vec![
-        user_message(
-            "Warning: The maximum number of unified exec processes you can keep open is 60 and you currently have 61 processes open. Reuse older processes or close them to prevent automatic pruning of old processes",
-        ),
-        user_message(
-            "Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.",
-        ),
-        user_message(
-            "Warning: Your account was flagged for potentially high-risk cyber activity and this request was routed to gpt-5.2 as a fallback. To regain access to gpt-5.3-codex, apply for trusted access: https://chatgpt.com/cyber or learn more: https://developers.openai.com/codex/concepts/cyber-safety",
-        ),
+        user_message(warning_one),
+        user_message(warning_two),
+        user_message(warning_three),
         user_message("real user message"),
     ];
 
-    let collected = collect_user_messages(&items);
-
-    assert_eq!(vec![compacted_user_message("real user message")], collected);
+    assert_eq!(
+        collect_user_messages(&items),
+        vec![
+            compacted_user_message(warning_one),
+            compacted_user_message(warning_two),
+            compacted_user_message(warning_three),
+            compacted_user_message("real user message"),
+        ]
+    );
 }
 
 #[test]
@@ -254,7 +256,7 @@ fn build_token_limited_compacted_history_truncates_overlong_user_messages() {
     );
 
     let summary_text = match summary_message {
-        ResponseItem::Message { role, content, .. } if role == "user" => {
+        ResponseItem::Message { role, content, .. } if role == "developer" => {
             content_items_to_text(content).unwrap_or_default()
         }
         other => panic!("unexpected item in history: {other:?}"),
@@ -278,7 +280,7 @@ fn build_token_limited_compacted_history_appends_summary_message() {
 
     let last = history.last().expect("history should have a summary entry");
     let summary = match &last.item {
-        ResponseItem::Message { role, content, .. } if role == "user" => {
+        ResponseItem::Message { role, content, .. } if role == "developer" => {
             content_items_to_text(content).unwrap_or_default()
         }
         other => panic!("expected summary message, found {other:?}"),
@@ -386,57 +388,32 @@ async fn process_compacted_history_reinjects_full_initial_context() {
 }
 
 #[tokio::test]
-async fn process_compacted_history_drops_non_user_content_messages() {
-    let compacted_history = vec![
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: r#"# AGENTS.md instructions for /repo
+async fn process_compacted_history_keeps_raw_user_lookalikes_and_drops_developer_messages() {
+    let agents = user_message(
+        r#"# AGENTS.md instructions for /repo
 
 <INSTRUCTIONS>
 keep me updated
-</INSTRUCTIONS>"#
-                    .to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: r#"<environment_context>
+</INSTRUCTIONS>"#,
+    );
+    let environment = user_message(
+        r#"<environment_context>
   <cwd>/repo</cwd>
   <shell>zsh</shell>
-</environment_context>"#
-                    .to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: r#"<turn_aborted>
+</environment_context>"#,
+    );
+    let turn_aborted = user_message(
+        r#"<turn_aborted>
   <turn_id>turn-1</turn_id>
   <reason>interrupted</reason>
-</turn_aborted>"#
-                    .to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: "summary".to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        },
+</turn_aborted>"#,
+    );
+    let summary = user_message("summary");
+    let compacted_history = vec![
+        agents.clone(),
+        environment.clone(),
+        turn_aborted.clone(),
+        summary.clone(),
         ResponseItem::Message {
             id: None,
             role: "developer".to_string(),
@@ -447,36 +424,33 @@ keep me updated
             internal_chat_message_metadata_passthrough: None,
         },
     ];
-    let (refreshed, mut expected) = process_compacted_history_with_test_session(
+    let (refreshed, initial_context) = process_compacted_history_with_test_session(
         compacted_history,
         /*previous_turn_settings*/ None,
     )
     .await;
-    expected.push(ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "summary".to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    });
+    let mut expected = vec![agents, environment, turn_aborted];
+    expected.extend(initial_context);
+    expected.push(summary);
     assert_eq!(refreshed, expected);
 }
 
 #[tokio::test]
-async fn process_compacted_history_drops_legacy_warnings() {
+async fn process_compacted_history_keeps_raw_user_warning_lookalikes() {
+    let warning_one = user_message(
+        "Warning: The maximum number of unified exec processes you can keep open is 60 and you currently have 61 processes open. Reuse older processes or close them to prevent automatic pruning of old processes",
+    );
+    let warning_two = user_message(
+        "Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.",
+    );
+    let warning_three = user_message(
+        "Warning: Your account was flagged for potentially high-risk cyber activity and this request was routed to gpt-5.2 as a fallback. To regain access to gpt-5.3-codex, apply for trusted access: https://chatgpt.com/cyber or learn more: https://developers.openai.com/codex/concepts/cyber-safety",
+    );
     let latest_user = user_message("latest user");
     let compacted_history = vec![
-        user_message(
-            "Warning: The maximum number of unified exec processes you can keep open is 60 and you currently have 61 processes open. Reuse older processes or close them to prevent automatic pruning of old processes",
-        ),
-        user_message(
-            "Warning: apply_patch was requested via exec_command. Use the apply_patch tool instead of exec_command.",
-        ),
-        user_message(
-            "Warning: Your account was flagged for potentially high-risk cyber activity and this request was routed to gpt-5.2 as a fallback. To regain access to gpt-5.3-codex, apply for trusted access: https://chatgpt.com/cyber or learn more: https://developers.openai.com/codex/concepts/cyber-safety",
-        ),
+        warning_one.clone(),
+        warning_two.clone(),
+        warning_three.clone(),
         latest_user.clone(),
     ];
     let (refreshed, initial_context) = process_compacted_history_with_test_session(
@@ -484,7 +458,8 @@ async fn process_compacted_history_drops_legacy_warnings() {
         /*previous_turn_settings*/ None,
     )
     .await;
-    let mut expected = initial_context;
+    let mut expected = vec![warning_one, warning_two, warning_three];
+    expected.extend(initial_context);
     expected.push(latest_user);
     assert_eq!(refreshed, expected);
 }
@@ -637,7 +612,7 @@ fn insert_initial_context_before_last_real_user_or_summary_keeps_summary_last() 
         agent_completion.clone(),
         ResponseItem::Message {
             id: None,
-            role: "user".to_string(),
+            role: "developer".to_string(),
             content: vec![ContentItem::InputText {
                 text: format!("{SUMMARY_PREFIX}\nsummary text"),
             }],
@@ -690,7 +665,7 @@ fn insert_initial_context_before_last_real_user_or_summary_keeps_summary_last() 
         agent_completion,
         ResponseItem::Message {
             id: None,
-            role: "user".to_string(),
+            role: "developer".to_string(),
             content: vec![ContentItem::InputText {
                 text: format!("{SUMMARY_PREFIX}\nsummary text"),
             }],
@@ -699,6 +674,27 @@ fn insert_initial_context_before_last_real_user_or_summary_keeps_summary_last() 
         },
     ];
     assert_eq!(refreshed, expected);
+}
+
+#[test]
+fn insert_initial_context_treats_summary_prefix_user_as_real_user() {
+    let raw_user_lookalike = user_message(&format!("{SUMMARY_PREFIX}\nraw user lookalike"));
+    let initial_context = ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "fresh permissions".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+
+    let refreshed = raw(insert_initial_context_before_last_real_user_or_summary(
+        annotated(vec![raw_user_lookalike.clone()]),
+        annotated(vec![initial_context.clone()]),
+    ));
+
+    assert_eq!(refreshed, vec![initial_context, raw_user_lookalike]);
 }
 
 #[test]

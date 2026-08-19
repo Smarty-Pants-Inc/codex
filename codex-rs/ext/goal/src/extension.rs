@@ -8,6 +8,7 @@ use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
+use codex_extension_api::ThreadIdleCause;
 use codex_extension_api::ThreadIdleInput;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadResumeInput;
@@ -50,6 +51,93 @@ pub struct GoalExtensionConfig {
     pub enabled: bool,
     pub max_goal_token_budget: Option<i64>,
 }
+/// Host capability for starting a follow-up goal turn when a thread becomes idle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GoalAutoContinueCapability {
+    /// Keep active goals inert while the thread is idle.
+    #[default]
+    Disabled,
+    /// Allow the existing interactive idle-continuation path.
+    Interactive,
+}
+
+fn auto_continue_capability_for(
+    session_source: &SessionSource,
+    host_capability: GoalAutoContinueCapability,
+) -> GoalAutoContinueCapability {
+    match session_source {
+        SessionSource::Cli | SessionSource::VSCode => host_capability,
+        _ => GoalAutoContinueCapability::Disabled,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_extension_api::ThreadIdleContinuation;
+
+    #[test]
+    fn auto_continue_is_limited_to_interactive_root_sources() {
+        assert_eq!(
+            GoalAutoContinueCapability::Interactive,
+            auto_continue_capability_for(
+                &SessionSource::Cli,
+                GoalAutoContinueCapability::Interactive,
+            )
+        );
+        assert_eq!(
+            GoalAutoContinueCapability::Interactive,
+            auto_continue_capability_for(
+                &SessionSource::VSCode,
+                GoalAutoContinueCapability::Interactive,
+            )
+        );
+        assert_eq!(
+            GoalAutoContinueCapability::Disabled,
+            auto_continue_capability_for(
+                &SessionSource::Exec,
+                GoalAutoContinueCapability::Interactive,
+            )
+        );
+        assert_eq!(
+            GoalAutoContinueCapability::Disabled,
+            auto_continue_capability_for(
+                &SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id: ThreadId::new(),
+                    depth: 1,
+                    agent_path: None,
+                    agent_nickname: None,
+                    agent_role: None,
+                }),
+                GoalAutoContinueCapability::Interactive,
+            )
+        );
+    }
+
+    #[test]
+    fn idle_continuation_respects_interrupts_and_higher_priority_blockers() {
+        let session_store = ExtensionData::new("session");
+        let thread_store = ExtensionData::new("thread");
+        let continuation = ThreadIdleContinuation::default();
+        let input = |cause| ThreadIdleInput {
+            cause,
+            session_store: &session_store,
+            thread_store: &thread_store,
+            continuation: &continuation,
+        };
+
+        assert!(goal_continuation_is_allowed(&input(
+            ThreadIdleCause::Completed
+        )));
+        assert!(!goal_continuation_is_allowed(&input(
+            ThreadIdleCause::Interrupted
+        )));
+        continuation.block();
+        assert!(!goal_continuation_is_allowed(&input(
+            ThreadIdleCause::Completed
+        )));
+    }
+}
 
 #[derive(Clone)]
 pub struct GoalExtension<C> {
@@ -60,6 +148,7 @@ pub struct GoalExtension<C> {
     thread_manager: Weak<ThreadManager>,
     goal_service: Arc<GoalService>,
     goal_config: Arc<dyn Fn(&C) -> GoalExtensionConfig + Send + Sync>,
+    auto_continue_capability: GoalAutoContinueCapability,
 }
 
 impl<C> std::fmt::Debug for GoalExtension<C> {
@@ -69,6 +158,7 @@ impl<C> std::fmt::Debug for GoalExtension<C> {
 }
 
 impl<C> GoalExtension<C> {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_host_capabilities(
         state_dbs: Arc<codex_state::StateRuntime>,
         analytics_events_client: AnalyticsEventsClient,
@@ -76,6 +166,7 @@ impl<C> GoalExtension<C> {
         metrics_client: Option<MetricsClient>,
         thread_manager: Weak<ThreadManager>,
         goal_service: Arc<GoalService>,
+        auto_continue_capability: GoalAutoContinueCapability,
         goal_config: impl Fn(&C) -> GoalExtensionConfig + Send + Sync + 'static,
     ) -> Self {
         Self {
@@ -85,6 +176,7 @@ impl<C> GoalExtension<C> {
             metrics: GoalMetrics::new(metrics_client),
             thread_manager,
             goal_service,
+            auto_continue_capability,
             goal_config: Arc::new(goal_config),
         }
     }
@@ -103,6 +195,8 @@ where
                     input.session_source,
                     SessionSource::SubAgent(SubAgentSource::Review)
                 );
+            let auto_continue_capability =
+                auto_continue_capability_for(input.session_source, self.auto_continue_capability);
             input.thread_store.insert(config);
             let accounting_state = input
                 .thread_store
@@ -122,6 +216,7 @@ where
                         analytics: self.analytics.clone(),
                         enabled,
                         tools_available_for_thread,
+                        auto_continue_capability,
                     },
                 )
             });
@@ -147,10 +242,12 @@ where
 
     fn on_thread_idle<'a>(&'a self, input: ThreadIdleInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
+            if !goal_continuation_is_allowed(&input) {
+                return;
+            }
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
                 return;
             };
-
             if let Err(err) = runtime.continue_if_idle().await {
                 tracing::warn!(
                     "failed to continue active goal for idle thread {}: {err}",
@@ -456,6 +553,7 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn install_with_backend<C>(
     registry: &mut ExtensionRegistryBuilder<C>,
     state_dbs: Arc<codex_state::StateRuntime>,
@@ -463,6 +561,7 @@ pub fn install_with_backend<C>(
     metrics_client: Option<MetricsClient>,
     thread_manager: Weak<ThreadManager>,
     goal_service: Arc<GoalService>,
+    auto_continue_capability: GoalAutoContinueCapability,
     goal_config: impl Fn(&C) -> GoalExtensionConfig + Send + Sync + 'static,
 ) where
     C: Send + Sync + 'static,
@@ -474,6 +573,7 @@ pub fn install_with_backend<C>(
         metrics_client,
         thread_manager,
         Arc::clone(&goal_service),
+        auto_continue_capability,
         goal_config,
     ));
     registry.thread_lifecycle_contributor(extension.clone());
@@ -486,6 +586,10 @@ pub fn install_with_backend<C>(
 
 fn goal_runtime_handle(thread_store: &ExtensionData) -> Option<Arc<GoalRuntimeHandle>> {
     thread_store.get::<GoalRuntimeHandle>()
+}
+
+fn goal_continuation_is_allowed(input: &ThreadIdleInput<'_>) -> bool {
+    input.cause != ThreadIdleCause::Interrupted && input.continuation.is_allowed()
 }
 
 fn tool_attempt_counts_for_goal_progress(outcome: ToolCallOutcome) -> bool {

@@ -1092,7 +1092,7 @@ async fn selected_executor_catalog_follows_step_availability_and_reuses_its_cach
         .await;
 
     assert_eq!(1, fragments.len());
-    assert_eq!("user", fragments[0].role());
+    assert_eq!("developer", fragments[0].role());
     assert!(fragments[0].render().contains("<name>lint-fix</name>"));
     assert!(fragments[0].render().contains("# Lint Fix"));
     assert_eq!(

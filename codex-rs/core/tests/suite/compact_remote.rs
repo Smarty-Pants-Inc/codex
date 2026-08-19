@@ -2256,18 +2256,9 @@ async fn remote_compact_trims_function_call_history_to_fit_context_window() -> R
     wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
 
     let compact_request = compact_mock.single_request();
-    let user_messages = compact_request.message_input_texts("user");
-    assert!(
-        user_messages
-            .iter()
-            .any(|message| message == first_user_message),
-        "expected compact request to retain earlier user history"
-    );
-    assert!(
-        user_messages
-            .iter()
-            .any(|message| message == second_user_message),
-        "expected compact request to retain the user boundary message"
+    assert_eq!(
+        compact_request.message_input_texts("user"),
+        vec![first_user_message, second_user_message]
     );
 
     assert!(
@@ -2496,18 +2487,9 @@ async fn auto_remote_compact_trims_function_call_history_to_fit_context_window()
     );
 
     let compact_request = compact_mock.single_request();
-    let user_messages = compact_request.message_input_texts("user");
-    assert!(
-        user_messages
-            .iter()
-            .any(|message| message == first_user_message),
-        "expected compact request to retain earlier user history"
-    );
-    assert!(
-        user_messages
-            .iter()
-            .any(|message| message == second_user_message),
-        "expected compact request to retain the user boundary message"
+    assert_eq!(
+        compact_request.message_input_texts("user"),
+        vec![first_user_message, second_user_message]
     );
 
     assert!(
@@ -3888,13 +3870,9 @@ async fn snapshot_request_shape_remote_pre_turn_compaction_including_incoming_us
         )
     );
     assert_eq!(
-        requests[2]
-            .message_input_texts("user")
-            .iter()
-            .filter(|text| text.as_str() == "USER_THREE")
-            .count(),
-        1,
-        "post-compaction request should contain incoming user exactly once from runtime append"
+        requests[2].message_input_texts("user"),
+        vec!["USER_ONE", "USER_TWO", "USER_THREE"],
+        "post-compaction request should contain only direct user text"
     );
 
     Ok(())

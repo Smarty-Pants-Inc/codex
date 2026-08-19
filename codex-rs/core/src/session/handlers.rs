@@ -222,9 +222,10 @@ pub async fn request_user_input_response(
 pub async fn request_permissions_response(
     sess: &Arc<Session>,
     id: String,
+    turn_id: String,
     response: RequestPermissionsResponse,
 ) {
-    sess.notify_request_permissions_response(&id, response)
+    sess.notify_request_permissions_response(&id, &turn_id, response)
         .await;
 }
 
@@ -629,8 +630,12 @@ pub(super) async fn submission_loop(
                     request_user_input_response(&sess, id, response).await;
                     false
                 }
-                Op::RequestPermissionsResponse { id, response } => {
-                    request_permissions_response(&sess, id, response).await;
+                Op::RequestPermissionsResponse {
+                    id,
+                    turn_id,
+                    response,
+                } => {
+                    request_permissions_response(&sess, id, turn_id, response).await;
                     false
                 }
                 Op::DynamicToolResponse { id, response } => {

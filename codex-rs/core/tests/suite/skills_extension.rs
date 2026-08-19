@@ -644,7 +644,7 @@ async fn capability_sections_render_in_order_with_host_repo_and_plugin_skills() 
         "expected host skill summary in developer message: {developer_messages:?}"
     );
 
-    let user_text = request.message_input_texts("user").join("\n");
+    let developer_text = developer_messages.join("\n");
     for (name, path, body) in [
         ("host-search", &host_skill_path, HOST_SKILL_BODY),
         ("repo-search", &repo_skill_path, REPO_SKILL_BODY),
@@ -655,16 +655,16 @@ async fn capability_sections_render_in_order_with_host_repo_and_plugin_skills() 
         ),
     ] {
         assert!(
-            user_text.contains(&format!("<skill>\n<name>{name}</name>")),
-            "expected injected skill `{name}` in user input: {user_text}"
+            developer_text.contains(&format!("<skill>\n<name>{name}</name>")),
+            "expected injected skill `{name}` in developer input: {developer_text}"
         );
         assert!(
-            user_text.contains(path.to_string_lossy().as_ref()),
-            "expected path for `{name}` in user input: {user_text}"
+            developer_text.contains(path.to_string_lossy().as_ref()),
+            "expected path for `{name}` in developer input: {developer_text}"
         );
         assert!(
-            user_text.contains(body),
-            "expected body for `{name}` in user input: {user_text}"
+            developer_text.contains(body),
+            "expected body for `{name}` in developer input: {developer_text}"
         );
     }
 
@@ -725,12 +725,12 @@ async fn agent_plugin_skill_prompt_stays_bounded_without_skills_extension() -> R
     })
     .await;
 
-    let user_text = response
+    let developer_text = response
         .single_request()
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .join("\n");
-    assert!(user_text.contains("acme.tools:review"));
-    assert!(!user_text.contains("AGENT_SKILL_TRUNCATED_TAIL"));
+    assert!(developer_text.contains("acme.tools:review"));
+    assert!(!developer_text.contains("AGENT_SKILL_TRUNCATED_TAIL"));
     let EventMsg::Warning(warning) = warning else {
         unreachable!("wait_for_event matched an Agent skill truncation warning")
     };
@@ -1000,8 +1000,7 @@ async fn explicit_only_orchestrator_skill_is_hidden_but_can_be_invoked() -> Resu
             .all(|message| !message.contains("- demo:explicit-only:")),
         "model-visible skills should omit the explicit-only skill: {developer_messages:?}"
     );
-    let user_messages = request.message_input_texts("user");
-    let skill_instructions = user_messages
+    let skill_instructions = developer_messages
         .iter()
         .find(|message| {
             message.contains("<name>demo:explicit-only</name>")
@@ -1851,7 +1850,7 @@ async fn production_turn_uses_provider_host_catalog_and_core_snapshot_injection(
     let cutover_skill_lines = developer_texts
         .iter()
         .flat_map(|text| text.lines())
-        .filter(|line| line.contains(skill_name))
+        .filter(|line| line.starts_with(&format!("- {skill_name}: ")))
         .collect::<Vec<_>>();
 
     assert_eq!(
@@ -1861,9 +1860,9 @@ async fn production_turn_uses_provider_host_catalog_and_core_snapshot_injection(
             skill_resource.replace('\\', "/")
         )]
     );
-    let user_text = request.message_input_texts("user").join("\n");
-    assert!(user_text.contains(&snapshot_contents));
-    assert!(!user_text.contains(provider_contents));
+    let developer_text = developer_texts.join("\n");
+    assert!(developer_text.contains(&snapshot_contents));
+    assert!(!developer_text.contains(provider_contents));
     let app_mentioned_events =
         wait_for_analytics_events(&server, "codex_app_mentioned", /*expected_count*/ 1).await;
     let app_mentioned_event = &app_mentioned_events[0];
@@ -1948,8 +1947,8 @@ async fn production_turn_suppresses_only_the_superseded_host_skill_prompt() -> R
     test.submit_turn("Use $first-host and $second-host.")
         .await?;
 
-    let user_messages = response.single_request().message_input_texts("user");
-    let skill_messages = user_messages
+    let developer_messages = response.single_request().message_input_texts("developer");
+    let skill_messages = developer_messages
         .into_iter()
         .filter(|message| message.starts_with("<skill>"))
         .collect::<Vec<_>>();
@@ -2033,7 +2032,7 @@ async fn production_turn_warns_and_omits_unreadable_host_skill() -> Result<()> {
 
     let skill_messages = response
         .single_request()
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .filter(|message| message.starts_with("<skill>"))
         .collect::<Vec<_>>();
@@ -2074,14 +2073,16 @@ async fn production_turn_keeps_full_snapshot_host_skill_prompt() -> Result<()> {
     let test = builder.build_with_auto_env(&server).await?;
 
     test.submit_turn("Use $long-host.").await?;
-    let user_text = response
+    let developer_text = response
         .single_request()
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .join("\n");
 
-    assert!(user_text.contains(&skill_contents));
+    assert!(developer_text.contains(&skill_contents));
     assert_eq!(
-        user_text.matches("<skill>\n<name>long-host</name>").count(),
+        developer_text
+            .matches("<skill>\n<name>long-host</name>")
+            .count(),
         1
     );
 
@@ -2118,14 +2119,16 @@ async fn production_turn_keeps_core_host_injection_when_catalog_listings_are_dis
     let test = builder.build_with_auto_env(&server).await?;
 
     test.submit_turn("Use $long-host.").await?;
-    let user_text = response
+    let developer_text = response
         .single_request()
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .join("\n");
 
-    assert!(user_text.contains(&skill_contents));
+    assert!(developer_text.contains(&skill_contents));
     assert_eq!(
-        user_text.matches("<skill>\n<name>long-host</name>").count(),
+        developer_text
+            .matches("<skill>\n<name>long-host</name>")
+            .count(),
         1
     );
 

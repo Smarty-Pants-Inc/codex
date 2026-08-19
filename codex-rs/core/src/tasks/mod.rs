@@ -826,7 +826,19 @@ impl Session {
             }
         };
         if cleared_active_turn {
-            self.emit_thread_idle_lifecycle_if_idle(idle_cause).await;
+            let session = Arc::clone(self);
+            // Idle contributors may start a follow-up turn. Run them outside the
+            // completed turn span so continuation spans do not nest indefinitely.
+            if let Err(err) = tokio::spawn(
+                async move {
+                    session.emit_thread_idle_lifecycle_if_idle(idle_cause).await;
+                }
+                .instrument(Span::none()),
+            )
+            .await
+            {
+                warn!("thread idle lifecycle task failed: {err}");
+            }
         }
         // Regular items were flushed before this terminal event was appended; buffering
         // thread writers may not flush it without another explicit barrier.

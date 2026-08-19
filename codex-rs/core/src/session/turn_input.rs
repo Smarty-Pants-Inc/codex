@@ -176,15 +176,7 @@ async fn start_or_steer(
         responsesapi_client_metadata,
         ..
     } = request;
-    let SubmittedTurnInput::UserInput {
-        content: mut items,
-        client_id,
-    } = input
-    else {
-        return Err(CodexErr::InvalidRequest(
-            "only user input can steer a turn".to_string(),
-        ));
-    };
+    let (mut items, client_id, is_user_input) = into_steerable_input(input)?;
     let can_start_root_turn = start.parent_turn_id.is_none() && start.root_turn_id.is_none();
     let incoming_root_turn_id = start
         .parent_turn_id
@@ -194,6 +186,7 @@ async fn start_or_steer(
     match session
         .steer_input(
             &mut items,
+            is_user_input,
             additional_context.clone(),
             /*expected_turn_id*/ None,
             settings.required_active_final_output_json_schema(),
@@ -211,7 +204,8 @@ async fn start_or_steer(
             let turn_context = settings
                 .apply_started(session, submission_id.clone())
                 .await?;
-            if can_start_root_turn
+            if is_user_input
+                && can_start_root_turn
                 && !items.is_empty()
                 && turn_context
                     .turn_metadata_state
@@ -229,13 +223,19 @@ async fn start_or_steer(
             session
                 .maybe_emit_model_warnings_for_turn(turn_context.as_ref())
                 .await;
-            turn_context.session_telemetry.user_prompt(&items);
+            if is_user_input {
+                turn_context.session_telemetry.user_prompt(&items);
+            }
             let mut task_input = merge_additional_context_input(session, additional_context).await;
             if !items.is_empty() {
-                task_input.push(TurnInput::UserInput {
-                    content: items,
-                    client_id,
-                });
+                if is_user_input {
+                    task_input.push(TurnInput::UserInput {
+                        content: items,
+                        client_id,
+                    });
+                } else {
+                    task_input.push(TurnInput::DeveloperInput { content: items });
+                }
             }
             session
                 .spawn_task(turn_context, task_input, RegularTask::new())
@@ -263,7 +263,8 @@ async fn start_if_idle(
         ..
     } = request;
     let has_user_input = has_nonempty_user_input(&input);
-    let is_automatic_idle_work = !has_user_input && !is_recovery;
+    let has_developer_input = has_nonempty_developer_input(&input);
+    let is_automatic_idle_work = !has_user_input && !has_developer_input && !is_recovery;
     let can_start_root_turn = start.parent_turn_id.is_none() && start.root_turn_id.is_none();
     if session.input_queue.has_trigger_turn_mailbox_items().await {
         return Ok(TurnInputSubmission::NotSubmitted {
@@ -346,9 +347,14 @@ async fn start_if_idle(
             turn_context.session_telemetry.user_prompt(content);
         }
         task_input.push(pending_turn_input(input));
-    } else if is_automatic_idle_work && !matches!(&input, SubmittedTurnInput::UserInput { .. }) {
-        // Automatic response-item work still needs to be queued, but an empty
-        // user-input request should start sampling without adding a message.
+    } else if has_developer_input {
+        task_input.push(pending_turn_input(input));
+    } else if !matches!(
+        &input,
+        SubmittedTurnInput::UserInput { .. } | SubmittedTurnInput::DeveloperInput { .. }
+    ) {
+        // Automatic response-item work starts without an initial prompt and is
+        // drained from the active turn queue by the regular task.
         session
             .input_queue
             .extend_pending_input_for_turn_state(
@@ -384,15 +390,7 @@ async fn steer(
         responsesapi_client_metadata,
         ..
     } = request;
-    let SubmittedTurnInput::UserInput {
-        content: mut items,
-        client_id,
-    } = input
-    else {
-        return Err(CodexErr::InvalidRequest(
-            "only user input can steer a turn".to_string(),
-        ));
-    };
+    let (mut items, client_id, is_user_input) = into_steerable_input(input)?;
     let incoming_root_turn_id = start
         .parent_turn_id
         .as_ref()
@@ -401,6 +399,7 @@ async fn steer(
     match session
         .steer_input(
             &mut items,
+            is_user_input,
             additional_context,
             Some(expected_turn_id.as_str()),
             settings.required_active_final_output_json_schema(),
@@ -423,7 +422,7 @@ impl Session {
         let submission_id = Uuid::now_v7().to_string();
         let submission = handle(
             self,
-            TurnInputRequest::user_input(vec![UserInput::Text {
+            TurnInputRequest::developer_input(vec![UserInput::Text {
                 text,
                 text_elements: Vec::new(),
             }]),
@@ -477,6 +476,7 @@ impl Session {
     async fn steer_input(
         &self,
         input: &mut Vec<UserInput>,
+        is_user_input: bool,
         additional_context: BTreeMap<String, AdditionalContextEntry>,
         expected_turn_id: Option<&str>,
         required_final_output_json_schema: Option<&Value>,
@@ -528,10 +528,12 @@ impl Session {
         {
             return Err(NotSubmittedReason::ActiveTurnOutputSchemaMismatch);
         }
-        active_task
-            .turn_context
-            .session_telemetry
-            .user_prompt(input);
+        if is_user_input {
+            active_task
+                .turn_context
+                .session_telemetry
+                .user_prompt(input);
+        }
 
         let mut pending_input = merge_additional_context_input(self, additional_context).await;
 
@@ -542,10 +544,16 @@ impl Session {
                 .set_responsesapi_client_metadata(responsesapi_client_metadata);
         }
 
-        pending_input.push(TurnInput::UserInput {
-            content: std::mem::take(input),
-            client_id: client_user_message_id,
-        });
+        if is_user_input {
+            pending_input.push(TurnInput::UserInput {
+                content: std::mem::take(input),
+                client_id: client_user_message_id,
+            });
+        } else {
+            pending_input.push(TurnInput::DeveloperInput {
+                content: std::mem::take(input),
+            });
+        }
         if let Some(incoming_root_turn_id) = incoming_root_turn_id
             && active_task.turn_context.turn_metadata_state.root_turn_id() != incoming_root_turn_id
         {
@@ -568,6 +576,28 @@ fn has_nonempty_user_input(input: &SubmittedTurnInput) -> bool {
     matches!(input, SubmittedTurnInput::UserInput { content, .. } if !content.is_empty())
 }
 
+fn has_nonempty_developer_input(input: &SubmittedTurnInput) -> bool {
+    matches!(input, SubmittedTurnInput::DeveloperInput { content } if !content.is_empty())
+}
+
+fn into_steerable_input(
+    input: SubmittedTurnInput,
+) -> CodexResult<(Vec<UserInput>, Option<String>, bool)> {
+    match input {
+        SubmittedTurnInput::UserInput { content, client_id } => {
+            Ok((content, client_id, /*is_user_input*/ true))
+        }
+        SubmittedTurnInput::DeveloperInput { content } => {
+            Ok((content, None, /*is_user_input*/ false))
+        }
+        SubmittedTurnInput::ResponseItem(_) | SubmittedTurnInput::InterAgentCommunication(_) => {
+            Err(CodexErr::InvalidRequest(
+                "only user or developer input can steer a turn".to_string(),
+            ))
+        }
+    }
+}
+
 async fn merge_additional_context_input(
     session: &Session,
     additional_context: BTreeMap<String, AdditionalContextEntry>,
@@ -588,6 +618,7 @@ fn pending_turn_input(input: SubmittedTurnInput) -> TurnInput {
         SubmittedTurnInput::UserInput { content, client_id } => {
             TurnInput::UserInput { content, client_id }
         }
+        SubmittedTurnInput::DeveloperInput { content } => TurnInput::DeveloperInput { content },
         SubmittedTurnInput::ResponseItem(item) => TurnInput::ResponseItem(item.into()),
         SubmittedTurnInput::InterAgentCommunication(communication) => {
             TurnInput::InterAgentCommunication(communication)

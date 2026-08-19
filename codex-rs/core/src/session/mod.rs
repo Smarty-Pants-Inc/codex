@@ -1482,28 +1482,24 @@ impl Session {
         // Keep the recorded rollout unchanged. Prepare its reconstructed history before
         // installing it, so legacy media is processed once for this resume or fork and
         // will be processed again if the rollout is reconstructed in a future session.
-        // Replay disables image-resize notices, so media preparation remains one-to-one. Keep
-        // the prior batch behavior and carry history-only metadata in a positional sidecar.
-        let (mut prepared_history, metadata): (Vec<_>, Vec<_>) = history
-            .into_iter()
-            .map(|envelope| (envelope.item, envelope.metadata))
-            .unzip();
-        let _ = prepare_image_response_items(
-            &mut prepared_history,
-            ImagePreparationMode::DetailBased,
-            ImageResizeNoticeMode::Disabled,
-        );
-        prepare_audio_response_items(&mut prepared_history);
-        assert_eq!(
-            prepared_history.len(),
-            metadata.len(),
-            "replay media preparation must remain one-to-one when resize notices are disabled"
-        );
-        history = prepared_history
-            .into_iter()
-            .zip(metadata)
-            .map(|(item, metadata)| ResponseItemEnvelope { item, metadata })
-            .collect();
+        // Generated developer notices have no source metadata; preserve each source envelope's
+        // metadata on its original prepared response item.
+        let mut prepared_history = Vec::with_capacity(history.len());
+        for ResponseItemEnvelope { item, metadata } in history {
+            let mut prepared_items = vec![item];
+            let _ = prepare_image_response_items(
+                &mut prepared_items,
+                ImagePreparationMode::DetailBased,
+                ImageResizeNoticeMode::Disabled,
+            );
+            prepare_audio_response_items(&mut prepared_items);
+            let mut metadata = metadata;
+            prepared_history.extend(prepared_items.into_iter().map(|item| ResponseItemEnvelope {
+                item,
+                metadata: metadata.take(),
+            }));
+        }
+        history = prepared_history;
         {
             let mut state = self.state.lock().await;
             state.replace_annotated_history(history, reference_context_item);
@@ -2636,6 +2632,7 @@ impl Session {
                     ts.insert_pending_request_permissions(
                         call_id.clone(),
                         PendingRequestPermissions {
+                            turn_id: turn_context.sub_id.clone(),
                             tx_response,
                             requested_permissions: requested_permissions.clone(),
                             environment: environment.clone(),
@@ -2744,13 +2741,10 @@ impl Session {
         }
     }
 
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "active turn checks and turn state updates must remain atomic"
-    )]
     pub async fn notify_request_permissions_response(
         &self,
         call_id: &str,
+        turn_id: &str,
         response: RequestPermissionsResponse,
     ) {
         let (entry, originating_turn_state) = {
@@ -2758,7 +2752,7 @@ impl Session {
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    let entry = ts.remove_pending_request_permissions(call_id);
+                    let entry = ts.remove_pending_request_permissions_for_turn(call_id, turn_id);
                     let originating_turn_state = entry.as_ref().map(|_| Arc::clone(&at.turn_state));
                     (entry, originating_turn_state)
                 }
@@ -3660,7 +3654,7 @@ impl Session {
         let mut initial_multi_agent_mode = None;
         let mut managed_developer_instructions = None;
         for fragment in world_state.render_full() {
-            match fragment.role() {
+            match fragment.semantic_role() {
                 "developer"
                     if fragment.markers().0 == ModelSwitchInstructions::type_markers().0 =>
                 {
@@ -3686,7 +3680,6 @@ impl Session {
                     separate_developer_sections.push(fragment.render_fragment());
                 }
                 "developer" => developer_sections.push(fragment.render_fragment()),
-                "user" => contextual_user_sections.push(fragment.render_fragment()),
                 _ => {}
             }
         }

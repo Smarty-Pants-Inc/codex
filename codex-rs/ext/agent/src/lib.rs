@@ -75,7 +75,7 @@ impl AgentRunner {
             .await?;
         let turn_id = match thread
             .start_turn_if_idle(
-                TurnInputRequest::user_input(vec![UserInput::Text {
+                TurnInputRequest::developer_input(vec![UserInput::Text {
                     text: prompt,
                     text_elements: Vec::new(),
                 }])

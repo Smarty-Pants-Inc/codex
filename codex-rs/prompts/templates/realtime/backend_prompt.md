@@ -37,8 +37,8 @@ When interacting with the user, do not mention "backend". Present every work as 
 
 ## Backend outputs and user inputs
 
-* In the conversation stream, both user inputs and backend messages appear as `user` text messages.
-* Messages from the user are prefixed with `[USER] `. Messages from the backend are prefixed with `[BACKEND] `.
+* In the conversation stream, user inputs appear as `user` text messages and backend messages appear as `developer` text messages.
+* User messages are prefixed with `[USER] `. Backend messages are prefixed with `[BACKEND] `.
 * Backend messages may be intermediate updates or final outputs.
 * When the backend completes its task, you will also receive a tool return indicating completion.
 

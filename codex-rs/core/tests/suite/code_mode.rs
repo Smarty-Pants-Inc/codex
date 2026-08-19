@@ -4499,7 +4499,9 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
         })
         .collect::<Vec<_>>();
     assert_eq!(guardian_requests.len(), 2);
-    let guardian_text = guardian_requests[0].message_input_texts("user").concat();
+    let guardian_text = guardian_requests[0]
+        .message_input_texts("developer")
+        .concat();
     let evidence_enabled = enhanced_transcripts || auto_review_required;
     for included in [
         DIRECT_NODE_REPL_MIDDLE,
@@ -4517,31 +4519,31 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
         );
     }
     let guardian_request = guardian_requests[0];
-    let reviewer_image_urls = guardian_request.message_input_image_urls("user");
+    let reviewer_image_urls = guardian_request.message_input_image_urls("developer");
     let expected_images = usize::from(reviewer_images) + usize::from(check_detail);
     assert_eq!(reviewer_image_urls.len(), expected_images);
     if reviewer_images {
         assert_eq!(reviewer_image_urls[0], PRIVATE_IMAGE);
-        let reviewer_user_content = guardian_request
+        let reviewer_developer_content = guardian_request
             .inputs_of_type("message")
             .into_iter()
-            .filter(|item| item.get("role").and_then(Value::as_str) == Some("user"))
+            .filter(|item| item.get("role").and_then(Value::as_str) == Some("developer"))
             .filter_map(|item| item.get("content").and_then(Value::as_array).cloned())
             .flatten()
             .collect::<Vec<_>>();
-        let image_index = reviewer_user_content
+        let image_index = reviewer_developer_content
             .iter()
             .position(|item| item.get("image_url").and_then(Value::as_str) == Some(PRIVATE_IMAGE))
             .expect("private reviewer image should be present");
         if check_detail {
-            assert_eq!(reviewer_user_content[image_index]["detail"], "high");
+            assert_eq!(reviewer_developer_content[image_index]["detail"], "high");
             let payload = reviewer_image_urls[1].split_once(',').unwrap().1;
             let dimensions =
                 image::load_from_memory(&BASE64_STANDARD.decode(payload)?)?.dimensions();
             assert_eq!(dimensions, (2048, 32));
         }
         for (index, marker) in [(image_index - 1, "before"), (image_index + 1, "after")] {
-            let text = reviewer_user_content[index]["text"].as_str().unwrap();
+            let text = reviewer_developer_content[index]["text"].as_str().unwrap();
             assert!(text.contains(marker));
         }
     }
@@ -4560,7 +4562,7 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
     }
     assert_eq!(
         guardian_requests[1]
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .concat()
             .matches(NODE_REPL_DOM_MIDDLE)
             .count(),
@@ -4568,7 +4570,7 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
         "a reused Guardian session must not append the same evidence twice"
     );
     assert_eq!(
-        guardian_requests[1].message_input_image_urls("user"),
+        guardian_requests[1].message_input_image_urls("developer"),
         if reviewer_constraint == Some("large_prompt") {
             vec![PRIVATE_IMAGE.to_string()]
         } else {

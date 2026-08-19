@@ -608,11 +608,11 @@ impl CodexThread {
         self.session.token_usage_info().await
     }
 
-    /// Records a user-role session-prefix message without creating a new user turn boundary.
+    /// Records an internal session-prefix message without creating a new user turn boundary.
     pub(crate) async fn inject_user_message_without_turn(&self, message: String) {
         let item = ResponseItem::Message {
             id: None,
-            role: "user".to_string(),
+            role: "developer".to_string(),
             content: vec![ContentItem::InputText { text: message }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
@@ -641,6 +641,15 @@ impl CodexThread {
         if items.is_empty() {
             return Err(CodexErr::InvalidRequest(
                 "items must not be empty".to_string(),
+            ));
+        }
+        if self.session_source.is_non_root_agent()
+            && items
+                .iter()
+                .any(|item| matches!(item, ResponseItem::Message { role, .. } if role == "user"))
+        {
+            return Err(CodexErr::InvalidRequest(
+                "user-role response items cannot be injected into non-root threads".to_string(),
             ));
         }
 

@@ -288,6 +288,7 @@ async fn extension_tool_uses_granted_turn_permissions_without_host_local_persist
     assert_eq!(request.call_id, permissions_call_id);
     test.codex
         .submit(Op::RequestPermissionsResponse {
+            turn_id: request.turn_id,
             id: permissions_call_id.to_string(),
             response: RequestPermissionsResponse {
                 permissions: request.permissions,

@@ -15,6 +15,8 @@ use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ExtensionWarning;
 use codex_extension_api::FunctionCallError;
 use codex_extension_api::NoopTurnItemEmitter;
+use codex_extension_api::ThreadIdleCause;
+use codex_extension_api::ThreadIdleInput;
 use codex_extension_api::ThreadResumeInput;
 use codex_extension_api::ThreadStartInput;
 use codex_extension_api::ThreadStopInput;
@@ -27,6 +29,7 @@ use codex_extension_api::ToolPayload;
 use codex_extension_api::TurnErrorInput;
 use codex_extension_api::TurnStartInput;
 use codex_extension_api::TurnStopInput;
+use codex_goal_extension::GoalAutoContinueCapability;
 use codex_goal_extension::GoalExtensionConfig;
 use codex_goal_extension::GoalObjectiveUpdate;
 use codex_goal_extension::GoalRuntimeHandle;
@@ -47,6 +50,8 @@ use codex_protocol::protocol::ThreadGoalStatus;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TruncationPolicy;
+use core_test_support::responses::start_mock_server;
+use core_test_support::test_codex::test_codex;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
@@ -1106,6 +1111,65 @@ async fn thread_resume_rehydrates_active_goal_idle_accounting() -> anyhow::Resul
 }
 
 #[tokio::test]
+async fn disabled_idle_continuation_preserves_active_goal() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let mut builder = test_codex();
+    let test = builder.build(&server).await?;
+    let disabled_runtime = test
+        .codex
+        .state_db()
+        .ok_or_else(|| anyhow::anyhow!("live test thread should have a state database"))?;
+    let thread_id = test.session_configured.thread_id;
+    assert!(test.thread_manager.get_thread(thread_id).await.is_ok());
+    disabled_runtime
+        .thread_goals()
+        .replace_thread_goal(
+            thread_id,
+            "disabled continuation stays active",
+            codex_state::ThreadGoalStatus::Active,
+            /*token_budget*/ None,
+        )
+        .await?;
+    let disabled_harness = GoalExtensionHarness::new_with_thread_manager(
+        disabled_runtime.clone(),
+        thread_id,
+        GoalAutoContinueCapability::Disabled,
+        /*persistent_thread_state_available*/ true,
+        Arc::downgrade(&test.thread_manager),
+    )
+    .await?;
+    disabled_harness.resume_thread().await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    disabled_harness.idle_thread().await;
+    disabled_harness
+        .runtime_handle()
+        .prepare_external_goal_mutation()
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+    let disabled_goal = disabled_runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("disabled goal should exist"))?;
+    assert_eq!(codex_state::ThreadGoalStatus::Active, disabled_goal.status);
+    assert!(
+        disabled_goal.time_used_seconds >= 1,
+        "disabled auto-continuation should preserve active idle accounting"
+    );
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "disabled auto-continuation must not submit a model request for a live thread"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn goal_service_sets_gets_and_clears_thread_goal() -> anyhow::Result<()> {
     let runtime = test_runtime().await?;
     let thread_id = test_thread_id()?;
@@ -1254,6 +1318,7 @@ async fn installed_tools_with_start(
         /*metrics_client*/ None,
         Weak::new(),
         goal_service,
+        GoalAutoContinueCapability::Disabled,
         |_| GoalExtensionConfig {
             enabled: true,
             max_goal_token_budget: None,
@@ -1301,6 +1366,38 @@ impl GoalExtensionHarness {
         runtime: Arc<codex_state::StateRuntime>,
         thread_id: ThreadId,
     ) -> anyhow::Result<Self> {
+        Self::new_with_host_capabilities(
+            runtime,
+            thread_id,
+            GoalAutoContinueCapability::Disabled,
+            /*persistent_thread_state_available*/ true,
+        )
+        .await
+    }
+
+    async fn new_with_host_capabilities(
+        runtime: Arc<codex_state::StateRuntime>,
+        thread_id: ThreadId,
+        auto_continue_capability: GoalAutoContinueCapability,
+        persistent_thread_state_available: bool,
+    ) -> anyhow::Result<Self> {
+        Self::new_with_thread_manager(
+            runtime,
+            thread_id,
+            auto_continue_capability,
+            persistent_thread_state_available,
+            Weak::new(),
+        )
+        .await
+    }
+
+    async fn new_with_thread_manager(
+        runtime: Arc<codex_state::StateRuntime>,
+        thread_id: ThreadId,
+        auto_continue_capability: GoalAutoContinueCapability,
+        persistent_thread_state_available: bool,
+        thread_manager: Weak<codex_core::ThreadManager>,
+    ) -> anyhow::Result<Self> {
         let sink = Arc::new(RecordingEventSink::default());
         let mut builder = ExtensionRegistryBuilder::<()>::with_event_sink(sink.clone());
         let goal_service = Arc::new(GoalService::new());
@@ -1309,8 +1406,9 @@ impl GoalExtensionHarness {
             runtime,
             AnalyticsEventsClient::disabled(),
             /*metrics_client*/ None,
-            Weak::new(),
+            thread_manager,
             Arc::clone(&goal_service),
+            auto_continue_capability,
             |_| GoalExtensionConfig {
                 enabled: true,
                 max_goal_token_budget: None,
@@ -1325,7 +1423,7 @@ impl GoalExtensionHarness {
                 .on_thread_start(ThreadStartInput {
                     config: &(),
                     session_source: &session_source,
-                    persistent_thread_state_available: true,
+                    persistent_thread_state_available,
                     environments: &[],
                     mcp_resource_client: None,
                     extension_metrics: None,
@@ -1412,6 +1510,20 @@ impl GoalExtensionHarness {
                 .on_thread_resume(ThreadResumeInput {
                     session_store: &self.session_store,
                     thread_store: &self.thread_store,
+                })
+                .await;
+        }
+    }
+
+    async fn idle_thread(&self) {
+        let continuation = codex_extension_api::ThreadIdleContinuation::default();
+        for contributor in self.registry.thread_lifecycle_contributors() {
+            contributor
+                .on_thread_idle(ThreadIdleInput {
+                    cause: ThreadIdleCause::Completed,
+                    session_store: &self.session_store,
+                    thread_store: &self.thread_store,
+                    continuation: &continuation,
                 })
                 .await;
         }

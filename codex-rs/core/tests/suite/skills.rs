@@ -137,16 +137,16 @@ async fn user_turn_includes_skill_instructions() -> Result<()> {
     .await;
 
     let request = mock.single_request();
-    let user_texts = request.message_input_texts("user");
+    let developer_texts = request.message_input_texts("developer");
     let skill_path_str = skill_path.to_string_lossy();
     assert!(
-        user_texts.iter().any(|text| {
+        developer_texts.iter().any(|text| {
             text.contains("<skill>\n<name>demo</name>")
                 && text.contains("<path>")
                 && text.contains(skill_body)
                 && text.contains(skill_path_str.as_ref())
         }),
-        "expected skill instructions in user input, got {user_texts:?}"
+        "expected skill instructions in developer input, got {developer_texts:?}"
     );
     assert!(request.has_content_kinds(&["skills.selected_skill_instructions"]));
 
@@ -231,26 +231,24 @@ async fn user_turn_selects_symlinked_skill_by_advertised_discovery_path() -> Res
 
     let request = mock.single_request();
     let developer_texts = request.message_input_texts("developer");
-    let advertised_path = format!(
-        "(file: {})",
-        discovery_path.to_string_lossy().replace('\\', "/")
-    );
     assert!(
-        developer_texts
-            .iter()
-            .any(|text| text.contains(&advertised_path)),
+        developer_texts.iter().any(|text| {
+            text.lines().any(|line| {
+                line.starts_with("- linked-demo: Linked demo skill (file: ")
+                    && line.ends_with("/linked-demo/SKILL.md)")
+            })
+        }),
         "expected symlink discovery path in the skill catalog, got {developer_texts:?}"
     );
 
-    let user_texts = request.message_input_texts("user");
     let canonical_identity = format!("<path>{canonical_path_display}</path>");
     assert!(
-        user_texts.iter().any(|text| {
+        developer_texts.iter().any(|text| {
             text.contains("<skill>\n<name>linked-demo</name>")
                 && text.contains(&canonical_identity)
                 && text.contains(skill_body)
         }),
-        "expected canonical skill instructions selected by discovery path, got {user_texts:?}"
+        "expected canonical skill instructions selected by discovery path, got {developer_texts:?}"
     );
 
     Ok(())
@@ -310,16 +308,16 @@ async fn idle_user_turn_includes_skill_instructions_in_the_first_request() -> Re
     })
     .await;
 
-    let user_texts = mock.single_request().message_input_texts("user");
+    let developer_texts = mock.single_request().message_input_texts("developer");
     let skill_path_str = skill_path.to_string_lossy();
     assert!(
-        user_texts.iter().any(|text| {
+        developer_texts.iter().any(|text| {
             text.contains("<skill>\n<name>queued-demo</name>")
                 && text.contains("<path>")
                 && text.contains(skill_body)
                 && text.contains(skill_path_str.as_ref())
         }),
-        "expected queued skill instructions in the first request, got {user_texts:?}"
+        "expected queued skill instructions in the first request, got {developer_texts:?}"
     );
 
     Ok(())

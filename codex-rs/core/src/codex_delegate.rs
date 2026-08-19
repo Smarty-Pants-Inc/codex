@@ -212,7 +212,7 @@ pub(crate) async fn run_codex_thread_one_shot(
     // Send the initial input to kick off the one-shot turn.
     let submission = io
         .submit_turn_input(
-            TurnInputRequest::user_input(input).on_start(TurnStartOptions {
+            TurnInputRequest::developer_input(input).on_start(TurnStartOptions {
                 final_output_json_schema,
                 parent_turn_id: Some(parent_turn_id),
                 root_turn_id,

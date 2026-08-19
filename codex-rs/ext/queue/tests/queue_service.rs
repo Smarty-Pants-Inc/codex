@@ -20,6 +20,7 @@ use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ExtensionWarning;
 use codex_extension_api::NoopExtensionEventSink;
 use codex_extension_api::ThreadIdleCause;
+use codex_extension_api::ThreadIdleContinuation;
 use codex_extension_api::ThreadIdleInput;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadResumeInput;
@@ -217,15 +218,41 @@ async fn emit_idle_with_cause(
 ) {
     let session_store = ExtensionData::new("session");
     let thread_store = ExtensionData::new(thread_id.to_string());
+    let continuation = ThreadIdleContinuation::default();
     <QueuedItemService as ThreadLifecycleContributor<()>>::on_thread_idle(
         service,
         ThreadIdleInput {
             cause,
             session_store: &session_store,
             thread_store: &thread_store,
+            continuation: &continuation,
         },
     )
     .await;
+}
+
+#[tokio::test]
+async fn idle_dispatch_failure_blocks_later_continuation() -> anyhow::Result<()> {
+    let (queue, _home) = test_queue().await?;
+    let service = QueuedItemService::new(queue, Weak::new(), Arc::new(NoopExtensionEventSink));
+    let thread_id = ThreadId::new();
+    let session_store = ExtensionData::new("session");
+    let thread_store = ExtensionData::new(thread_id.to_string());
+    let continuation = ThreadIdleContinuation::default();
+
+    <QueuedItemService as ThreadLifecycleContributor<()>>::on_thread_idle(
+        &service,
+        ThreadIdleInput {
+            cause: ThreadIdleCause::Completed,
+            session_store: &session_store,
+            thread_store: &thread_store,
+            continuation: &continuation,
+        },
+    )
+    .await;
+
+    assert!(!continuation.is_allowed());
+    Ok(())
 }
 
 #[tokio::test]

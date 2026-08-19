@@ -171,7 +171,7 @@ impl AgentControl {
         self.rollout_budget.as_ref()
     }
 
-    /// Send rich user input items to an existing agent thread.
+    /// Send rich developer-origin input items to an existing agent thread.
     pub(crate) async fn send_input(
         &self,
         agent_id: ThreadId,
@@ -182,13 +182,13 @@ impl AgentControl {
         let state = self.upgrade()?;
         let thread = state.get_thread(agent_id).await?;
         let result = match thread
-            .start_or_steer_turn(
-                TurnInputRequest::user_input(input).on_start(TurnStartOptions {
+            .start_or_steer_turn(TurnInputRequest::developer_input(input).on_start(
+                TurnStartOptions {
                     parent_turn_id,
                     root_turn_id,
                     ..Default::default()
-                }),
-            )
+                },
+            ))
             .await
         {
             Ok(TurnInputSubmission::Started { turn_id }) => Ok(turn_id),

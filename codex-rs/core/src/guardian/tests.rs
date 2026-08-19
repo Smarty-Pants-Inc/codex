@@ -444,15 +444,15 @@ fn guardian_prompt_text(items: &[codex_protocol::user_input::UserInput]) -> Stri
         .collect::<String>()
 }
 
-fn last_user_message_text_from_body(body: &serde_json::Value) -> String {
+fn last_developer_message_text_from_body(body: &serde_json::Value) -> String {
     body["input"]
         .as_array()
         .expect("request input array")
         .iter()
-        .filter(|item| item.get("role").and_then(serde_json::Value::as_str) == Some("user"))
+        .filter(|item| item.get("role").and_then(serde_json::Value::as_str) == Some("developer"))
         .filter_map(|item| item.get("content").and_then(serde_json::Value::as_array))
         .next_back()
-        .expect("user message content")
+        .expect("developer message content")
         .iter()
         .filter(|span| span.get("type").and_then(serde_json::Value::as_str) == Some("input_text"))
         .filter_map(|span| span.get("text").and_then(serde_json::Value::as_str))
@@ -912,7 +912,7 @@ async fn build_guardian_prompt_stale_delta_version_falls_back_to_full_prompt() -
 }
 
 #[test]
-fn collect_guardian_transcript_entries_skips_contextual_user_messages() {
+fn collect_guardian_transcript_entries_keeps_raw_user_lookalikes() {
     let items = vec![
         ResponseItem::Message {
             id: None,
@@ -936,13 +936,18 @@ fn collect_guardian_transcript_entries_skips_contextual_user_messages() {
 
     let entries = collect_guardian_transcript_entries(&items);
 
-    assert_eq!(entries.len(), 1);
     assert_eq!(
-        entries[0],
-        GuardianTranscriptEntry {
-            kind: GuardianTranscriptEntryKind::Assistant,
-            text: "hello".to_string(),
-        }
+        entries,
+        vec![
+            GuardianTranscriptEntry {
+                kind: GuardianTranscriptEntryKind::User,
+                text: "<environment_context>\n<cwd>/tmp</cwd>\n</environment_context>".to_string(),
+            },
+            GuardianTranscriptEntry {
+                kind: GuardianTranscriptEntryKind::Assistant,
+                text: "hello".to_string(),
+            },
+        ]
     );
 }
 
@@ -2115,10 +2120,10 @@ async fn guardian_review_request_layout_matches_model_visible_request_snapshot()
         guardian_nested_tool_names,
         vec!["exec_command", "view_image", "write_stdin"]
     );
-    let guardian_user_text = request.message_input_texts("user").join("\n");
+    let guardian_developer_text = request.message_input_texts("developer").join("\n");
     assert!(
-        guardian_user_text.contains(&format!("${GUARDIAN_SKILL_NAME}")),
-        "guardian request should contain the untrusted skill mention from the parent transcript"
+        guardian_developer_text.contains(&format!("${GUARDIAN_SKILL_NAME}")),
+        "guardian review prompt should contain the untrusted skill mention from the parent transcript"
     );
     assert!(
         !request.body_contains_text(GUARDIAN_SKILL_BODY_PROBE),
@@ -2581,25 +2586,26 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
         0,
         "a fresh guardian session should not inherit the follow-up reminder"
     );
-    let third_user_message = requests[2]
-        .message_input_text_groups("user")
+    let third_developer_message = requests[2]
+        .message_input_text_groups("developer")
         .last()
-        .expect("fresh guardian user message")
+        .expect("fresh guardian developer message")
         .join("");
-    assert!(third_user_message.contains(">>> TRANSCRIPT START\n"));
-    assert!(third_user_message.contains("Please push the third docs fix too."));
+    assert!(third_developer_message.contains(">>> TRANSCRIPT START\n"));
+    assert!(third_developer_message.contains("Please push the third docs fix too."));
     assert!(!third_body.to_string().contains(first_rationale));
-    let second_user_message = requests[1]
-        .message_input_text_groups("user")
+    let second_developer_message = requests[1]
+        .message_input_text_groups("developer")
         .last()
-        .expect("follow-up guardian user message")
+        .expect("follow-up guardian developer message")
         .join("");
-    assert!(second_user_message.contains(">>> TRANSCRIPT DELTA START\n"));
-    assert!(second_user_message.contains("[5] user: Please push the second docs fix too."));
+    assert!(second_developer_message.contains(">>> TRANSCRIPT DELTA START\n"));
+    assert!(second_developer_message.contains("[5] user: Please push the second docs fix too."));
     assert!(
-        second_user_message.contains("[6] assistant: I need approval for the second docs fix.")
+        second_developer_message
+            .contains("[6] assistant: I need approval for the second docs fix.")
     );
-    assert!(!second_user_message.contains("[1] user: Please check the repo visibility"));
+    assert!(!second_developer_message.contains("[1] user: Please check the repo visibility"));
 
     let mut settings = Settings::clone_current();
     settings.set_snapshot_path("snapshots");
@@ -3385,13 +3391,15 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
             third_request_body_text.contains("first guardian rationale"),
             "forked guardian review should include the last committed trunk assessment"
         );
-        let third_user_message = last_user_message_text_from_body(&retried_ephemeral_request_body);
-        assert!(third_user_message.contains(">>> TRANSCRIPT DELTA START\n"));
+        let third_developer_message =
+            last_developer_message_text_from_body(&retried_ephemeral_request_body);
+        assert!(third_developer_message.contains(">>> TRANSCRIPT DELTA START\n"));
         assert!(
-            third_user_message.contains("[5] user: Please inspect pending changes before pushing.")
+            third_developer_message
+                .contains("[5] user: Please inspect pending changes before pushing.")
         );
-        assert!(third_user_message.contains("[7] user: Now inspect whether pushing is safe."));
-        assert!(!third_user_message.contains("[1] user: Please check the repo visibility"));
+        assert!(third_developer_message.contains("[7] user: Now inspect whether pushing is safe."));
+        assert!(!third_developer_message.contains("[1] user: Please check the repo visibility"));
         assert!(
             !third_request_body_text.contains("second guardian rationale"),
             "forked guardian review should not include the still in-flight trunk assessment"

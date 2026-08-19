@@ -325,6 +325,7 @@ impl App {
                         thread_id,
                         thread_label,
                         call_id: params.item_id.clone(),
+                        turn_id: params.turn_id.clone(),
                         environment_id: params.environment_id.clone(),
                         reason: params.reason.clone(),
                         permissions,

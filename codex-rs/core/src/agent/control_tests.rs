@@ -96,6 +96,26 @@ fn text_input(text: &str) -> Vec<UserInput> {
     }]
 }
 
+fn user_message(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+async fn record_user_message(thread: &CodexThread, text: &str) {
+    let turn_context = thread.session.new_default_turn().await;
+    thread
+        .session
+        .record_conversation_items(turn_context.as_ref(), &[user_message(text)])
+        .await;
+}
+
 fn captured_op_matches(actual: &(ThreadId, Op), expected: &(ThreadId, Op)) -> bool {
     if actual.0 != expected.0 {
         return false;
@@ -266,7 +286,7 @@ fn has_subagent_notification<'a>(
         let ResponseItem::Message { role, content, .. } = item else {
             return false;
         };
-        if role != "user" {
+        if role != "developer" {
             return false;
         }
         content.iter().any(|content_item| match content_item {
@@ -296,27 +316,30 @@ fn history_contains_text<'a>(
     })
 }
 
-async fn wait_for_recorded_user_message(thread: &CodexThread, needle: &str) {
+async fn wait_for_recorded_developer_message(thread: &CodexThread, needle: &str) {
     timeout(Duration::from_secs(5), async {
         loop {
-            let event = thread
-                .next_event()
-                .await
-                .expect("event stream should stay open");
-            if let EventMsg::ItemCompleted(ItemCompletedEvent {
-                item: TurnItem::UserMessage(item),
-                ..
-            }) = event.msg
-                && item.content.iter().any(
-                    |input| matches!(input, UserInput::Text { text, .. } if text.contains(needle)),
-                )
-            {
+            let history = thread.session.clone_history().await;
+            if history.raw_items().any(|item| {
+                let ResponseItem::Message { role, content, .. } = item else {
+                    return false;
+                };
+                role == "developer"
+                    && content.iter().any(|input| {
+                        matches!(
+                            input,
+                            ContentItem::InputText { text } | ContentItem::OutputText { text }
+                                if text.contains(needle)
+                        )
+                    })
+            }) {
                 return;
             }
+            sleep(Duration::from_millis(25)).await;
         }
     })
     .await
-    .expect("timed out waiting for user message recording");
+    .expect("timed out waiting for developer message recording");
 }
 
 fn history_contains_assistant_inter_agent_communication<'a>(
@@ -607,7 +630,7 @@ async fn subscribe_status_updates_on_shutdown() {
 }
 
 #[tokio::test]
-async fn send_input_submits_user_message() {
+async fn send_input_records_developer_message() {
     let harness = AgentControlHarness::new().await;
     let (thread_id, thread) = harness.start_thread().await;
 
@@ -625,7 +648,7 @@ async fn send_input_submits_user_message() {
         .await
         .expect("send_input should succeed");
     assert!(!submission_id.is_empty());
-    wait_for_recorded_user_message(thread.as_ref(), "hello from tests").await;
+    wait_for_recorded_developer_message(thread.as_ref(), "hello from tests").await;
 }
 
 #[tokio::test]
@@ -724,6 +747,15 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         .get_thread(spawned_agent.thread_id)
         .await
         .expect("child thread should exist");
+    let error = child_thread
+        .inject_response_items(vec![user_message("direct user injection")])
+        .await
+        .expect_err("non-root threads should reject raw user injection");
+    assert!(matches!(
+        error.details(),
+        CodexErrorDetails::InvalidRequest(message)
+            if message == "user-role response items cannot be injected into non-root threads"
+    ));
     child_thread
         .inject_response_items(vec![assistant_message(
             "child persisted",
@@ -967,7 +999,7 @@ async fn spawn_agent_creates_thread_and_sends_prompt() {
         .get_thread(thread_id)
         .await
         .expect("thread should be registered");
-    wait_for_recorded_user_message(thread.as_ref(), "spawned").await;
+    wait_for_recorded_developer_message(thread.as_ref(), "spawned").await;
 }
 
 #[tokio::test]
@@ -1333,9 +1365,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .expect("start parent thread");
     let parent_thread_id = new_thread.thread_id;
     let parent_thread = new_thread.thread;
-    parent_thread
-        .inject_user_message_without_turn("parent seed context".to_string())
-        .await;
+    record_user_message(&parent_thread, "parent seed context").await;
     let expected_parent_seed = parent_thread
         .session
         .clone_history()
@@ -1344,6 +1374,10 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .next()
         .cloned()
         .expect("parent seed should be recorded");
+    let mut expected_parent_seed = expected_parent_seed;
+    if let ResponseItem::Message { role, .. } = &mut expected_parent_seed {
+        *role = "developer".to_string();
+    }
     let turn_context = parent_thread.session.new_default_turn().await;
     let parent_spawn_call_id = "spawn-call-history".to_string();
     let trigger_message = InterAgentCommunication::new(
@@ -1595,7 +1629,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         "empty child developer instructions should preserve unrelated developer fragments"
     );
 
-    wait_for_recorded_user_message(child_thread.as_ref(), "child task").await;
+    wait_for_recorded_developer_message(child_thread.as_ref(), "child task").await;
 
     let _ = harness
         .control
@@ -2218,9 +2252,7 @@ async fn spawn_agent_fork_last_n_turns_keeps_only_recent_turns() {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, parent_thread) = harness.start_thread().await;
 
-    parent_thread
-        .inject_user_message_without_turn("old parent context".to_string())
-        .await;
+    record_user_message(&parent_thread, "old parent context").await;
     let queued_communication = InterAgentCommunication::new(
         AgentPath::root(),
         AgentPath::try_from("/root/worker").expect("agent path"),
@@ -2252,9 +2284,7 @@ async fn spawn_agent_fork_last_n_turns_keeps_only_recent_turns() {
             &[triggered_communication.to_response_input_item().into()],
         )
         .await;
-    parent_thread
-        .inject_user_message_without_turn("current parent task".to_string())
-        .await;
+    record_user_message(&parent_thread, "current parent task").await;
     let spawn_turn_context = parent_thread.session.new_default_turn().await;
     let parent_spawn_call_id = "spawn-call-last-n".to_string();
     parent_thread
@@ -2384,9 +2414,7 @@ async fn spawn_agent_fork_last_n_turns_drops_parent_startup_prefix_when_under_li
             }],
         )
         .await;
-    parent_thread
-        .inject_user_message_without_turn("current parent task".to_string())
-        .await;
+    record_user_message(&parent_thread, "current parent task").await;
     let spawn_turn_context = parent_thread.session.new_default_turn().await;
     let parent_spawn_call_id = "spawn-call-last-n-under-limit".to_string();
     parent_thread
@@ -2488,9 +2516,7 @@ async fn spawn_agent_fork_last_n_turns_strips_parent_usage_hints() {
         .expect("start parent thread");
     let parent_thread_id = new_thread.thread_id;
     let parent_thread = new_thread.thread;
-    parent_thread
-        .inject_user_message_without_turn("parent task".to_string())
-        .await;
+    record_user_message(&parent_thread, "parent task").await;
     let turn_context = parent_thread.session.new_default_turn().await;
     let parent_spawn_call_id = "spawn-call-last-n-usage-hints".to_string();
     parent_thread

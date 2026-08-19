@@ -43,6 +43,7 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
+use core_test_support::responses;
 use core_test_support::skip_if_remote;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -769,6 +770,167 @@ async fn queue_start_without_id_starts_the_head_when_idle() -> Result<()> {
 }
 
 #[tokio::test]
+async fn idle_dispatches_queued_user_input_before_goal_continuation() -> Result<()> {
+    skip_if_remote!(
+        Ok(()),
+        "uses a host-local command and cwd fixture unavailable to remote executors"
+    );
+
+    let responses = vec![
+        blocked_turn_response()?,
+        create_final_assistant_message_sse_response("queued message done")?,
+        responses::sse(vec![
+            responses::ev_response_created("goal-continuation"),
+            responses::ev_completed_with_tokens("goal-continuation", /*total_tokens*/ 2),
+        ]),
+    ];
+    let server = create_mock_responses_server_sequence_unchecked(responses).await;
+    let (mut app, _codex_home, server) =
+        queue_goal_app_with_server(server, /*enable_goal_auto_continue*/ true).await?;
+    let thread_id = app
+        .start_thread(ThreadStartParams::default())
+        .await?
+        .thread
+        .id;
+    let (active_turn_id, _approval_id) = start_blocked_turn(&mut app, &thread_id).await?;
+    let queued = queue_item(
+        &mut app,
+        submission(&thread_id, "queued direct user message"),
+    )
+    .await?;
+
+    let _: TurnInterruptResponse = app
+        .request(|request_id| ClientRequest::TurnInterrupt {
+            request_id,
+            params: TurnInterruptParams {
+                thread_id: thread_id.clone(),
+                turn_id: active_turn_id,
+            },
+        })
+        .await?;
+    let interrupted: TurnCompletedNotification =
+        timeout(READ_TIMEOUT, app.read_notification("turn/completed")).await??;
+    assert_eq!(interrupted.turn.status, TurnStatus::Interrupted);
+    assert_eq!(
+        list_queue(&mut app, &thread_id).await?.data,
+        vec![queued.clone()]
+    );
+
+    let goal_request_id = app
+        .send_raw_request(
+            "thread/goal/set",
+            Some(json!({
+                "threadId": thread_id,
+                "objective": "continue only after the queued message",
+                "status": "active",
+                "tokenBudget": 10,
+            })),
+        )
+        .await?;
+    let _: Value = timeout(READ_TIMEOUT, app.read_response(goal_request_id)).await??;
+
+    loop {
+        let started: ItemStartedNotification =
+            timeout(READ_TIMEOUT, app.read_notification("item/started")).await??;
+        if let ThreadItem::UserMessage { client_id, .. } = started.item
+            && client_id.as_deref() == Some(queued.client_user_message_id.as_str())
+        {
+            break;
+        }
+    }
+    for _ in 0..2 {
+        let completed: TurnCompletedNotification =
+            timeout(READ_TIMEOUT, app.read_notification("turn/completed")).await??;
+        assert_eq!(completed.turn.status, TurnStatus::Completed);
+    }
+
+    let requests = server
+        .received_requests()
+        .await
+        .context("mock request capture unavailable")?
+        .into_iter()
+        .filter(|request| request.url.path().ends_with("/responses"))
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 3);
+    assert!(
+        requests[1].body_json::<Value>()?["input"]
+            .to_string()
+            .contains("queued direct user message")
+    );
+    assert!(
+        requests[2].body_json::<Value>()?["input"]
+            .to_string()
+            .contains("continue only after the queued message")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn only_active_interactive_goal_updates_dispatch_interrupted_queue() -> Result<()> {
+    skip_if_remote!(
+        Ok(()),
+        "uses a host-local command and cwd fixture unavailable to remote executors"
+    );
+
+    for (status, enable_goal_auto_continue) in
+        [("paused", true), ("complete", true), ("active", false)]
+    {
+        let server = create_mock_responses_server_sequence_unchecked(vec![
+            blocked_turn_response()?,
+            create_final_assistant_message_sse_response("queued message done")?,
+        ])
+        .await;
+        let (mut app, _codex_home, _server) = queue_goal_app_with_server(
+            server,
+            /*enable_goal_auto_continue*/ enable_goal_auto_continue,
+        )
+        .await?;
+        let thread_id = app
+            .start_thread(ThreadStartParams::default())
+            .await?
+            .thread
+            .id;
+        let (active_turn_id, _approval_id) = start_blocked_turn(&mut app, &thread_id).await?;
+        let queued = queue_item(
+            &mut app,
+            submission(&thread_id, "queued direct user message"),
+        )
+        .await?;
+
+        let _: TurnInterruptResponse = app
+            .request(|request_id| ClientRequest::TurnInterrupt {
+                request_id,
+                params: TurnInterruptParams {
+                    thread_id: thread_id.clone(),
+                    turn_id: active_turn_id,
+                },
+            })
+            .await?;
+        let interrupted: TurnCompletedNotification =
+            timeout(READ_TIMEOUT, app.read_notification("turn/completed")).await??;
+        assert_eq!(interrupted.turn.status, TurnStatus::Interrupted);
+
+        let goal_request_id = app
+            .send_raw_request(
+                "thread/goal/set",
+                Some(json!({
+                    "threadId": thread_id,
+                    "objective": "update the goal",
+                    "status": status,
+                })),
+            )
+            .await?;
+        let _: Value = timeout(READ_TIMEOUT, app.read_response(goal_request_id)).await??;
+        assert_eq!(
+            list_queue(&mut app, &thread_id).await?.data,
+            vec![queued],
+            "setting a {status} goal must not dispatch the interrupted queue"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_new_turn_preserves_queued_messages_until_it_completes() -> Result<()> {
     skip_if_remote!(
         Ok(()),
@@ -871,6 +1033,33 @@ async fn queue_app_with_server(server: MockServer) -> Result<(TestAppServer, Tem
         .without_managed_config()
         .build_initialized()
         .await?;
+    Ok((app, codex_home, server))
+}
+
+async fn queue_goal_app_with_server(
+    server: MockServer,
+    enable_goal_auto_continue: bool,
+) -> Result<(TestAppServer, TempDir, MockServer)> {
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri())
+        .with_approval_policy("untrusted")
+        .with_root_config(r#"approvals_reviewer = "user""#)
+        .write(codex_home.path())?;
+    let config_path = codex_home.path().join("config.toml");
+    let config = std::fs::read_to_string(&config_path)?;
+    std::fs::write(
+        &config_path,
+        config.replace("personality = true\n", "personality = true\ngoals = true\n"),
+    )?;
+    let builder = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_managed_config();
+    let builder = if enable_goal_auto_continue {
+        builder.with_goal_auto_continue()
+    } else {
+        builder
+    };
+    let app = builder.build_initialized().await?;
     Ok((app, codex_home, server))
 }
 

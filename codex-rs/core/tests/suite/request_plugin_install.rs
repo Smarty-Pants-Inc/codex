@@ -439,7 +439,7 @@ async fn mcp_discovery_overlaps_endpoint_plugin_recommendations() -> Result<()> 
     let request = response.single_request();
     assert!(
         request
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .join("\n")
             .contains("github@openai-curated-remote"),
         "the completed request should preserve endpoint recommendations"
@@ -550,7 +550,7 @@ async fn explicit_false_preserves_legacy_workflow() -> Result<()> {
     let request = &requests[0];
     assert!(
         !request
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .join("\n")
             .contains("<recommended_plugins>")
     );
@@ -734,10 +734,10 @@ async fn endpoint_mode_injects_candidates_hides_list_and_rejects_invented_ids() 
 
     let requests = mock.requests();
     assert_eq!(requests.len(), 2);
-    let contextual_user_message = requests[0].message_input_texts("user").join("\n");
-    assert!(contextual_user_message.contains("<recommended_plugins>"));
-    assert!(contextual_user_message.contains("github@openai-curated-remote"));
-    assert!(contextual_user_message.contains("google-calendar@openai-curated-remote"));
+    let contextual_developer_message = requests[0].message_input_texts("developer").join("\n");
+    assert!(contextual_developer_message.contains("<recommended_plugins>"));
+    assert!(contextual_developer_message.contains("github@openai-curated-remote"));
+    assert!(contextual_developer_message.contains("google-calendar@openai-curated-remote"));
     let body = requests[0].body_json();
     let tools = tool_names(&body);
     assert!(
@@ -1141,7 +1141,7 @@ async fn endpoint_mode_with_no_eligible_candidates_exposes_no_suggestion_tools()
     let request = mock.single_request();
     assert!(
         !request
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .join("\n")
             .contains("<recommended_plugins>")
     );
