@@ -5,6 +5,7 @@ use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_escalated_command_execution_sse_response;
+use app_test_support::create_fake_rollout_with_source;
 use app_test_support::create_final_assistant_message_sse_response;
 use app_test_support::create_mock_responses_server_sequence;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
@@ -43,6 +44,7 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
+use codex_protocol::protocol::SessionSource;
 use core_test_support::responses;
 use core_test_support::skip_if_remote;
 use pretty_assertions::assert_eq;
@@ -861,6 +863,110 @@ async fn idle_dispatches_queued_user_input_before_goal_continuation() -> Result<
         requests[2].body_json::<Value>()?["input"]
             .to_string()
             .contains("continue only after the queued message")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resumed_exec_thread_uses_current_interactive_goal_capability() -> Result<()> {
+    skip_if_remote!(
+        Ok(()),
+        "uses a host-local queue and goal continuation fixture"
+    );
+
+    let server = create_mock_responses_server_sequence_unchecked(vec![
+        create_final_assistant_message_sse_response("queued message done")?,
+        responses::sse(vec![
+            responses::ev_response_created("goal-continuation"),
+            responses::ev_completed_with_tokens("goal-continuation", /*total_tokens*/ 2),
+        ]),
+    ])
+    .await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri())
+        .with_approval_policy("on-request")
+        .with_root_config(r#"approvals_reviewer = "user""#)
+        .write(codex_home.path())?;
+    let config_path = codex_home.path().join("config.toml");
+    let config = std::fs::read_to_string(&config_path)?;
+    std::fs::write(
+        &config_path,
+        config.replace("personality = true\n", "personality = true\ngoals = true\n"),
+    )?;
+    let thread_id = create_fake_rollout_with_source(
+        codex_home.path(),
+        "2025-01-05T12-00-00",
+        "2025-01-05T12:00:00Z",
+        "saved exec thread",
+        Some("mock_provider"),
+        None,
+        SessionSource::Exec,
+    )?;
+    let mut app = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_managed_config()
+        .with_goal_auto_continue()
+        .build_initialized()
+        .await?;
+    let resume_request_id = app
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread_id.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let _: ThreadResumeResponse =
+        timeout(READ_TIMEOUT, app.read_response(resume_request_id)).await??;
+    let queued = queue_item(
+        &mut app,
+        submission(&thread_id, "queued direct user message after resume"),
+    )
+    .await?;
+
+    let goal_request_id = app
+        .send_raw_request(
+            "thread/goal/set",
+            Some(json!({
+                "threadId": thread_id,
+                "objective": "continue after the resumed thread queue",
+                "status": "active",
+                "tokenBudget": 10,
+            })),
+        )
+        .await?;
+    let _: Value = timeout(READ_TIMEOUT, app.read_response(goal_request_id)).await??;
+
+    loop {
+        let started: ItemStartedNotification =
+            timeout(READ_TIMEOUT, app.read_notification("item/started")).await??;
+        if let ThreadItem::UserMessage { client_id, .. } = started.item
+            && client_id.as_deref() == Some(queued.client_user_message_id.as_str())
+        {
+            break;
+        }
+    }
+    for _ in 0..2 {
+        let completed: TurnCompletedNotification =
+            timeout(READ_TIMEOUT, app.read_notification("turn/completed")).await??;
+        assert_eq!(completed.turn.status, TurnStatus::Completed);
+    }
+
+    let requests = server
+        .received_requests()
+        .await
+        .context("mock request capture unavailable")?
+        .into_iter()
+        .filter(|request| request.url.path().ends_with("/responses"))
+        .collect::<Vec<_>>();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[0].body_json::<Value>()?["input"]
+            .to_string()
+            .contains("queued direct user message after resume")
+    );
+    assert!(
+        requests[1].body_json::<Value>()?["input"]
+            .to_string()
+            .contains("continue after the resumed thread queue")
     );
     Ok(())
 }

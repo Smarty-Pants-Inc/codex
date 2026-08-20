@@ -1170,6 +1170,61 @@ async fn disabled_idle_continuation_preserves_active_goal() -> anyhow::Result<()
 }
 
 #[tokio::test]
+async fn interactive_host_does_not_auto_continue_subagent_goal() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let mut builder = test_codex();
+    let test = builder.build(&server).await?;
+    let runtime = test
+        .codex
+        .state_db()
+        .ok_or_else(|| anyhow::anyhow!("live test thread should have a state database"))?;
+    let thread_id = test.session_configured.thread_id;
+    runtime
+        .thread_goals()
+        .replace_thread_goal(
+            thread_id,
+            "subagent continuation stays inert",
+            codex_state::ThreadGoalStatus::Active,
+            /*token_budget*/ None,
+        )
+        .await?;
+    let harness = GoalExtensionHarness::new_with_thread_manager_and_source(
+        runtime.clone(),
+        thread_id,
+        GoalAutoContinueCapability::Interactive,
+        /*persistent_thread_state_available*/ true,
+        Arc::downgrade(&test.thread_manager),
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        }),
+    )
+    .await?;
+
+    harness.resume_thread().await;
+    harness.idle_thread().await;
+
+    let goal = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("subagent goal should exist"))?;
+    assert_eq!(codex_state::ThreadGoalStatus::Active, goal.status);
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty(),
+        "interactive host capability must not auto-continue a non-root agent thread"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn goal_service_sets_gets_and_clears_thread_goal() -> anyhow::Result<()> {
     let runtime = test_runtime().await?;
     let thread_id = test_thread_id()?;
@@ -1399,6 +1454,25 @@ impl GoalExtensionHarness {
         persistent_thread_state_available: bool,
         thread_manager: Weak<codex_core::ThreadManager>,
     ) -> anyhow::Result<Self> {
+        Self::new_with_thread_manager_and_source(
+            runtime,
+            thread_id,
+            auto_continue_capability,
+            persistent_thread_state_available,
+            thread_manager,
+            SessionSource::Cli,
+        )
+        .await
+    }
+
+    async fn new_with_thread_manager_and_source(
+        runtime: Arc<codex_state::StateRuntime>,
+        thread_id: ThreadId,
+        auto_continue_capability: GoalAutoContinueCapability,
+        persistent_thread_state_available: bool,
+        thread_manager: Weak<codex_core::ThreadManager>,
+        session_source: SessionSource,
+    ) -> anyhow::Result<Self> {
         let sink = Arc::new(RecordingEventSink::default());
         let mut builder = ExtensionRegistryBuilder::<()>::with_event_sink(sink.clone());
         let goal_service = Arc::new(GoalService::new());
@@ -1419,7 +1493,6 @@ impl GoalExtensionHarness {
         let registry = builder.build();
         let session_store = ExtensionData::new("session-1");
         let thread_store = ExtensionData::new(thread_id.to_string());
-        let session_source = SessionSource::Cli;
         for contributor in registry.thread_lifecycle_contributors() {
             contributor
                 .on_thread_start(ThreadStartInput {

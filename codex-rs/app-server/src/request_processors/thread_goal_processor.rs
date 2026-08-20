@@ -6,7 +6,6 @@ use codex_goal_extension::GoalService;
 use codex_goal_extension::GoalServiceError;
 use codex_goal_extension::GoalSetRequest;
 use codex_goal_extension::GoalTokenBudgetUpdate;
-use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
 use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_queue_extension::QueuedItemService;
@@ -217,10 +216,11 @@ impl ThreadGoalRequestProcessor {
             .await;
         if should_start_queued_user_input
             && let Ok(thread) = self.thread_manager.get_thread(thread_id).await
-            && matches!(
-                thread.config_snapshot().await.session_source,
-                SessionSource::Cli | SessionSource::VSCode
-            )
+            && !thread
+                .config_snapshot()
+                .await
+                .session_source
+                .is_non_root_agent()
             && let Some(queue_service) = self.queue_service.as_ref()
         {
             match queue_service

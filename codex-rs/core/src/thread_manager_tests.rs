@@ -12,6 +12,7 @@ use crate::session::tests::make_session_and_context;
 use crate::tasks::InterruptedTurnHistoryMarker;
 use crate::tasks::interrupted_turn_history_marker;
 use codex_extension_api::empty_extension_registry;
+use codex_history::CompactedItem;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
 use codex_models_manager::manager::RefreshStrategy;
@@ -1254,7 +1255,7 @@ async fn selected_capability_roots_round_trip_through_fork() {
 }
 
 #[tokio::test]
-async fn prepared_root_fork_from_non_root_copies_normalized_history() {
+async fn prepared_root_fork_from_non_root_preserves_recorded_user_provenance() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config().await;
     config.codex_home = temp_dir.path().join("codex-home").abs();
@@ -1268,29 +1269,52 @@ async fn prepared_root_fork_from_non_root_copies_normalized_history() {
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
     );
     let source_thread_id = ThreadId::new();
-    let task = "legacy synthetic review task";
-    let prepared = codex_thread_store::PreparedFork::new(
-        source_thread_id,
-        None,
-        Arc::new(vec![
-            RolloutItem::SessionMeta(SessionMetaLine {
-                meta: SessionMeta {
-                    session_id: source_thread_id.into(),
-                    id: source_thread_id,
-                    source: SessionSource::SubAgent(SubAgentSource::Review),
-                    history_mode: ThreadHistoryMode::Paginated,
-                    ..SessionMeta::default()
-                },
-                git: None,
-            }),
-            RolloutItem::ResponseItem(user_msg(task).into()),
-            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
-                message: task.to_string(),
-                ..Default::default()
-            })),
-        ]),
-        (),
+    let direct_user_message = "direct user input to a non-root thread";
+    let compacted_direct_user_message = "compacted direct user input";
+    let source_history = Arc::new(vec![
+        RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                session_id: source_thread_id.into(),
+                id: source_thread_id,
+                source: SessionSource::SubAgent(SubAgentSource::Review),
+                history_mode: ThreadHistoryMode::Paginated,
+                ..SessionMeta::default()
+            },
+            git: None,
+        }),
+        RolloutItem::Compacted(CompactedItem {
+            message: "legacy summary".to_string(),
+            replacement_history: Some(vec![user_msg(compacted_direct_user_message).into()]),
+            mcp_resource_origins: None,
+            window_number: None,
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+        }),
+        RolloutItem::ResponseItem(user_msg(direct_user_message).into()),
+        RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+            message: direct_user_message.to_string(),
+            ..Default::default()
+        })),
+    ]);
+    let snapshot = fork_history_from_snapshot(
+        ForkSnapshot::Interrupted,
+        InitialHistory::Resumed(ResumedHistory {
+            conversation_id: source_thread_id,
+            history: Arc::clone(&source_history),
+            rollout_path: None,
+        }),
+        InterruptedTurnHistoryMarker::Disabled,
     );
+    assert!(snapshot.get_rollout_items().iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::EventMsg(EventMsg::UserMessage(event))
+                if event.message == direct_user_message
+        )
+    }));
+    let prepared =
+        codex_thread_store::PreparedFork::new(source_thread_id, None, source_history, ());
 
     let forked = manager
         .fork_prepared_thread(
@@ -1308,15 +1332,15 @@ async fn prepared_root_fork_from_non_root_copies_normalized_history() {
         .thread
         .flush_rollout()
         .await
-        .expect("flush normalized fork");
+        .expect("flush copied fork");
     let InitialHistory::Resumed(persisted) = RolloutRecorder::get_rollout_history(
         &forked
             .thread
             .rollout_path()
-            .expect("normalized fork rollout path"),
+            .expect("copied fork rollout path"),
     )
     .await
-    .expect("read normalized fork rollout") else {
+    .expect("read copied fork rollout") else {
         panic!("expected persisted fork history");
     };
 
@@ -1327,23 +1351,32 @@ async fn prepared_root_fork_from_non_root_copies_normalized_history() {
                 if matches!(
                     &envelope.item,
                     ResponseItem::Message { role, content, .. }
-                        if role == "developer"
+                        if role == "user"
                             && content.iter().any(|content| matches!(
                                 content,
                                 ContentItem::InputText { text } | ContentItem::OutputText { text }
-                                    if text == task
+                                    if text == direct_user_message
                             ))
                 )
         )
     }));
-    assert!(!persisted.history.iter().any(|item| {
+    assert!(persisted.history.iter().any(|item| {
         matches!(
             item,
-            RolloutItem::ResponseItem(envelope)
-                if matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "user")
-        ) || matches!(
-            item,
-            RolloutItem::EventMsg(EventMsg::UserMessage(event)) if event.message == task
+            RolloutItem::Compacted(compacted)
+                if compacted.replacement_history.as_ref().is_some_and(|history| {
+                    history.iter().any(|envelope| matches!(
+                        &envelope.item,
+                        ResponseItem::Message { role, content, .. }
+                            if role == "user"
+                                && content.iter().any(|content| matches!(
+                                    content,
+                                    ContentItem::InputText { text }
+                                        | ContentItem::OutputText { text }
+                                        if text == compacted_direct_user_message
+                                ))
+                    ))
+                })
         )
     }));
 }

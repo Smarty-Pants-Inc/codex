@@ -66,9 +66,10 @@ fn auto_continue_capability_for(
     session_source: &SessionSource,
     host_capability: GoalAutoContinueCapability,
 ) -> GoalAutoContinueCapability {
-    match session_source {
-        SessionSource::Cli | SessionSource::VSCode => host_capability,
-        _ => GoalAutoContinueCapability::Disabled,
+    if session_source.is_non_root_agent() {
+        GoalAutoContinueCapability::Disabled
+    } else {
+        host_capability
     }
 }
 
@@ -78,26 +79,27 @@ mod tests {
     use codex_extension_api::ThreadIdleContinuation;
 
     #[test]
-    fn auto_continue_is_limited_to_interactive_root_sources() {
-        assert_eq!(
-            GoalAutoContinueCapability::Interactive,
-            auto_continue_capability_for(
-                &SessionSource::Cli,
+    fn auto_continue_follows_current_host_for_root_threads() {
+        for session_source in [
+            SessionSource::Cli,
+            SessionSource::VSCode,
+            SessionSource::Exec,
+            SessionSource::Mcp,
+            SessionSource::Unknown,
+        ] {
+            assert_eq!(
                 GoalAutoContinueCapability::Interactive,
-            )
-        );
-        assert_eq!(
-            GoalAutoContinueCapability::Interactive,
-            auto_continue_capability_for(
-                &SessionSource::VSCode,
-                GoalAutoContinueCapability::Interactive,
-            )
-        );
+                auto_continue_capability_for(
+                    &session_source,
+                    GoalAutoContinueCapability::Interactive,
+                )
+            );
+        }
         assert_eq!(
             GoalAutoContinueCapability::Disabled,
             auto_continue_capability_for(
                 &SessionSource::Exec,
-                GoalAutoContinueCapability::Interactive,
+                GoalAutoContinueCapability::Disabled,
             )
         );
         assert_eq!(
