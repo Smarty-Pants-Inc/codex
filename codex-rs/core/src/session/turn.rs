@@ -646,10 +646,10 @@ fn turn_user_input(input: &[TurnInput]) -> Vec<UserInput> {
     input
         .iter()
         .filter_map(|item| match item {
-            TurnInput::UserInput { content, .. } | TurnInput::DeveloperInput { content } => {
-                Some(content.as_slice())
-            }
-            TurnInput::ResponseItem(_) | TurnInput::InterAgentCommunication(_) => None,
+            TurnInput::UserInput { content, .. } => Some(content.as_slice()),
+            TurnInput::DeveloperInput { .. }
+            | TurnInput::ResponseItem(_)
+            | TurnInput::InterAgentCommunication(_) => None,
         })
         .flatten()
         .cloned()

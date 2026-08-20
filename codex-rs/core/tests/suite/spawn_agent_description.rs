@@ -40,6 +40,7 @@ use tokio::time::sleep;
 const MULTI_AGENT_V1_NAMESPACE: &str = "multi_agent_v1";
 const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
 const SPAWN_AGENT_TOOL_NAME: &str = "spawn_agent";
+const WAIT_GUIDANCE: &str = "When a provided collaboration wait tool supports long waits, prefer minutes to avoid busy polling.";
 
 fn spawn_agent_description(body: &Value) -> Option<String> {
     namespace_child_tool(body, MULTI_AGENT_V1_NAMESPACE, SPAWN_AGENT_TOOL_NAME)
@@ -363,11 +364,9 @@ async fn multi_agent_v2_wait_guidance_uses_overridable_developer_instructions(
 
     let request = response.single_request();
     let developer_messages = request.message_input_texts("developer");
-    let has_wait_guidance = developer_messages.iter().any(|message| {
-        message.contains(
-            "When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.",
-        )
-    });
+    let has_wait_guidance = developer_messages
+        .iter()
+        .any(|message| message.contains(WAIT_GUIDANCE));
     assert_eq!(has_wait_guidance, expected_wait_guidance);
 
     let body = request.body_json();
@@ -397,8 +396,7 @@ async fn multi_agent_v2_cold_resume_refreshes_legacy_usage_hints_once(
 ) -> Result<()> {
     let resumed_root_agent_usage_hint_text = resumed_root_agent_usage_hint_text.map(str::to_string);
     let legacy_root_agent_usage_hint_text = "Legacy root instructions.";
-    let wait_guidance =
-        "When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.";
+    let wait_guidance = WAIT_GUIDANCE;
     let config_toml = format!(
         "[features.multi_agent_v2]\nenabled = true\nwait_agent_enabled = {wait_agent_enabled}\n"
     );
@@ -571,8 +569,7 @@ async fn multi_agent_v2_resume_refreshes_changed_wait_guidance(
     initial_wait_agent_enabled: bool,
     resumed_wait_agent_enabled: bool,
 ) -> Result<()> {
-    let wait_guidance =
-        "When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.";
+    let wait_guidance = WAIT_GUIDANCE;
     let initial_config_toml = format!(
         "[features.multi_agent_v2]\nenabled = true\nwait_agent_enabled = {initial_wait_agent_enabled}\n"
     );
@@ -748,11 +745,7 @@ wait_agent_enabled = {wait_agent_enabled}
         request
             .message_input_texts("developer")
             .iter()
-            .any(|message| {
-                message.contains(
-                "When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.",
-            )
-            }),
+            .any(|message| message.contains(WAIT_GUIDANCE)),
         wait_agent_enabled
     );
 

@@ -256,6 +256,40 @@ async fn idle_dispatch_failure_blocks_later_continuation() -> anyhow::Result<()>
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn successful_idle_dispatch_blocks_later_continuation() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    responses::mount_sse_once(&server, responses::sse_completed("queued-turn")).await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+    let thread_id = test.session_configured.thread_id;
+    let service = QueuedItemService::new(
+        loaded_thread_queue(&test)?,
+        Arc::downgrade(&test.thread_manager),
+        Arc::new(NoopExtensionEventSink),
+    );
+    service
+        .enqueue(thread_id, user_input("queued user input"))
+        .await?;
+    let session_store = ExtensionData::new("session");
+    let thread_store = ExtensionData::new(thread_id.to_string());
+    let continuation = ThreadIdleContinuation::default();
+
+    <QueuedItemService as ThreadLifecycleContributor<()>>::on_thread_idle(
+        &service,
+        ThreadIdleInput {
+            cause: ThreadIdleCause::Completed,
+            session_store: &session_store,
+            thread_store: &thread_store,
+            continuation: &continuation,
+        },
+    )
+    .await;
+
+    assert!(!continuation.is_allowed());
+    assert!(service.list(thread_id).await?.is_empty());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn run_if_empty_holds_dispatch_lock_until_work_finishes() -> anyhow::Result<()> {
     let (queue, _home) = test_queue().await?;
     let service = Arc::new(QueuedItemService::new(

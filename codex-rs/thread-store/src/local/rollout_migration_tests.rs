@@ -1115,6 +1115,7 @@ async fn migration_rolls_back_pre_compaction_turns_from_sqlite_history() {
     ]) else {
         unreachable!("compacted helper always creates a compaction checkpoint");
     };
+    checkpoint.message = "legacy local compaction summary".to_string();
     checkpoint.mcp_resource_origins = Some(McpResourceOriginCheckpoint {
         origins: vec![McpResourceOrigin {
             call_id: "widget-call".to_string(),

@@ -454,7 +454,7 @@ impl QueuedItemService {
             {
                 Ok(StartIfIdleSubmission::Started { .. }) => {
                     self.delete_locked(thread_id, queued_item_id).await?;
-                    return Ok(true);
+                    return Ok(false);
                 }
                 Ok(StartIfIdleSubmission::NotSubmitted { reason }) => {
                     tracing::warn!(

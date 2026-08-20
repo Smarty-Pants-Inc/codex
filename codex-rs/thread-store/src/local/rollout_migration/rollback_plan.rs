@@ -317,20 +317,20 @@ impl RollbackPlanner {
             let post_compaction_turns = depth_before.saturating_sub(frame.boundary_depth);
             let remaining = count.saturating_sub(post_compaction_turns);
             if remaining > 0 {
-                let has_local_summary = !frame.item.message.is_empty();
-                frame.item.mcp_resource_origins = None;
-                let replacement_history =
-                    frame.item.replacement_history.as_mut().ok_or_else(|| {
-                        migration_error(
-                            "legacy rollback crosses a compaction without replacement history",
-                        )
-                    })?;
-                if has_local_summary
-                    && let Some(summary) = replacement_history.last_mut()
-                    && let ResponseItem::Message { role, .. } = &mut summary.item
-                    && role == "user"
-                {
-                    *role = "developer".to_string();
+                let CompactedItem {
+                    message,
+                    replacement_history,
+                    mcp_resource_origins,
+                    ..
+                } = &mut frame.item;
+                *mcp_resource_origins = None;
+                let replacement_history = replacement_history.as_mut().ok_or_else(|| {
+                    migration_error(
+                        "legacy rollback crosses a compaction without replacement history",
+                    )
+                })?;
+                if let Some(summary) = replacement_history.last_mut() {
+                    migrate_legacy_local_summary(&mut summary.item, message);
                 }
                 rollback::drop_last_n_user_turns(
                     replacement_history,
@@ -344,6 +344,16 @@ impl RollbackPlanner {
         self.pending_user_response = None;
         self.pending_delivery_boundary = None;
         Ok(())
+    }
+}
+
+fn migrate_legacy_local_summary(item: &mut ResponseItem, compacted_message: &str) {
+    if !compacted_message.is_empty()
+        && let ResponseItem::Message { role, content, .. } = item
+        && role == "user"
+        && matches!(content.as_slice(), [ContentItem::InputText { text }] if text == compacted_message)
+    {
+        *role = "developer".to_string();
     }
 }
 
@@ -390,4 +400,34 @@ fn user_response_matches_event(content: &[ContentItem], event: &UserMessageEvent
                 .collect::<Vec<_>>()
         && event.local_images.is_empty()
         && event.local_audio.is_empty()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_summary_migration_requires_exact_text_match() {
+        let mut item = ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "direct user input".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+
+        migrate_legacy_local_summary(&mut item, "legacy summary");
+        assert!(matches!(
+            &item,
+            ResponseItem::Message { role, .. } if role == "user"
+        ));
+
+        migrate_legacy_local_summary(&mut item, "direct user input");
+        assert!(matches!(
+            &item,
+            ResponseItem::Message { role, .. } if role == "developer"
+        ));
+    }
 }

@@ -1327,6 +1327,19 @@ async fn prepared_root_fork_from_non_root_preserves_recorded_user_provenance() {
         )
         .await
         .expect("fork prepared non-root history");
+    let live_history = forked.thread.session.clone_history().await;
+    assert!(live_history.raw_items().any(|item| {
+        matches!(
+            item,
+            ResponseItem::Message { role, content, .. }
+                if role == "user"
+                    && content.iter().any(|content| matches!(
+                        content,
+                        ContentItem::InputText { text } | ContentItem::OutputText { text }
+                            if text == compacted_direct_user_message
+                    ))
+        )
+    }));
     forked.thread.ensure_rollout_materialized().await;
     forked
         .thread

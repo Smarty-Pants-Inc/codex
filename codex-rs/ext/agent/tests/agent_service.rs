@@ -59,11 +59,18 @@ async fn starts_resolved_agent_prompt_in_forked_thread() -> Result<()> {
     .await;
 
     let request = response_mock.single_request();
+    let prompt = "Use $example-agent to inspect the current changes.";
     assert!(
         request
+            .message_input_texts("developer")
+            .iter()
+            .any(|text| text == prompt)
+    );
+    assert!(
+        !request
             .message_input_texts("user")
             .iter()
-            .any(|text| text == "Use $example-agent to inspect the current changes.")
+            .any(|text| text == prompt)
     );
 
     Ok(())

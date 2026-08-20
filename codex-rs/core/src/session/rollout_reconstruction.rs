@@ -2,6 +2,7 @@ use super::*;
 use crate::context::world_state::WorldStateSnapshot;
 use crate::context_manager::is_user_turn_boundary;
 use codex_history::ResponseItemEnvelope;
+use codex_protocol::models::ContentItem;
 use codex_protocol::protocol::SessionContextWindow;
 use uuid::Uuid;
 
@@ -50,7 +51,7 @@ struct ActiveReplaySegment<'a> {
     previous_turn_settings: Option<PreviousTurnSettings>,
     reference_context_item: TurnReferenceContextItem,
     world_state_replay: Vec<&'a RolloutItem>,
-    base_replacement_history: Option<(&'a [ResponseItemEnvelope], bool)>,
+    base_replacement_history: Option<(&'a [ResponseItemEnvelope], &'a str)>,
     window: Option<ReconstructedWindow>,
 }
 
@@ -61,7 +62,7 @@ fn turn_ids_are_compatible(active_turn_id: Option<&str>, item_turn_id: Option<&s
 
 fn finalize_active_segment<'a>(
     active_segment: ActiveReplaySegment<'a>,
-    base_replacement_history: &mut Option<(&'a [ResponseItemEnvelope], bool)>,
+    base_replacement_history: &mut Option<(&'a [ResponseItemEnvelope], &'a str)>,
     previous_turn_settings: &mut Option<PreviousTurnSettings>,
     reference_context_item: &mut TurnReferenceContextItem,
     world_state_replay: &mut Vec<&'a RolloutItem>,
@@ -137,7 +138,7 @@ impl Session {
                 _ => None,
             })
         };
-        let mut base_replacement_history: Option<(&[ResponseItemEnvelope], bool)> = None;
+        let mut base_replacement_history: Option<(&[ResponseItemEnvelope], &str)> = None;
         let mut previous_turn_settings = None;
         let mut reference_context_item = TurnReferenceContextItem::NeverSet;
         let mut world_state_replay = Vec::new();
@@ -183,7 +184,7 @@ impl Session {
                         && let Some(replacement_history) = &compacted.replacement_history
                     {
                         active_segment.base_replacement_history =
-                            Some((replacement_history, !compacted.message.is_empty()));
+                            Some((replacement_history, compacted.message.as_str()));
                         rollout_suffix = &rollout_items[index + 1..];
                     }
                 }
@@ -320,10 +321,10 @@ impl Session {
 
         let mut history = ContextManager::new();
         let mut saw_legacy_compaction_without_replacement_history = false;
-        if let Some((base_replacement_history, has_local_summary)) = base_replacement_history {
+        if let Some((base_replacement_history, compacted_message)) = base_replacement_history {
             history.replace_annotated(reconstructed_replacement_history(
                 base_replacement_history,
-                has_local_summary,
+                compacted_message,
             ));
         }
         // Materialize exact history semantics from the replay-derived suffix. The eventual lazy
@@ -351,7 +352,7 @@ impl Session {
                         // should stop before any compaction that has Some replacement_history
                         history.replace_annotated(reconstructed_replacement_history(
                             replacement_history,
-                            !compacted.message.is_empty(),
+                            &compacted.message,
                         ));
                     } else {
                         saw_legacy_compaction_without_replacement_history = true;
@@ -447,18 +448,20 @@ impl Session {
 
 fn reconstructed_replacement_history(
     replacement_history: &[ResponseItemEnvelope],
-    has_local_summary: bool,
+    compacted_message: &str,
 ) -> Vec<ResponseItemEnvelope> {
     let mut replacement_history = replacement_history.to_vec();
-    if has_local_summary && let Some(summary) = replacement_history.last_mut() {
-        migrate_replayed_user_role(summary);
+    if let Some(summary) = replacement_history.last_mut() {
+        migrate_replayed_user_role(summary, compacted_message);
     }
     replacement_history
 }
 
-fn migrate_replayed_user_role(item: &mut ResponseItemEnvelope) {
-    if let ResponseItem::Message { role, .. } = &mut item.item
+fn migrate_replayed_user_role(item: &mut ResponseItemEnvelope, compacted_message: &str) {
+    if !compacted_message.is_empty()
+        && let ResponseItem::Message { role, content, .. } = &mut item.item
         && role == "user"
+        && matches!(content.as_slice(), [ContentItem::InputText { text }] if text == compacted_message)
     {
         *role = "developer".to_string();
     }

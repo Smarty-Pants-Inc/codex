@@ -39,6 +39,29 @@ fn assistant_output_text(text: &str) -> ResponseItem {
 }
 
 #[test]
+fn turn_user_input_returns_only_direct_user_content() {
+    let direct_user_input = UserInput::Text {
+        text: "direct user input".to_string(),
+        text_elements: Vec::new(),
+    };
+    let developer_input = UserInput::Text {
+        text: "developer input with $skill and @plugin".to_string(),
+        text_elements: Vec::new(),
+    };
+    let input = vec![
+        TurnInput::DeveloperInput {
+            content: vec![developer_input],
+        },
+        TurnInput::UserInput {
+            content: vec![direct_user_input.clone()],
+            client_id: None,
+        },
+    ];
+
+    assert_eq!(turn_user_input(&input), vec![direct_user_input]);
+}
+
+#[test]
 fn post_sampling_token_estimate_is_disabled_by_always_on_sinks() {
     assert!(
         !codex_feedback::CodexFeedback::logger_filter()
