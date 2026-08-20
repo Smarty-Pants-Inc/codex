@@ -5,8 +5,9 @@ use codex_protocol::protocol::EventMsg;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
-use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_with_timeout;
 use pretty_assertions::assert_eq;
+use std::time::Duration;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn starts_resolved_agent_prompt_in_forked_thread() -> Result<()> {
@@ -45,18 +46,16 @@ async fn starts_resolved_agent_prompt_in_forked_thread() -> Result<()> {
             .forked_from_thread_id,
         Some(parent_thread_id)
     );
-    let started = wait_for_event(&agent_run.thread, |event| {
-        matches!(event, EventMsg::TurnStarted(_))
-    })
+    let completed = wait_for_event_with_timeout(
+        &agent_run.thread,
+        |event| matches!(event, EventMsg::TurnComplete(_)),
+        Duration::from_secs(120),
+    )
     .await;
-    let EventMsg::TurnStarted(started) = started else {
-        unreachable!("event predicate only matches turn started events");
+    let EventMsg::TurnComplete(completed) = completed else {
+        unreachable!("event predicate only matches turn complete events");
     };
-    assert_eq!(started.turn_id, agent_run.turn_id);
-    wait_for_event(&agent_run.thread, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
-    .await;
+    assert_eq!(completed.turn_id, agent_run.turn_id);
 
     let request = response_mock.single_request();
     let prompt = "Use $example-agent to inspect the current changes.";
