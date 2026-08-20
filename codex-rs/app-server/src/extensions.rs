@@ -77,7 +77,7 @@ where
     } = dependencies;
     let mut builder = ExtensionRegistryBuilder::<Config>::with_event_sink(Arc::clone(&event_sink));
     // Direct queued user input must win idle arbitration, so install queue before goal.
-    if let Some(queue_service) = queue_service {
+    if let Some(queue_service) = queue_service.clone() {
         codex_queue_extension::install(&mut builder, queue_service);
     }
     codex_history_notes_extension::install(&mut builder, auth_manager.clone());
@@ -89,6 +89,7 @@ where
             codex_otel::global(),
             thread_manager.clone(),
             goal_service,
+            queue_service,
             goal_auto_continue_capability,
             |config: &Config| GoalExtensionConfig {
                 enabled: config.features.enabled(codex_features::Feature::Goals),

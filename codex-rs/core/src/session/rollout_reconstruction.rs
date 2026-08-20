@@ -318,9 +318,6 @@ impl Session {
         )
         .unwrap_or(u64::MAX);
 
-        // Non-root histories are normalized before a root fork is materialized. A non-root
-        // destination still migrates legacy persisted task messages after rollback replay.
-        let migrate_non_root_user_roles = turn_context.session_source.is_non_root_agent();
         let mut history = ContextManager::new();
         let mut saw_legacy_compaction_without_replacement_history = false;
         if let Some((base_replacement_history, has_local_summary)) = base_replacement_history {
@@ -434,10 +431,7 @@ impl Session {
             previous_id: None,
             id: None,
         });
-        let mut history = history.into_annotated_items();
-        if migrate_non_root_user_roles {
-            history.iter_mut().for_each(migrate_replayed_user_role);
-        }
+        let history = history.into_annotated_items();
         RolloutReconstruction {
             history,
             previous_turn_settings,

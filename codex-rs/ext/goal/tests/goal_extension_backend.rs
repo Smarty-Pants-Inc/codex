@@ -1318,6 +1318,7 @@ async fn installed_tools_with_start(
         /*metrics_client*/ None,
         Weak::new(),
         goal_service,
+        /*queue_service*/ None,
         GoalAutoContinueCapability::Disabled,
         |_| GoalExtensionConfig {
             enabled: true,
@@ -1408,6 +1409,7 @@ impl GoalExtensionHarness {
             /*metrics_client*/ None,
             thread_manager,
             Arc::clone(&goal_service),
+            /*queue_service*/ None,
             auto_continue_capability,
             |_| GoalExtensionConfig {
                 enabled: true,

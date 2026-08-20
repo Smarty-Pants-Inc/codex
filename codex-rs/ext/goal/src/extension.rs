@@ -32,6 +32,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadGoalStatus;
 use codex_protocol::protocol::TokenUsageInfo;
+use codex_queue_extension::QueuedItemService;
 
 use crate::accounting::BudgetLimitedGoalDisposition;
 use crate::accounting::GoalAccountingState;
@@ -148,6 +149,7 @@ pub struct GoalExtension<C> {
     thread_manager: Weak<ThreadManager>,
     goal_service: Arc<GoalService>,
     goal_config: Arc<dyn Fn(&C) -> GoalExtensionConfig + Send + Sync>,
+    queue_service: Option<Arc<QueuedItemService>>,
     auto_continue_capability: GoalAutoContinueCapability,
 }
 
@@ -166,6 +168,7 @@ impl<C> GoalExtension<C> {
         metrics_client: Option<MetricsClient>,
         thread_manager: Weak<ThreadManager>,
         goal_service: Arc<GoalService>,
+        queue_service: Option<Arc<QueuedItemService>>,
         auto_continue_capability: GoalAutoContinueCapability,
         goal_config: impl Fn(&C) -> GoalExtensionConfig + Send + Sync + 'static,
     ) -> Self {
@@ -176,6 +179,7 @@ impl<C> GoalExtension<C> {
             metrics: GoalMetrics::new(metrics_client),
             thread_manager,
             goal_service,
+            queue_service,
             auto_continue_capability,
             goal_config: Arc::new(goal_config),
         }
@@ -248,7 +252,20 @@ where
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
                 return;
             };
-            if let Err(err) = runtime.continue_if_idle().await {
+            let continuation = Box::pin(runtime.continue_if_idle());
+            let result = match &self.queue_service {
+                Some(queue_service) => {
+                    match Box::pin(queue_service.run_if_empty(runtime.thread_id(), continuation))
+                        .await
+                    {
+                        Ok(Some(result)) => result,
+                        Ok(None) => Ok(()),
+                        Err(err) => Err(err.to_string()),
+                    }
+                }
+                None => continuation.await,
+            };
+            if let Err(err) = result {
                 tracing::warn!(
                     "failed to continue active goal for idle thread {}: {err}",
                     runtime.thread_id()
@@ -561,6 +578,7 @@ pub fn install_with_backend<C>(
     metrics_client: Option<MetricsClient>,
     thread_manager: Weak<ThreadManager>,
     goal_service: Arc<GoalService>,
+    queue_service: Option<Arc<QueuedItemService>>,
     auto_continue_capability: GoalAutoContinueCapability,
     goal_config: impl Fn(&C) -> GoalExtensionConfig + Send + Sync + 'static,
 ) where
@@ -573,6 +591,7 @@ pub fn install_with_backend<C>(
         metrics_client,
         thread_manager,
         Arc::clone(&goal_service),
+        queue_service,
         auto_continue_capability,
         goal_config,
     ));

@@ -296,6 +296,24 @@ impl QueuedItemService {
             .map(queued_item_from_record)
             .collect()
     }
+    /// Runs lower-priority automatic work only while this thread's durable queue is empty.
+    pub async fn run_if_empty<T>(
+        &self,
+        thread_id: ThreadId,
+        work: impl Future<Output = T>,
+    ) -> Result<Option<T>, QueueServiceError> {
+        let _dispatch_guard = self.dispatch_guard(thread_id).await;
+        if self
+            .queue
+            .list_page(thread_id, /*offset*/ 0, /*limit*/ 1)
+            .await?
+            .is_empty()
+        {
+            Ok(Some(work.await))
+        } else {
+            Ok(None)
+        }
+    }
 
     pub async fn update(
         &self,

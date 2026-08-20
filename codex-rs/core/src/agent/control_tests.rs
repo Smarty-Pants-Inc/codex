@@ -1374,10 +1374,6 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .next()
         .cloned()
         .expect("parent seed should be recorded");
-    let mut expected_parent_seed = expected_parent_seed;
-    if let ResponseItem::Message { role, .. } = &mut expected_parent_seed {
-        *role = "developer".to_string();
-    }
     let turn_context = parent_thread.session.new_default_turn().await;
     let parent_spawn_call_id = "spawn-call-history".to_string();
     let trigger_message = InterAgentCommunication::new(

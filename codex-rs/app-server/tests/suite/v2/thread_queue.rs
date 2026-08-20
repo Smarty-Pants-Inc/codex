@@ -1042,7 +1042,7 @@ async fn queue_goal_app_with_server(
 ) -> Result<(TestAppServer, TempDir, MockServer)> {
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri())
-        .with_approval_policy("untrusted")
+        .with_approval_policy("on-request")
         .with_root_config(r#"approvals_reviewer = "user""#)
         .write(codex_home.path())?;
     let config_path = codex_home.path().join("config.toml");

@@ -215,18 +215,35 @@ impl ThreadGoalRequestProcessor {
             .await;
         self.emit_thread_goal_updated_ordered(thread_id, goal, listener_command_tx)
             .await;
-        let queue_arbitration_succeeded = if should_start_queued_user_input
+        if should_start_queued_user_input
             && let Ok(thread) = self.thread_manager.get_thread(thread_id).await
             && matches!(
                 thread.config_snapshot().await.session_source,
                 SessionSource::Cli | SessionSource::VSCode
-            ) {
-            self.start_queued_user_input_if_present(thread_id, thread.as_ref())
+            )
+            && let Some(queue_service) = self.queue_service.as_ref()
+        {
+            match queue_service
+                .run_if_empty(
+                    thread_id,
+                    Box::pin(outcome.apply_runtime_effects(&self.goal_service)),
+                )
                 .await
+            {
+                Ok(Some(())) => {}
+                Ok(None) => {
+                    if self
+                        .start_queued_user_input_if_present(thread_id, thread.as_ref())
+                        .await
+                    {
+                        outcome.apply_runtime_effects(&self.goal_service).await;
+                    }
+                }
+                Err(err) => {
+                    warn!(%thread_id, %err, "failed to check queued user input before goal continuation");
+                }
+            }
         } else {
-            true
-        };
-        if queue_arbitration_succeeded {
             outcome.apply_runtime_effects(&self.goal_service).await;
         }
         Ok(())

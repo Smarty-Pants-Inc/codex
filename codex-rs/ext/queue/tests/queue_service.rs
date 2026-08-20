@@ -255,6 +255,52 @@ async fn idle_dispatch_failure_blocks_later_continuation() -> anyhow::Result<()>
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn run_if_empty_holds_dispatch_lock_until_work_finishes() -> anyhow::Result<()> {
+    let (queue, _home) = test_queue().await?;
+    let service = Arc::new(QueuedItemService::new(
+        queue,
+        Weak::new(),
+        Arc::new(NoopExtensionEventSink),
+    ));
+    let thread_id = ThreadId::new();
+    let (work_started_tx, work_started_rx) = oneshot::channel();
+    let (release_work_tx, release_work_rx) = oneshot::channel();
+
+    let automatic_work = {
+        let service = Arc::clone(&service);
+        tokio::spawn(async move {
+            service
+                .run_if_empty(thread_id, async move {
+                    let _ = work_started_tx.send(());
+                    let _ = release_work_rx.await;
+                })
+                .await
+        })
+    };
+    work_started_rx.await?;
+
+    let (enqueue_attempted_tx, enqueue_attempted_rx) = oneshot::channel();
+    let enqueue = {
+        let service = Arc::clone(&service);
+        tokio::spawn(async move {
+            let _ = enqueue_attempted_tx.send(());
+            service
+                .enqueue(thread_id, user_input("queued user input"))
+                .await
+        })
+    };
+    enqueue_attempted_rx.await?;
+    tokio::task::yield_now().await;
+    assert!(!enqueue.is_finished());
+
+    let _ = release_work_tx.send(());
+    assert!(automatic_work.await??.is_some());
+    let queued = enqueue.await??;
+    assert_eq!(vec![queued], service.list(thread_id).await?);
+    Ok(())
+}
+
 #[tokio::test]
 async fn queued_input_and_unique_event_ids_round_trip() -> anyhow::Result<()> {
     let (queue, _home) = test_queue().await?;

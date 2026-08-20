@@ -3287,6 +3287,7 @@ dependencies = [
  "codex-extension-api",
  "codex-otel",
  "codex-protocol",
+ "codex-queue-extension",
  "codex-rollout",
  "codex-state",
  "codex-tools",

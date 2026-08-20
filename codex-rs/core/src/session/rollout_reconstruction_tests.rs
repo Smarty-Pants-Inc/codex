@@ -239,19 +239,19 @@ async fn reconstruction_keeps_image_only_user_message_after_js_repl_output() {
 }
 
 #[tokio::test]
-async fn reconstruction_migrates_legacy_non_root_user_messages_to_developer() {
+async fn reconstruction_preserves_non_root_direct_user_messages() {
     let (session, mut turn_context) = make_session_and_context().await;
     turn_context.session_source = SessionSource::SubAgent(SubAgentSource::Review);
-    let legacy_task = user_message("legacy synthetic review task");
+    let direct_user_input = user_message("direct user input");
 
     let reconstruction = session
         .reconstruct_history_from_rollout(
             &turn_context,
             &[
-                RolloutItem::ResponseItem(legacy_task.into()),
+                RolloutItem::ResponseItem(direct_user_input.clone().into()),
                 RolloutItem::EventMsg(EventMsg::UserMessage(
                     codex_protocol::protocol::UserMessageEvent {
-                        message: "legacy synthetic review task".to_string(),
+                        message: "direct user input".to_string(),
                         ..Default::default()
                     },
                 )),
@@ -259,35 +259,7 @@ async fn reconstruction_migrates_legacy_non_root_user_messages_to_developer() {
         )
         .await;
 
-    assert_eq!(
-        reconstruction.history,
-        annotated(vec![developer_message("legacy synthetic review task")])
-    );
-}
-
-#[tokio::test]
-async fn reconstruction_applies_non_root_rollback_before_role_migration() {
-    let (session, mut turn_context) = make_session_and_context().await;
-    turn_context.session_source = SessionSource::SubAgent(SubAgentSource::Review);
-    let kept_task = user_message("kept synthetic review task");
-
-    let reconstruction = session
-        .reconstruct_history_from_rollout(
-            &turn_context,
-            &[
-                RolloutItem::ResponseItem(kept_task.into()),
-                RolloutItem::ResponseItem(user_message("rolled back synthetic task").into()),
-                RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
-                    codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 1 },
-                )),
-            ],
-        )
-        .await;
-
-    assert_eq!(
-        reconstruction.history,
-        annotated(vec![developer_message("kept synthetic review task")])
-    );
+    assert_eq!(reconstruction.history, annotated(vec![direct_user_input]));
 }
 
 #[tokio::test]
