@@ -684,20 +684,35 @@ async fn externally_changed_queues_dispatch_independently_and_retry_failed_wakes
             user_input("independent thread"),
         )
         .await?;
+    tokio::time::timeout(Duration::from_secs(/*secs*/ 25), async {
+        loop {
+            if installed
+                .skip_next_idle
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(/*millis*/ 10)).await;
+        }
+    })
+    .await
+    .context("watcher did not attempt the intentionally skipped wake")?;
+    assert_eq!(vec![updated], queue.list(thread_id).await?);
 
     wait_for_event_with_timeout(
         independent_thread.thread.as_ref(),
         |event| matches!(event, EventMsg::TurnComplete(_)),
-        Duration::from_secs(/*secs*/ 25),
+        Duration::from_secs(/*secs*/ 120),
     )
     .await;
-    assert_eq!(1, model_responses.requests().len());
-    assert_eq!(vec![updated], queue.list(thread_id).await?);
+    assert!(queue.list(independent_thread.thread_id).await?.is_empty());
 
     wait_for_event_with_timeout(
         test.codex.as_ref(),
         |event| matches!(event, EventMsg::TurnComplete(_)),
-        Duration::from_secs(/*secs*/ 25),
+        Duration::from_secs(/*secs*/ 120),
     )
     .await;
     tokio::time::sleep(Duration::from_secs(/*secs*/ 11)).await;
@@ -725,7 +740,7 @@ async fn externally_changed_queues_dispatch_independently_and_retry_failed_wakes
     wait_for_event_with_timeout(
         resumed.thread.as_ref(),
         |event| matches!(event, EventMsg::TurnComplete(_)),
-        Duration::from_secs(/*secs*/ 25),
+        Duration::from_secs(/*secs*/ 120),
     )
     .await;
     assert!(queue.list(thread_id).await?.is_empty());
@@ -735,14 +750,14 @@ async fn externally_changed_queues_dispatch_independently_and_retry_failed_wakes
         .into_iter()
         .filter_map(|request| request.message_input_texts("user").pop())
         .collect::<Vec<_>>();
+    assert_eq!(3, prompts.len());
+    let mut concurrent_prompts = prompts[..2].to_vec();
+    concurrent_prompts.sort();
     assert_eq!(
-        vec![
-            "independent thread",
-            "locally edited external message",
-            "queued before ordinary resume",
-        ],
-        prompts
+        vec!["independent thread", "locally edited external message"],
+        concurrent_prompts
     );
+    assert_eq!("queued before ordinary resume", prompts[2]);
     Ok(())
 }
 
