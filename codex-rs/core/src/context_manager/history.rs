@@ -462,7 +462,6 @@ impl ContextManager {
 
         // strip audio when model does not support it
         normalize::strip_audio_when_unsupported(input_modalities, items);
-        normalize::move_generated_media_placeholders_out_of_user_messages(items);
     }
 
     fn process_item(item: &ResponseItem, policy: TruncationPolicy) -> ResponseItem {

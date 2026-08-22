@@ -475,18 +475,29 @@ async fn resumed_history_only_emits_resize_notices_for_new_images() -> anyhow::R
         .restart(&server, &replayed)
         .await?;
     let existing_rollout_lines = fs::read_to_string(&rollout_path)?.lines().count();
+    responses::mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-client-context"),
+            ev_assistant_message("msg-client-context", "done"),
+            ev_completed("resp-client-context"),
+        ]),
+    )
+    .await;
+    replayed
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Image {
+            image_url: original_image_url,
+            detail: Some(ImageDetail::High),
+        }]))
+        .await?;
+    wait_for_event(&replayed.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
     replayed
         .codex
         .inject_response_items(vec![
-            ResponseInputItem::Message {
-                role: "user".to_string(),
-                content: vec![ContentItem::InputImage {
-                    image_url: original_image_url,
-                    detail: Some(ImageDetail::High),
-                }],
-                phase: None,
-            }
-            .into(),
             ResponseInputItem::Message {
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText {
@@ -507,8 +518,14 @@ async fn resumed_history_only_emits_resize_notices_for_new_images() -> anyhow::R
             else {
                 return None;
             };
-            matches!(envelope.item, ResponseItem::Message { role, .. } if role == "developer")
-                .then(|| envelope.metadata.map(|metadata| metadata.client_authored))
+            let ResponseItem::Message { role, content, .. } = envelope.item else {
+                return None;
+            };
+            (role == "developer"
+                && content.iter().any(|item| {
+                    matches!(item, ContentItem::InputText { text } if text.starts_with("<image_resize_notice>"))
+                }))
+            .then(|| envelope.metadata.map(|metadata| metadata.client_authored))
         })
         .collect::<Vec<_>>();
     assert_eq!(persisted_developer_metadata, vec![None, Some(true)]);

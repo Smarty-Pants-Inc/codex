@@ -370,6 +370,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_structured_requ
     assert_eq!(
         requests[0].body_json()["input"][2]["content"],
         json!([
+            {"type": "input_text", "text": super::UNTRUSTED_GUARDIAN_EVIDENCE_NOTICE},
             {"type": "input_text", "text": "The user requested a README summary."},
             {"type": "input_text", "text": "The assistant inspected README.md."},
         ])

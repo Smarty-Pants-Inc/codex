@@ -160,7 +160,6 @@ use codex_thread_store::ReadThreadParams;
 use codex_thread_store::ResumeThreadParams;
 use codex_thread_store::ThreadPersistenceMetadata;
 use codex_thread_store::ThreadStore;
-use codex_utils_audio::prepare_response_items as prepare_audio_response_items;
 use codex_utils_path_uri::PathUri;
 use futures::future::BoxFuture;
 use futures::future::Shared;
@@ -352,6 +351,7 @@ use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnModerationMetadataEvent;
 use codex_protocol::protocol::WarningEvent;
+use codex_protocol::turn_input::IdleTurnSource;
 use codex_protocol::turn_input::TurnInputMode;
 use codex_protocol::turn_input::TurnInputRequest;
 use codex_protocol::turn_input::TurnInputSubmission;
@@ -870,6 +870,7 @@ impl SessionIo {
     pub(crate) async fn submit_recover_turn(
         &self,
         thread_settings: ThreadSettingsOverrides,
+        idle_turn_source: IdleTurnSource,
         trace: Option<W3cTraceContext>,
         turn_id: String,
     ) -> CodexResult<TurnInputSubmission> {
@@ -878,6 +879,7 @@ impl SessionIo {
             id: turn_id,
             op: Op::RecoverTurn {
                 thread_settings,
+                idle_turn_source,
                 reply: reply_tx,
             },
             trace,
@@ -1492,7 +1494,6 @@ impl Session {
                 ImagePreparationMode::DetailBased,
                 ImageResizeNoticeMode::Disabled,
             );
-            prepare_audio_response_items(&mut prepared_items);
             let mut metadata = metadata;
             prepared_history.extend(prepared_items.into_iter().map(|item| ResponseItemEnvelope {
                 item,
@@ -2985,7 +2986,6 @@ impl Session {
             image_preparation_mode,
             image_resize_notice_mode,
         );
-        prepare_audio_response_items(&mut items);
         // Most response items get their passthrough turn ID at the durable history boundary.
         for item in &mut items {
             Self::stamp_response_item_for_history(item, &turn_context.sub_id);
@@ -3029,39 +3029,17 @@ impl Session {
         }
     }
 
-    pub(crate) fn response_item_from_user_input(&self, input: Vec<UserInput>) -> ResponseItem {
-        let mut item = ResponseItem::from(ResponseInputItem::from_user_input(
+    pub(crate) fn response_items_from_user_input(
+        &self,
+        input: Vec<UserInput>,
+    ) -> Vec<ResponseItem> {
+        ResponseInputItem::from_user_input_with_generated_content(
             input,
             LocalImagePreparation::Defer,
-        ));
-        if let ResponseItem::Message {
-            content,
-            internal_chat_message_metadata_passthrough,
-            ..
-        } = &mut item
-        {
-            let content_item_kinds = content
-                .iter()
-                .map(|content| {
-                    ContentItemKind(
-                        match content {
-                            ContentItem::InputText { .. } | ContentItem::OutputText { .. } => {
-                                "user.text"
-                            }
-                            ContentItem::InputImage { .. } => "user.image",
-                            ContentItem::InputAudio { .. } => "user.audio",
-                        }
-                        .to_string(),
-                    )
-                })
-                .collect();
-            *internal_chat_message_metadata_passthrough =
-                Some(InternalChatMessageMetadataPassthrough {
-                    content_item_kinds: Some(content_item_kinds),
-                    ..Default::default()
-                });
-        }
-        item
+        )
+        .into_iter()
+        .map(ResponseItem::from)
+        .collect()
     }
 
     #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
@@ -4100,8 +4078,8 @@ impl Session {
         // Persist the user message to history, but emit the turn item from `UserInput` so
         // UI-only `text_elements` are preserved. `ResponseItem::Message` does not carry
         // those spans, and `record_response_item_and_emit_turn_item` would drop them.
-        let response_item = self.response_item_from_user_input(input.to_vec());
-        self.record_conversation_items(turn_context, std::slice::from_ref(&response_item))
+        let response_items = self.response_items_from_user_input(input.to_vec());
+        self.record_conversation_items(turn_context, &response_items)
             .await;
         let mut user_message_item = UserMessageItem::new(input);
         user_message_item.client_id = client_id;

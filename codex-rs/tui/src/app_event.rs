@@ -33,6 +33,7 @@ use codex_app_server_protocol::SkillsListResponse;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadGoalStatus;
 use codex_app_server_protocol::ThreadItemsListResponse;
+use codex_app_server_protocol::UserInput;
 use codex_connectors::AppInfo;
 use codex_file_search::FileMatch;
 use codex_message_history::HistoryBatchCursor;
@@ -250,6 +251,23 @@ pub(crate) enum AppEvent {
     SubmitThreadOp {
         thread_id: ThreadId,
         op: AppCommand,
+    },
+
+    /// Persist a queued direct user follow-up before the active turn completes.
+    QueueFollowUpUserMessage {
+        thread_id: ThreadId,
+        client_user_message_id: String,
+        input: Vec<UserInput>,
+    },
+
+    /// Remove a server-owned queued follow-up that the user moved back into the composer.
+    DeleteQueuedFollowUpUserMessage {
+        thread_id: ThreadId,
+        queued_submission_id: String,
+    },
+    /// Reconcile local server-owned queue shadows after a live queue change.
+    ReconcileQueuedFollowUps {
+        thread_id: ThreadId,
     },
 
     /// Interrupt, fork, and retry a safety-buffered turn with the server-selected model.

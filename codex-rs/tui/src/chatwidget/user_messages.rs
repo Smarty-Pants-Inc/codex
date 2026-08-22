@@ -58,11 +58,24 @@ pub(super) enum ShellEscapePolicy {
     Disallow,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(super) enum QueuedUserMessageAdmission {
+    #[default]
+    Local,
+    PendingServerAdmission {
+        client_user_message_id: String,
+    },
+    ServerQueued {
+        queued_submission_id: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct QueuedUserMessage {
     pub(super) user_message: UserMessage,
     pub(super) action: QueuedInputAction,
     pub(super) pending_pastes: Vec<(String, String)>,
+    server_queue_admission: QueuedUserMessageAdmission,
 }
 
 impl QueuedUserMessage {
@@ -71,6 +84,61 @@ impl QueuedUserMessage {
             user_message,
             action,
             pending_pastes: Vec::new(),
+            server_queue_admission: QueuedUserMessageAdmission::Local,
+        }
+    }
+
+    pub(super) fn mark_pending_server_admission(&mut self, client_user_message_id: String) {
+        self.server_queue_admission = QueuedUserMessageAdmission::PendingServerAdmission {
+            client_user_message_id,
+        };
+    }
+
+    pub(super) fn is_server_managed(&self) -> bool {
+        !matches!(
+            self.server_queue_admission,
+            QueuedUserMessageAdmission::Local
+        )
+    }
+
+    pub(super) fn pending_server_admission_id(&self) -> Option<&str> {
+        match &self.server_queue_admission {
+            QueuedUserMessageAdmission::PendingServerAdmission {
+                client_user_message_id,
+            } => Some(client_user_message_id),
+            QueuedUserMessageAdmission::Local | QueuedUserMessageAdmission::ServerQueued { .. } => {
+                None
+            }
+        }
+    }
+
+    pub(super) fn mark_server_queued(
+        &mut self,
+        client_user_message_id: &str,
+        queued_submission_id: String,
+    ) -> bool {
+        if self.pending_server_admission_id() != Some(client_user_message_id) {
+            return false;
+        }
+        self.server_queue_admission = QueuedUserMessageAdmission::ServerQueued {
+            queued_submission_id,
+        };
+        true
+    }
+
+    pub(super) fn clear_pending_server_admission(&mut self) {
+        if self.pending_server_admission_id().is_some() {
+            self.server_queue_admission = QueuedUserMessageAdmission::Local;
+        }
+    }
+
+    pub(super) fn queued_submission_id(&self) -> Option<&str> {
+        match &self.server_queue_admission {
+            QueuedUserMessageAdmission::ServerQueued {
+                queued_submission_id,
+            } => Some(queued_submission_id),
+            QueuedUserMessageAdmission::Local
+            | QueuedUserMessageAdmission::PendingServerAdmission { .. } => None,
         }
     }
 

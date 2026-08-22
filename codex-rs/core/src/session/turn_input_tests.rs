@@ -13,6 +13,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnAbortReason;
+use codex_protocol::turn_input::IdleTurnSource;
 use codex_protocol::turn_input::TurnInput as SubmittedTurnInput;
 use codex_protocol::user_input::UserInput;
 use core_test_support::test_codex::local_selections;
@@ -142,6 +143,42 @@ async fn accepted_input_applies_thread_settings() {
     );
 }
 
+async fn assert_developer_input_starts_root(mode: TurnInputMode) {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    let submission_id = "developer-root".to_string();
+    let submission = handle(
+        &session,
+        TurnInputRequest::developer_input(vec![UserInput::Text {
+            text: "generated prompt".to_string(),
+            text_elements: Vec::new(),
+        }]),
+        mode,
+        submission_id.clone(),
+    )
+    .await
+    .expect("developer input should start");
+    assert!(matches!(submission, TurnInputSubmission::Started { .. }));
+    let root_turn_id = session
+        .active_turn
+        .lock()
+        .await
+        .as_ref()
+        .and_then(|turn| turn.task.as_ref())
+        .and_then(|task| task.turn_context.turn_metadata_state.root_turn_id());
+    assert_eq!(root_turn_id.as_deref(), Some(submission_id.as_str()));
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+}
+
+#[tokio::test]
+async fn start_or_steer_developer_input_starts_a_root_turn() {
+    assert_developer_input_starts_root(TurnInputMode::StartOrSteer).await;
+}
+
+#[tokio::test]
+async fn start_only_developer_input_starts_a_root_turn() {
+    assert_developer_input_starts_root(TurnInputMode::StartIfIdle).await;
+}
+
 #[tokio::test]
 async fn start_only_rejects_active_turn_without_injecting() {
     let (session, turn_context, _rx) = make_session_and_context_with_rx().await;
@@ -202,6 +239,7 @@ async fn recovery_rejects_active_turn_without_injecting_or_applying_settings() {
             approval_policy: Some(AskForApproval::Never),
             ..Default::default()
         },
+        IdleTurnSource::Unspecified,
         "recovered-turn".to_string(),
     )
     .await
@@ -263,6 +301,59 @@ async fn start_only_rejects_plan_mode_without_injecting() {
             .get_pending_input(&session.active_turn)
             .await
     );
+}
+
+#[tokio::test]
+async fn goal_continuation_only_bypasses_existing_plan_mode() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    let mut collaboration_mode = session.collaboration_mode().await;
+    collaboration_mode.mode = ModeKind::Plan;
+    {
+        let mut state = session.state.lock().await;
+        state.session_configuration.collaboration_mode = collaboration_mode;
+    }
+
+    let submission = handle(
+        &session,
+        TurnInputRequest::new(SubmittedTurnInput::ResponseItem(user_message(
+            "goal continuation",
+        )))
+        .with_idle_turn_source(IdleTurnSource::GoalContinuation),
+        TurnInputMode::StartIfIdle,
+        "goal-continuation".to_string(),
+    )
+    .await
+    .expect("goal continuation submission should be valid");
+
+    assert!(matches!(submission, TurnInputSubmission::Started { .. }));
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    let mut collaboration_mode = session.collaboration_mode().await;
+    collaboration_mode.mode = ModeKind::Plan;
+    let submission = handle(
+        &session,
+        TurnInputRequest::new(SubmittedTurnInput::ResponseItem(user_message(
+            "goal continuation",
+        )))
+        .with_idle_turn_source(IdleTurnSource::GoalContinuation)
+        .with_thread_settings(ThreadSettingsOverrides {
+            collaboration_mode: Some(collaboration_mode),
+            ..Default::default()
+        }),
+        TurnInputMode::StartIfIdle,
+        "requested-plan-goal-continuation".to_string(),
+    )
+    .await
+    .expect("requested Plan submission should be valid");
+
+    assert_eq!(
+        TurnInputSubmission::NotSubmitted {
+            reason: NotSubmittedReason::PlanMode,
+        },
+        submission
+    );
+    assert!(session.active_turn.lock().await.is_none());
 }
 
 #[tokio::test]

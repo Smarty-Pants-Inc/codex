@@ -27,6 +27,7 @@ use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::NonSteerableTurnKind;
 use codex_protocol::protocol::ThreadSettingsOverrides;
+use codex_protocol::turn_input::IdleTurnSource;
 use codex_protocol::turn_input::NotSubmittedReason;
 use codex_protocol::turn_input::TurnInput as SubmittedTurnInput;
 use codex_protocol::turn_input::TurnInputMode;
@@ -157,9 +158,12 @@ pub(super) async fn handle(
 pub(super) async fn handle_recovery(
     session: &Arc<Session>,
     thread_settings: ThreadSettingsOverrides,
+    idle_turn_source: IdleTurnSource,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
-    let request = TurnInputRequest::user_input(Vec::new()).with_thread_settings(thread_settings);
+    let request = TurnInputRequest::user_input(Vec::new())
+        .with_thread_settings(thread_settings)
+        .with_idle_turn_source(idle_turn_source);
     start_if_idle(session, request, submission_id, /*is_recovery*/ true).await
 }
 
@@ -204,8 +208,7 @@ async fn start_or_steer(
             let turn_context = settings
                 .apply_started(session, submission_id.clone())
                 .await?;
-            if is_user_input
-                && can_start_root_turn
+            if can_start_root_turn
                 && !items.is_empty()
                 && turn_context
                     .turn_metadata_state
@@ -260,10 +263,13 @@ async fn start_if_idle(
         start,
         additional_context,
         responsesapi_client_metadata,
+        idle_turn_source,
+        idle_turn_admission,
         ..
     } = request;
     let has_user_input = has_nonempty_user_input(&input);
-    let has_developer_input = has_nonempty_developer_input(&input);
+    let has_developer_input =
+        matches!(&input, SubmittedTurnInput::DeveloperInput { content } if !content.is_empty());
     let is_automatic_idle_work = !has_user_input && !has_developer_input && !is_recovery;
     let can_start_root_turn = start.parent_turn_id.is_none() && start.root_turn_id.is_none();
     if session.input_queue.has_trigger_turn_mailbox_items().await {
@@ -272,8 +278,11 @@ async fn start_if_idle(
         });
     }
     // Empty non-recovery starts are automatic wakeups, not explicit user requests.
-    // Do not let them start a Plan turn.
-    if is_automatic_idle_work && session.collaboration_mode().await.mode == ModeKind::Plan {
+    // Only an explicit interactive goal continuation may continue an existing Plan session.
+    if is_automatic_idle_work
+        && idle_turn_source != IdleTurnSource::GoalContinuation
+        && session.collaboration_mode().await.mode == ModeKind::Plan
+    {
         return Ok(TurnInputSubmission::NotSubmitted {
             reason: NotSubmittedReason::PlanMode,
         });
@@ -286,8 +295,29 @@ async fn start_if_idle(
                 reason: NotSubmittedReason::NotIdle,
             });
         }
-        let active_turn = active_turn.get_or_insert_with(ActiveTurn::default);
-        Arc::clone(&active_turn.turn_state)
+
+        let mut reserved_turn_state = None;
+        let mut reserve = || {
+            let active_turn = active_turn.get_or_insert_with(ActiveTurn::default);
+            reserved_turn_state = Some(Arc::clone(&active_turn.turn_state));
+        };
+        let admitted = if is_automatic_idle_work {
+            if let Some(admission) = idle_turn_admission.as_ref() {
+                admission.reserve_if_allowed(&mut reserve)
+            } else {
+                reserve();
+                true
+            }
+        } else {
+            reserve();
+            true
+        };
+        if !admitted {
+            return Ok(TurnInputSubmission::NotSubmitted {
+                reason: NotSubmittedReason::PendingTriggerTurn,
+            });
+        }
+        reserved_turn_state.expect("admitted idle work must reserve a turn")
     };
 
     if session.input_queue.has_trigger_turn_mailbox_items().await {
@@ -321,12 +351,15 @@ async fn start_if_idle(
             return Err(error);
         }
     };
+    if idle_turn_source != IdleTurnSource::Unspecified {
+        turn_context.extension_data.insert(idle_turn_source);
+    }
     if let Some(responsesapi_client_metadata) = responsesapi_client_metadata {
         turn_context
             .turn_metadata_state
             .set_responsesapi_client_metadata(responsesapi_client_metadata);
     }
-    if has_user_input
+    if (has_user_input || has_developer_input)
         && can_start_root_turn
         && turn_context
             .turn_metadata_state
@@ -574,10 +607,6 @@ impl Session {
 
 fn has_nonempty_user_input(input: &SubmittedTurnInput) -> bool {
     matches!(input, SubmittedTurnInput::UserInput { content, .. } if !content.is_empty())
-}
-
-fn has_nonempty_developer_input(input: &SubmittedTurnInput) -> bool {
-    matches!(input, SubmittedTurnInput::DeveloperInput { content } if !content.is_empty())
 }
 
 fn into_steerable_input(

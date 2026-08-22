@@ -202,6 +202,15 @@ impl ChatWidget {
                     notification.action,
                 );
             }
+            ServerNotification::ThreadQueueChanged(notification) => {
+                if replay_kind.is_none()
+                    && let Ok(thread_id) = ThreadId::from_string(&notification.thread_id)
+                    && self.thread_id.as_ref() == Some(&thread_id)
+                {
+                    self.app_event_tx
+                        .send(AppEvent::ReconcileQueuedFollowUps { thread_id });
+                }
+            }
             ServerNotification::ThreadClosed(_) => {
                 if !from_replay {
                     self.on_shutdown_complete();
@@ -213,7 +222,6 @@ impl ChatWidget {
             | ServerNotification::ThreadStarted(_)
             | ServerNotification::ThreadStatusChanged(_)
             | ServerNotification::ThreadReverted(_)
-            | ServerNotification::ThreadQueueChanged(_)
             | ServerNotification::ThreadArchived(_)
             | ServerNotification::ThreadDeleted(_)
             | ServerNotification::ThreadUnarchived(_)

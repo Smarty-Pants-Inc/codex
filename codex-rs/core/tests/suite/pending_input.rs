@@ -17,7 +17,9 @@ use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
 use codex_protocol::items::TurnItem;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -76,11 +78,16 @@ async fn idle_response_items_include_pending_mailbox_in_first_request() -> anyho
     let submission = test
         .codex
         .start_turn_if_idle(TurnInputRequest::new(TurnInput::ResponseItem(
-            responses::user_message_item("automatic response item"),
+            developer_message_item("automatic response item"),
         )))
         .await?;
     assert!(matches!(submission, StartIfIdleSubmission::Started { .. }));
-    wait_for_turn_complete(test.codex.as_ref()).await;
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        while response.requests().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
 
     let request = response.single_request();
     let request_body = request.body_json();
@@ -88,7 +95,7 @@ async fn idle_response_items_include_pending_mailbox_in_first_request() -> anyho
     responses::assert_parent_turn(&request_body, /*expected*/ None)?;
     assert!(
         request
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .iter()
             .any(|message| message == "automatic response item")
     );
@@ -205,6 +212,17 @@ fn sse_event(event: Value) -> String {
     responses::sse(vec![event])
 }
 
+fn developer_message_item(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
 fn message_input_texts(body: &Value, role: &str) -> Vec<String> {
     body.get("input")
         .and_then(Value::as_array)
@@ -1003,7 +1021,7 @@ async fn injected_response_item_reopens_turn_after_final_answer() {
 
     assert!(
         codex
-            .inject_if_running(vec![responses::user_message_item(INJECTED_CONTEXT)])
+            .inject_if_running(vec![developer_message_item(INJECTED_CONTEXT)])
             .await
             .is_ok()
     );
@@ -1014,9 +1032,10 @@ async fn injected_response_item_reopens_turn_after_final_answer() {
     let requests = server.requests().await;
     assert_eq!(requests.len(), 2);
     let second: Value = from_slice(&requests[1]).expect("parse second request");
+    assert_eq!(message_input_texts(&second, "user"), vec![INITIAL_PROMPT]);
     assert_eq!(
-        message_input_texts(&second, "user"),
-        vec![INITIAL_PROMPT, INJECTED_CONTEXT]
+        message_input_texts(&second, "developer"),
+        vec![INJECTED_CONTEXT]
     );
 
     server.shutdown().await;

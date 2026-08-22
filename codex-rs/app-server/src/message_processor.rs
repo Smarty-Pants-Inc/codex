@@ -84,6 +84,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::W3cTraceContext;
+use codex_queue_extension::QueueEnqueueIntent;
 use codex_queue_extension::QueuedItemService;
 use codex_rollout::StateDbHandle;
 use codex_state::log_db::LogDbLayer;
@@ -482,8 +483,6 @@ impl MessageProcessor {
             thread_state_manager.clone(),
             state_db.clone(),
             Arc::clone(&goal_service),
-            goal_auto_continue_capability,
-            queue_service.clone(),
         );
         let thread_queue_processor = ThreadQueueRequestProcessor::new(
             Arc::clone(&thread_manager),
@@ -911,6 +910,13 @@ impl MessageProcessor {
             &codex_request,
         );
 
+        let enqueue_intent = match &codex_request {
+            ClientRequest::ThreadQueueAdd { params, .. } => self
+                .thread_queue_processor
+                .register_enqueue_intent(&params.thread_id),
+            _ => None,
+        };
+
         let event_stream_ready = match &codex_request {
             ClientRequest::McpServerEventStreamStart { params, .. } => Some(
                 session
@@ -936,6 +942,7 @@ impl MessageProcessor {
                         request_context,
                         session,
                         event_stream_ready,
+                        enqueue_intent,
                     )
                     .await;
                 if let Err(error) = result {
@@ -965,6 +972,7 @@ impl MessageProcessor {
         request_context: RequestContext,
         session: Arc<ConnectionSessionState>,
         event_stream_ready: Option<McpEventStreamReady>,
+        enqueue_intent: Option<QueueEnqueueIntent>,
     ) -> Result<(), JSONRPCErrorError> {
         let connection_id = connection_request_id.connection_id;
         let app_server_client_name = session.app_server_client_name().map(str::to_string);
@@ -1209,7 +1217,7 @@ impl MessageProcessor {
             }
             ClientRequest::ThreadQueueAdd { params, .. } => self
                 .thread_queue_processor
-                .add(params)
+                .add(params, enqueue_intent)
                 .await
                 .map(|response| Some(response.into())),
             ClientRequest::ThreadQueueList { params, .. } => self

@@ -23,6 +23,7 @@ use core_test_support::streaming_sse::start_streaming_sse_server;
 use core_test_support::test_codex::local;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_with_timeout;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use std::sync::Arc;
@@ -117,6 +118,7 @@ async fn recover_turn_if_idle_preserves_id_and_resumes_plan_mode() {
                 ..Default::default()
             },
             trace: None,
+            idle_turn_source: codex_protocol::turn_input::IdleTurnSource::Unspecified,
         })
         .await
         .expect("recovered turn should start");
@@ -127,25 +129,31 @@ async fn recover_turn_if_idle_preserves_id_and_resumes_plan_mode() {
         }
     );
 
-    let started = wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnStarted(_))
-    })
+    let started = wait_for_event_with_timeout(
+        &test.codex,
+        |event| matches!(event, EventMsg::TurnStarted(_)),
+        Duration::from_secs(30),
+    )
     .await;
     let EventMsg::TurnStarted(started) = started else {
         unreachable!("wait_for_event returned unexpected event");
     };
     assert_eq!(started.turn_id, turn_id);
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
+    wait_for_event_with_timeout(
+        &test.codex,
+        |event| matches!(event, EventMsg::TurnComplete(_)),
+        Duration::from_secs(30),
+    )
     .await;
 
-    let user_input_groups = response_mock
-        .single_request()
-        .message_input_text_groups("user");
-    assert_eq!(user_input_groups.len(), 1);
-    assert_eq!(user_input_groups[0].len(), 1);
-    assert!(user_input_groups[0][0].starts_with("<environment_context>"));
+    let request = response_mock.single_request();
+    assert!(request.message_input_texts("user").is_empty());
+    assert!(
+        request
+            .message_input_texts("developer")
+            .iter()
+            .any(|text| text.starts_with("<environment_context>"))
+    );
 }
 
 /// Concurrent submissions must start exactly one turn and steer the other message.

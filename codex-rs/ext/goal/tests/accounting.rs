@@ -6,6 +6,7 @@ mod accounting;
 use accounting::GoalAccountingState;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::protocol::TokenUsage;
+use codex_protocol::turn_input::IdleTurnSource;
 use pretty_assertions::assert_eq;
 
 #[test]
@@ -14,6 +15,7 @@ fn goal_accounting_uses_turn_start_baseline_for_exact_deltas() {
     state.start_turn(
         "turn-1",
         ModeKind::Default,
+        IdleTurnSource::Unspecified,
         &token_usage(
             /*input_tokens*/ 100, /*cached_input_tokens*/ 10, /*output_tokens*/ 30,
             /*reasoning_output_tokens*/ 5, /*total_tokens*/ 135,
@@ -38,7 +40,12 @@ fn goal_accounting_uses_turn_start_baseline_for_exact_deltas() {
 #[test]
 fn goal_accounting_ignores_plan_mode_turns() {
     let state = GoalAccountingState::default();
-    state.start_turn("turn-1", ModeKind::Plan, &TokenUsage::default());
+    state.start_turn(
+        "turn-1",
+        ModeKind::Plan,
+        IdleTurnSource::Unspecified,
+        &TokenUsage::default(),
+    );
 
     let recorded = state.record_token_usage(
         "turn-1",
@@ -49,6 +56,30 @@ fn goal_accounting_ignores_plan_mode_turns() {
     );
 
     assert_eq!(None, recorded);
+}
+
+#[test]
+fn goal_accounting_tracks_tagged_plan_mode_goal_continuation() {
+    let state = GoalAccountingState::default();
+    state.start_turn(
+        "turn-1",
+        ModeKind::Plan,
+        IdleTurnSource::GoalContinuation,
+        &TokenUsage::default(),
+    );
+
+    let recorded = state
+        .record_token_usage(
+            "turn-1",
+            &token_usage(
+                /*input_tokens*/ 20, /*cached_input_tokens*/ 5, /*output_tokens*/ 8,
+                /*reasoning_output_tokens*/ 2, /*total_tokens*/ 30,
+            ),
+        )
+        .expect("tagged Plan continuation should account tokens");
+
+    assert_eq!(23, recorded.turn_delta);
+    assert_eq!(23, recorded.thread_unflushed_delta);
 }
 
 fn token_usage(

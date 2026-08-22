@@ -2586,6 +2586,11 @@ mod tests {
                 first_json["session"]["tools"][0]["name"],
                 Value::String("background_agent".to_string())
             );
+            let background_agent_description = first_json["session"]["tools"][0]["description"]
+                .as_str()
+                .expect("background agent description");
+            assert!(background_agent_description.contains("when it needs execution"));
+            assert!(!background_agent_description.contains("default action"));
             assert_eq!(
                 first_json["session"]["tools"][0]["parameters"]["required"],
                 json!(["prompt"])

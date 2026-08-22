@@ -5,6 +5,7 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::turn_input::IdleTurnSource;
 use codex_protocol::turn_input::SuspendTurnOutcome;
 use std::sync::Arc;
 use std::time::Duration;
@@ -66,6 +67,11 @@ pub(super) async fn suspend_turn_and_shutdown(
     let task = turn.task.take().ok_or_else(|| {
         CodexErr::Fatal("accepted root turn suspension had no running task".to_string())
     })?;
+    let idle_turn_source = task
+        .turn_context
+        .extension_data
+        .get::<IdleTurnSource>()
+        .map_or(IdleTurnSource::Unspecified, |source| *source);
     let turn_id = task.turn_context.sub_id.clone();
     // Normal shutdown records a terminal turn event, preventing another worker from
     // recovering this turn under its original ID. Cancel the task without that event.
@@ -116,5 +122,8 @@ pub(super) async fn suspend_turn_and_shutdown(
             msg: EventMsg::ShutdownComplete,
         })
         .await;
-    Ok(SuspendTurnOutcome::Suspended { turn_id })
+    Ok(SuspendTurnOutcome::Suspended {
+        turn_id,
+        idle_turn_source,
+    })
 }

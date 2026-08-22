@@ -9,6 +9,10 @@ use codex_state::SqliteQueueStore;
 use crate::MAX_QUEUE_ITEMS;
 use crate::ThreadStoreError;
 use crate::ThreadStoreFuture;
+/// Holds an empty queue stable while a lower-priority idle turn is reserved.
+pub trait QueueEmptyReservation: Send {}
+
+impl<T: Send> QueueEmptyReservation for T {}
 
 /// Storage-neutral persistence for ordered, thread-scoped user messages.
 pub trait QueueStore: Send + Sync {
@@ -21,6 +25,11 @@ pub trait QueueStore: Send + Sync {
         revision: i64,
         thread_ids: &'a [ThreadId],
     ) -> ThreadStoreFuture<'a, Vec<(ThreadId, i64)>>;
+    /// Return a guard only when the queue is empty, blocking durable writes until drop.
+    fn reserve_if_empty(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, Option<Box<dyn QueueEmptyReservation>>>;
 
     fn enqueue(
         &self,
@@ -92,6 +101,23 @@ impl QueueStore for LocalQueueStore {
         thread_ids: &'a [ThreadId],
     ) -> ThreadStoreFuture<'a, Vec<(ThreadId, i64)>> {
         queue_future(self.queue().changes_since(revision, thread_ids))
+    }
+    fn reserve_if_empty(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreFuture<'_, Option<Box<dyn QueueEmptyReservation>>> {
+        Box::pin(async move {
+            self.queue()
+                .reserve_if_empty(thread_id)
+                .await
+                .map(|reservation| {
+                    reservation
+                        .map(|reservation| Box::new(reservation) as Box<dyn QueueEmptyReservation>)
+                })
+                .map_err(|error| ThreadStoreError::Internal {
+                    message: format!("queue storage failed: {error}"),
+                })
+        })
     }
 
     fn enqueue(

@@ -32,6 +32,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadGoalStatus;
 use codex_protocol::protocol::TokenUsageInfo;
+use codex_protocol::turn_input::IdleTurnSource;
 use codex_queue_extension::QueuedItemService;
 
 use crate::accounting::BudgetLimitedGoalDisposition;
@@ -217,6 +218,7 @@ where
                     self.event_emitter.clone(),
                     self.metrics.clone(),
                     self.thread_manager.clone(),
+                    self.queue_service.clone(),
                     accounting_state,
                     GoalRuntimeConfig {
                         analytics: self.analytics.clone(),
@@ -254,24 +256,13 @@ where
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
                 return;
             };
-            let continuation = Box::pin(runtime.continue_if_idle());
-            let result = match &self.queue_service {
-                Some(queue_service) => {
-                    match Box::pin(queue_service.run_if_empty(runtime.thread_id(), continuation))
-                        .await
-                    {
-                        Ok(Some(result)) => result,
-                        Ok(None) => Ok(()),
-                        Err(err) => Err(err.to_string()),
-                    }
-                }
-                None => continuation.await,
-            };
+            let result = runtime.continue_if_idle().await;
             if let Err(err) = result {
                 tracing::warn!(
                     "failed to continue active goal for idle thread {}: {err}",
                     runtime.thread_id()
                 );
+                runtime.emit_warning(format!("Could not continue the active goal: {err}"));
             }
         })
     }
@@ -327,16 +318,22 @@ where
                 tracing::warn!("failed to clear deferred goal continuation: {err}");
             }
 
+            let idle_turn_source = input
+                .turn_store
+                .get::<IdleTurnSource>()
+                .map_or(IdleTurnSource::Unspecified, |source| *source);
             let accounting = runtime.accounting_state();
             accounting.start_turn(
                 input.turn_id,
                 input.collaboration_mode.mode,
+                idle_turn_source,
                 input.token_usage_at_turn_start,
             );
             if matches!(
                 input.collaboration_mode.mode,
                 codex_protocol::config_types::ModeKind::Plan
-            ) {
+            ) && idle_turn_source != IdleTurnSource::GoalContinuation
+            {
                 accounting.clear_current_turn_goal();
                 return;
             }

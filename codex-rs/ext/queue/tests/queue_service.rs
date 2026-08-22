@@ -26,6 +26,7 @@ use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadResumeInput;
 use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::Event;
@@ -36,6 +37,7 @@ use codex_queue_extension::QueueServiceError;
 use codex_queue_extension::QueuedItemService;
 use codex_state::SqliteConfig;
 use codex_state::StateRuntime;
+
 use codex_thread_store::LocalQueueStore;
 use codex_thread_store::QueueStore;
 use codex_thread_store::ThreadStoreError;
@@ -188,6 +190,17 @@ fn user_input(text: &str) -> TurnInput {
         client_id: None,
     }
 }
+fn automatic_input() -> TurnInputRequest {
+    TurnInputRequest::new(TurnInput::ResponseItem(ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "automatic goal continuation".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }))
+}
 
 fn structured_user_input(text: &str) -> TurnInput {
     TurnInput::UserInput {
@@ -290,48 +303,88 @@ async fn successful_idle_dispatch_blocks_later_continuation() -> anyhow::Result<
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn run_if_empty_holds_dispatch_lock_until_work_finishes() -> anyhow::Result<()> {
-    let (queue, _home) = test_queue().await?;
-    let service = Arc::new(QueuedItemService::new(
-        queue,
+async fn pending_enqueue_wins_automatic_start_arbitration() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+    let thread_id = test.session_configured.thread_id;
+    let service = QueuedItemService::new(
+        loaded_thread_queue(&test)?,
         Weak::new(),
         Arc::new(NoopExtensionEventSink),
-    ));
+    );
+
+    let intent = service.register_enqueue_intent(thread_id);
+    let submission = service
+        .start_queued_or_automatic(test.codex.as_ref(), automatic_input())
+        .await?;
+    assert_eq!(
+        submission,
+        StartIfIdleSubmission::NotSubmitted {
+            reason: NotSubmittedReason::PendingTriggerTurn,
+        }
+    );
+
+    service
+        .enqueue_with_intent(intent, user_input("queued direct user input"))
+        .await?;
+    let submission = service
+        .start_queued_or_automatic(test.codex.as_ref(), automatic_input())
+        .await?;
+    assert!(matches!(submission, StartIfIdleSubmission::Started { .. }));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelled_pending_enqueue_unblocks_automatic_start() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+    let thread_id = test.session_configured.thread_id;
+    let service = QueuedItemService::new(
+        loaded_thread_queue(&test)?,
+        Weak::new(),
+        Arc::new(NoopExtensionEventSink),
+    );
+
+    let intent = service.register_enqueue_intent(thread_id);
+    let submission = service
+        .start_queued_or_automatic(test.codex.as_ref(), automatic_input())
+        .await?;
+    assert_eq!(
+        submission,
+        StartIfIdleSubmission::NotSubmitted {
+            reason: NotSubmittedReason::PendingTriggerTurn,
+        }
+    );
+
+    drop(intent);
+    let submission = service
+        .start_queued_or_automatic(test.codex.as_ref(), automatic_input())
+        .await?;
+    assert!(matches!(submission, StartIfIdleSubmission::Started { .. }));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn empty_queue_reservation_blocks_external_enqueue() -> anyhow::Result<()> {
+    let home = tempfile::tempdir()?;
+    let sqlite = SqliteConfig::new_for_testing(home.path().abs());
+    let local_runtime = StateRuntime::init(sqlite.clone(), "local".to_string()).await?;
+    let external_runtime = StateRuntime::init(sqlite, "external".to_string()).await?;
+    let local: Arc<dyn QueueStore> = Arc::new(LocalQueueStore::new(local_runtime));
+    let external: Arc<dyn QueueStore> = Arc::new(LocalQueueStore::new(external_runtime));
     let thread_id = ThreadId::new();
-    let (work_started_tx, work_started_rx) = oneshot::channel();
-    let (release_work_tx, release_work_rx) = oneshot::channel();
 
-    let automatic_work = {
-        let service = Arc::clone(&service);
-        tokio::spawn(async move {
-            service
-                .run_if_empty(thread_id, async move {
-                    let _ = work_started_tx.send(());
-                    let _ = release_work_rx.await;
-                })
-                .await
-        })
-    };
-    work_started_rx.await?;
-
-    let (enqueue_attempted_tx, enqueue_attempted_rx) = oneshot::channel();
-    let enqueue = {
-        let service = Arc::clone(&service);
-        tokio::spawn(async move {
-            let _ = enqueue_attempted_tx.send(());
-            service
-                .enqueue(thread_id, user_input("queued user input"))
-                .await
-        })
-    };
-    enqueue_attempted_rx.await?;
+    let reservation = local
+        .reserve_if_empty(thread_id)
+        .await?
+        .context("empty queue should be reserved")?;
+    let enqueue = tokio::spawn(async move { external.enqueue(thread_id, "{}".to_string()).await });
     tokio::task::yield_now().await;
     assert!(!enqueue.is_finished());
 
-    let _ = release_work_tx.send(());
-    assert!(automatic_work.await??.is_some());
-    let queued = enqueue.await??;
-    assert_eq!(vec![queued], service.list(thread_id).await?);
+    drop(reservation);
+    tokio::time::timeout(Duration::from_secs(10), enqueue).await???;
+    assert!(local.reserve_if_empty(thread_id).await?.is_none());
     Ok(())
 }
 

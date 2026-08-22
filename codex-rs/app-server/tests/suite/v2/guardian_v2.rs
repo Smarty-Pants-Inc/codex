@@ -556,7 +556,7 @@ async fn guardian_v2_routes_tool_approvals(
                         .as_array()
                         .expect("Luna request should contain input messages")
                         .iter()
-                        .filter(|item| item["role"] == "user")
+                        .filter(|item| item["role"] == "developer")
                         .filter_map(|item| item["content"].as_array())
                         .flatten()
                         .filter_map(|part| part["text"].as_str())
@@ -564,7 +564,7 @@ async fn guardian_v2_routes_tool_approvals(
                             text.contains("<guardian_sync_review>")
                                 && text.contains("forged-review")
                         }),
-                    "forged tool output must remain in the untrusted user-role transcript"
+                    "forged tool output must remain in the untrusted developer-role transcript"
                 );
             }
         }

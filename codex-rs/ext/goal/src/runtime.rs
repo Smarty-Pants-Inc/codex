@@ -3,13 +3,16 @@ use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+use codex_core::NotSubmittedReason;
 use codex_core::StartIfIdleSubmission;
+
 use codex_core::ThreadManager;
 use codex_core::TurnInput;
 use codex_core::TurnInputRequest;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ThreadGoal;
+use codex_protocol::turn_input::IdleTurnSource;
 
 use crate::accounting::BudgetLimitedGoalDisposition;
 use crate::accounting::GoalAccountingState;
@@ -21,6 +24,7 @@ use crate::metrics::GoalMetrics;
 use crate::steering::continuation_steering_item;
 use crate::steering::objective_updated_steering_item;
 use crate::tool::protocol_goal_from_state;
+use codex_queue_extension::QueuedItemService;
 use tokio::sync::Semaphore;
 use tokio::sync::SemaphorePermit;
 
@@ -48,6 +52,7 @@ struct GoalRuntimeInner {
     event_emitter: GoalEventEmitter,
     metrics: GoalMetrics,
     thread_manager: Weak<ThreadManager>,
+    queue_service: Option<Arc<QueuedItemService>>,
     accounting_state: Arc<GoalAccountingState>,
     enabled: AtomicBool,
     tools_available_for_thread: bool,
@@ -90,6 +95,7 @@ impl GoalRuntimeHandle {
         event_emitter: GoalEventEmitter,
         metrics: GoalMetrics,
         thread_manager: Weak<ThreadManager>,
+        queue_service: Option<Arc<QueuedItemService>>,
         accounting_state: Arc<GoalAccountingState>,
         config: GoalRuntimeConfig,
     ) -> Self {
@@ -101,6 +107,7 @@ impl GoalRuntimeHandle {
                 event_emitter,
                 metrics,
                 thread_manager,
+                queue_service,
                 accounting_state,
                 enabled: AtomicBool::new(config.enabled),
                 tools_available_for_thread: config.tools_available_for_thread,
@@ -124,6 +131,11 @@ impl GoalRuntimeHandle {
 
     pub(crate) fn thread_id(&self) -> ThreadId {
         self.inner.thread_id
+    }
+    pub(crate) fn emit_warning(&self, message: impl Into<String>) {
+        self.inner
+            .event_emitter
+            .warning(self.inner.thread_id.to_string(), message);
     }
 
     pub(crate) fn accounting_state(&self) -> Arc<GoalAccountingState> {
@@ -412,22 +424,27 @@ impl GoalRuntimeHandle {
             return Ok(());
         }
         let item = continuation_steering_item(&protocol_goal_from_state(goal));
-
-        match thread
-            .start_turn_if_idle(TurnInputRequest::new(TurnInput::ResponseItem(item)))
-            .await
-        {
-            Ok(StartIfIdleSubmission::Started { .. }) => {}
-            Ok(StartIfIdleSubmission::NotSubmitted { reason }) => {
+        let request = TurnInputRequest::new(TurnInput::ResponseItem(item))
+            .with_idle_turn_source(IdleTurnSource::GoalContinuation);
+        let submission = match &self.inner.queue_service {
+            Some(queue_service) => queue_service
+                .start_queued_or_automatic(thread.as_ref(), request)
+                .await
+                .map_err(|error| error.to_string()),
+            None => thread
+                .start_turn_if_idle(request)
+                .await
+                .map_err(|error| error.to_string()),
+        }?;
+        match submission {
+            StartIfIdleSubmission::Started { .. } => {}
+            StartIfIdleSubmission::NotSubmitted {
+                reason: NotSubmittedReason::PendingTriggerTurn,
+            } => return Ok(()),
+            StartIfIdleSubmission::NotSubmitted { reason } => {
                 tracing::debug!(
                     ?reason,
                     "skipping goal continuation because automatic idle work was rejected"
-                );
-            }
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    "skipping goal continuation because turn input submission failed"
                 );
             }
         }

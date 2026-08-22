@@ -504,7 +504,7 @@ async fn untrusted_project_excludes_project_instructions() -> Result<()> {
     test.submit_turn("hello").await?;
     let instructions = resp_mock
         .single_request()
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .find(|text| text.starts_with("# AGENTS.md instructions"))
         .expect("global instructions message");

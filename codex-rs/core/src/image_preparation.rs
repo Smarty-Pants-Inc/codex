@@ -13,6 +13,7 @@ use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageDetail;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
+use codex_utils_audio::prepare_audio_item;
 use codex_utils_image::ImageProcessingError;
 use codex_utils_image::PromptImageMode;
 use codex_utils_image::PromptImageResizeLimits;
@@ -121,34 +122,27 @@ pub(crate) fn prepare_response_items(
             })
         };
     for mut item in std::mem::take(items) {
-        let (resize_notice, image_error_notice) = match &mut item {
+        if matches!(&item, ResponseItem::Message { role, .. } if role == "user") {
+            prepared_items.extend(prepare_user_message(
+                item,
+                resize_notice_mode,
+                &mut metadata,
+                mode,
+            ));
+            continue;
+        }
+        let resize_notice = match &mut item {
             ResponseItem::Message { role, content, .. } => {
-                let (resized_images, image_error_content) = prepare_message_content(
+                prepare_message_content(
                     content,
                     ImageOrigin {
                         message_role: Some(role),
                         item_id: None,
                     },
-                    if role == "user" {
-                        resize_notice_mode
-                    } else {
-                        ImageResizeNoticeMode::Disabled
-                    },
                     &mut metadata,
                     mode,
                 );
-                let resize_notice = (!resized_images.is_empty()).then(|| {
-                    ImageResizeNotice::new(ImageResizeNoticeSource::UserMessage, resized_images)
-                });
-                let image_error_notice =
-                    (!image_error_content.is_empty()).then(|| ResponseItem::Message {
-                        id: None,
-                        role: "developer".to_string(),
-                        content: image_error_content,
-                        phase: None,
-                        internal_chat_message_metadata_passthrough: None,
-                    });
-                (resize_notice, image_error_notice)
+                None
             }
             ResponseItem::FunctionCallOutput {
                 call_id, output, ..
@@ -169,12 +163,9 @@ pub(crate) fn prepare_response_items(
             | ResponseItem::Compaction { .. }
             | ResponseItem::CompactionTrigger { .. }
             | ResponseItem::ContextCompaction { .. }
-            | ResponseItem::Other => (None, None),
+            | ResponseItem::Other => None,
         };
         prepared_items.push(item);
-        if let Some(image_error_notice) = image_error_notice {
-            prepared_items.push(image_error_notice);
-        }
         if let Some(resize_notice) = resize_notice {
             prepared_items.push(ContextualUserFragment::into(resize_notice));
         }
@@ -183,60 +174,135 @@ pub(crate) fn prepare_response_items(
     metadata
 }
 
-fn prepare_message_content(
-    items: &mut Vec<ContentItem>,
-    origin: ImageOrigin<'_>,
+fn prepare_user_message(
+    item: ResponseItem,
     resize_notice_mode: ImageResizeNoticeMode,
     metadata: &mut Vec<ImagePreparationMetadata>,
     mode: ImagePreparationMode,
-) -> (Vec<ResizedImage>, Vec<ContentItem>) {
-    let image_count = items
+) -> Vec<ResponseItem> {
+    let ResponseItem::Message {
+        id,
+        role,
+        content,
+        phase,
+        internal_chat_message_metadata_passthrough,
+    } = item
+    else {
+        unreachable!("user media preparation requires a message");
+    };
+    let image_count = content
         .iter()
         .filter(|item| matches!(item, ContentItem::InputImage { .. }))
         .count();
     let mut image_number = 0;
-    let mut resized_images = Vec::new();
-    let mut image_error_content = Vec::new();
+    let mut prepared_content = Vec::with_capacity(content.len());
+    let mut developer_notices = Vec::new();
+
+    for content_item in content {
+        match content_item {
+            ContentItem::InputImage {
+                mut image_url,
+                mut detail,
+            } => {
+                image_number += 1;
+                match prepare_image(
+                    &mut image_url,
+                    &mut detail,
+                    ImageOrigin {
+                        message_role: Some("user"),
+                        item_id: None,
+                    },
+                    metadata,
+                    mode,
+                ) {
+                    Ok(resize) => {
+                        prepared_content.push(ContentItem::InputImage { image_url, detail });
+                        if let Some(resize) = resize
+                            && resize_notice_mode == ImageResizeNoticeMode::Enabled
+                        {
+                            developer_notices.push(image_resize_notice(ResizedImage {
+                                image_number,
+                                image_count,
+                                source_width: resize.source_width,
+                                source_height: resize.source_height,
+                                prepared_width: resize.prepared_width,
+                                prepared_height: resize.prepared_height,
+                            }));
+                        }
+                    }
+                    Err(error) => {
+                        warn!(%error, "failed to prepare message image");
+                        developer_notices.push(ContentItem::InputText {
+                            text: error.placeholder().to_string(),
+                        });
+                    }
+                }
+            }
+            ContentItem::InputAudio { mut audio_url } => {
+                if let Some(placeholder) = prepare_audio_item(&mut audio_url) {
+                    developer_notices.push(ContentItem::InputText { text: placeholder });
+                } else {
+                    prepared_content.push(ContentItem::InputAudio { audio_url });
+                }
+            }
+            content_item => prepared_content.push(content_item),
+        }
+    }
+
+    let mut prepared = vec![ResponseItem::Message {
+        id,
+        role,
+        content: prepared_content,
+        phase,
+        internal_chat_message_metadata_passthrough,
+    }];
+    if !developer_notices.is_empty() {
+        prepared.push(ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: developer_notices,
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        });
+    }
+    prepared
+}
+
+fn prepare_message_content(
+    items: &mut Vec<ContentItem>,
+    origin: ImageOrigin<'_>,
+    metadata: &mut Vec<ImagePreparationMetadata>,
+    mode: ImagePreparationMode,
+) {
     let mut prepared_content = Vec::with_capacity(items.len());
     for mut item in std::mem::take(items) {
         let error_placeholder = match &mut item {
             ContentItem::InputImage { image_url, detail } => {
-                image_number += 1;
                 match prepare_image(image_url, detail, origin, metadata, mode) {
-                    Ok(Some(resize)) if resize_notice_mode == ImageResizeNoticeMode::Enabled => {
-                        resized_images.push(ResizedImage {
-                            image_number,
-                            image_count,
-                            source_width: resize.source_width,
-                            source_height: resize.source_height,
-                            prepared_width: resize.prepared_width,
-                            prepared_height: resize.prepared_height,
-                        });
-                        None
-                    }
                     Ok(_) => None,
                     Err(error) => {
                         warn!(%error, "failed to prepare message image");
-                        Some(error.placeholder())
+                        Some(error.placeholder().to_string())
                     }
                 }
             }
+            ContentItem::InputAudio { audio_url } => prepare_audio_item(audio_url),
             _ => None,
         };
         if let Some(error_placeholder) = error_placeholder {
-            let placeholder = ContentItem::InputText {
-                text: error_placeholder.to_string(),
+            item = ContentItem::InputText {
+                text: error_placeholder,
             };
-            if origin.message_role == Some("user") {
-                image_error_content.push(placeholder);
-                continue;
-            }
-            item = placeholder;
         }
         prepared_content.push(item);
     }
     *items = prepared_content;
-    (resized_images, image_error_content)
+}
+
+fn image_resize_notice(image: ResizedImage) -> ContentItem {
+    ContentItem::InputText {
+        text: ImageResizeNotice::new(ImageResizeNoticeSource::UserMessage, vec![image]).render(),
+    }
 }
 
 fn prepare_tool_output_content(
@@ -253,27 +319,35 @@ fn prepare_tool_output_content(
     let mut image_number = 0;
     let mut resized_images = Vec::new();
     for item in items {
-        if let FunctionCallOutputContentItem::InputImage { image_url, detail } = item {
-            image_number += 1;
-            match prepare_image(image_url, detail, origin, metadata, mode) {
-                Ok(Some(resize)) if resize_notice_mode == ImageResizeNoticeMode::Enabled => {
-                    resized_images.push(ResizedImage {
-                        image_number,
-                        image_count,
-                        source_width: resize.source_width,
-                        source_height: resize.source_height,
-                        prepared_width: resize.prepared_width,
-                        prepared_height: resize.prepared_height,
-                    });
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    warn!(%error, "failed to prepare tool output image");
-                    *item = FunctionCallOutputContentItem::InputText {
-                        text: error.placeholder().to_string(),
-                    };
+        match item {
+            FunctionCallOutputContentItem::InputImage { image_url, detail } => {
+                image_number += 1;
+                match prepare_image(image_url, detail, origin, metadata, mode) {
+                    Ok(Some(resize)) if resize_notice_mode == ImageResizeNoticeMode::Enabled => {
+                        resized_images.push(ResizedImage {
+                            image_number,
+                            image_count,
+                            source_width: resize.source_width,
+                            source_height: resize.source_height,
+                            prepared_width: resize.prepared_width,
+                            prepared_height: resize.prepared_height,
+                        });
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        warn!(%error, "failed to prepare tool output image");
+                        *item = FunctionCallOutputContentItem::InputText {
+                            text: error.placeholder().to_string(),
+                        };
+                    }
                 }
             }
+            FunctionCallOutputContentItem::InputAudio { audio_url } => {
+                if let Some(placeholder) = prepare_audio_item(audio_url) {
+                    *item = FunctionCallOutputContentItem::InputText { text: placeholder };
+                }
+            }
+            _ => {}
         }
     }
     resized_images

@@ -52,6 +52,12 @@ pub fn snapshot_local_user_input(input: &mut UserInput) -> io::Result<()> {
 }
 
 fn read_bounded_local_media(path: &Path, max_bytes: usize, kind: &str) -> io::Result<Vec<u8>> {
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{kind} input path is not a regular file"),
+        ));
+    }
     let file = std::fs::File::open(path)?;
     if file.metadata()?.len() > max_bytes as u64 {
         return Err(io::Error::new(

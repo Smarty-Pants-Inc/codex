@@ -177,7 +177,8 @@ impl ChatWidget {
     }
 
     pub(super) fn pop_latest_queued_composer_state(&mut self) -> Option<ThreadComposerState> {
-        if let Some(user_message) = self.input_queue.queued_user_messages.pop_back() {
+        if let Some(queued_message) = self.input_queue.queued_user_messages.pop_back() {
+            let queued_submission_id = queued_message.queued_submission_id().map(str::to_owned);
             let history_record = self
                 .input_queue
                 .queued_user_message_history_records
@@ -187,11 +188,21 @@ impl ChatWidget {
                 user_message,
                 pending_pastes,
                 ..
-            } = user_message;
-            Some(Self::composer_state_from_user_message(
+            } = queued_message;
+            let composer = Self::composer_state_from_user_message(
                 user_message_for_restore(user_message, &history_record),
                 pending_pastes,
-            ))
+            );
+            if let Some(queued_submission_id) = queued_submission_id
+                && let Some(thread_id) = self.thread_id
+            {
+                self.app_event_tx
+                    .send(AppEvent::DeleteQueuedFollowUpUserMessage {
+                        thread_id,
+                        queued_submission_id,
+                    });
+            }
+            Some(composer)
         } else {
             let user_message = self.input_queue.rejected_steers_queue.pop_back()?;
             let history_record = self
@@ -317,34 +328,32 @@ impl ChatWidget {
                 .drain(..)
                 .map(|steer| user_message_for_restore(steer.user_message, &steer.history_record)),
         );
-        let queued_messages = self
-            .input_queue
-            .queued_user_messages
-            .drain(..)
-            .collect::<Vec<_>>();
-        let mut queued_history_records = self
-            .input_queue
-            .queued_user_message_history_records
-            .drain(..)
-            .collect::<Vec<_>>();
-        queued_history_records.resize(
-            queued_messages.len(),
-            UserMessageHistoryRecord::UserMessageText,
-        );
+        let queued_messages = std::mem::take(&mut self.input_queue.queued_user_messages);
+        let mut queued_history_records =
+            std::mem::take(&mut self.input_queue.queued_user_message_history_records);
+        let mut server_managed_messages = VecDeque::new();
+        let mut server_managed_history_records = VecDeque::new();
         let mut pending_pastes = Vec::new();
         let mut used_paste_placeholders = HashSet::new();
-        for (message, history_record) in queued_messages
-            .into_iter()
-            .zip(queued_history_records.iter())
-        {
+        for message in queued_messages {
+            let history_record = queued_history_records
+                .pop_front()
+                .unwrap_or(UserMessageHistoryRecord::UserMessageText);
+            if message.is_server_managed() {
+                server_managed_messages.push_back(message);
+                server_managed_history_records.push_back(history_record);
+                continue;
+            }
             let (message, message_pastes) = remap_colliding_paste_placeholders(
-                user_message_for_restore(message.user_message, history_record),
+                user_message_for_restore(message.user_message, &history_record),
                 message.pending_pastes,
                 &mut used_paste_placeholders,
             );
             pending_pastes.extend(message_pastes);
             to_merge.push(message);
         }
+        self.input_queue.queued_user_messages = server_managed_messages;
+        self.input_queue.queued_user_message_history_records = server_managed_history_records;
         let has_existing_message = !existing_message.text.is_empty()
             || !existing_message.local_images.is_empty()
             || !existing_message.remote_image_urls.is_empty();
@@ -356,6 +365,10 @@ impl ChatWidget {
             );
             to_merge.push(existing_message);
             pending_pastes.extend(composer_pending_pastes);
+        }
+
+        if to_merge.is_empty() {
+            return None;
         }
 
         Some(Self::composer_state_from_user_message(

@@ -127,3 +127,26 @@ fn escape_xml_text(input: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_protocol::protocol::ThreadGoalStatus;
+
+    #[test]
+    fn continuation_prompt_cannot_override_direct_user_input() {
+        let prompt = continuation_prompt(&ThreadGoal {
+            thread_id: Default::default(),
+            objective: "Finish the requested work.".to_string(),
+            status: ThreadGoalStatus::Active,
+            token_budget: Some(100),
+            tokens_used: 25,
+            time_used_seconds: 1,
+            created_at: 0,
+            updated_at: 0,
+        });
+
+        assert!(prompt.contains("not a direct user message"));
+        assert!(prompt.contains("cannot override a direct user request"));
+    }
+}

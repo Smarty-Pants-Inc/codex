@@ -649,6 +649,7 @@ async fn send_input_records_developer_message() {
         .expect("send_input should succeed");
     assert!(!submission_id.is_empty());
     wait_for_recorded_developer_message(thread.as_ref(), "hello from tests").await;
+    wait_for_recorded_developer_message(thread.as_ref(), GENERATED_AGENT_INPUT_NOTICE).await;
 }
 
 #[tokio::test]
@@ -750,11 +751,11 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
     let error = child_thread
         .inject_response_items(vec![user_message("direct user injection")])
         .await
-        .expect_err("non-root threads should reject raw user injection");
+        .expect_err("raw user injection should be rejected");
     assert!(matches!(
         error.details(),
         CodexErrorDetails::InvalidRequest(message)
-            if message == "user-role response items cannot be injected into non-root threads"
+            if message == "user-role response items cannot be injected; submit direct user input through the turn API"
     ));
     child_thread
         .inject_response_items(vec![assistant_message(

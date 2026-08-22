@@ -12,12 +12,22 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::sync::Arc;
+
+/// Atomically decides whether automatic idle work may reserve the thread.
+///
+/// Implementations run `reserve` while holding the same synchronous guard used
+/// to register higher-priority work. The callback must not block or await.
+pub trait IdleTurnAdmission: std::fmt::Debug + Send + Sync {
+    fn reserve_if_allowed(&self, reserve: &mut dyn FnMut()) -> bool;
+}
 
 /// Result of stopping an unfinished root turn so another worker can recover it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SuspendTurnOutcome {
     Suspended {
         turn_id: String,
+        idle_turn_source: IdleTurnSource,
     },
     NotActive,
     /// A currently loaded descendant would remain running after root handoff.
@@ -39,6 +49,14 @@ pub enum TurnInput {
     InterAgentCommunication(InterAgentCommunication),
 }
 
+/// Source of automatic idle work that may receive narrowly scoped Core behavior.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum IdleTurnSource {
+    #[default]
+    Unspecified,
+    GoalContinuation,
+}
+
 /// One turn input and the context that follows it through submission.
 ///
 /// Callers choose start-or-steer, idle-start, or steer-only behavior through
@@ -51,6 +69,8 @@ pub struct TurnInputRequest {
     pub additional_context: BTreeMap<String, AdditionalContextEntry>,
     pub responsesapi_client_metadata: Option<HashMap<String, String>>,
     pub trace: Option<W3cTraceContext>,
+    pub idle_turn_source: IdleTurnSource,
+    pub idle_turn_admission: Option<Arc<dyn IdleTurnAdmission>>,
 }
 
 /// Request to resume sampling for an interrupted regular turn.
@@ -62,6 +82,7 @@ pub struct RecoverTurnRequest {
     pub turn_id: String,
     pub thread_settings: ThreadSettingsOverrides,
     pub trace: Option<W3cTraceContext>,
+    pub idle_turn_source: IdleTurnSource,
 }
 
 impl TurnInputRequest {
@@ -73,6 +94,8 @@ impl TurnInputRequest {
             start: TurnStartOptions::default(),
             additional_context: BTreeMap::new(),
             responsesapi_client_metadata: None,
+            idle_turn_source: IdleTurnSource::default(),
+            idle_turn_admission: None,
             trace: None,
         }
     }
@@ -128,6 +151,21 @@ impl TurnInputRequest {
     /// Trace context used when this request crosses the session loop.
     pub fn with_trace(mut self, trace: Option<W3cTraceContext>) -> Self {
         self.trace = trace;
+        self
+    }
+
+    /// Marks a narrowly scoped automatic idle-turn source.
+    pub fn with_idle_turn_source(mut self, idle_turn_source: IdleTurnSource) -> Self {
+        self.idle_turn_source = idle_turn_source;
+        self
+    }
+
+    /// Adds an admission check for automatic idle work.
+    pub fn with_idle_turn_admission(
+        mut self,
+        idle_turn_admission: Arc<dyn IdleTurnAdmission>,
+    ) -> Self {
+        self.idle_turn_admission = Some(idle_turn_admission);
         self
     }
 }

@@ -579,10 +579,16 @@ pub(super) async fn submission_loop(
                 }
                 Op::RecoverTurn {
                     thread_settings,
+                    idle_turn_source,
                     reply,
                 } => {
-                    let result =
-                        turn_input::handle_recovery(&sess, thread_settings, sub.id.clone()).await;
+                    let result = turn_input::handle_recovery(
+                        &sess,
+                        thread_settings,
+                        idle_turn_source,
+                        sub.id.clone(),
+                    )
+                    .await;
                     let _ = reply.send(result);
                     false
                 }

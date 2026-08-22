@@ -440,10 +440,3 @@ fn strip_unsupported_media(
     }
     *items = normalized_items;
 }
-
-/// Kept for existing normalization callers. Generated notices now have developer authority at
-/// their creation point, so literal text never establishes provenance.
-pub(crate) fn move_generated_media_placeholders_out_of_user_messages(
-    _items: &mut Vec<ResponseItemEnvelope>,
-) {
-}

@@ -93,8 +93,8 @@ pub(crate) async fn build_prompt_input_from_session(
         .await?;
 
     if !input.is_empty() {
-        let response_item = sess.response_item_from_user_input(input);
-        sess.record_conversation_items(turn_context.as_ref(), std::slice::from_ref(&response_item))
+        let response_items = sess.response_items_from_user_input(input);
+        sess.record_conversation_items(turn_context.as_ref(), &response_items)
             .await;
     }
 

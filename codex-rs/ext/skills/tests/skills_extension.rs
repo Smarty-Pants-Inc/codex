@@ -212,7 +212,10 @@ async fn installed_extension_uses_host_service_snapshot() -> TestResult {
         "<skill>\n<name>demo</name>\n<path>{skill_prompt_path}</path>\n{DEMO_SKILL_CONTENTS}\n</skill>"
     );
     assert_eq!(
-        vec![("developer", expected_catalog), ("user", expected_skill),],
+        vec![
+            ("developer", expected_catalog),
+            ("developer", expected_skill),
+        ],
         fragments
             .iter()
             .map(|fragment| (fragment.role(), fragment.render()))

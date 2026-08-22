@@ -11,6 +11,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::turn_input::IdleTurnSource;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
@@ -106,13 +107,16 @@ async fn root_turn_suspension_preserves_unfinished_turn_history() {
         .await
         .expect("start a currently loaded descendant");
     let submitted = codex
-        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-            text: "preserve this exact unfinished turn".into(),
-            text_elements: Vec::new(),
-        }]))
+        .start_turn_if_idle(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "preserve this exact unfinished turn".into(),
+                text_elements: Vec::new(),
+            }])
+            .with_idle_turn_source(IdleTurnSource::GoalContinuation),
+        )
         .await
         .expect("start root turn");
-    let codex_core::TurnInputSubmission::Started { turn_id } = submitted else {
+    let codex_core::StartIfIdleSubmission::Started { turn_id } = submitted else {
         panic!("expected a started root turn");
     };
     wait_for_event(&codex, |event| matches!(event, EventMsg::TurnStarted(_))).await;
@@ -143,6 +147,7 @@ async fn root_turn_suspension_preserves_unfinished_turn_history() {
             .expect("stop and close the old writer"),
         SuspendTurnOutcome::Suspended {
             turn_id: turn_id.clone(),
+            idle_turn_source: IdleTurnSource::GoalContinuation,
         },
     );
     let rollout_path = codex.rollout_path().expect("rollout path");
@@ -187,6 +192,7 @@ async fn root_turn_suspension_preserves_unfinished_turn_history() {
                 turn_id: turn_id.clone(),
                 thread_settings: Default::default(),
                 trace: None,
+                idle_turn_source: IdleTurnSource::GoalContinuation,
             })
             .await
             .expect("recover the unfinished turn"),

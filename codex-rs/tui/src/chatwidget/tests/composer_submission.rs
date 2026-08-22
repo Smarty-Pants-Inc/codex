@@ -181,6 +181,229 @@ async fn hidden_shell_paste_queued_before_session_submits_literal_prompt() {
 }
 
 #[tokio::test]
+async fn plain_follow_ups_are_server_admitted_in_fifo_order_without_local_resubmission() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ Some("gpt-5")).await;
+    chat.codex_op_target = super::super::CodexOpTarget::AppEvent;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    handle_turn_started(&mut chat, "turn-1");
+
+    chat.bottom_pane
+        .set_composer_text("first follow-up".to_string(), Vec::new(), Vec::new());
+    chat.handle_key_event(KeyEvent::from(KeyCode::Tab));
+    let (first_client_user_message_id, first_input) = loop {
+        match rx.try_recv().expect("expected queued follow-up admission") {
+            AppEvent::QueueFollowUpUserMessage {
+                thread_id: event_thread_id,
+                client_user_message_id,
+                input,
+            } => {
+                assert_eq!(event_thread_id, thread_id);
+                break (client_user_message_id, input);
+            }
+            _ => {}
+        }
+    };
+    assert_eq!(
+        first_input,
+        vec![UserInput::Text {
+            text: "first follow-up".to_string(),
+            text_elements: Vec::new(),
+        }]
+    );
+
+    chat.bottom_pane
+        .set_composer_text("second follow-up".to_string(), Vec::new(), Vec::new());
+    chat.handle_key_event(KeyEvent::from(KeyCode::Tab));
+    let (second_client_user_message_id, second_input) = loop {
+        match rx.try_recv().expect("expected queued follow-up admission") {
+            AppEvent::QueueFollowUpUserMessage {
+                thread_id: event_thread_id,
+                client_user_message_id,
+                input,
+            } => {
+                assert_eq!(event_thread_id, thread_id);
+                break (client_user_message_id, input);
+            }
+            _ => {}
+        }
+    };
+    assert_eq!(
+        second_input,
+        vec![UserInput::Text {
+            text: "second follow-up".to_string(),
+            text_elements: Vec::new(),
+        }]
+    );
+    assert_ne!(first_client_user_message_id, second_client_user_message_id);
+
+    assert!(
+        chat.mark_server_queue_admitted(&first_client_user_message_id, "queued-first".to_string(),)
+    );
+    assert!(
+        chat.mark_server_queue_admitted(
+            &second_client_user_message_id,
+            "queued-second".to_string(),
+        )
+    );
+    let local_message = QueuedUserMessage::new(
+        UserMessage::from("local fallback"),
+        QueuedInputAction::Plain,
+    );
+    let mut pending_message = QueuedUserMessage::new(
+        UserMessage::from("pending server admission"),
+        QueuedInputAction::Plain,
+    );
+    pending_message.mark_pending_server_admission("pending-admission".to_string());
+    for message in [local_message, pending_message] {
+        chat.input_queue.queued_user_messages.push_back(message);
+        chat.input_queue
+            .queued_user_message_history_records
+            .push_back(UserMessageHistoryRecord::UserMessageText);
+    }
+    assert_eq!(
+        chat.queued_user_message_texts(),
+        vec![
+            "first follow-up",
+            "second follow-up",
+            "local fallback",
+            "pending server admission",
+        ]
+    );
+
+    handle_turn_completed(&mut chat, "turn-1", /*duration_ms*/ None);
+    assert!(
+        !std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::CodexOp(Op::UserTurn { .. }))),
+        "server-admitted follow-ups must not be resubmitted locally"
+    );
+
+    handle_turn_started(&mut chat, "external-turn");
+    assert_eq!(
+        chat.queued_user_message_texts(),
+        vec![
+            "first follow-up",
+            "second follow-up",
+            "local fallback",
+            "pending server admission",
+        ]
+    );
+    handle_turn_completed(&mut chat, "external-turn", /*duration_ms*/ None);
+    assert!(
+        !std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::CodexOp(Op::UserTurn { .. }))),
+        "server-admitted follow-ups must not be resubmitted locally"
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::ThreadQueueChanged(
+            codex_app_server_protocol::ThreadQueueChangedNotification {
+                thread_id: thread_id.to_string(),
+            },
+        ),
+        /*replay_kind*/ None,
+    );
+    let reconciled_thread_id = loop {
+        match rx
+            .try_recv()
+            .expect("expected queued follow-up reconciliation")
+        {
+            AppEvent::ReconcileQueuedFollowUps { thread_id } => break thread_id,
+            _ => {}
+        }
+    };
+    assert_eq!(reconciled_thread_id, thread_id);
+
+    chat.reconcile_server_queued_follow_ups(thread_id, vec!["queued-second".to_string()]);
+    assert_eq!(
+        chat.queued_user_message_texts(),
+        vec![
+            "second follow-up",
+            "local fallback",
+            "pending server admission"
+        ]
+    );
+    chat.reconcile_server_queued_follow_ups(thread_id, Vec::new());
+    assert_eq!(
+        chat.queued_user_message_texts(),
+        vec!["local fallback", "pending server admission"]
+    );
+}
+
+#[tokio::test]
+async fn editing_server_admitted_follow_up_requests_server_deletion() {
+    let (mut chat, mut rx, mut op_rx) =
+        make_chatwidget_manual(/*model_override*/ Some("gpt-5")).await;
+    chat.codex_op_target = super::super::CodexOpTarget::AppEvent;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    chat.chat_keymap.edit_queued_message = vec![crate::key_hint::alt(KeyCode::Up)];
+    handle_turn_started(&mut chat, "turn-1");
+    chat.bottom_pane
+        .set_composer_text("edit this follow-up".to_string(), Vec::new(), Vec::new());
+    chat.handle_key_event(KeyEvent::from(KeyCode::Tab));
+    let client_user_message_id = loop {
+        match rx.try_recv().expect("expected queued follow-up admission") {
+            AppEvent::QueueFollowUpUserMessage {
+                client_user_message_id,
+                ..
+            } => break client_user_message_id,
+            _ => {}
+        }
+    };
+    assert!(
+        chat.mark_server_queue_admitted(&client_user_message_id, "queued-for-edit".to_string(),)
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+
+    assert_eq!(chat.bottom_pane.composer_text(), "edit this follow-up");
+    assert!(chat.queued_user_message_texts().is_empty());
+    match rx.try_recv().expect("expected queued follow-up deletion") {
+        AppEvent::DeleteQueuedFollowUpUserMessage {
+            thread_id: event_thread_id,
+            queued_submission_id,
+        } => {
+            assert_eq!(event_thread_id, thread_id);
+            assert_eq!(queued_submission_id, "queued-for-edit");
+        }
+        event => panic!("expected queued follow-up deletion, got {event:?}"),
+    }
+    assert_no_submit_op(&mut op_rx);
+}
+
+#[tokio::test]
+async fn interrupted_turn_keeps_server_admitted_follow_up_queued() {
+    let (mut chat, mut rx, mut op_rx) =
+        make_chatwidget_manual(/*model_override*/ Some("gpt-5")).await;
+    chat.codex_op_target = super::super::CodexOpTarget::AppEvent;
+    chat.thread_id = Some(ThreadId::new());
+    handle_turn_started(&mut chat, "turn-1");
+    chat.bottom_pane
+        .set_composer_text("keep this queued".to_string(), Vec::new(), Vec::new());
+    chat.handle_key_event(KeyEvent::from(KeyCode::Tab));
+    let client_user_message_id = loop {
+        match rx.try_recv().expect("expected queued follow-up admission") {
+            AppEvent::QueueFollowUpUserMessage {
+                client_user_message_id,
+                ..
+            } => break client_user_message_id,
+            _ => {}
+        }
+    };
+    assert!(chat.mark_server_queue_admitted(
+        &client_user_message_id,
+        "queued-after-interrupt".to_string(),
+    ));
+
+    handle_turn_interrupted(&mut chat, "turn-1");
+
+    assert_eq!(chat.queued_user_message_texts(), vec!["keep this queued"]);
+    assert!(chat.bottom_pane.composer_text().is_empty());
+    assert_no_submit_op(&mut op_rx);
+}
+
+#[tokio::test]
 async fn parent_owned_thread_blocks_all_direct_input_entry_points() {
     let (mut chat, mut rx, mut op_rx) =
         make_chatwidget_manual(/*model_override*/ Some("gpt-5")).await;
@@ -317,11 +540,11 @@ async fn parent_owned_thread_restores_pending_initial_prompt() {
 #[tokio::test]
 async fn parent_owned_thread_preserves_queued_input_before_draining() {
     let (mut chat, _rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ Some("gpt-5")).await;
-    let queued_message = QueuedUserMessage {
-        user_message: UserMessage::from("keep this queued prompt"),
-        action: QueuedInputAction::Plain,
-        pending_pastes: vec![("[Image 1]".to_string(), "pasted contents".to_string())],
-    };
+    let mut queued_message = QueuedUserMessage::new(
+        UserMessage::from("keep this queued prompt"),
+        QueuedInputAction::Plain,
+    );
+    queued_message.pending_pastes = vec![("[Image 1]".to_string(), "pasted contents".to_string())];
     let history_record = UserMessageHistoryRecord::UserMessageText;
     chat.input_queue
         .queued_user_messages

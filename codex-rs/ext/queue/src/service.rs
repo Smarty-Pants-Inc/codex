@@ -6,6 +6,8 @@ use std::sync::Weak;
 use std::time::Duration;
 
 use codex_core::CodexThread;
+use codex_core::IdleTurnAdmission;
+use codex_core::NotSubmittedReason;
 use codex_core::StartIfIdleSubmission;
 use codex_core::ThreadManager;
 use codex_core::TurnInput;
@@ -27,6 +29,8 @@ use codex_protocol::protocol::W3cTraceContext;
 use codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS;
 use codex_protocol::user_input::UserInput;
 use codex_thread_store::MAX_QUEUE_ITEMS;
+use codex_thread_store::QueueEmptyReservation;
+
 use codex_thread_store::QueueStore;
 use codex_thread_store::QueuedUserSubmissionRecord;
 use codex_thread_store::ThreadStoreError;
@@ -60,13 +64,87 @@ pub enum QueueServiceError {
     )]
     InputTooLarge { actual_chars: usize },
 }
+/// Tracks a thread's dispatch lock and direct-input enqueue intents.
+struct QueueDispatchState {
+    lock: Arc<Mutex<()>>,
+    pending_enqueues: StdMutex<usize>,
+}
+/// Couples the durable empty-queue reservation to Core's in-memory reservation.
+struct QueueAutomaticAdmission {
+    dispatch: Arc<QueueDispatchState>,
+    queue_reservation: StdMutex<Option<Box<dyn QueueEmptyReservation>>>,
+}
+
+/// Retains the weakly indexed state until after its mutex guard is released.
+struct QueueDispatchGuard {
+    _guard: OwnedMutexGuard<()>,
+    _state: Arc<QueueDispatchState>,
+}
+
+impl std::fmt::Debug for QueueAutomaticAdmission {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("QueueAutomaticAdmission")
+    }
+}
+
+impl IdleTurnAdmission for QueueAutomaticAdmission {
+    fn reserve_if_allowed(&self, reserve: &mut dyn FnMut()) -> bool {
+        let pending = self
+            .dispatch
+            .pending_enqueues
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let admitted = *pending == 0;
+        if admitted {
+            reserve();
+        }
+        drop(pending);
+        self.queue_reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        admitted
+    }
+}
+
+/// Marks a direct user-input enqueue that has been accepted for dispatch.
+///
+/// The pending count makes direct input win over lower-priority automatic work.
+pub struct QueueEnqueueIntent {
+    thread_id: ThreadId,
+    dispatch: Arc<QueueDispatchState>,
+    thread_manager: Weak<ThreadManager>,
+    wake_on_drop: bool,
+}
+
+impl Drop for QueueEnqueueIntent {
+    fn drop(&mut self) {
+        let mut pending = self
+            .dispatch
+            .pending_enqueues
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *pending = pending
+            .checked_sub(1)
+            .expect("pending enqueue intent count must not underflow");
+        let should_wake = self.wake_on_drop && *pending == 0;
+        drop(pending);
+
+        if should_wake && let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(wake_loaded_thread(
+                self.thread_manager.clone(),
+                self.thread_id,
+            ));
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct QueuedItemService {
     queue: Arc<dyn QueueStore>,
     thread_manager: Weak<ThreadManager>,
     event_sink: Arc<dyn ExtensionEventSink>,
-    dispatch_locks: Arc<StdMutex<HashMap<ThreadId, Weak<Mutex<()>>>>>,
+    dispatch_states: Arc<StdMutex<HashMap<ThreadId, Weak<QueueDispatchState>>>>,
     resumed_threads: Arc<StdMutex<HashSet<ThreadId>>>,
 }
 
@@ -80,7 +158,7 @@ impl QueuedItemService {
             queue,
             thread_manager,
             event_sink,
-            dispatch_locks: Arc::new(StdMutex::new(HashMap::new())),
+            dispatch_states: Arc::new(StdMutex::new(HashMap::new())),
             resumed_threads: Arc::new(StdMutex::new(HashSet::new())),
         }
     }
@@ -243,22 +321,45 @@ impl QueuedItemService {
         }
     }
 
-    fn dispatch_lock(&self, thread_id: ThreadId) -> Arc<Mutex<()>> {
-        let mut locks = self
-            .dispatch_locks
+    fn dispatch_state(&self, thread_id: ThreadId) -> Arc<QueueDispatchState> {
+        let mut states = self
+            .dispatch_states
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        locks.retain(|_, lock| lock.strong_count() != 0);
-        if let Some(lock) = locks.get(&thread_id).and_then(Weak::upgrade) {
-            return lock;
+        states.retain(|_, state| state.strong_count() != 0);
+        if let Some(state) = states.get(&thread_id).and_then(Weak::upgrade) {
+            return state;
         }
-        let lock = Arc::new(Mutex::new(()));
-        locks.insert(thread_id, Arc::downgrade(&lock));
-        lock
+        let state = Arc::new(QueueDispatchState {
+            lock: Arc::new(Mutex::new(())),
+            pending_enqueues: StdMutex::new(0),
+        });
+        states.insert(thread_id, Arc::downgrade(&state));
+        state
     }
 
-    async fn dispatch_guard(&self, thread_id: ThreadId) -> OwnedMutexGuard<()> {
-        self.dispatch_lock(thread_id).lock_owned().await
+    async fn dispatch_guard(&self, thread_id: ThreadId) -> QueueDispatchGuard {
+        let state = self.dispatch_state(thread_id);
+        let guard = state.lock.clone().lock_owned().await;
+        QueueDispatchGuard {
+            _guard: guard,
+            _state: state,
+        }
+    }
+
+    /// Registers a received direct-input enqueue before it can wait behind another request.
+    pub fn register_enqueue_intent(&self, thread_id: ThreadId) -> QueueEnqueueIntent {
+        let dispatch = self.dispatch_state(thread_id);
+        *dispatch
+            .pending_enqueues
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+        QueueEnqueueIntent {
+            thread_id,
+            dispatch,
+            thread_manager: self.thread_manager.clone(),
+            wake_on_drop: true,
+        }
     }
 
     pub async fn enqueue(
@@ -266,14 +367,25 @@ impl QueuedItemService {
         thread_id: ThreadId,
         input: TurnInput,
     ) -> Result<QueuedItem, QueueServiceError> {
+        self.enqueue_with_intent(self.register_enqueue_intent(thread_id), input)
+            .await
+    }
+
+    /// Prepares and persists an enqueue request that has already registered its intent.
+    pub async fn enqueue_with_intent(
+        &self,
+        mut intent: QueueEnqueueIntent,
+        input: TurnInput,
+    ) -> Result<QueuedItem, QueueServiceError> {
+        let thread_id = intent.thread_id;
         let input = prepare_queued_user_input(input).await?;
+        let dispatch_guard = intent.dispatch.lock.clone().lock_owned().await;
         let payload = serde_json::to_string(&input)?;
-        let item = {
-            let _dispatch_guard = self.dispatch_guard(thread_id).await;
-            let item = queued_item_from_record(self.queue.enqueue(thread_id, payload).await?)?;
-            self.emit_changed(thread_id);
-            item
-        };
+        let item = queued_item_from_record(self.queue.enqueue(thread_id, payload).await?)?;
+        self.emit_changed(thread_id);
+        intent.wake_on_drop = false;
+        drop(dispatch_guard);
+        drop(intent);
         self.wake_if_loaded(thread_id).await;
         Ok(item)
     }
@@ -296,31 +408,14 @@ impl QueuedItemService {
             .map(queued_item_from_record)
             .collect()
     }
-    /// Runs lower-priority automatic work only while this thread's durable queue is empty.
-    pub async fn run_if_empty<T>(
-        &self,
-        thread_id: ThreadId,
-        work: impl Future<Output = T>,
-    ) -> Result<Option<T>, QueueServiceError> {
-        let _dispatch_guard = self.dispatch_guard(thread_id).await;
-        if self
-            .queue
-            .list_page(thread_id, /*offset*/ 0, /*limit*/ 1)
-            .await?
-            .is_empty()
-        {
-            Ok(Some(work.await))
-        } else {
-            Ok(None)
-        }
-    }
 
     pub async fn update(
         &self,
         thread_id: ThreadId,
         queued_item_id: String,
-        mut input: TurnInput,
+        input: TurnInput,
     ) -> Result<Option<QueuedItem>, QueueServiceError> {
+        let mut input = prepare_queued_user_input(input).await?;
         let _dispatch_guard = self.dispatch_guard(thread_id).await;
         if let TurnInput::UserInput { client_id, .. } = &mut input {
             *client_id = self
@@ -335,7 +430,6 @@ impl QueuedItemService {
                     _ => None,
                 });
         }
-        let input = prepare_queued_user_input(input).await?;
         let payload = serde_json::to_string(&input)?;
         let item = self
             .queue
@@ -390,6 +484,49 @@ impl QueuedItemService {
     ) -> Result<StartIfIdleSubmission, QueueServiceError> {
         let thread_id = thread.session_configured().thread_id;
         let _dispatch_guard = self.dispatch_guard(thread_id).await;
+        self.start_locked(thread, queued_item_id, trace).await
+    }
+
+    /// Starts the queued head when present, otherwise attempts lower-priority automatic work.
+    pub async fn start_queued_or_automatic(
+        &self,
+        thread: &CodexThread,
+        automatic_request: TurnInputRequest,
+    ) -> Result<StartIfIdleSubmission, QueueServiceError> {
+        let thread_id = thread.session_configured().thread_id;
+        let dispatch = self.dispatch_state(thread_id);
+        let _dispatch_guard = dispatch.lock.clone().lock_owned().await;
+        if *dispatch
+            .pending_enqueues
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            != 0
+        {
+            return Ok(StartIfIdleSubmission::NotSubmitted {
+                reason: NotSubmittedReason::PendingTriggerTurn,
+            });
+        }
+        if let Some(queue_reservation) = self.queue.reserve_if_empty(thread_id).await? {
+            let admission = Arc::new(QueueAutomaticAdmission {
+                dispatch,
+                queue_reservation: StdMutex::new(Some(queue_reservation)),
+            });
+            Ok(thread
+                .start_turn_if_idle(automatic_request.with_idle_turn_admission(admission))
+                .await?)
+        } else {
+            self.start_locked(thread, /*queued_item_id*/ None, /*trace*/ None)
+                .await
+        }
+    }
+
+    async fn start_locked(
+        &self,
+        thread: &CodexThread,
+        queued_item_id: Option<String>,
+        trace: Option<W3cTraceContext>,
+    ) -> Result<StartIfIdleSubmission, QueueServiceError> {
+        let thread_id = thread.session_configured().thread_id;
         let item = self
             .list(thread_id)
             .await?
@@ -479,16 +616,7 @@ impl QueuedItemService {
     }
 
     async fn wake_if_loaded(&self, thread_id: ThreadId) {
-        let Some(manager) = self.thread_manager.upgrade() else {
-            return;
-        };
-        if let Ok(thread) = manager.get_thread(thread_id).await
-            && !matches!(thread.agent_status().await, AgentStatus::Interrupted)
-        {
-            thread
-                .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
-                .await;
-        }
+        wake_loaded_thread(self.thread_manager.clone(), thread_id).await;
     }
 
     fn emit_changed(&self, thread_id: ThreadId) {
@@ -496,6 +624,22 @@ impl QueuedItemService {
             id: Uuid::now_v7().to_string(),
             msg: EventMsg::ThreadQueueChanged(ThreadQueueChangedEvent { thread_id }),
         });
+    }
+}
+
+async fn wake_loaded_thread(thread_manager: Weak<ThreadManager>, thread_id: ThreadId) {
+    let Some(manager) = thread_manager.upgrade() else {
+        return;
+    };
+    if let Ok(thread) = manager.get_thread(thread_id).await
+        && !matches!(
+            thread.agent_status().await,
+            AgentStatus::Interrupted | AgentStatus::Shutdown | AgentStatus::NotFound
+        )
+    {
+        thread
+            .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
+            .await;
     }
 }
 

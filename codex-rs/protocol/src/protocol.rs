@@ -56,6 +56,7 @@ use crate::plan_tool::UpdatePlanArgs;
 use crate::request_permissions::RequestPermissionsEvent;
 use crate::request_permissions::RequestPermissionsResponse;
 use crate::request_user_input::RequestUserInputResponse;
+use crate::turn_input::IdleTurnSource;
 use crate::turn_input::SuspendTurnOutcome;
 use crate::turn_input::TurnInputMode;
 use crate::turn_input::TurnInputRequest;
@@ -579,6 +580,7 @@ pub enum Op {
     /// Resume an interrupted regular turn.
     RecoverTurn {
         thread_settings: ThreadSettingsOverrides,
+        idle_turn_source: IdleTurnSource,
         reply: oneshot::Sender<CodexResult<TurnInputSubmission>>,
     },
 

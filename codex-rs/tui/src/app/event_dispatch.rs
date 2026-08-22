@@ -713,6 +713,67 @@ impl App {
                     tracing::error!(error = ?err, "failed to start turn through app server");
                 }
             }
+            AppEvent::QueueFollowUpUserMessage {
+                thread_id,
+                client_user_message_id,
+                input,
+            } => {
+                if !self
+                    .chat_widget
+                    .has_pending_server_queue_admission(&client_user_message_id)
+                {
+                    return Ok(AppRunControl::Continue);
+                }
+                match app_server
+                    .thread_queue_add(thread_id, input, client_user_message_id.clone())
+                    .await
+                {
+                    Ok(response) => {
+                        self.chat_widget.mark_server_queue_admitted(
+                            &client_user_message_id,
+                            response.queued_submission.id,
+                        );
+                    }
+                    Err(error) => {
+                        if self
+                            .chat_widget
+                            .reject_server_queue_admission(&client_user_message_id)
+                        {
+                            self.chat_widget.add_error_message(format!(
+                                "Failed to queue follow-up: {error:#}. The message remains queued locally."
+                            ));
+                        }
+                    }
+                }
+            }
+            AppEvent::DeleteQueuedFollowUpUserMessage {
+                thread_id,
+                queued_submission_id,
+            } => match app_server
+                .thread_queue_delete(thread_id, queued_submission_id)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => self.chat_widget.add_error_message(
+                    "The queued follow-up had already started or was removed. The message remains in the composer."
+                        .to_string(),
+                ),
+                Err(error) => self.chat_widget.add_error_message(format!(
+                    "Failed to remove queued follow-up: {error:#}. The message remains in the composer and may still run."
+                )),
+            },
+            AppEvent::ReconcileQueuedFollowUps { thread_id } => {
+                match app_server.thread_queue_list(thread_id).await {
+                    Ok(queued_submission_ids) => self
+                        .chat_widget
+                        .reconcile_server_queued_follow_ups(thread_id, queued_submission_ids),
+                    Err(error) => tracing::warn!(
+                        thread_id = %thread_id,
+                        error = ?error,
+                        "failed to reconcile queued follow-ups"
+                    ),
+                }
+            }
             AppEvent::RetrySafetyBufferedTurn {
                 thread_id,
                 turn_id,

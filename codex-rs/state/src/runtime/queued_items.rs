@@ -4,6 +4,10 @@ use crate::QueuedUserSubmissionRecord;
 use sqlx::Connection;
 use tokio::sync::Mutex;
 use uuid::Uuid;
+/// Keeps the queue database's writer slot while Core reserves an idle turn.
+pub struct SqliteQueueEmptyReservation {
+    _transaction: sqlx::Transaction<'static, Sqlite>,
+}
 
 /// SQLite-backed persistence for durable, thread-scoped user messages.
 #[derive(Clone)]
@@ -72,6 +76,25 @@ impl SqliteQueueStore {
         rows.into_iter()
             .map(|(thread_id, revision)| Ok((ThreadId::try_from(thread_id)?, revision)))
             .collect()
+    }
+    /// Atomically observes an empty thread queue and blocks queue writes until dropped.
+    pub async fn reserve_if_empty(
+        &self,
+        thread_id: ThreadId,
+    ) -> anyhow::Result<Option<SqliteQueueEmptyReservation>> {
+        let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let item_count =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM queued_items WHERE thread_id = ?")
+                .bind(thread_id.to_string())
+                .fetch_one(transaction.as_mut())
+                .await?;
+        if item_count != 0 {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        Ok(Some(SqliteQueueEmptyReservation {
+            _transaction: transaction,
+        }))
     }
 
     pub async fn enqueue(

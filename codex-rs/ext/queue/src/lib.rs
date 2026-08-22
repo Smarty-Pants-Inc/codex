@@ -6,6 +6,7 @@ use codex_extension_api::ExtensionRegistryBuilder;
 
 mod service;
 
+pub use service::QueueEnqueueIntent;
 pub use service::QueueServiceError;
 pub use service::QueuedItem;
 pub use service::QueuedItemService;

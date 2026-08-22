@@ -363,6 +363,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn goal_set_and_queue_add_use_thread_exclusive_access() {
+        let goal_set = ClientRequest::ThreadGoalSet {
+            request_id: RequestId::Integer(i64::from(FIRST_REQUEST_VALUE)),
+            params: codex_app_server_protocol::ThreadGoalSetParams {
+                thread_id: "thread-1".to_string(),
+                objective: None,
+                status: None,
+                token_budget: None,
+            },
+        };
+        let queue_add = ClientRequest::ThreadQueueAdd {
+            request_id: RequestId::Integer(i64::from(SECOND_REQUEST_VALUE)),
+            params: codex_app_server_protocol::ThreadQueueAddParams {
+                thread_id: "thread-1".to_string(),
+                input: Vec::new(),
+                client_user_message_id: "client-message".to_string(),
+            },
+        };
+
+        for request in [goal_set, queue_add] {
+            assert_eq!(
+                RequestSerializationQueueKey::from_scope(
+                    ConnectionId(0),
+                    request
+                        .serialization_scope()
+                        .expect("thread write should be serialized"),
+                ),
+                (
+                    RequestSerializationQueueKey::Thread {
+                        thread_id: "thread-1".to_string(),
+                    },
+                    RequestSerializationAccess::Exclusive,
+                )
+            );
+        }
+    }
+
     #[tokio::test]
     async fn different_keys_run_concurrently() {
         let queues = RequestSerializationQueues::default();

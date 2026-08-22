@@ -91,6 +91,25 @@ fn content_items_to_text_joins_non_empty_segments() {
 }
 
 #[test]
+fn generated_compaction_summary_has_fixed_non_authority_notice() {
+    let framed = frame_compacted_summary(&format!("{SUMMARY_PREFIX}\nmodel summary"));
+
+    assert!(framed.starts_with(&format!("{SUMMARY_PREFIX}\n")));
+    assert!(framed.contains(COMPACTED_SUMMARY_DATA_NOTICE));
+    assert!(framed.ends_with("model summary"));
+    assert_eq!(frame_compacted_summary(&framed), framed);
+    let embedded_notice = format!(
+        "{SUMMARY_PREFIX}\nmodel quoted: {COMPACTED_SUMMARY_DATA_NOTICE}\nremaining summary"
+    );
+    assert_eq!(
+        frame_compacted_summary(&embedded_notice),
+        format!(
+            "{SUMMARY_PREFIX}\n{COMPACTED_SUMMARY_DATA_NOTICE}\nmodel quoted: {COMPACTED_SUMMARY_DATA_NOTICE}\nremaining summary"
+        )
+    );
+}
+
+#[test]
 fn content_items_to_text_ignores_image_only_content() {
     let items = vec![ContentItem::InputImage {
         image_url: "file://image.png".to_string(),

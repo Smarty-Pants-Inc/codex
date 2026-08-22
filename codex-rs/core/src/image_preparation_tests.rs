@@ -248,9 +248,9 @@ fn resize_notices_preserve_original_image_positions_and_skip_failed_images() {
         "</image_resize_notice>"
     );
 
-    assert_eq!(items.len(), 5);
+    assert_eq!(items.len(), 4);
     let ResponseItem::Message { role, content, .. } = &items[0] else {
-        panic!("expected message");
+        panic!("expected user message");
     };
     assert_eq!(role, "user");
     let [
@@ -279,34 +279,19 @@ fn resize_notices_preserve_original_image_positions_and_skip_failed_images() {
         ResponseItem::Message {
             id: None,
             role: "developer".to_string(),
-            content: vec![ContentItem::InputText {
-                text: IMAGE_PROCESSING_ERROR_PLACEHOLDER.to_string(),
-            }],
+            content: vec![
+                ContentItem::InputText {
+                    text: IMAGE_PROCESSING_ERROR_PLACEHOLDER.to_string(),
+                },
+                ContentItem::InputText {
+                    text: expected_user_notice.to_string(),
+                },
+            ],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         }
     );
-    assert_eq!(
-        items[2],
-        ResponseItem::Message {
-            id: None,
-            role: "developer".to_string(),
-            content: vec![ContentItem::InputText {
-                text: expected_user_notice.to_string(),
-            }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: Some(
-                InternalChatMessageMetadataPassthrough {
-                    content_item_kinds: Some(vec![ContentItemKind(
-                        "images.resize_notice".to_string()
-                    )]),
-                    ..Default::default()
-                },
-            ),
-        }
-    );
-
-    let ResponseItem::FunctionCallOutput { output, .. } = &items[3] else {
+    let ResponseItem::FunctionCallOutput { output, .. } = &items[2] else {
         panic!("expected function call output");
     };
     let [
@@ -327,7 +312,7 @@ fn resize_notices_preserve_original_image_positions_and_skip_failed_images() {
         (1600, 1600)
     );
     assert_eq!(
-        items[4],
+        items[3],
         ResponseItem::Message {
             id: None,
             role: "developer".to_string(),
@@ -353,7 +338,184 @@ fn resize_notices_preserve_original_image_positions_and_skip_failed_images() {
 }
 
 #[test]
-fn preparation_replaces_only_failed_tool_images_and_preserves_metadata() {
+fn mixed_user_media_notices_preserve_content_source_order() {
+    let (large_image_url, _) = png_data_url(/*width*/ 2048, /*height*/ 2048);
+    let mut items = vec![ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![
+            ContentItem::InputText {
+                text: "before".to_string(),
+            },
+            ContentItem::InputImage {
+                image_url: large_image_url,
+                detail: Some(ImageDetail::High),
+            },
+            ContentItem::InputAudio {
+                audio_url: "data:audio/x-wav;base64,YXVkaW8=".to_string(),
+            },
+            ContentItem::InputAudio {
+                audio_url: "https://example.com/audio.mp3".to_string(),
+            },
+            ContentItem::InputImage {
+                image_url: "data:image/png;base64,%%%".to_string(),
+                detail: Some(ImageDetail::High),
+            },
+            ContentItem::InputText {
+                text: "after".to_string(),
+            },
+        ],
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            turn_id: Some("turn-media".to_string()),
+            ..Default::default()
+        }),
+    }];
+
+    prepare_response_items(
+        &mut items,
+        ImagePreparationMode::DetailBased,
+        ImageResizeNoticeMode::Enabled,
+    );
+
+    assert_eq!(items.len(), 2);
+    let ResponseItem::Message { role, content, .. } = &items[0] else {
+        panic!("expected user message");
+    };
+    assert_eq!(role, "user");
+    let [
+        ContentItem::InputText { text: before },
+        ContentItem::InputImage { image_url, .. },
+        ContentItem::InputAudio { audio_url },
+        ContentItem::InputText { text: after },
+    ] = content.as_slice()
+    else {
+        panic!("expected all valid direct content in one user message");
+    };
+    assert_eq!(before, "before");
+    assert_eq!(decoded_image(image_url).1.dimensions(), (1600, 1600));
+    assert_eq!(audio_url, "data:audio/wav;base64,YXVkaW8=");
+    assert_eq!(after, "after");
+    assert_eq!(items[0].turn_id(), Some("turn-media"));
+    assert_eq!(
+        items[1],
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![
+                ContentItem::InputText {
+                    text: concat!(
+                        "<image_resize_notice>\n",
+                        "Image 1 of 2 in the preceding user message was resized from 2048x2048 to 1600x1600 pixels.\n",
+                        "</image_resize_notice>"
+                    )
+                    .to_string(),
+                },
+                ContentItem::InputText {
+                    text: "audio content omitted because it could not be processed".to_string(),
+                },
+                ContentItem::InputText {
+                    text: IMAGE_PROCESSING_ERROR_PLACEHOLDER.to_string(),
+                },
+            ],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }
+    );
+}
+
+#[test]
+fn all_failed_user_media_preserves_the_user_boundary_and_source_order() {
+    let mut items = vec![ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![
+            ContentItem::InputAudio {
+                audio_url: "data:audio/wav;base64,%%%".to_string(),
+            },
+            ContentItem::InputImage {
+                image_url: "data:image/png;base64,%%%".to_string(),
+                detail: Some(ImageDetail::High),
+            },
+            ContentItem::InputAudio {
+                audio_url: "data:audio/flac;base64,YXVkaW8=".to_string(),
+            },
+        ],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }];
+
+    prepare_response_items(
+        &mut items,
+        ImagePreparationMode::DetailBased,
+        ImageResizeNoticeMode::Enabled,
+    );
+
+    assert_eq!(
+        items,
+        vec![
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: Vec::new(),
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "developer".to_string(),
+                content: vec![
+                    ContentItem::InputText {
+                        text: "audio content omitted because it could not be processed".to_string(),
+                    },
+                    ContentItem::InputText {
+                        text: IMAGE_PROCESSING_ERROR_PLACEHOLDER.to_string(),
+                    },
+                    ContentItem::InputText {
+                        text: "audio content omitted because its format is not supported; use wav, mp3, m4a, webm, or ogg".to_string(),
+                    },
+                ],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+        ]
+    );
+}
+
+#[test]
+fn failed_non_user_audio_remains_in_its_original_message() {
+    let mut items = vec![ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputAudio {
+            audio_url: "https://example.com/audio.mp3".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }];
+
+    prepare_response_items(
+        &mut items,
+        ImagePreparationMode::DetailBased,
+        ImageResizeNoticeMode::Enabled,
+    );
+
+    assert_eq!(
+        items,
+        vec![ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "audio content omitted because it could not be processed".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }]
+    );
+}
+
+#[test]
+fn preparation_replaces_only_failed_tool_media_and_preserves_metadata() {
     let (valid_image_url, _) = png_data_url(/*width*/ 64, /*height*/ 32);
     let expected_valid_image_url = valid_image_url.clone();
     let mut items = vec![ResponseItem::CustomToolCallOutput {
@@ -364,6 +526,9 @@ fn preparation_replaces_only_failed_tool_images_and_preserves_metadata() {
             body: FunctionCallOutputBody::ContentItems(vec![
                 FunctionCallOutputContentItem::InputText {
                     text: "before".to_string(),
+                },
+                FunctionCallOutputContentItem::InputAudio {
+                    audio_url: "https://example.com/audio.mp3".to_string(),
                 },
                 FunctionCallOutputContentItem::InputImage {
                     image_url: "data:image/png;base64,%%%".to_string(),
@@ -403,6 +568,9 @@ fn preparation_replaces_only_failed_tool_images_and_preserves_metadata() {
                 body: FunctionCallOutputBody::ContentItems(vec![
                     FunctionCallOutputContentItem::InputText {
                         text: "before".to_string(),
+                    },
+                    FunctionCallOutputContentItem::InputText {
+                        text: "audio content omitted because it could not be processed".to_string(),
                     },
                     FunctionCallOutputContentItem::InputText {
                         text: IMAGE_PROCESSING_ERROR_PLACEHOLDER.to_string(),

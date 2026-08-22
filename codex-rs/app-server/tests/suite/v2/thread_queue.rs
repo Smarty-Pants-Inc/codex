@@ -859,11 +859,25 @@ async fn idle_dispatches_queued_user_input_before_goal_continuation() -> Result<
             .to_string()
             .contains("queued direct user message")
     );
-    assert!(
-        requests[2].body_json::<Value>()?["input"]
-            .to_string()
-            .contains("continue only after the queued message")
-    );
+    let continuation_request = requests[2].body_json::<Value>()?;
+    let role_contains_objective = |role: &str| {
+        continuation_request["input"]
+            .as_array()
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item["role"] == role
+                        && item["content"].as_array().is_some_and(|content| {
+                            content.iter().any(|part| {
+                                part["text"].as_str().is_some_and(|text| {
+                                    text.contains("continue only after the queued message")
+                                })
+                            })
+                        })
+                })
+            })
+    };
+    assert!(role_contains_objective("developer"));
+    assert!(!role_contains_objective("user"));
     Ok(())
 }
 

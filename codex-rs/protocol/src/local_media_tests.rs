@@ -101,6 +101,22 @@ fn rejects_invalid_local_media_without_changing_user_input() -> Result<()> {
 }
 
 #[test]
+fn rejects_non_file_local_media_without_opening_it() -> Result<()> {
+    let temp_dir = tempdir()?;
+    let path = temp_dir.path().join("directory.mp3");
+    std::fs::create_dir(&path)?;
+    let mut input = UserInput::LocalAudio { path };
+    let original = input.clone();
+
+    let error = snapshot_local_user_input(&mut input)
+        .expect_err("a non-file local media path must be rejected");
+
+    assert_eq!(io::ErrorKind::InvalidInput, error.kind());
+    assert_eq!(original, input);
+    Ok(())
+}
+
+#[test]
 fn rejects_oversized_local_media_without_reading_it() -> Result<()> {
     let temp_dir = tempdir()?;
 

@@ -89,6 +89,12 @@ use codex_app_server_protocol::ThreadMemoryModeSetResponse;
 use codex_app_server_protocol::ThreadMetadataGitInfoUpdateParams;
 use codex_app_server_protocol::ThreadMetadataUpdateParams;
 use codex_app_server_protocol::ThreadMetadataUpdateResponse;
+use codex_app_server_protocol::ThreadQueueAddParams;
+use codex_app_server_protocol::ThreadQueueAddResponse;
+use codex_app_server_protocol::ThreadQueueDeleteParams;
+use codex_app_server_protocol::ThreadQueueDeleteResponse;
+use codex_app_server_protocol::ThreadQueueListParams;
+use codex_app_server_protocol::ThreadQueueListResponse;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadResumeParams;
@@ -1134,6 +1140,71 @@ impl AppServerSession {
                 },
             })
             .await
+    }
+
+    pub(crate) async fn thread_queue_add(
+        &mut self,
+        thread_id: ThreadId,
+        input: Vec<UserInput>,
+        client_user_message_id: String,
+    ) -> Result<ThreadQueueAddResponse> {
+        let request_id = self.next_request_id();
+        self.client
+            .request_typed(ClientRequest::ThreadQueueAdd {
+                request_id,
+                params: ThreadQueueAddParams {
+                    thread_id: thread_id.to_string(),
+                    input,
+                    client_user_message_id,
+                },
+            })
+            .await
+            .wrap_err("thread/queue/add failed in TUI")
+    }
+
+    pub(crate) async fn thread_queue_list(&mut self, thread_id: ThreadId) -> Result<Vec<String>> {
+        let mut cursor = None;
+        let mut queued_submission_ids = Vec::new();
+        loop {
+            let request_id = self.next_request_id();
+            let response: ThreadQueueListResponse = self
+                .client
+                .request_typed(ClientRequest::ThreadQueueList {
+                    request_id,
+                    params: ThreadQueueListParams {
+                        thread_id: thread_id.to_string(),
+                        cursor: cursor.take(),
+                        limit: None,
+                    },
+                })
+                .await
+                .wrap_err("thread/queue/list failed in TUI")?;
+            queued_submission_ids.extend(response.data.into_iter().map(|submission| submission.id));
+            let Some(next_cursor) = response.next_cursor else {
+                return Ok(queued_submission_ids);
+            };
+            cursor = Some(next_cursor);
+        }
+    }
+
+    pub(crate) async fn thread_queue_delete(
+        &mut self,
+        thread_id: ThreadId,
+        queued_submission_id: String,
+    ) -> Result<bool> {
+        let request_id = self.next_request_id();
+        let response: ThreadQueueDeleteResponse = self
+            .client
+            .request_typed(ClientRequest::ThreadQueueDelete {
+                request_id,
+                params: ThreadQueueDeleteParams {
+                    thread_id: thread_id.to_string(),
+                    queued_submission_id,
+                },
+            })
+            .await
+            .wrap_err("thread/queue/delete failed in TUI")?;
+        Ok(response.deleted)
     }
 
     pub(crate) async fn thread_set_name(

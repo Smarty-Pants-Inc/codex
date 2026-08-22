@@ -89,15 +89,24 @@ pub(crate) enum GuardianPromptMode {
     Full,
     Delta { cursor: GuardianTranscriptCursor },
 }
+fn escape_guardian_evidence(text: impl AsRef<str>) -> String {
+    text.as_ref().replace(">>>", "> > >")
+}
 
-/// Builds the guardian user content items from:
+fn escape_guardian_input(mut input: UserInput) -> UserInput {
+    if let UserInput::Text { text, .. } = &mut input {
+        *text = escape_guardian_evidence(text.as_str());
+    }
+    input
+}
+
+/// Builds the guardian's variable review content from:
 /// - a compact transcript for authorization and local context
 /// - the exact action JSON being proposed for approval
 ///
 /// The fixed guardian policy lives in the review session developer message.
-/// Split the variable request into separate user content items so the
-/// Responses request snapshot shows clear boundaries while preserving exact
-/// prompt text through trailing newlines.
+/// Split the variable request into separate content items so the Responses
+/// request snapshot shows clear boundaries while preserving trailing newlines.
 #[cfg(test)]
 pub(crate) async fn build_guardian_prompt_items(
     session: &Session,
@@ -224,14 +233,14 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
                 .to_string(),
         );
         for message in root_authorization {
-            push_text(message.render());
+            push_text(escape_guardian_evidence(message.render()));
         }
         push_text(">>> ROOT CONVERSATION END\n".to_string());
     }
     push_text(headings.transcript_start.to_string());
     for (index, entry) in transcript_entries.into_iter().enumerate() {
         let prefix = if index == 0 { "" } else { "\n" };
-        push_text(format!("{prefix}{entry}\n"));
+        push_text(format!("{prefix}{}\n", escape_guardian_evidence(entry)));
     }
     push_text(headings.transcript_end.to_string());
     push_text(format!(
@@ -243,7 +252,7 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
     }
     if let Some(denied_reads_context) = parent_context.and_then(parent_turn_denied_reads_context) {
         push_text("\n>>> PARENT TURN PERMISSION CONTEXT START\n".to_string());
-        push_text(denied_reads_context);
+        push_text(escape_guardian_evidence(denied_reads_context));
         push_text(">>> PARENT TURN PERMISSION CONTEXT END\n".to_string());
     }
     let mut node_repl_evidence_sequence = reviewed_node_repl_evidence_sequence;
@@ -255,7 +264,12 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
             .and_then(|evidence| evidence.snapshot_since(reviewed_node_repl_evidence_sequence))
     {
         node_repl_evidence_sequence = fragment.sequence;
-        items.extend(fragment.into_inputs(evidence_mode));
+        items.extend(
+            fragment
+                .into_inputs(evidence_mode)
+                .into_iter()
+                .map(escape_guardian_input),
+        );
     }
     let mut push_text = |text: String| {
         items.push(UserInput::Text {
@@ -293,7 +307,7 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
                     TruncationPolicy::Tokens(GUARDIAN_MAX_APPROVAL_REASON_TOKENS),
                 );
                 push_text("Retry reason:\n".to_string());
-                push_text(format!("{reason}\n\n"));
+                push_text(format!("{}\n\n", escape_guardian_evidence(reason)));
             }
             push_text(
                 "Assess the exact planned action below. Use read-only tool checks when local state matters.\n"
@@ -302,7 +316,10 @@ pub(crate) async fn build_guardian_prompt_items_with_parent_turn(
             push_text("Planned action JSON:\n".to_string());
         }
     }
-    push_text(format!("{}\n", planned_action_json.text));
+    push_text(format!(
+        "{}\n",
+        escape_guardian_evidence(planned_action_json.text)
+    ));
     push_text(">>> APPROVAL REQUEST END\n".to_string());
     Ok(GuardianPromptItems {
         items,

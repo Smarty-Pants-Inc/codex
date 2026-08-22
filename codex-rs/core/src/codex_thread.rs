@@ -384,10 +384,11 @@ impl CodexThread {
             turn_id,
             thread_settings,
             trace,
+            idle_turn_source,
         } = request;
         match self
             .io
-            .submit_recover_turn(thread_settings, trace, turn_id)
+            .submit_recover_turn(thread_settings, idle_turn_source, trace, turn_id)
             .await?
         {
             TurnInputSubmission::Started { turn_id } => {
@@ -643,13 +644,13 @@ impl CodexThread {
                 "items must not be empty".to_string(),
             ));
         }
-        if self.session_source.is_non_root_agent()
-            && items
-                .iter()
-                .any(|item| matches!(item, ResponseItem::Message { role, .. } if role == "user"))
+        if items
+            .iter()
+            .any(|item| matches!(item, ResponseItem::Message { role, .. } if role == "user"))
         {
             return Err(CodexErr::InvalidRequest(
-                "user-role response items cannot be injected into non-root threads".to_string(),
+                "user-role response items cannot be injected; submit direct user input through the turn API"
+                    .to_string(),
             ));
         }
 

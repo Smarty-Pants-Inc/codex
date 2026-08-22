@@ -30,6 +30,7 @@ use codex_core::TurnInput;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_queue_extension::QueueEnqueueIntent;
 use codex_queue_extension::QueueServiceError;
 use codex_queue_extension::QueuedItem;
 use codex_queue_extension::QueuedItemService;
@@ -69,17 +70,27 @@ impl ThreadQueueRequestProcessor {
         }
     }
 
+    pub(crate) fn register_enqueue_intent(
+        &self,
+        raw_thread_id: &str,
+    ) -> Option<QueueEnqueueIntent> {
+        let thread_id = ThreadId::from_string(raw_thread_id).ok()?;
+        Some(self.service.as_ref()?.register_enqueue_intent(thread_id))
+    }
+
     pub(crate) async fn add(
         &self,
         params: ThreadQueueAddParams,
+        intent: Option<QueueEnqueueIntent>,
     ) -> Result<ThreadQueueAddResponse, JSONRPCErrorError> {
         validate_user_input_image_urls(&params.input)?;
         let (thread_id, loaded_thread, source) = self.require_thread(&params.thread_id).await?;
         ensure_direct_input_allowed(loaded_thread.as_deref(), &source)?;
-        let queued_item = self
-            .service()?
-            .enqueue(
-                thread_id,
+        let service = self.service()?;
+        let intent = intent.unwrap_or_else(|| service.register_enqueue_intent(thread_id));
+        let queued_item = service
+            .enqueue_with_intent(
+                intent,
                 submission_into_turn_input(params.input, Some(params.client_user_message_id)),
             )
             .await

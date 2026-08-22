@@ -4301,7 +4301,14 @@ await tools.exec_command({ cmd: "true", sandbox_permissions: "require_escalated"
         })
         .expect("the shell command should trigger Guardian review");
     assert!(guardian_request.message_input_image_urls("user").is_empty());
-    let guardian_text = guardian_request.message_input_texts("user").concat();
+    assert!(guardian_request.message_input_texts("user").is_empty());
+    assert!(
+        guardian_request
+            .message_input_image_urls("developer")
+            .is_empty()
+    );
+    let guardian_text = guardian_request.message_input_texts("developer").concat();
+    assert!(!guardian_text.is_empty());
     let parent_input = serde_json::to_string(&requests.last().unwrap().input())?;
     for marker in [
         "guardian-visible-before-image",

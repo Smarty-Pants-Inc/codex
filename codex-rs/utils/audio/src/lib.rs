@@ -86,6 +86,14 @@ pub fn prepare_response_items(items: &mut [ResponseItem]) {
     }
 }
 
+/// Canonicalizes one audio input and returns its omission notice on failure.
+pub fn prepare_audio_item(audio_url: &mut String) -> Option<String> {
+    prepare_audio(audio_url).err().map(|error| {
+        warn!(%error, "failed to prepare audio");
+        error.placeholder().to_string()
+    })
+}
+
 fn prepare_message_content(items: &mut [ContentItem]) {
     for item in items {
         if let ContentItem::InputAudio { audio_url } = item

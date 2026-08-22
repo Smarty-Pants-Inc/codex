@@ -62,6 +62,85 @@ async fn turn_start_failure_is_shown_without_exiting() -> Result<()> {
 }
 
 #[tokio::test]
+async fn queued_follow_up_admission_failure_keeps_prompt_queued() -> Result<()> {
+    let (mut app, mut app_event_rx, mut op_rx) = make_test_app_with_channels().await;
+    let config = app.config.clone();
+    let model = app.chat_widget.current_model().to_string();
+    app.chat_widget =
+        crate::chatwidget::ChatWidget::new_with_app_event(crate::chatwidget::ChatWidgetInit {
+            config,
+            frame_requester: crate::tui::FrameRequester::test_dummy(),
+            app_event_tx: app.app_event_tx.clone(),
+            workspace_command_runner: None,
+            initial_user_message: None,
+            enhanced_keys_supported: false,
+            has_chatgpt_account: false,
+            has_codex_backend_auth: false,
+            model_catalog: app.model_catalog.clone(),
+            feedback: codex_feedback::CodexFeedback::new(),
+            is_first_run: false,
+            status_account_display: None,
+            runtime_model_provider_base_url: None,
+            initial_plan_type: None,
+            model: Some(model),
+            startup_tooltip_override: None,
+            status_line_invalid_items_warned: app.status_line_invalid_items_warned.clone(),
+            terminal_title_invalid_items_warned: app.terminal_title_invalid_items_warned.clone(),
+            session_telemetry: app.session_telemetry.clone(),
+        });
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    let thread_id = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174001")?;
+    app.active_thread_id = Some(thread_id);
+    app.chat_widget
+        .handle_thread_session(test_thread_session(thread_id, app.config.cwd.to_path_buf()));
+    while app_event_rx.try_recv().is_ok() {}
+    app.chat_widget.handle_server_notification(
+        turn_started_notification(thread_id, "turn-1"),
+        /*replay_kind*/ None,
+    );
+    app.chat_widget
+        .restore_user_message_to_composer(UserMessage::from("keep this follow-up"));
+    app.chat_widget
+        .handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let queue_event = loop {
+        match app_event_rx
+            .try_recv()
+            .expect("expected queued follow-up event")
+        {
+            event @ AppEvent::QueueFollowUpUserMessage { .. } => break event,
+            _ => {}
+        }
+    };
+
+    let control = app
+        .handle_event(&mut tui, &mut app_server, queue_event)
+        .await?;
+
+    assert!(matches!(control, AppRunControl::Continue));
+    assert_eq!(
+        app.chat_widget.queued_user_message_texts(),
+        vec!["keep this follow-up"]
+    );
+    while let Ok(op) = op_rx.try_recv() {
+        assert!(!matches!(op, Op::UserTurn { .. }));
+    }
+    let error_cell = std::iter::from_fn(|| app_event_rx.try_recv().ok())
+        .find_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => Some(cell),
+            _ => None,
+        })
+        .expect("queue admission failure should be added to history");
+    let error = lines_to_single_string(&error_cell.display_lines(/*width*/ 200));
+    insta::assert_snapshot!(error, @r"
+    ■ Failed to queue follow-up: thread/queue/add failed in TUI: thread/queue/add failed: failed to read thread: invalid thread-store request: no rollout found for thread id 123e4567-e89b-12d3-a456-426614174001 (code -32603). The message remains queued locally.
+    ");
+
+    app_server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn misalignment_policy_blocks_queued_turns_and_goal_resumption() -> Result<()> {
     let (mut app, _app_event_rx, mut op_rx) = make_test_app_with_channels().await;
     let mut tui = crate::tui::test_support::make_test_tui()?;

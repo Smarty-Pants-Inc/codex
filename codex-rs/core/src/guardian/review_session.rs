@@ -1248,9 +1248,12 @@ async fn run_review_on_session(
 
 async fn append_guardian_followup_reminder(review_session: &GuardianReviewSession) {
     let reminder: ResponseItem = ContextualUserFragment::into(GuardianFollowupReviewReminder);
+    // `TurnComplete` is emitted just before the active-turn slot is cleared. Record the reminder
+    // directly so a fast follow-up cannot queue it onto the completed turn and snapshot too early.
+    let turn_context = review_session.session.new_default_turn().await;
     review_session
         .session
-        .inject_no_new_turn(vec![reminder], /*current_turn_context*/ None)
+        .record_conversation_items(turn_context.as_ref(), &[reminder])
         .await;
 }
 

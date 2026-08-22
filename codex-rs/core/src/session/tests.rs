@@ -2435,6 +2435,100 @@ async fn prepares_image_failures_before_history_insertion() {
 }
 
 #[tokio::test]
+async fn local_media_failures_become_developer_messages() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let items = session.response_items_from_user_input(vec![
+        UserInput::LocalImage {
+            path: PathBuf::from("missing-image.png"),
+            detail: None,
+        },
+        UserInput::Text {
+            text: "direct user text".to_string(),
+            text_elements: Vec::new(),
+        },
+        UserInput::LocalAudio {
+            path: PathBuf::from("missing-audio.wav"),
+        },
+    ]);
+
+    let [
+        ResponseItem::Message {
+            role: user_role,
+            content: user_content,
+            ..
+        },
+        ResponseItem::Message {
+            role: notice_role,
+            content: notice_content,
+            ..
+        },
+    ] = items.as_slice()
+    else {
+        panic!("expected one direct user message followed by one generated notice message");
+    };
+    assert_eq!(user_role, "user");
+    assert_eq!(
+        user_content,
+        &[ContentItem::InputText {
+            text: "direct user text".to_string(),
+        }]
+    );
+    assert_eq!(notice_role, "developer");
+    assert_eq!(notice_content.len(), 2);
+    assert!(notice_content.iter().all(|item| matches!(
+        item,
+        ContentItem::InputText { text } if text.starts_with("Codex could not read the local")
+    )));
+}
+
+#[tokio::test]
+async fn local_media_provenance_preserves_attachment_numbering() {
+    let media = tempfile::tempdir().expect("create media directory");
+    let first_image = media.path().join("first.png");
+    let second_image = media.path().join("second.png");
+    let first_audio = media.path().join("first.wav");
+    let second_audio = media.path().join("second.wav");
+    for path in [&first_image, &second_image, &first_audio, &second_audio] {
+        std::fs::write(path, b"media").expect("write media fixture");
+    }
+
+    let (session, _turn_context) = make_session_and_context().await;
+    let items = session.response_items_from_user_input(vec![
+        UserInput::LocalImage {
+            path: first_image,
+            detail: None,
+        },
+        UserInput::LocalImage {
+            path: second_image,
+            detail: None,
+        },
+        UserInput::LocalAudio { path: first_audio },
+        UserInput::LocalAudio { path: second_audio },
+    ]);
+
+    let [ResponseItem::Message { role, content, .. }] = items.as_slice() else {
+        panic!("expected one direct user message");
+    };
+    assert_eq!(role, "user");
+    let labels = content
+        .iter()
+        .filter_map(|item| match item {
+            ContentItem::InputText { text }
+                if text.starts_with("<image name=") || text.starts_with("<audio name=") =>
+            {
+                Some(text.as_str())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(labels.len(), 4);
+    assert!(labels[0].contains("[Image #1]"));
+    assert!(labels[1].contains("[Image #2]"));
+    assert!(labels[2].contains("[Audio #1]"));
+    assert!(labels[3].contains("[Audio #2]"));
+}
+
+#[tokio::test]
 async fn prepares_resumed_history_before_installing_it() {
     let (session, _turn_context) = make_session_and_context().await;
     let resumed_item = ResponseItem::Message {
@@ -3875,7 +3969,9 @@ async fn thread_rollback_restores_cleared_reference_context_item_after_compactio
         .expect("thread settings should have turn_id");
     let compact_turn_id = "compact-turn".to_string();
     let rolled_back_turn_id = "rolled-back-turn".to_string();
-    let mut compacted_summary = user_message("summary after compaction");
+    let mut compacted_summary = user_message(&compact::frame_compacted_summary(
+        "summary after compaction",
+    ));
     if let ResponseItem::Message { role, .. } = &mut compacted_summary {
         *role = "developer".to_string();
     }
@@ -11265,11 +11361,12 @@ async fn sample_rollout(
     rollout_items.push(RolloutItem::ResponseItem(assistant1.clone().into()));
 
     let summary1 = "summary one";
+    let framed_summary1 = compact::frame_compacted_summary(summary1);
     let snapshot1 = live_history
         .clone()
         .for_prompt(&reconstruction_turn.model_info.input_modalities);
     let user_messages1 = collect_user_messages(&snapshot1);
-    let rebuilt1 = compact::build_compacted_history(Vec::new(), &user_messages1, summary1);
+    let rebuilt1 = compact::build_compacted_history(Vec::new(), &user_messages1, &framed_summary1);
     live_history.replace_annotated(rebuilt1);
     let (window_number, window_ids) = session.advance_auto_compact_window().await;
     rollout_items.push(RolloutItem::Compacted(CompactedItem {
@@ -11313,11 +11410,12 @@ async fn sample_rollout(
     rollout_items.push(RolloutItem::ResponseItem(assistant2.clone().into()));
 
     let summary2 = "summary two";
+    let framed_summary2 = compact::frame_compacted_summary(summary2);
     let snapshot2 = live_history
         .clone()
         .for_prompt(&reconstruction_turn.model_info.input_modalities);
     let user_messages2 = collect_user_messages(&snapshot2);
-    let rebuilt2 = compact::build_compacted_history(Vec::new(), &user_messages2, summary2);
+    let rebuilt2 = compact::build_compacted_history(Vec::new(), &user_messages2, &framed_summary2);
     live_history.replace_annotated(rebuilt2);
     let (window_number, window_ids) = session.advance_auto_compact_window().await;
     rollout_items.push(RolloutItem::Compacted(CompactedItem {

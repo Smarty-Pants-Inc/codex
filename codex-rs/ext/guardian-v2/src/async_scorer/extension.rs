@@ -213,6 +213,10 @@ fn truncate_action_value(value: &mut serde_json::Value, max_tokens: usize) {
         serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
     }
 }
+fn escape_guardian_evidence(text: impl AsRef<str>) -> String {
+    text.as_ref().replace(">>>", "> > >")
+}
+
 /// Explains why Guardian v2 requires synchronous approval review.
 #[derive(Debug, Eq, PartialEq)]
 pub enum StrictReviewReason {
@@ -637,12 +641,13 @@ impl GuardianV2Extension {
                 classification_input.extend(
                     root_conversation
                         .into_iter()
-                        .map(GuardianRootMessage::render),
+                        .map(GuardianRootMessage::render)
+                        .map(escape_guardian_evidence),
                 );
                 classification_input.push(">>> ROOT CONVERSATION END\n".to_owned());
             }
             classification_input.push(">>> TRANSCRIPT START\n".to_owned());
-            classification_input.extend(transcript);
+            classification_input.extend(transcript.into_iter().map(escape_guardian_evidence));
             classification_input.push(">>> TRANSCRIPT END\n\n".to_owned());
             let trusted_review_evidence = sync_reviews
                 .iter()
@@ -651,12 +656,13 @@ impl GuardianV2Extension {
                         && review.root_authorization_version == root_authorization_version
                 })
                 .map(ContextualUserFragment::render)
+                .map(escape_guardian_evidence)
                 .collect();
             classification_input.extend([
                 "The Codex agent has requested the following action:\n".to_owned(),
                 ">>> APPROVAL REQUEST START\n".to_owned(),
                 "Planned action JSON:\n".to_owned(),
-                format!("{planned_action}\n"),
+                format!("{}\n", escape_guardian_evidence(planned_action)),
                 ">>> APPROVAL REQUEST END\n".to_owned(),
             ]);
             let mut classification_finished_at = None;

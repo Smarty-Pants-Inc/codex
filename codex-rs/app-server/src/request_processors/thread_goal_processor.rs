@@ -1,6 +1,4 @@
 use super::*;
-use codex_core::StartIfIdleSubmission;
-use codex_goal_extension::GoalAutoContinueCapability;
 use codex_goal_extension::GoalObjectiveUpdate;
 use codex_goal_extension::GoalService;
 use codex_goal_extension::GoalServiceError;
@@ -8,7 +6,6 @@ use codex_goal_extension::GoalSetRequest;
 use codex_goal_extension::GoalTokenBudgetUpdate;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
 use codex_protocol::protocol::ThreadSettingsSnapshot;
-use codex_queue_extension::QueuedItemService;
 
 #[derive(Clone)]
 pub(crate) struct ThreadGoalRequestProcessor {
@@ -18,8 +15,6 @@ pub(crate) struct ThreadGoalRequestProcessor {
     thread_state_manager: ThreadStateManager,
     state_db: Option<StateDbHandle>,
     goal_service: Arc<GoalService>,
-    goal_auto_continue_capability: GoalAutoContinueCapability,
-    queue_service: Option<Arc<QueuedItemService>>,
 }
 
 impl ThreadGoalRequestProcessor {
@@ -30,8 +25,6 @@ impl ThreadGoalRequestProcessor {
         thread_state_manager: ThreadStateManager,
         state_db: Option<StateDbHandle>,
         goal_service: Arc<GoalService>,
-        goal_auto_continue_capability: GoalAutoContinueCapability,
-        queue_service: Option<Arc<QueuedItemService>>,
     ) -> Self {
         Self {
             thread_manager,
@@ -40,8 +33,6 @@ impl ThreadGoalRequestProcessor {
             thread_state_manager,
             state_db,
             goal_service,
-            goal_auto_continue_capability,
-            queue_service,
         }
     }
 
@@ -164,8 +155,6 @@ impl ThreadGoalRequestProcessor {
             .await
             .map_err(goal_service_error)?;
         let goal = ThreadGoal::from(outcome.goal.clone());
-        let should_start_queued_user_input = goal.status == ThreadGoalStatus::Active
-            && self.goal_auto_continue_capability == GoalAutoContinueCapability::Interactive;
 
         let persist_result = match self.thread_manager.get_thread(thread_id).await {
             Ok(thread) => match thread.rollout_path() {
@@ -214,76 +203,8 @@ impl ThreadGoalRequestProcessor {
             .await;
         self.emit_thread_goal_updated_ordered(thread_id, goal, listener_command_tx)
             .await;
-        if should_start_queued_user_input
-            && let Ok(thread) = self.thread_manager.get_thread(thread_id).await
-            && !thread
-                .config_snapshot()
-                .await
-                .session_source
-                .is_non_root_agent()
-            && let Some(queue_service) = self.queue_service.as_ref()
-        {
-            match queue_service
-                .run_if_empty(
-                    thread_id,
-                    Box::pin(outcome.apply_runtime_effects(&self.goal_service)),
-                )
-                .await
-            {
-                Ok(Some(())) => {}
-                Ok(None) => {
-                    if self
-                        .start_queued_user_input_if_present(thread_id, thread.as_ref())
-                        .await
-                    {
-                        outcome.apply_runtime_effects(&self.goal_service).await;
-                    }
-                }
-                Err(err) => {
-                    warn!(%thread_id, %err, "failed to check queued user input before goal continuation");
-                }
-            }
-        } else {
-            outcome.apply_runtime_effects(&self.goal_service).await;
-        }
+        outcome.apply_runtime_effects(&self.goal_service).await;
         Ok(())
-    }
-
-    async fn start_queued_user_input_if_present(
-        &self,
-        thread_id: ThreadId,
-        thread: &CodexThread,
-    ) -> bool {
-        let Some(queue_service) = self.queue_service.as_ref() else {
-            return true;
-        };
-        let queued = match queue_service
-            .list_page(thread_id, /*offset*/ 0, /*limit*/ 1)
-            .await
-        {
-            Ok(queued) => queued,
-            Err(err) => {
-                warn!(%thread_id, %err, "failed to check queued user input before goal continuation");
-                return false;
-            }
-        };
-        if queued.is_empty() {
-            return true;
-        }
-        match queue_service
-            .start(thread, /*queued_item_id*/ None, /*trace*/ None)
-            .await
-        {
-            Ok(StartIfIdleSubmission::Started { .. }) => true,
-            Ok(StartIfIdleSubmission::NotSubmitted { reason }) => {
-                warn!(%thread_id, ?reason, "queued user input could not start before goal continuation");
-                false
-            }
-            Err(err) => {
-                warn!(%thread_id, %err, "failed to start queued user input before goal continuation");
-                false
-            }
-        }
     }
 
     async fn thread_goal_get_inner(
