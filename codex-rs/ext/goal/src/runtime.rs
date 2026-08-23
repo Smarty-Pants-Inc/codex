@@ -7,7 +7,6 @@ use codex_core::NotSubmittedReason;
 use codex_core::StartIfIdleSubmission;
 
 use codex_core::ThreadManager;
-use codex_core::TurnInput;
 use codex_core::TurnInputRequest;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ResponseItem;
@@ -21,7 +20,7 @@ use crate::analytics::GoalEventAttribution;
 use crate::events::GoalEventEmitter;
 use crate::extension::GoalAutoContinueCapability;
 use crate::metrics::GoalMetrics;
-use crate::steering::continuation_steering_item;
+use crate::steering::continuation_developer_input;
 use crate::steering::objective_updated_steering_item;
 use crate::tool::protocol_goal_from_state;
 use codex_queue_extension::QueuedItemService;
@@ -423,8 +422,8 @@ impl GoalRuntimeHandle {
             self.inner.accounting_state.clear_active_goal();
             return Ok(());
         }
-        let item = continuation_steering_item(&protocol_goal_from_state(goal));
-        let request = TurnInputRequest::new(TurnInput::ResponseItem(item))
+        let input = continuation_developer_input(&protocol_goal_from_state(goal));
+        let request = TurnInputRequest::developer_input(input)
             .with_idle_turn_source(IdleTurnSource::GoalContinuation);
         let submission = match &self.inner.queue_service {
             Some(queue_service) => queue_service

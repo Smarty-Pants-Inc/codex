@@ -4,7 +4,24 @@ use super::turn_context::TurnContext;
 use codex_features::Feature;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
+use codex_protocol::error::CodexErr;
+use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
+
+pub(crate) const USER_ROLE_RESPONSE_ITEM_ERROR: &str =
+    "user-role response items cannot be injected; submit direct user input through the turn API";
+
+pub(crate) fn validate_live_response_items(items: &[ResponseItem]) -> CodexResult<()> {
+    if items
+        .iter()
+        .any(|item| matches!(item, ResponseItem::Message { role, .. } if role == "user"))
+    {
+        return Err(CodexErr::InvalidRequest(
+            USER_ROLE_RESPONSE_ITEM_ERROR.to_string(),
+        ));
+    }
+    Ok(())
+}
 
 impl Session {
     /// Returns the input if there is no active turn to inject into.
@@ -16,6 +33,9 @@ impl Session {
         &self,
         input: Vec<ResponseItem>,
     ) -> Result<(), Vec<ResponseItem>> {
+        if validate_live_response_items(&input).is_err() {
+            return Err(input);
+        }
         let mut active = self.active_turn.lock().await;
         match active.as_mut() {
             Some(active_turn) => {
@@ -120,6 +140,9 @@ impl Session {
         items: Vec<ResponseItem>,
         current_turn_context: Option<&TurnContext>,
     ) {
+        if validate_live_response_items(&items).is_err() {
+            return;
+        }
         let Err(items) = self.inject_if_running(items).await else {
             return;
         };

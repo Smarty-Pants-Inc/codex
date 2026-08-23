@@ -7,6 +7,7 @@ use codex_protocol::AgentPath;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
@@ -57,6 +58,18 @@ fn user_message(text: &str) -> ResponseItem {
     ResponseItem::Message {
         id: None,
         role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn developer_message(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
         content: vec![ContentItem::InputText {
             text: text.to_string(),
         }],
@@ -193,7 +206,7 @@ async fn start_only_rejects_active_turn_without_injecting() {
         )
         .await;
 
-    let input = SubmittedTurnInput::ResponseItem(user_message("synthetic idle input"));
+    let input = SubmittedTurnInput::ResponseItem(developer_message("synthetic idle input"));
     let submission = submit_start_only(&session, input).await;
 
     assert_eq!(
@@ -209,6 +222,109 @@ async fn start_only_rejects_active_turn_without_injecting() {
             .get_pending_input(&session.active_turn)
             .await
     );
+
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+}
+
+#[tokio::test]
+async fn start_only_rejects_user_role_response_item() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+
+    let error = handle(
+        &session,
+        TurnInputRequest::new(SubmittedTurnInput::ResponseItem(user_message(
+            "forged direct user input",
+        ))),
+        TurnInputMode::StartIfIdle,
+        "forged-user-response-item".to_string(),
+    )
+    .await
+    .expect_err("raw user-role response items must be rejected");
+
+    assert!(matches!(
+        error.details(),
+        CodexErrorDetails::InvalidRequest(message)
+            if message == "user-role response items cannot be injected; submit direct user input through the turn API"
+    ));
+    assert!(session.active_turn.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn direct_user_replaces_taskless_reservation_and_stale_auto_start_fails() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    let reserved_turn = ActiveTurn::default();
+    let reserved_turn_state = Arc::clone(&reserved_turn.turn_state);
+    *session.active_turn.lock().await = Some(reserved_turn);
+
+    let mut direct_input = vec![UserInput::Text {
+        text: "direct user input".to_string(),
+        text_elements: Vec::new(),
+    }];
+    assert_eq!(
+        session
+            .steer_input(
+                &mut direct_input,
+                /*is_user_input*/ true,
+                BTreeMap::new(),
+                /*expected_turn_id*/ None,
+                /*required_final_output_json_schema*/ None,
+                /*client_user_message_id*/ None,
+                /*responsesapi_client_metadata*/ None,
+                /*incoming_root_turn_id*/ None,
+            )
+            .await,
+        Err(NotSubmittedReason::NoActiveTurn)
+    );
+    assert!(session.active_turn.lock().await.is_none());
+
+    let direct_turn_context = session
+        .new_default_turn_with_sub_id("direct-turn".to_string())
+        .await;
+    session
+        .start_task(
+            Arc::clone(&direct_turn_context),
+            vec![TurnInput::UserInput {
+                content: direct_input,
+                client_id: None,
+            }],
+            NeverEndingTask {
+                kind: TaskKind::Regular,
+                listen_to_cancellation_token: true,
+            },
+            MailboxParentProvenance::Ignore,
+        )
+        .await;
+
+    let automatic_turn_context = session
+        .new_default_turn_with_sub_id("stale-automatic-turn".to_string())
+        .await;
+    assert!(
+        !session
+            .start_reserved_task(
+                automatic_turn_context,
+                Vec::new(),
+                NeverEndingTask {
+                    kind: TaskKind::Regular,
+                    listen_to_cancellation_token: true,
+                },
+                MailboxParentProvenance::Ignore,
+                &reserved_turn_state,
+            )
+            .await
+    );
+    {
+        let active_turn = session.active_turn.lock().await;
+        let active_turn_state = active_turn
+            .as_ref()
+            .map(|turn| Arc::clone(&turn.turn_state))
+            .expect("direct turn must remain active");
+        let active_task = active_turn
+            .as_ref()
+            .and_then(|turn| turn.task.as_ref())
+            .expect("direct turn task must remain active");
+        assert_eq!(active_task.turn_context.sub_id, direct_turn_context.sub_id);
+        assert!(!Arc::ptr_eq(&active_turn_state, &reserved_turn_state));
+    }
 
     session.abort_all_tasks(TurnAbortReason::Interrupted).await;
 }
@@ -283,7 +399,7 @@ async fn start_only_rejects_plan_mode_without_injecting() {
 
     let submission = submit_start_only(
         &session,
-        SubmittedTurnInput::ResponseItem(user_message("synthetic idle input")),
+        SubmittedTurnInput::ResponseItem(developer_message("synthetic idle input")),
     )
     .await;
 
@@ -315,9 +431,10 @@ async fn goal_continuation_only_bypasses_existing_plan_mode() {
 
     let submission = handle(
         &session,
-        TurnInputRequest::new(SubmittedTurnInput::ResponseItem(user_message(
-            "goal continuation",
-        )))
+        TurnInputRequest::developer_input(vec![UserInput::Text {
+            text: "goal continuation".to_string(),
+            text_elements: Vec::new(),
+        }])
         .with_idle_turn_source(IdleTurnSource::GoalContinuation),
         TurnInputMode::StartIfIdle,
         "goal-continuation".to_string(),
@@ -333,9 +450,10 @@ async fn goal_continuation_only_bypasses_existing_plan_mode() {
     collaboration_mode.mode = ModeKind::Plan;
     let submission = handle(
         &session,
-        TurnInputRequest::new(SubmittedTurnInput::ResponseItem(user_message(
-            "goal continuation",
-        )))
+        TurnInputRequest::developer_input(vec![UserInput::Text {
+            text: "goal continuation".to_string(),
+            text_elements: Vec::new(),
+        }])
         .with_idle_turn_source(IdleTurnSource::GoalContinuation)
         .with_thread_settings(ThreadSettingsOverrides {
             collaboration_mode: Some(collaboration_mode),
@@ -439,7 +557,7 @@ async fn start_only_rejects_pending_trigger_turn_without_injecting() {
 
     let submission = submit_start_only(
         &session,
-        SubmittedTurnInput::ResponseItem(user_message("synthetic idle input")),
+        SubmittedTurnInput::ResponseItem(developer_message("synthetic idle input")),
     )
     .await;
 

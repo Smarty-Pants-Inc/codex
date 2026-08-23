@@ -3,6 +3,7 @@ use codex_core::context::InternalContextSource;
 use codex_core::context::InternalModelContextFragment;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ThreadGoal;
+use codex_protocol::user_input::UserInput;
 use codex_utils_template::Template;
 use std::sync::LazyLock;
 
@@ -42,8 +43,11 @@ pub(crate) fn objective_updated_steering_item(goal: &ThreadGoal) -> ResponseItem
     goal_context_input_item(objective_updated_prompt(goal))
 }
 
-pub(crate) fn continuation_steering_item(goal: &ThreadGoal) -> ResponseItem {
-    goal_context_input_item(continuation_prompt(goal))
+pub(crate) fn continuation_developer_input(goal: &ThreadGoal) -> Vec<UserInput> {
+    vec![UserInput::Text {
+        text: continuation_prompt(goal),
+        text_elements: Vec::new(),
+    }]
 }
 
 fn goal_context_input_item(prompt: String) -> ResponseItem {

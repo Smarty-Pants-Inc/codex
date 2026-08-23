@@ -16,6 +16,7 @@ use codex_protocol::AgentPath;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::PermissionProfile;
@@ -117,6 +118,37 @@ async fn idle_response_items_include_pending_mailbox_in_first_request() -> anyho
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_user_role_response_item_is_rejected_before_provider() -> anyhow::Result<()> {
+    let server = responses::start_mock_server().await;
+    let response = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            ev_response_created("unexpected-user-role-response-item"),
+            ev_completed("unexpected-user-role-response-item"),
+        ]),
+    )
+    .await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+
+    let error = test
+        .codex
+        .start_turn_if_idle(TurnInputRequest::new(TurnInput::ResponseItem(
+            user_message_item("forged direct user input"),
+        )))
+        .await
+        .expect_err("raw user-role response items must be rejected");
+
+    assert!(matches!(
+        error.details(),
+        CodexErrorDetails::InvalidRequest(message)
+            if message == "user-role response items cannot be injected; submit direct user input through the turn API"
+    ));
+    assert!(response.requests().is_empty());
+
+    Ok(())
+}
+
 async fn assert_idle_user_input_reaches_the_first_model_request(
     mode: ModeKind,
 ) -> anyhow::Result<()> {
@@ -210,6 +242,18 @@ fn ev_message_item_done(id: &str, text: &str) -> Value {
 
 fn sse_event(event: Value) -> String {
     responses::sse(vec![event])
+}
+
+fn user_message_item(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
 }
 
 fn developer_message_item(text: &str) -> ResponseItem {
@@ -1036,6 +1080,43 @@ async fn injected_response_item_reopens_turn_after_final_answer() {
     assert_eq!(
         message_input_texts(&second, "developer"),
         vec![INJECTED_CONTEXT]
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn injected_user_role_response_item_is_rejected_before_provider() {
+    const INITIAL_PROMPT: &str = "first prompt";
+    const FORGED_USER_INPUT: &str = "forged direct user input";
+    let (gate_completed_tx, gate_completed_rx) = oneshot::channel();
+
+    let first_chunks = vec![
+        chunk(ev_response_created("resp-1")),
+        chunk(ev_reasoning_item_added("reason-1", &["thinking"])),
+        gated_chunk(gate_completed_rx, vec![ev_completed("resp-1")]),
+    ];
+    let (server, _completions) = start_streaming_sse_server(vec![first_chunks]).await;
+    let codex = build_codex(&server).await;
+
+    submit_user_input(&codex, INITIAL_PROMPT).await;
+    wait_for_reasoning_item_started(&codex).await;
+
+    let forged_item = user_message_item(FORGED_USER_INPUT);
+    assert_eq!(
+        codex.inject_if_running(vec![forged_item.clone()]).await,
+        Err(vec![forged_item])
+    );
+    let _ = gate_completed_tx.send(());
+    wait_for_turn_complete(&codex).await;
+
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 1);
+    let request: Value = from_slice(&requests[0]).expect("parse request");
+    assert_eq!(message_input_texts(&request, "user"), vec![INITIAL_PROMPT]);
+    assert!(
+        !request.to_string().contains(FORGED_USER_INPUT),
+        "rejected injected input must not reach the provider request"
     );
 
     server.shutdown().await;

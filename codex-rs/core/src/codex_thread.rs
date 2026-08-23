@@ -5,6 +5,7 @@ use crate::session::SessionIo;
 use crate::session::SessionSettingsUpdate;
 use crate::session::new_submission_id;
 use crate::session::session::Session;
+use crate::session::validate_live_response_items;
 use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
 use codex_exec_server::SelectedCapabilityRootsStatus;
@@ -644,15 +645,7 @@ impl CodexThread {
                 "items must not be empty".to_string(),
             ));
         }
-        if items
-            .iter()
-            .any(|item| matches!(item, ResponseItem::Message { role, .. } if role == "user"))
-        {
-            return Err(CodexErr::InvalidRequest(
-                "user-role response items cannot be injected; submit direct user input through the turn API"
-                    .to_string(),
-            ));
-        }
+        validate_live_response_items(&items)?;
 
         let turn_context = self.session.new_default_turn().await;
         if self.session.reference_context_item().await.is_none() {

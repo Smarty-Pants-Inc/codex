@@ -9,6 +9,7 @@
 //! options only apply on Started.
 
 use super::TurnInput;
+use super::inject::validate_live_response_items;
 use super::session::Session;
 use super::session::SessionSettingsUpdate;
 use super::thread_settings;
@@ -268,16 +269,20 @@ async fn start_if_idle(
         ..
     } = request;
     let has_user_input = has_nonempty_user_input(&input);
+    if let SubmittedTurnInput::ResponseItem(item) = &input {
+        validate_live_response_items(std::slice::from_ref(item))?;
+    }
     let has_developer_input =
         matches!(&input, SubmittedTurnInput::DeveloperInput { content } if !content.is_empty());
-    let is_automatic_idle_work = !has_user_input && !has_developer_input && !is_recovery;
     let can_start_root_turn = start.parent_turn_id.is_none() && start.root_turn_id.is_none();
+    let is_automatic_idle_work = (!has_user_input && !has_developer_input && !is_recovery)
+        || (has_developer_input && idle_turn_source == IdleTurnSource::GoalContinuation);
     if session.input_queue.has_trigger_turn_mailbox_items().await {
         return Ok(TurnInputSubmission::NotSubmitted {
             reason: NotSubmittedReason::PendingTriggerTurn,
         });
     }
-    // Empty non-recovery starts are automatic wakeups, not explicit user requests.
+    // Empty non-recovery starts and tagged generated goal continuations are automatic wakeups.
     // Only an explicit interactive goal continuation may continue an existing Plan session.
     if is_automatic_idle_work
         && idle_turn_source != IdleTurnSource::GoalContinuation
@@ -290,10 +295,16 @@ async fn start_if_idle(
 
     let turn_state = {
         let mut active_turn = session.active_turn.lock().await;
-        if active_turn.is_some() {
+        if active_turn
+            .as_ref()
+            .is_some_and(|active_turn| active_turn.task.is_some())
+        {
             return Ok(TurnInputSubmission::NotSubmitted {
                 reason: NotSubmittedReason::NotIdle,
             });
+        }
+        if has_user_input {
+            *active_turn = None;
         }
 
         let mut reserved_turn_state = None;
@@ -317,7 +328,12 @@ async fn start_if_idle(
                 reason: NotSubmittedReason::PendingTriggerTurn,
             });
         }
-        reserved_turn_state.expect("admitted idle work must reserve a turn")
+        let Some(reserved_turn_state) = reserved_turn_state else {
+            return Ok(TurnInputSubmission::NotSubmitted {
+                reason: NotSubmittedReason::PendingTriggerTurn,
+            });
+        };
+        reserved_turn_state
     };
 
     if session.input_queue.has_trigger_turn_mailbox_items().await {
@@ -396,14 +412,20 @@ async fn start_if_idle(
             )
             .await;
     }
-    session
-        .start_task(
+    if !session
+        .start_reserved_task(
             turn_context,
             task_input,
             RegularTask::new(),
             MailboxParentProvenance::Ignore,
+            &turn_state,
         )
-        .await;
+        .await
+    {
+        return Ok(TurnInputSubmission::NotSubmitted {
+            reason: NotSubmittedReason::NotIdle,
+        });
+    }
     Ok(TurnInputSubmission::Started {
         turn_id: submission_id,
     })
@@ -523,6 +545,9 @@ impl Session {
         };
 
         let Some(active_task) = active_turn.task.as_ref() else {
+            if is_user_input {
+                *active = None;
+            }
             return Err(NotSubmittedReason::NoActiveTurn);
         };
         let active_turn_id = &active_task.turn_context.sub_id;
