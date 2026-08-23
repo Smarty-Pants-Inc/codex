@@ -87,7 +87,7 @@ pub(crate) struct RunningTask {
 /// Mutable state for a single turn.
 #[derive(Default)]
 pub(crate) struct TurnState {
-    pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
+    pending_approvals: HashMap<String, PendingApproval>,
     pending_request_permissions: HashMap<String, PendingRequestPermissions>,
     pending_user_input: HashMap<String, oneshot::Sender<RequestUserInputResponse>>,
     pending_elicitations: HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>,
@@ -102,6 +102,11 @@ pub(crate) struct TurnState {
     pub(crate) token_usage_at_turn_start: TokenUsage,
 }
 
+struct PendingApproval {
+    turn_id: String,
+    tx: oneshot::Sender<ReviewDecision>,
+}
+
 pub(crate) struct PendingRequestPermissions {
     pub(crate) turn_id: String,
     pub(crate) tx_response: oneshot::Sender<RequestPermissionsResponse>,
@@ -113,16 +118,28 @@ impl TurnState {
     pub(crate) fn insert_pending_approval(
         &mut self,
         key: String,
+        turn_id: String,
         tx: oneshot::Sender<ReviewDecision>,
     ) -> Option<oneshot::Sender<ReviewDecision>> {
-        self.pending_approvals.insert(key, tx)
+        self.pending_approvals
+            .insert(key, PendingApproval { turn_id, tx })
+            .map(|pending| pending.tx)
     }
 
     pub(crate) fn remove_pending_approval(
         &mut self,
         key: &str,
+        turn_id: Option<&str>,
     ) -> Option<oneshot::Sender<ReviewDecision>> {
-        self.pending_approvals.remove(key)
+        if self
+            .pending_approvals
+            .get(key)
+            .is_some_and(|pending| turn_id.is_some_and(|turn_id| pending.turn_id == turn_id))
+        {
+            self.pending_approvals.remove(key).map(|pending| pending.tx)
+        } else {
+            None
+        }
     }
 
     pub(crate) fn clear_pending_waiters(&mut self) {

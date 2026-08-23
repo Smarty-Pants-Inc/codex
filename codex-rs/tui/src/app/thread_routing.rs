@@ -223,6 +223,7 @@ impl App {
                         .approval_id
                         .clone()
                         .unwrap_or_else(|| params.item_id.clone()),
+                    turn_id: params.turn_id.clone(),
                     environment_id: params.environment_id.clone(),
                     command: params
                         .command
@@ -248,19 +249,20 @@ impl App {
             ServerRequest::FileChangeRequestApproval { params, .. } => Some(
                 ThreadInteractiveRequest::Approval(ApprovalRequest::ApplyPatch(
                     ApplyPatchApprovalRequest {
-                    thread_id,
-                    thread_label,
-                    id: params.item_id.clone(),
-                    reason: params.reason.clone(),
-                    cwd: self
-                        .thread_cwd(thread_id)
-                        .await
-                        .unwrap_or_else(|| self.config.cwd.clone()),
-                    changes: self
-                        .thread_file_change_changes(thread_id, &params.turn_id, &params.item_id)
-                        .await
-                        .map(crate::app_server_approval_conversions::file_update_changes_to_display)
-                        .unwrap_or_default(),
+                        thread_id,
+                        thread_label,
+                        id: params.item_id.clone(),
+                        turn_id: params.turn_id.clone(),
+                        reason: params.reason.clone(),
+                        cwd: self
+                            .thread_cwd(thread_id)
+                            .await
+                            .unwrap_or_else(|| self.config.cwd.clone()),
+                        changes: self
+                            .thread_file_change_changes(thread_id, &params.turn_id, &params.item_id)
+                            .await
+                            .map(crate::app_server_approval_conversions::file_update_changes_to_display)
+                            .unwrap_or_default(),
                     },
                 )),
             ),

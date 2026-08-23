@@ -208,6 +208,7 @@ await tools.apply_patch("*** Begin Patch\n*** Add File: code_mode_patch_approval
         .codex
         .submit(Op::PatchApproval {
             id: approval.call_id,
+            turn_id: Some(approval.turn_id),
             decision: ReviewDecision::Approved,
         })
         .await?;

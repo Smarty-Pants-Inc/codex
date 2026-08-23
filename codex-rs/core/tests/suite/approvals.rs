@@ -2176,6 +2176,7 @@ async fn run_scenario(scenario: &ScenarioSpec) -> Result<()> {
             test.codex
                 .submit(Op::PatchApproval {
                     id: approval.call_id,
+                    turn_id: Some(approval.turn_id),
                     decision: decision.clone(),
                 })
                 .await?;
@@ -2262,6 +2263,7 @@ async fn approving_apply_patch_for_session_skips_future_prompts_for_same_file() 
     test.codex
         .submit(Op::PatchApproval {
             id: approval.call_id,
+            turn_id: Some(approval.turn_id),
             decision: ReviewDecision::ApprovedForSession,
         })
         .await?;

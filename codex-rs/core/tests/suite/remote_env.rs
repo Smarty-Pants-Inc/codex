@@ -3449,6 +3449,7 @@ async fn apply_patch_approvals_are_remembered_per_environment() -> Result<()> {
     test.codex
         .submit(Op::PatchApproval {
             id: approval.call_id,
+            turn_id: Some(approval.turn_id),
             decision: ReviewDecision::ApprovedForSession,
         })
         .await?;
@@ -3469,6 +3470,7 @@ async fn apply_patch_approvals_are_remembered_per_environment() -> Result<()> {
     test.codex
         .submit(Op::PatchApproval {
             id: approval.call_id,
+            turn_id: Some(approval.turn_id),
             decision: ReviewDecision::ApprovedForSession,
         })
         .await?;

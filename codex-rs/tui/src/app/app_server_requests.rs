@@ -51,10 +51,12 @@ pub(super) struct UnsupportedAppServerRequest {
 pub(crate) enum ResolvedAppServerRequest {
     ExecApproval {
         thread_id: String,
+        turn_id: String,
         id: String,
     },
     FileChangeApproval {
         thread_id: String,
+        turn_id: String,
         id: String,
     },
     PermissionsApproval {
@@ -72,8 +74,8 @@ pub(crate) enum ResolvedAppServerRequest {
 
 #[derive(Debug, Default)]
 pub(super) struct PendingAppServerRequests {
-    exec_approvals: HashMap<(String, String), AppServerRequestId>,
-    file_change_approvals: HashMap<(String, String), AppServerRequestId>,
+    exec_approvals: HashMap<(String, String, String), AppServerRequestId>,
+    file_change_approvals: HashMap<(String, String, String), AppServerRequestId>,
     permissions_approvals: HashMap<(String, String), (String, AppServerRequestId)>,
     user_inputs: HashMap<String, VecDeque<PendingUserInputRequest>>,
     mcp_requests: HashMap<McpRequestKey, AppServerRequestId>,
@@ -105,7 +107,11 @@ impl PendingAppServerRequests {
                     .clone()
                     .unwrap_or_else(|| params.item_id.clone());
                 self.exec_approvals.insert(
-                    (Self::canonical_thread_id(&params.thread_id), approval_id),
+                    (
+                        Self::canonical_thread_id(&params.thread_id),
+                        params.turn_id.clone(),
+                        approval_id,
+                    ),
                     request_id.clone(),
                 );
                 None
@@ -114,6 +120,7 @@ impl PendingAppServerRequests {
                 self.file_change_approvals.insert(
                     (
                         Self::canonical_thread_id(&params.thread_id),
+                        params.turn_id.clone(),
                         params.item_id.clone(),
                     ),
                     request_id.clone(),
@@ -209,9 +216,19 @@ impl PendingAppServerRequests {
         let thread_id = Self::canonical_thread_id(thread_id);
         let op: AppCommand = op.into();
         let resolution = match &op {
-            AppCommand::ExecApproval { id, decision, .. } => self
-                .exec_approvals
-                .remove(&(thread_id, id.clone()))
+            AppCommand::ExecApproval {
+                id,
+                turn_id,
+                decision,
+            } => turn_id
+                .as_deref()
+                .and_then(|turn_id| {
+                    self.exec_approvals.remove(&(
+                        thread_id.clone(),
+                        turn_id.to_string(),
+                        id.clone(),
+                    ))
+                })
                 .map(|request_id| {
                     Ok::<AppServerRequestResolution, String>(AppServerRequestResolution {
                         request_id,
@@ -226,9 +243,19 @@ impl PendingAppServerRequests {
                     })
                 })
                 .transpose()?,
-            AppCommand::PatchApproval { id, decision } => self
-                .file_change_approvals
-                .remove(&(thread_id, id.clone()))
+            AppCommand::PatchApproval {
+                id,
+                turn_id,
+                decision,
+            } => turn_id
+                .as_deref()
+                .and_then(|turn_id| {
+                    self.file_change_approvals.remove(&(
+                        thread_id.clone(),
+                        turn_id.to_string(),
+                        id.clone(),
+                    ))
+                })
                 .map(|request_id| {
                     Ok::<AppServerRequestResolution, String>(AppServerRequestResolution {
                         request_id,
@@ -327,7 +354,8 @@ impl PendingAppServerRequests {
             self.exec_approvals.remove(&key);
             return Some(ResolvedAppServerRequest::ExecApproval {
                 thread_id: key.0,
-                id: key.1,
+                turn_id: key.1,
+                id: key.2,
             });
         }
 
@@ -337,7 +365,8 @@ impl PendingAppServerRequests {
             self.file_change_approvals.remove(&key);
             return Some(ResolvedAppServerRequest::FileChangeApproval {
                 thread_id: key.0,
-                id: key.1,
+                turn_id: key.1,
+                id: key.2,
             });
         }
 
@@ -525,7 +554,7 @@ mod tests {
                 "thread-1",
                 &Op::ExecApproval {
                     id: "approval-1".to_string(),
-                    turn_id: None,
+                    turn_id: Some("turn-1".to_string()),
                     decision: CommandExecutionApprovalDecision::Accept,
                 },
             )
@@ -543,7 +572,7 @@ mod tests {
                 "item/commandExecution/requestApproval",
                 Op::ExecApproval {
                     id: "shared-id".to_string(),
-                    turn_id: None,
+                    turn_id: Some("turn-1".to_string()),
                     decision: CommandExecutionApprovalDecision::Accept,
                 },
             ),
@@ -551,6 +580,7 @@ mod tests {
                 "item/fileChange/requestApproval",
                 Op::PatchApproval {
                     id: "shared-id".to_string(),
+                    turn_id: Some("turn-1".to_string()),
                     decision: FileChangeApprovalDecision::Accept,
                 },
             ),
@@ -975,6 +1005,7 @@ mod tests {
                 "thread-1",
                 &Op::PatchApproval {
                     id: "patch-1".to_string(),
+                    turn_id: Some("turn-1".to_string()),
                     decision: FileChangeApprovalDecision::Cancel,
                 },
             )
@@ -1020,6 +1051,7 @@ mod tests {
             ),
             Some(ResolvedAppServerRequest::ExecApproval {
                 thread_id: thread_id.clone(),
+                turn_id: "turn-1".to_string(),
                 id: "approval-1".to_string(),
             })
         );

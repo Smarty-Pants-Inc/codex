@@ -1991,7 +1991,7 @@ async fn apply_patch_approval_sends_op_with_call_id() {
     let mut found = false;
     while let Ok(app_ev) = rx.try_recv() {
         if let AppEvent::SubmitThreadOp {
-            op: Op::PatchApproval { id, decision },
+            op: Op::PatchApproval { id, decision, .. },
             ..
         } = app_ev
         {
@@ -2046,7 +2046,7 @@ async fn apply_patch_full_flow_integration_like() {
         .try_recv()
         .expect("expected op forwarded to codex channel");
     match forwarded {
-        Op::PatchApproval { id, decision } => {
+        Op::PatchApproval { id, decision, .. } => {
             assert_eq!(id, "call-1");
             assert_matches!(
                 decision,

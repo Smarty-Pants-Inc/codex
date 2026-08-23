@@ -1006,6 +1006,7 @@ async fn escalated_patch_rejects_symlink_swapped_after_approval_request() -> Res
     test.codex
         .submit(Op::PatchApproval {
             id: approval.call_id,
+            turn_id: Some(approval.turn_id),
             decision: ReviewDecision::Approved,
         })
         .await?;

@@ -756,6 +756,7 @@ timeout = 900
                     test.codex
                         .submit(Op::PatchApproval {
                             id: approval.call_id,
+                            turn_id: Some(approval.turn_id),
                             decision: if matches!(
                                 scenario,
                                 PushedExecScenario::SandboxedDirectPatchRetry

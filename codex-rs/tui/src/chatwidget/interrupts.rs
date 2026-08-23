@@ -243,6 +243,7 @@ mod tests {
         assert!(
             !manager.remove_resolved_prompt(&ResolvedAppServerRequest::ExecApproval {
                 thread_id: "thread-1".to_string(),
+                turn_id: "turn".to_string(),
                 id: "call".to_string(),
             })
         );
@@ -251,6 +252,7 @@ mod tests {
         assert!(
             manager.remove_resolved_prompt(&ResolvedAppServerRequest::ExecApproval {
                 thread_id: "thread-1".to_string(),
+                turn_id: "turn".to_string(),
                 id: "approval".to_string(),
             })
         );
@@ -266,6 +268,7 @@ mod tests {
         assert!(
             !manager.remove_resolved_prompt(&ResolvedAppServerRequest::ExecApproval {
                 thread_id: "thread-1".to_string(),
+                turn_id: "turn".to_string(),
                 id: "call".to_string(),
             })
         );

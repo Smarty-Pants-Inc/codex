@@ -92,25 +92,32 @@ impl PendingInteractiveReplayState {
         let op: AppCommand = op.into();
         match &op {
             AppCommand::ExecApproval { id, turn_id, .. } => {
-                self.exec_approval_call_ids.remove(id);
                 if let Some(turn_id) = turn_id {
                     Self::remove_call_id_from_turn_map_entry(
                         &mut self.exec_approval_call_ids_by_turn_id,
                         turn_id,
                         id,
                     );
+                    self.pending_requests_by_request_id.retain(
+                        |_, pending| {
+                            !matches!(pending, PendingInteractiveRequest::ExecApproval { turn_id: pending_turn_id, approval_id } if pending_turn_id == turn_id && approval_id == id)
+                        },
+                    );
                 }
-                self.pending_requests_by_request_id
-                    .retain(|_, pending| !matches!(pending, PendingInteractiveRequest::ExecApproval { approval_id, .. } if approval_id == id));
             }
-            AppCommand::PatchApproval { id, .. } => {
-                self.patch_approval_call_ids.remove(id);
-                Self::remove_call_id_from_turn_map(
-                    &mut self.patch_approval_call_ids_by_turn_id,
-                    id,
-                );
-                self.pending_requests_by_request_id
-                    .retain(|_, pending| !matches!(pending, PendingInteractiveRequest::PatchApproval { item_id, .. } if item_id == id));
+            AppCommand::PatchApproval { id, turn_id, .. } => {
+                if let Some(turn_id) = turn_id {
+                    Self::remove_call_id_from_turn_map_entry(
+                        &mut self.patch_approval_call_ids_by_turn_id,
+                        turn_id,
+                        id,
+                    );
+                    self.pending_requests_by_request_id.retain(
+                        |_, pending| {
+                            !matches!(pending, PendingInteractiveRequest::PatchApproval { turn_id: pending_turn_id, item_id } if pending_turn_id == turn_id && item_id == id)
+                        },
+                    );
+                }
             }
             AppCommand::ResolveElicitation {
                 server_name,
@@ -252,16 +259,28 @@ impl PendingInteractiveReplayState {
             ServerNotification::ItemStarted(notification) => match &notification.item {
                 ThreadItem::CommandExecution { id, .. } => {
                     self.exec_approval_call_ids.remove(id);
-                    Self::remove_call_id_from_turn_map(
+                    Self::remove_call_id_from_turn_map_entry(
                         &mut self.exec_approval_call_ids_by_turn_id,
+                        &notification.turn_id,
                         id,
+                    );
+                    self.pending_requests_by_request_id.retain(
+                        |_, pending| {
+                            !matches!(pending, PendingInteractiveRequest::ExecApproval { turn_id, approval_id } if turn_id == &notification.turn_id && approval_id == id)
+                        },
                     );
                 }
                 ThreadItem::FileChange { id, .. } => {
                     self.patch_approval_call_ids.remove(id);
-                    Self::remove_call_id_from_turn_map(
+                    Self::remove_call_id_from_turn_map_entry(
                         &mut self.patch_approval_call_ids_by_turn_id,
+                        &notification.turn_id,
                         id,
+                    );
+                    self.pending_requests_by_request_id.retain(
+                        |_, pending| {
+                            !matches!(pending, PendingInteractiveRequest::PatchApproval { turn_id, item_id } if turn_id == &notification.turn_id && item_id == id)
+                        },
                     );
                 }
                 _ => {}
@@ -351,12 +370,11 @@ impl PendingInteractiveReplayState {
 
     pub(super) fn should_replay_snapshot_request(&self, request: &ServerRequest) -> bool {
         match request {
-            ServerRequest::CommandExecutionRequestApproval { params, .. } => self
-                .exec_approval_call_ids
-                .contains(params.approval_id.as_ref().unwrap_or(&params.item_id)),
-            ServerRequest::FileChangeRequestApproval { params, .. } => {
-                self.patch_approval_call_ids.contains(&params.item_id)
-            }
+            ServerRequest::CommandExecutionRequestApproval { .. }
+            | ServerRequest::FileChangeRequestApproval { .. } => self
+                .pending_requests_by_request_id
+                .values()
+                .any(|pending| Self::request_matches_server_request(pending, request)),
             ServerRequest::McpServerElicitationRequest { request_id, params } => self
                 .elicitation_requests
                 .contains(&ElicitationRequestKey::new(
@@ -863,14 +881,51 @@ mod tests {
 
         store.note_outbound_op(&Op::PatchApproval {
             id: "call-1".to_string(),
+            turn_id: Some("turn-1".to_string()),
             decision: codex_app_server_protocol::FileChangeApprovalDecision::Accept,
         });
 
-        let snapshot = store.snapshot();
-        assert!(
-            snapshot.events.is_empty(),
-            "resolved patch approval prompt should not replay on thread switch"
-        );
+        assert!(store.snapshot().events.is_empty());
+    }
+
+    #[test]
+    fn stale_exec_abort_does_not_clear_reused_approval_on_new_turn() {
+        let mut store = ThreadEventStore::new(/*capacity*/ 8);
+        store.push_request(exec_approval_request(
+            "call-1",
+            Some("approval-1"),
+            "turn-1",
+        ));
+        store.push_request(exec_approval_request(
+            "call-1",
+            Some("approval-1"),
+            "turn-2",
+        ));
+        store.note_outbound_op(&Op::ExecApproval {
+            id: "approval-1".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            decision: CommandExecutionApprovalDecision::Cancel,
+        });
+
+        assert!(store.snapshot().events.iter().any(|event| {
+            matches!(event, ThreadBufferedEvent::Request(request) if matches!(request.as_ref(), ServerRequest::CommandExecutionRequestApproval { params, .. } if params.turn_id == "turn-2"))
+        }));
+    }
+
+    #[test]
+    fn stale_patch_abort_does_not_clear_reused_approval_on_new_turn() {
+        let mut store = ThreadEventStore::new(/*capacity*/ 8);
+        store.push_request(patch_approval_request("call-1", "turn-1"));
+        store.push_request(patch_approval_request("call-1", "turn-2"));
+        store.note_outbound_op(&Op::PatchApproval {
+            id: "call-1".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            decision: codex_app_server_protocol::FileChangeApprovalDecision::Cancel,
+        });
+
+        assert!(store.snapshot().events.iter().any(|event| {
+            matches!(event, ThreadBufferedEvent::Request(request) if matches!(request.as_ref(), ServerRequest::FileChangeRequestApproval { params, .. } if params.turn_id == "turn-2"))
+        }));
     }
 
     #[test]

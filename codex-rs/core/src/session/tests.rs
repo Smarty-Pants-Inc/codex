@@ -6524,6 +6524,84 @@ async fn notify_request_permissions_response_ignores_unmatched_call_id() {
 }
 
 #[tokio::test]
+async fn stale_abort_does_not_interrupt_reused_exec_approval() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let session = Arc::new(session);
+    let active_turn = ActiveTurn::default();
+    let turn_state = Arc::clone(&active_turn.turn_state);
+    *session.active_turn.lock().await = Some(active_turn);
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    turn_state.lock().await.insert_pending_approval(
+        "reused-approval".to_string(),
+        "new-turn".to_string(),
+        tx,
+    );
+
+    handlers::exec_approval(
+        &session,
+        "reused-approval".to_string(),
+        Some("old-turn".to_string()),
+        codex_protocol::protocol::ReviewDecision::Abort,
+    )
+    .await;
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    handlers::exec_approval(
+        &session,
+        "reused-approval".to_string(),
+        Some("new-turn".to_string()),
+        codex_protocol::protocol::ReviewDecision::Abort,
+    )
+    .await;
+    assert_eq!(
+        rx.await.expect("matched exec approval receives abort"),
+        codex_protocol::protocol::ReviewDecision::Abort
+    );
+}
+
+#[tokio::test]
+async fn stale_abort_does_not_interrupt_reused_patch_approval() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let session = Arc::new(session);
+    let active_turn = ActiveTurn::default();
+    let turn_state = Arc::clone(&active_turn.turn_state);
+    *session.active_turn.lock().await = Some(active_turn);
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    turn_state.lock().await.insert_pending_approval(
+        "reused-approval".to_string(),
+        "new-turn".to_string(),
+        tx,
+    );
+
+    handlers::patch_approval(
+        &session,
+        "reused-approval".to_string(),
+        Some("old-turn".to_string()),
+        codex_protocol::protocol::ReviewDecision::Abort,
+    )
+    .await;
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    handlers::patch_approval(
+        &session,
+        "reused-approval".to_string(),
+        Some("new-turn".to_string()),
+        codex_protocol::protocol::ReviewDecision::Abort,
+    )
+    .await;
+    assert_eq!(
+        rx.await.expect("matched patch approval receives abort"),
+        codex_protocol::protocol::ReviewDecision::Abort
+    );
+}
+
+#[tokio::test]
 async fn request_permissions_response_is_bound_to_originating_turn() {
     let (session, turn_context) = make_session_and_context().await;
     let environment = turn_context

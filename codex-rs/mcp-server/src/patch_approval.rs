@@ -51,6 +51,7 @@ pub(crate) async fn handle_patch_approval_request(
     request_id: RequestId,
     tool_call_id: String,
     event_id: String,
+    turn_id: String,
     thread_id: ThreadId,
 ) {
     let approval_id = call_id.clone();
@@ -90,16 +91,17 @@ pub(crate) async fn handle_patch_approval_request(
 
     // Listen for the response on a separate task so we don't block the main agent loop.
     {
-        let codex = codex.clone();
         let approval_id = approval_id.clone();
+        let turn_id = turn_id.clone();
         tokio::spawn(async move {
-            on_patch_approval_response(approval_id, on_response, codex).await;
+            on_patch_approval_response(approval_id, turn_id, on_response, codex).await;
         });
     }
 }
 
 pub(crate) async fn on_patch_approval_response(
     approval_id: String,
+    turn_id: String,
     receiver: tokio::sync::oneshot::Receiver<serde_json::Value>,
     codex: Arc<CodexThread>,
 ) {
@@ -111,6 +113,7 @@ pub(crate) async fn on_patch_approval_response(
             if let Err(submit_err) = codex
                 .submit(Op::PatchApproval {
                     id: approval_id.clone(),
+                    turn_id: Some(turn_id.clone()),
                     decision: ReviewDecision::denied("approval request failed"),
                 })
                 .await
@@ -131,6 +134,7 @@ pub(crate) async fn on_patch_approval_response(
     if let Err(err) = codex
         .submit(Op::PatchApproval {
             id: approval_id,
+            turn_id: Some(turn_id),
             decision: response.decision,
         })
         .await

@@ -75,11 +75,12 @@ impl AppEventSender {
         &self,
         thread_id: ThreadId,
         id: String,
+        turn_id: String,
         decision: CommandExecutionApprovalDecision,
     ) {
         self.send(AppEvent::SubmitThreadOp {
             thread_id,
-            op: AppCommand::exec_approval(id, /*turn_id*/ None, decision),
+            op: AppCommand::exec_approval(id, Some(turn_id), decision),
         });
     }
 
@@ -100,11 +101,12 @@ impl AppEventSender {
         &self,
         thread_id: ThreadId,
         id: String,
+        turn_id: String,
         decision: FileChangeApprovalDecision,
     ) {
         self.send(AppEvent::SubmitThreadOp {
             thread_id,
-            op: AppCommand::patch_approval(id, decision),
+            op: AppCommand::patch_approval(id, Some(turn_id), decision),
         });
     }
 

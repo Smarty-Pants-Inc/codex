@@ -64,6 +64,7 @@ pub(crate) enum AppCommand {
     },
     PatchApproval {
         id: String,
+        turn_id: Option<String>,
         decision: FileChangeApprovalDecision,
     },
     ResolveElicitation {
@@ -185,8 +186,16 @@ impl AppCommand {
         }
     }
 
-    pub(crate) fn patch_approval(id: String, decision: FileChangeApprovalDecision) -> Self {
-        Self::PatchApproval { id, decision }
+    pub(crate) fn patch_approval(
+        id: String,
+        turn_id: Option<String>,
+        decision: FileChangeApprovalDecision,
+    ) -> Self {
+        Self::PatchApproval {
+            id,
+            turn_id,
+            decision,
+        }
     }
 
     pub(crate) fn resolve_elicitation(

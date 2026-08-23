@@ -2301,6 +2301,7 @@ async fn denied_child_permissions_require_fresh_approval(
             (
                 Op::PatchApproval {
                     id: approval.call_id,
+                    turn_id: Some(approval.turn_id),
                     decision: ReviewDecision::denied("denied child is not approved"),
                 },
                 approval.reason,

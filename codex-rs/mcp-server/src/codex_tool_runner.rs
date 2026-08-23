@@ -199,7 +199,7 @@ async fn run_codex_tool_session_inner(
                     EventMsg::ExecApprovalRequest(ev) => {
                         let approval_id = ev.effective_approval_id();
                         let ExecApprovalRequestEvent {
-                            turn_id: _,
+                            turn_id,
                             environment_id: _,
                             started_at_ms: _,
                             command,
@@ -224,6 +224,7 @@ async fn run_codex_tool_session_inner(
                             request_id.clone(),
                             request_id_str.clone(),
                             event.id.clone(),
+                            turn_id,
                             call_id,
                             approval_id,
                             parsed_cmd,
@@ -263,7 +264,7 @@ async fn run_codex_tool_session_inner(
                     }
                     EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
                         call_id,
-                        turn_id: _,
+                        turn_id,
                         started_at_ms: _,
                         reason,
                         grant_root,
@@ -279,6 +280,7 @@ async fn run_codex_tool_session_inner(
                             request_id.clone(),
                             request_id_str.clone(),
                             event.id.clone(),
+                            turn_id,
                             thread_id,
                         )
                         .await;

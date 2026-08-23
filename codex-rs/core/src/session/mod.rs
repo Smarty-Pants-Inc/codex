@@ -2394,7 +2394,11 @@ impl Session {
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_approval(effective_approval_id.clone(), tx_approve)
+                    ts.insert_pending_approval(
+                        effective_approval_id.clone(),
+                        turn_context.sub_id.clone(),
+                        tx_approve,
+                    )
                 }
                 None => None,
             }
@@ -2473,7 +2477,11 @@ impl Session {
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_approval(approval_id.clone(), tx_approve)
+                    ts.insert_pending_approval(
+                        approval_id.clone(),
+                        turn_context.sub_id.clone(),
+                        tx_approve,
+                    )
                 }
                 None => None,
             }
@@ -2921,13 +2929,18 @@ impl Session {
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
     )]
-    pub async fn notify_approval(&self, approval_id: &str, decision: ReviewDecision) {
+    pub async fn notify_approval(
+        &self,
+        approval_id: &str,
+        turn_id: Option<&str>,
+        decision: ReviewDecision,
+    ) -> bool {
         let entry = {
             let mut active = self.active_turn.lock().await;
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.remove_pending_approval(approval_id)
+                    ts.remove_pending_approval(approval_id, turn_id)
                 }
                 None => None,
             }
@@ -2935,9 +2948,11 @@ impl Session {
         match entry {
             Some(tx_approve) => {
                 tx_approve.send(decision).ok();
+                true
             }
             None => {
-                warn!("No pending approval found for call_id: {approval_id}");
+                warn!("No matching pending approval found for call_id: {approval_id}");
+                false
             }
         }
     }

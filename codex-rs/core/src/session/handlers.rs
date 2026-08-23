@@ -177,10 +177,14 @@ pub async fn exec_approval(
     turn_id: Option<String>,
     decision: ReviewDecision,
 ) {
-    let event_turn_id = turn_id.unwrap_or_else(|| approval_id.clone());
-    if let ReviewDecision::ApprovedExecpolicyAmendment {
-        proposed_execpolicy_amendment,
-    } = &decision
+    let event_turn_id = turn_id.clone().unwrap_or_else(|| approval_id.clone());
+    let delivered = sess
+        .notify_approval(&approval_id, turn_id.as_deref(), decision.clone())
+        .await;
+    if delivered
+        && let ReviewDecision::ApprovedExecpolicyAmendment {
+            proposed_execpolicy_amendment,
+        } = &decision
         && let Err(err) = sess
             .persist_execpolicy_amendment(proposed_execpolicy_amendment)
             .await
@@ -189,26 +193,21 @@ pub async fn exec_approval(
         tracing::warn!("{message}");
         let warning = EventMsg::Warning(WarningEvent { message });
         sess.send_event_raw(Event {
-            id: event_turn_id.clone(),
+            id: event_turn_id,
             msg: warning,
         })
         .await;
     }
-    match decision {
-        ReviewDecision::Abort => {
-            sess.interrupt_task().await;
-        }
-        other => sess.notify_approval(&approval_id, other).await,
-    }
 }
 
-pub async fn patch_approval(sess: &Arc<Session>, id: String, decision: ReviewDecision) {
-    match decision {
-        ReviewDecision::Abort => {
-            sess.interrupt_task().await;
-        }
-        other => sess.notify_approval(&id, other).await,
-    }
+pub async fn patch_approval(
+    sess: &Arc<Session>,
+    id: String,
+    turn_id: Option<String>,
+    decision: ReviewDecision,
+) {
+    sess.notify_approval(&id, turn_id.as_deref(), decision)
+        .await;
 }
 
 pub async fn request_user_input_response(
@@ -628,8 +627,12 @@ pub(super) async fn submission_loop(
                     exec_approval(&sess, approval_id, turn_id, decision).await;
                     false
                 }
-                Op::PatchApproval { id, decision } => {
-                    patch_approval(&sess, id, decision).await;
+                Op::PatchApproval {
+                    id,
+                    turn_id,
+                    decision,
+                } => {
+                    patch_approval(&sess, id, turn_id, decision).await;
                     false
                 }
                 Op::UserInputAnswer { id, response } => {

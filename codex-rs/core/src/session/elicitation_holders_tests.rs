@@ -72,7 +72,11 @@ async fn command_approval_holds_an_elicitation_until_response() {
     assert_eq!(event.script_path.as_deref(), Some("scripts/run.py"));
     wait_until_held(&mut pause_state).await;
     session
-        .notify_approval("call-1", ReviewDecision::Approved)
+        .notify_approval(
+            "call-1",
+            Some(&turn_context.sub_id),
+            ReviewDecision::Approved,
+        )
         .await;
     request.await.expect("approval task");
     wait_until_released(&mut pause_state).await;
@@ -103,7 +107,11 @@ async fn patch_approval_holds_an_elicitation_until_response() {
     events.recv().await.expect("approval event");
     wait_until_held(&mut pause_state).await;
     session
-        .notify_approval("call-1", ReviewDecision::Approved)
+        .notify_approval(
+            "call-1",
+            Some(&turn_context.sub_id),
+            ReviewDecision::Approved,
+        )
         .await;
     request.await.expect("approval task");
     wait_until_released(&mut pause_state).await;

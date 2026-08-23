@@ -82,6 +82,7 @@ pub(crate) struct ExecApprovalRequest {
     pub thread_id: ThreadId,
     pub thread_label: Option<String>,
     pub id: String,
+    pub turn_id: String,
     pub environment_id: Option<String>,
     pub command: Vec<String>,
     pub reason: Option<String>,
@@ -106,6 +107,7 @@ pub(crate) struct ApplyPatchApprovalRequest {
     pub thread_id: ThreadId,
     pub thread_label: Option<String>,
     pub id: String,
+    pub turn_id: String,
     pub reason: Option<String>,
     pub cwd: AbsolutePathBuf,
     pub changes: HashMap<PathBuf, FileChange>,
@@ -143,16 +145,32 @@ impl ApprovalRequest {
         match (self, request) {
             (
                 ApprovalRequest::Exec(request),
-                ResolvedAppServerRequest::ExecApproval { thread_id, id },
-            ) => request.thread_id.to_string() == *thread_id && request.id == *id,
+                ResolvedAppServerRequest::ExecApproval {
+                    thread_id,
+                    turn_id,
+                    id,
+                },
+            ) => {
+                request.thread_id.to_string() == *thread_id
+                    && request.turn_id == *turn_id
+                    && request.id == *id
+            }
             (
                 ApprovalRequest::Permissions(request),
                 ResolvedAppServerRequest::PermissionsApproval { thread_id, id },
             ) => request.thread_id.to_string() == *thread_id && request.call_id == *id,
             (
                 ApprovalRequest::ApplyPatch(request),
-                ResolvedAppServerRequest::FileChangeApproval { thread_id, id },
-            ) => request.thread_id.to_string() == *thread_id && request.id == *id,
+                ResolvedAppServerRequest::FileChangeApproval {
+                    thread_id,
+                    turn_id,
+                    id,
+                },
+            ) => {
+                request.thread_id.to_string() == *thread_id
+                    && request.turn_id == *turn_id
+                    && request.id == *id
+            }
             (
                 ApprovalRequest::McpElicitation(request),
                 ResolvedAppServerRequest::McpElicitation {
@@ -318,7 +336,12 @@ impl ApprovalOverlay {
         if let Some(request) = self.current_request.as_ref() {
             match (request, &option.decision) {
                 (ApprovalRequest::Exec(request), ApprovalDecision::Command(decision)) => {
-                    self.handle_exec_decision(&request.id, &request.command, decision.clone());
+                    self.handle_exec_decision(
+                        &request.id,
+                        &request.turn_id,
+                        &request.command,
+                        decision.clone(),
+                    );
                 }
                 (
                     ApprovalRequest::Permissions(request),
@@ -332,7 +355,7 @@ impl ApprovalOverlay {
                     );
                 }
                 (ApprovalRequest::ApplyPatch(request), ApprovalDecision::FileChange(decision)) => {
-                    self.handle_patch_decision(&request.id, decision.clone());
+                    self.handle_patch_decision(&request.id, &request.turn_id, decision.clone());
                 }
                 (
                     ApprovalRequest::McpElicitation(request),
@@ -355,6 +378,7 @@ impl ApprovalOverlay {
     fn handle_exec_decision(
         &self,
         id: &str,
+        turn_id: &str,
         command: &[String],
         decision: CommandExecutionApprovalDecision,
     ) {
@@ -388,7 +412,7 @@ impl ApprovalOverlay {
         }
         let thread_id = request.thread_id();
         self.app_event_tx
-            .exec_approval(thread_id, id.to_string(), decision);
+            .exec_approval(thread_id, id.to_string(), turn_id.to_string(), decision);
     }
 
     fn handle_permissions_decision(
@@ -443,7 +467,7 @@ impl ApprovalOverlay {
         );
     }
 
-    fn handle_patch_decision(&self, id: &str, decision: FileChangeApprovalDecision) {
+    fn handle_patch_decision(&self, id: &str, turn_id: &str, decision: FileChangeApprovalDecision) {
         let Some(thread_id) = self
             .current_request
             .as_ref()
@@ -452,7 +476,7 @@ impl ApprovalOverlay {
             return;
         };
         self.app_event_tx
-            .patch_approval(thread_id, id.to_string(), decision);
+            .patch_approval(thread_id, id.to_string(), turn_id.to_string(), decision);
     }
 
     fn handle_elicitation_decision(
@@ -497,6 +521,7 @@ impl ApprovalOverlay {
                 ApprovalRequest::Exec(request) => {
                     self.handle_exec_decision(
                         &request.id,
+                        &request.turn_id,
                         &request.command,
                         CommandExecutionApprovalDecision::Cancel,
                     );
@@ -510,7 +535,11 @@ impl ApprovalOverlay {
                     );
                 }
                 ApprovalRequest::ApplyPatch(request) => {
-                    self.handle_patch_decision(&request.id, FileChangeApprovalDecision::Cancel);
+                    self.handle_patch_decision(
+                        &request.id,
+                        &request.turn_id,
+                        FileChangeApprovalDecision::Cancel,
+                    );
                 }
                 ApprovalRequest::McpElicitation(request) => {
                     self.handle_elicitation_decision(
@@ -1195,6 +1224,7 @@ mod tests {
             thread_id: ThreadId::new(),
             thread_label: None,
             id: "test".to_string(),
+            turn_id: "turn".to_string(),
             environment_id: None,
             command: vec!["echo".to_string(), "hi".to_string()],
             reason: Some("reason".to_string()),
@@ -1389,6 +1419,7 @@ mod tests {
                 thread_id: ThreadId::new(),
                 thread_label: None,
                 id: "test".to_string(),
+                turn_id: "turn".to_string(),
                 environment_id: None,
                 command: vec!["echo".to_string(), "hi".to_string()],
                 reason: None,
@@ -1433,6 +1464,7 @@ mod tests {
                 thread_id: ThreadId::new(),
                 thread_label: None,
                 id: "test".to_string(),
+                turn_id: "turn".to_string(),
                 environment_id: None,
                 command: vec!["curl".to_string(), "https://example.com".to_string()],
                 reason: None,
@@ -1484,10 +1516,10 @@ mod tests {
         let request = make_exec_request();
         let thread_id = request.thread_id();
         let mut view = make_overlay(request, tx, Features::with_defaults());
-
         assert!(
             !view.dismiss_app_server_request(&ResolvedAppServerRequest::ExecApproval {
                 thread_id: ThreadId::new().to_string(),
+                turn_id: "turn".to_string(),
                 id: "test".to_string(),
             })
         );
@@ -1495,6 +1527,7 @@ mod tests {
         assert!(
             view.dismiss_app_server_request(&ResolvedAppServerRequest::ExecApproval {
                 thread_id: thread_id.to_string(),
+                turn_id: "turn".to_string(),
                 id: "test".to_string(),
             })
         );
@@ -1518,6 +1551,7 @@ mod tests {
                 thread_id,
                 thread_label: Some("Robie [explorer]".to_string()),
                 id: "test".to_string(),
+                turn_id: "turn".to_string(),
                 environment_id: None,
                 command: vec!["echo".to_string(), "hi".to_string()],
                 reason: None,
@@ -1553,6 +1587,7 @@ mod tests {
                 thread_id,
                 thread_label: Some("Robie [explorer]".to_string()),
                 id: "test".to_string(),
+                turn_id: "turn".to_string(),
                 environment_id: None,
                 command: vec!["echo".to_string(), "hi".to_string()],
                 reason: None,
@@ -1592,6 +1627,7 @@ mod tests {
                 thread_id: ThreadId::new(),
                 thread_label: Some("Robie [explorer]".to_string()),
                 id: "test".to_string(),
+                turn_id: "turn".to_string(),
                 environment_id: None,
                 command: vec!["echo".to_string(), "hi".to_string()],
                 reason: None,
@@ -1621,6 +1657,7 @@ mod tests {
                 thread_id: ThreadId::new(),
                 thread_label: None,
                 id: "test".to_string(),
+                turn_id: "turn".to_string(),
                 environment_id: None,
                 command: vec!["echo".to_string()],
                 reason: None,
@@ -1674,6 +1711,7 @@ mod tests {
                 thread_id: ThreadId::new(),
                 thread_label: None,
                 id: "test".to_string(),
+                turn_id: "turn".to_string(),
                 environment_id: None,
                 command: vec!["curl".to_string(), "https://example.com".to_string()],
                 reason: None,
@@ -1714,6 +1752,7 @@ mod tests {
             thread_id: ThreadId::new(),
             thread_label: None,
             id: "test".into(),
+            turn_id: "turn".to_string(),
             environment_id: None,
             command,
             reason: None,
@@ -2015,6 +2054,7 @@ mod tests {
             thread_id: ThreadId::new(),
             thread_label: None,
             id: "test".into(),
+            turn_id: "turn".to_string(),
             environment_id: None,
             command: vec!["cat".into(), "/tmp/readme.txt".into()],
             reason: None,
@@ -2072,6 +2112,7 @@ mod tests {
             thread_id: ThreadId::new(),
             thread_label: None,
             id: "test".into(),
+            turn_id: "turn".to_string(),
             environment_id: None,
             command: vec!["cat".into(), "/tmp/readme.txt".into()],
             reason: Some("need filesystem access".into()),
@@ -2145,6 +2186,7 @@ mod tests {
             thread_id: ThreadId::new(),
             thread_label: Some("Banach [worker]".to_string()),
             id: "test".to_string(),
+            turn_id: "turn".to_string(),
             reason: None,
             cwd: test_path_buf("/tmp").abs(),
             changes,
@@ -2178,6 +2220,7 @@ mod tests {
             thread_id: ThreadId::new(),
             thread_label: None,
             id: "test".to_string(),
+            turn_id: "turn".to_string(),
             reason: None,
             cwd: absolute_path("/tmp"),
             changes: HashMap::new(),
@@ -2197,6 +2240,7 @@ mod tests {
             thread_id: ThreadId::new(),
             thread_label: None,
             id: "test".into(),
+            turn_id: "turn".to_string(),
             environment_id: None,
             command: vec!["curl".into(), "https://example.com".into()],
             reason: Some("network request blocked".into()),
@@ -2334,6 +2378,7 @@ mod tests {
                 thread_id: ThreadId::new(),
                 thread_label: None,
                 id: "test".into(),
+                turn_id: "turn".to_string(),
                 environment_id: None,
                 command: vec![
                     "network-access".to_string(),

@@ -1977,6 +1977,7 @@ mod tests {
             thread_id: codex_protocol::ThreadId::new(),
             thread_label: None,
             id: "1".to_string(),
+            turn_id: "turn".to_string(),
             environment_id: None,
             command: vec!["echo".into(), "ok".into()],
             reason: None,
@@ -2265,6 +2266,7 @@ mod tests {
         assert!(
             pane.dismiss_app_server_request(&ResolvedAppServerRequest::ExecApproval {
                 thread_id: thread_id.to_string(),
+                turn_id: "turn".to_string(),
                 id: "1".to_string(),
             })
         );
@@ -2294,6 +2296,7 @@ mod tests {
         assert!(
             pane.dismiss_app_server_request(&ResolvedAppServerRequest::ExecApproval {
                 thread_id: "thread-1".to_string(),
+                turn_id: "turn".to_string(),
                 id: "request-1".to_string(),
             })
         );
@@ -2324,6 +2327,7 @@ mod tests {
         assert!(
             !pane.dismiss_app_server_request(&ResolvedAppServerRequest::ExecApproval {
                 thread_id: "thread-1".to_string(),
+                turn_id: "turn".to_string(),
                 id: "request-1".to_string(),
             })
         );
