@@ -4202,9 +4202,7 @@ mod tests {
             UserInput::Audio {
                 audio_url: audio_url.clone(),
             },
-            UserInput::LocalAudio {
-                path: local_path,
-            },
+            UserInput::LocalAudio { path: local_path },
         ]);
 
         assert_eq!(

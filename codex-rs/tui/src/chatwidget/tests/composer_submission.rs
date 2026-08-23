@@ -193,10 +193,11 @@ async fn plain_follow_ups_are_server_admitted_in_fifo_order_without_local_resubm
     chat.handle_key_event(KeyEvent::from(KeyCode::Tab));
     let (first_client_user_message_id, first_input) = loop {
         if let AppEvent::QueueFollowUpUserMessage {
-                thread_id: event_thread_id,
-                client_user_message_id,
-                input,
-            } = rx.try_recv().expect("expected queued follow-up admission") {
+            thread_id: event_thread_id,
+            client_user_message_id,
+            input,
+        } = rx.try_recv().expect("expected queued follow-up admission")
+        {
             assert_eq!(event_thread_id, thread_id);
             break (client_user_message_id, input);
         }
@@ -214,10 +215,11 @@ async fn plain_follow_ups_are_server_admitted_in_fifo_order_without_local_resubm
     chat.handle_key_event(KeyEvent::from(KeyCode::Tab));
     let (second_client_user_message_id, second_input) = loop {
         if let AppEvent::QueueFollowUpUserMessage {
-                thread_id: event_thread_id,
-                client_user_message_id,
-                input,
-            } = rx.try_recv().expect("expected queued follow-up admission") {
+            thread_id: event_thread_id,
+            client_user_message_id,
+            input,
+        } = rx.try_recv().expect("expected queued follow-up admission")
+        {
             assert_eq!(event_thread_id, thread_id);
             break (client_user_message_id, input);
         }
@@ -300,7 +302,10 @@ async fn plain_follow_ups_are_server_admitted_in_fifo_order_without_local_resubm
     let reconciled_thread_id = loop {
         if let AppEvent::ReconcileQueuedFollowUps { thread_id } = rx
             .try_recv()
-            .expect("expected queued follow-up reconciliation") { break thread_id }
+            .expect("expected queued follow-up reconciliation")
+        {
+            break thread_id;
+        }
     };
     assert_eq!(reconciled_thread_id, thread_id);
 
@@ -334,9 +339,12 @@ async fn editing_server_admitted_follow_up_requests_server_deletion() {
     chat.handle_key_event(KeyEvent::from(KeyCode::Tab));
     let client_user_message_id = loop {
         if let AppEvent::QueueFollowUpUserMessage {
-                client_user_message_id,
-                ..
-            } = rx.try_recv().expect("expected queued follow-up admission") { break client_user_message_id }
+            client_user_message_id,
+            ..
+        } = rx.try_recv().expect("expected queued follow-up admission")
+        {
+            break client_user_message_id;
+        }
     };
     assert!(
         chat.mark_server_queue_admitted(&client_user_message_id, "queued-for-edit".to_string(),)
@@ -371,9 +379,12 @@ async fn interrupted_turn_keeps_server_admitted_follow_up_queued() {
     chat.handle_key_event(KeyEvent::from(KeyCode::Tab));
     let client_user_message_id = loop {
         if let AppEvent::QueueFollowUpUserMessage {
-                client_user_message_id,
-                ..
-            } = rx.try_recv().expect("expected queued follow-up admission") { break client_user_message_id }
+            client_user_message_id,
+            ..
+        } = rx.try_recv().expect("expected queued follow-up admission")
+        {
+            break client_user_message_id;
+        }
     };
     assert!(chat.mark_server_queue_admitted(
         &client_user_message_id,

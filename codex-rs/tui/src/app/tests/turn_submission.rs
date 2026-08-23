@@ -106,7 +106,10 @@ async fn queued_follow_up_admission_failure_keeps_prompt_queued() -> Result<()> 
     let queue_event = loop {
         if let event @ AppEvent::QueueFollowUpUserMessage { .. } = app_event_rx
             .try_recv()
-            .expect("expected queued follow-up event") { break event }
+            .expect("expected queued follow-up event")
+        {
+            break event;
+        }
     };
 
     let control = app
