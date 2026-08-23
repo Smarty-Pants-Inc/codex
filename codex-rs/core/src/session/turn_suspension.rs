@@ -11,48 +11,80 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::warn;
 
+pub(super) struct SuspensionResult {
+    pub(super) outcome: CodexResult<SuspendTurnOutcome>,
+    pub(super) terminate_session: bool,
+}
+
+impl SuspensionResult {
+    fn recoverable(outcome: CodexResult<SuspendTurnOutcome>) -> Self {
+        Self {
+            outcome,
+            terminate_session: false,
+        }
+    }
+
+    fn terminal(outcome: CodexResult<SuspendTurnOutcome>) -> Self {
+        Self {
+            outcome,
+            terminate_session: true,
+        }
+    }
+}
+
 pub(super) async fn suspend_turn_and_shutdown(
     session: &Arc<Session>,
     submission_id: String,
-) -> CodexResult<SuspendTurnOutcome> {
+) -> SuspensionResult {
     {
         let active = session.active_turn.lock().await;
         let Some(task) = active.as_ref().and_then(|turn| turn.task.as_ref()) else {
-            return Ok(SuspendTurnOutcome::NotActive);
+            return SuspensionResult::recoverable(Ok(SuspendTurnOutcome::NotActive));
         };
         if task.kind != TaskKind::Regular {
-            return Ok(SuspendTurnOutcome::UnsupportedTask);
+            return SuspensionResult::recoverable(Ok(SuspendTurnOutcome::UnsupportedTask));
         }
     }
 
     // Refuse obvious descendants before the durability barrier; admission is rechecked and
     // sealed after the flush before handoff can be accepted.
-    if session
+    let live_subtree = match session
         .services
         .agent_control
         .list_live_agent_subtree_thread_ids(session.thread_id)
-        .await?
-        .len()
-        > 1
+        .await
     {
-        return Ok(SuspendTurnOutcome::HasLiveDescendants);
+        Ok(live_subtree) => live_subtree,
+        Err(error) => return SuspensionResult::recoverable(Err(error)),
+    };
+    if live_subtree.len() > 1 {
+        return SuspensionResult::recoverable(Ok(SuspendTurnOutcome::HasLiveDescendants));
     }
 
-    let live_thread = session
-        .live_thread_for_persistence("suspend an unfinished root turn")
-        .map_err(|error| CodexErr::Fatal(error.to_string()))?;
+    let live_thread = match session.live_thread_for_persistence("suspend an unfinished root turn") {
+        Ok(live_thread) => live_thread.clone(),
+        Err(error) => {
+            return SuspensionResult::recoverable(Err(CodexErr::Fatal(error.to_string())));
+        }
+    };
     // Flush before canceling execution so a persistence failure leaves the original turn running.
-    live_thread.flush().await.map_err(|error| {
-        CodexErr::Fatal(format!("flush before root turn suspension failed: {error}"))
-    })?;
+    if let Err(error) = live_thread.flush().await {
+        return SuspensionResult::recoverable(Err(CodexErr::Fatal(format!(
+            "flush before root turn suspension failed: {error}"
+        ))));
+    }
 
-    let Some(spawn_admission) = session
+    let spawn_admission = match session
         .services
         .agent_control
         .begin_root_turn_suspension_admission(session.thread_id)
-        .await?
-    else {
-        return Ok(SuspendTurnOutcome::HasLiveDescendants);
+        .await
+    {
+        Ok(Some(spawn_admission)) => spawn_admission,
+        Ok(None) => {
+            return SuspensionResult::recoverable(Ok(SuspendTurnOutcome::HasLiveDescendants));
+        }
+        Err(error) => return SuspensionResult::recoverable(Err(error)),
     };
 
     // Persist extension-owned resumable state while the task is still active. The admission
@@ -60,47 +92,52 @@ pub(super) async fn suspend_turn_and_shutdown(
     let turn_context = {
         let active = session.active_turn.lock().await;
         let Some(task) = active.as_ref().and_then(|turn| turn.task.as_ref()) else {
-            return Ok(SuspendTurnOutcome::NotActive);
+            return SuspensionResult::recoverable(Ok(SuspendTurnOutcome::NotActive));
         };
         if task.kind != TaskKind::Regular {
-            return Ok(SuspendTurnOutcome::UnsupportedTask);
+            return SuspensionResult::recoverable(Ok(SuspendTurnOutcome::UnsupportedTask));
         }
         Arc::clone(&task.turn_context)
     };
-    session
+    if let Err(error) = session
         .emit_turn_suspend_lifecycle(turn_context.extension_data.as_ref())
         .await
-        .map_err(|error| {
-            CodexErr::Fatal(format!(
-                "persist resumable state before root turn suspension failed: {error}"
-            ))
-        })?;
+    {
+        return SuspensionResult::recoverable(Err(CodexErr::Fatal(format!(
+            "persist resumable state before root turn suspension failed: {error}"
+        ))));
+    }
 
     // The flush and extension hooks can yield while the active turn completes or changes.
     // Remove only the exact regular turn whose resumable state was persisted.
-    let mut turn = {
+    let (turn, task) = {
         let mut active = session.active_turn.lock().await;
         let Some(active_turn) = active.as_ref() else {
-            return Ok(SuspendTurnOutcome::NotActive);
+            return SuspensionResult::recoverable(Ok(SuspendTurnOutcome::NotActive));
         };
-        let Some(task) = active_turn.task.as_ref() else {
-            return Ok(SuspendTurnOutcome::NotActive);
+        let Some(active_task) = active_turn.task.as_ref() else {
+            return SuspensionResult::recoverable(Ok(SuspendTurnOutcome::NotActive));
         };
-        if !Arc::ptr_eq(&task.turn_context, &turn_context) {
-            return Ok(SuspendTurnOutcome::NotActive);
+        if !Arc::ptr_eq(&active_task.turn_context, &turn_context) {
+            return SuspensionResult::recoverable(Ok(SuspendTurnOutcome::NotActive));
         }
-        if task.kind != TaskKind::Regular {
-            return Ok(SuspendTurnOutcome::UnsupportedTask);
+        if active_task.kind != TaskKind::Regular {
+            return SuspensionResult::recoverable(Ok(SuspendTurnOutcome::UnsupportedTask));
         }
-        active.take().ok_or_else(|| {
-            CodexErr::Fatal("accepted root turn suspension had no running turn".to_string())
-        })?
+        let Some(mut turn) = active.take() else {
+            return SuspensionResult::recoverable(Err(CodexErr::Fatal(
+                "accepted root turn suspension had no running turn".to_string(),
+            )));
+        };
+        let Some(task) = turn.task.take() else {
+            *active = Some(turn);
+            return SuspensionResult::recoverable(Err(CodexErr::Fatal(
+                "accepted root turn suspension had no running task".to_string(),
+            )));
+        };
+        (turn, task)
     };
     spawn_admission.seal();
-
-    let task = turn.task.take().ok_or_else(|| {
-        CodexErr::Fatal("accepted root turn suspension had no running task".to_string())
-    })?;
     let idle_turn_source = task
         .turn_context
         .extension_data
@@ -137,27 +174,53 @@ pub(super) async fn suspend_turn_and_shutdown(
     // intentionally drops that state; persisting or replaying it needs a separate protocol.
     session.input_queue.clear_pending(&turn).await;
 
-    // Stop all producers before flushing their final history and closing its writer.
-    // If either persistence step fails, do not report success: the current worker
-    // retains ownership until worker-failure recovery can take responsibility.
+    // Stop all producers before flushing their final history and closing its writer. This is
+    // past the point of no return: every outcome below terminates the session, and a failed close
+    // falls back to discarding the live writer so durable history can be recovered safely.
     handlers::shutdown_session_runtime(session).await;
-    live_thread.flush().await.map_err(|error| {
-        CodexErr::Fatal(format!("flush after root turn suspension failed: {error}"))
-    })?;
-    live_thread.shutdown().await.map_err(|error| {
-        CodexErr::Fatal(format!("close suspended root turn writer failed: {error}"))
-    })?;
-    // Announce thread shutdown only after its writer closes so a replacement worker
-    // cannot write the same thread concurrently.
+    let flush_result = live_thread.flush().await;
+    let shutdown_result = live_thread.shutdown().await;
+    let discard_result = if shutdown_result.is_err() {
+        Some(live_thread.discard().await)
+    } else {
+        None
+    };
+    // The runtime is terminal even when persistence reports an error, so release extension-owned
+    // thread state before the submission loop closes.
     handlers::emit_thread_stop_lifecycle(session.as_ref()).await;
-    session
-        .deliver_event_raw(Event {
-            id: submission_id,
-            msg: EventMsg::ShutdownComplete,
-        })
-        .await;
-    Ok(SuspendTurnOutcome::Suspended {
-        turn_id,
-        idle_turn_source,
-    })
+    match (flush_result, shutdown_result, discard_result) {
+        (Ok(()), Ok(()), None) => {
+            session
+                .deliver_event_raw(Event {
+                    id: submission_id,
+                    msg: EventMsg::ShutdownComplete,
+                })
+                .await;
+            SuspensionResult::terminal(Ok(SuspendTurnOutcome::Suspended {
+                turn_id,
+                idle_turn_source,
+            }))
+        }
+        (flush_result, shutdown_result, discard_result) => {
+            let flush_error = flush_result
+                .err()
+                .map(|error| format!("flush after root turn suspension failed: {error}"));
+            let shutdown_error = shutdown_result
+                .err()
+                .map(|error| format!("close suspended root turn writer failed: {error}"));
+            let discard_status = match discard_result {
+                Some(Ok(())) => "session was quarantined and its writer was discarded".to_string(),
+                Some(Err(error)) => format!(
+                    "session was quarantined, but discarding its writer also failed: {error}"
+                ),
+                None => "session was quarantined after its writer closed".to_string(),
+            };
+            let message = [flush_error, shutdown_error, Some(discard_status)]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("; ");
+            SuspensionResult::terminal(Err(CodexErr::Fatal(message)))
+        }
+    }
 }

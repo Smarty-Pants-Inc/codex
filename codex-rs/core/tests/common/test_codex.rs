@@ -338,6 +338,7 @@ pub struct TestCodexBuilder {
     code_mode_host_program: Option<PathBuf>,
     history_mode: Option<ThreadHistoryMode>,
     models_manager: Option<SharedModelsManager>,
+    thread_store: Option<Arc<dyn ThreadStore>>,
 }
 
 impl TestCodexBuilder {
@@ -356,6 +357,11 @@ impl TestCodexBuilder {
 
     pub fn with_models_manager(mut self, models_manager: SharedModelsManager) -> Self {
         self.models_manager = Some(models_manager);
+        self
+    }
+
+    pub fn with_thread_store(mut self, thread_store: Arc<dyn ThreadStore>) -> Self {
+        self.thread_store = Some(thread_store);
         self
     }
 
@@ -669,7 +675,10 @@ impl TestCodexBuilder {
     ) -> anyhow::Result<TestCodex> {
         let auth = self.auth.clone();
         let state_db = codex_core::init_state_db(&config).await;
-        let thread_store = thread_store_from_config(&config, state_db.clone());
+        let thread_store = self
+            .thread_store
+            .clone()
+            .unwrap_or_else(|| thread_store_from_config(&config, state_db.clone()));
         let installation_id = resolve_installation_id(&config.codex_home).await?;
         let user_instructions_provider =
             self.user_instructions_provider.clone().unwrap_or_else(|| {
@@ -1354,6 +1363,7 @@ pub fn test_codex() -> TestCodexBuilder {
         code_mode_host_program: None,
         history_mode: None,
         models_manager: None,
+        thread_store: None,
     }
 }
 

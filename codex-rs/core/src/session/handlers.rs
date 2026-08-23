@@ -592,17 +592,17 @@ pub(super) async fn submission_loop(
                     false
                 }
                 Op::SuspendTurnAndShutdown { reply } => {
-                    let result =
+                    let suspension =
                         super::turn_suspension::suspend_turn_and_shutdown(&sess, sub.id.clone())
                             .await;
-                    // Exit only after history is durable and its writer has closed; an error
-                    // must leave responsibility for the thread with the current worker.
-                    let should_exit = matches!(
-                        &result,
-                        Ok(codex_protocol::turn_input::SuspendTurnOutcome::Suspended { .. })
-                    );
-                    let _ = reply.send(result);
-                    should_exit
+                    // Close admission before replying to every terminal outcome. In particular,
+                    // a post-cancellation persistence error must not leave a half-suspended
+                    // session able to accept another submission.
+                    if suspension.terminate_session {
+                        rx_sub.close();
+                    }
+                    let _ = reply.send(suspension.outcome);
+                    suspension.terminate_session
                 }
                 Op::ThreadSettings { thread_settings } => {
                     thread_settings::update(&sess, sub.id.clone(), thread_settings).await;

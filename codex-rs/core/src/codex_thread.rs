@@ -412,9 +412,10 @@ impl CodexThread {
     /// rechecked and sealed before handoff succeeds. Queued user input and outstanding
     /// approval, elicitation, or server-request waiters remain best effort and may be discarded.
     ///
-    /// The session processes an accepted request even if its caller disconnects.
-    /// Callers must not transfer ownership until suspension succeeds, which
-    /// requires stopping execution, flushing history, and closing its writer.
+    /// The session processes an accepted request even if its caller disconnects. If persistence
+    /// or writer shutdown fails after the turn has been removed, Core quarantines and terminates
+    /// the current runtime before returning the error; callers must not reuse that thread and
+    /// should recover it from durable history on a replacement runtime.
     pub async fn suspend_turn_and_shutdown(&self) -> CodexResult<SuspendTurnOutcome> {
         if self.session_source.is_non_root_agent() {
             return Err(CodexErr::UnsupportedOperation(

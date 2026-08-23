@@ -497,6 +497,7 @@ pub struct InMemoryThreadStoreCalls {
 pub struct InMemoryThreadStore {
     state: tokio::sync::Mutex<InMemoryThreadStoreState>,
     omit_metadata_update_result: AtomicBool,
+    fail_shutdown: AtomicBool,
 }
 
 #[derive(Default)]
@@ -537,6 +538,10 @@ impl InMemoryThreadStore {
     pub fn omit_metadata_update_result_for_testing(&self) {
         self.omit_metadata_update_result
             .store(true, Ordering::Relaxed);
+    }
+    /// Makes live-thread shutdown fail so callers can verify terminal cleanup paths.
+    pub fn fail_shutdown_for_testing(&self) {
+        self.fail_shutdown.store(true, Ordering::Relaxed);
     }
 
     async fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreResult<()> {
@@ -883,6 +888,11 @@ impl ThreadStore for InMemoryThreadStore {
     fn shutdown_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
             self.state.lock().await.calls.shutdown_thread += 1;
+            if self.fail_shutdown.load(Ordering::Relaxed) {
+                return Err(ThreadStoreError::Internal {
+                    message: "injected thread shutdown failure".to_string(),
+                });
+            }
             Ok(())
         })
     }

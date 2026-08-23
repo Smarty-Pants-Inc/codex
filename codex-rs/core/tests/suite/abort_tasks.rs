@@ -7,12 +7,14 @@ use codex_history::RolloutLine;
 use std::sync::Arc;
 use std::time::Duration;
 
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::turn_input::IdleTurnSource;
 use codex_protocol::user_input::UserInput;
+use codex_thread_store::InMemoryThreadStore;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
@@ -208,6 +210,69 @@ async fn root_turn_suspension_preserves_unfinished_turn_history() {
         unreachable!("wait_for_event returned unexpected event");
     };
     assert_eq!(completed.turn_id, turn_id);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn root_turn_suspension_close_failure_quarantines_session() {
+    let server = start_mock_server().await;
+    mount_response_once(
+        &server,
+        sse_response(sse(vec![
+            ev_response_created("quarantined_response"),
+            ev_completed("quarantined_response"),
+        ]))
+        .set_delay(Duration::from_secs(60)),
+    )
+    .await;
+    let thread_store = Arc::new(InMemoryThreadStore::default());
+    let test = test_codex()
+        .with_model("gpt-5.4")
+        .with_thread_store(thread_store.clone())
+        .build_with_auto_env(&server)
+        .await
+        .expect("start root thread with injected persistence");
+    let codex = Arc::clone(&test.codex);
+    codex
+        .start_turn_if_idle(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "quarantine this unfinished turn if writer close fails".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .expect("start root turn");
+    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnStarted(_))).await;
+
+    let calls_before = thread_store.calls().await;
+    thread_store.fail_shutdown_for_testing();
+    let error = codex
+        .suspend_turn_and_shutdown()
+        .await
+        .expect_err("surface the failed writer close after quarantining the session");
+    assert!(matches!(
+        error.details(),
+        CodexErrorDetails::Fatal(message)
+            if message.contains("close suspended root turn writer failed")
+                && message.contains("session was quarantined and its writer was discarded")
+    ));
+
+    let calls_after = thread_store.calls().await;
+    assert!(calls_after.flush_thread >= calls_before.flush_thread + 2);
+    assert_eq!(
+        calls_after.shutdown_thread,
+        calls_before.shutdown_thread + 1
+    );
+    assert_eq!(calls_after.discard_thread, calls_before.discard_thread + 1);
+    let rejected = codex
+        .start_turn_if_idle(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "must not be accepted by the half-suspended runtime".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .expect_err("quarantined session must reject new work");
+    assert!(matches!(
+        rejected.details(),
+        CodexErrorDetails::InternalAgentDied
+    ));
+    codex.wait_until_terminated().await;
 }
 
 /// After an interrupt we expect the next request to the model to include both
