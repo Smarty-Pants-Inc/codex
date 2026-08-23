@@ -604,21 +604,27 @@ pub enum Op {
         communication: InterAgentCommunication,
     },
 
-    /// Approve a command execution
+    /// Approve a command execution.
     ExecApproval {
-        /// The id of the submission we are approving
+        /// The id of the submission we are approving.
         id: String,
         /// Turn id associated with the approval event, when available.
+        ///
+        /// When omitted, the legacy ID-only approval path is used. A supplied
+        /// turn id must match the turn that owns the pending approval.
         turn_id: Option<String>,
         /// The user's decision in response to the request.
         decision: ReviewDecision,
     },
 
-    /// Approve a code patch
+    /// Approve a code patch.
     PatchApproval {
-        /// The id of the submission we are approving
+        /// The id of the submission we are approving.
         id: String,
         /// Turn id associated with the approval event, when available.
+        ///
+        /// When omitted, the legacy ID-only approval path is used. A supplied
+        /// turn id must match the turn that owns the pending approval.
         turn_id: Option<String>,
         /// The user's decision in response to the request.
         decision: ReviewDecision,

@@ -6602,6 +6602,62 @@ async fn stale_abort_does_not_interrupt_reused_patch_approval() {
 }
 
 #[tokio::test]
+async fn legacy_exec_approval_without_turn_id_resolves_pending_approval() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let session = Arc::new(session);
+    let active_turn = ActiveTurn::default();
+    let turn_state = Arc::clone(&active_turn.turn_state);
+    *session.active_turn.lock().await = Some(active_turn);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    turn_state.lock().await.insert_pending_approval(
+        "legacy-approval".to_string(),
+        "current-turn".to_string(),
+        tx,
+    );
+
+    handlers::exec_approval(
+        &session,
+        "legacy-approval".to_string(),
+        None,
+        codex_protocol::protocol::ReviewDecision::Abort,
+    )
+    .await;
+
+    assert_eq!(
+        rx.await.expect("legacy exec approval receives abort"),
+        codex_protocol::protocol::ReviewDecision::Abort
+    );
+}
+
+#[tokio::test]
+async fn legacy_patch_approval_without_turn_id_resolves_pending_approval() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let session = Arc::new(session);
+    let active_turn = ActiveTurn::default();
+    let turn_state = Arc::clone(&active_turn.turn_state);
+    *session.active_turn.lock().await = Some(active_turn);
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    turn_state.lock().await.insert_pending_approval(
+        "legacy-approval".to_string(),
+        "current-turn".to_string(),
+        tx,
+    );
+
+    handlers::patch_approval(
+        &session,
+        "legacy-approval".to_string(),
+        None,
+        codex_protocol::protocol::ReviewDecision::Abort,
+    )
+    .await;
+
+    assert_eq!(
+        rx.await.expect("legacy patch approval receives abort"),
+        codex_protocol::protocol::ReviewDecision::Abort
+    );
+}
+
+#[tokio::test]
 async fn request_permissions_response_is_bound_to_originating_turn() {
     let (session, turn_context) = make_session_and_context().await;
     let environment = turn_context

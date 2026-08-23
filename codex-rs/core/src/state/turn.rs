@@ -134,7 +134,7 @@ impl TurnState {
         if self
             .pending_approvals
             .get(key)
-            .is_some_and(|pending| turn_id.is_some_and(|turn_id| pending.turn_id == turn_id))
+            .is_some_and(|pending| turn_id.is_none_or(|turn_id| pending.turn_id == turn_id))
         {
             self.pending_approvals.remove(key).map(|pending| pending.tx)
         } else {
