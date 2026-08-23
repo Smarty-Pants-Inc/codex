@@ -104,13 +104,9 @@ async fn queued_follow_up_admission_failure_keeps_prompt_queued() -> Result<()> 
     app.chat_widget
         .handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     let queue_event = loop {
-        match app_event_rx
+        if let event @ AppEvent::QueueFollowUpUserMessage { .. } = app_event_rx
             .try_recv()
-            .expect("expected queued follow-up event")
-        {
-            event @ AppEvent::QueueFollowUpUserMessage { .. } => break event,
-            _ => {}
-        }
+            .expect("expected queued follow-up event") { break event }
     };
 
     let control = app

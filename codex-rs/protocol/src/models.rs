@@ -3855,9 +3855,7 @@ mod tests {
         let audio_path = temp_dir.path().join("sample.flac");
         std::fs::write(&audio_path, b"audio")?;
 
-        let item = ResponseInputItem::from(vec![UserInput::LocalAudio {
-            path: audio_path.clone(),
-        }]);
+        let item = ResponseInputItem::from(vec![UserInput::LocalAudio { path: audio_path }]);
 
         let ResponseInputItem::Message { content, .. } = item else {
             panic!("expected message response");
