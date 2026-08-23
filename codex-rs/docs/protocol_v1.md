@@ -68,8 +68,8 @@ For complete documentation of the `Op` and `EventMsg` variants, refer to [protoc
 - `Op`
   - `Op::UserTurn` – Any input from the user to kick off a `Turn`, including full per-turn context such as cwd, model, sandbox, approval policy, and optional `approvals_reviewer`
   - `Op::Interrupt` – Interrupts a running turn
-  - `Op::ExecApproval` – Approve or deny code execution. Its optional `turn_id` is checked when supplied; omitting it preserves the legacy ID-only approval path.
-  - `Op::PatchApproval` – Approve or deny a code patch. Its optional `turn_id` is checked when supplied; omitting it preserves the legacy ID-only approval path.
+  - `Op::ExecApproval` – Approve or deny code execution. Its optional `turn_id` is checked when supplied; the ID-only legacy path may resolve only that ID's first registration in a session, so callers must provide the current `turn_id` after reuse.
+  - `Op::PatchApproval` – Approve or deny a code patch. Its optional `turn_id` is checked when supplied; the ID-only legacy path may resolve only that ID's first registration in a session, so callers must provide the current `turn_id` after reuse.
   - `Op::UserInputAnswer` – Provide answers for a `request_user_input` tool call
 
 - `EventMsg`

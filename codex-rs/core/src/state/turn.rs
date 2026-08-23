@@ -104,6 +104,7 @@ pub(crate) struct TurnState {
 
 struct PendingApproval {
     turn_id: String,
+    legacy_response_allowed: bool,
     tx: oneshot::Sender<ReviewDecision>,
 }
 
@@ -119,10 +120,18 @@ impl TurnState {
         &mut self,
         key: String,
         turn_id: String,
+        legacy_response_allowed: bool,
         tx: oneshot::Sender<ReviewDecision>,
     ) -> Option<oneshot::Sender<ReviewDecision>> {
         self.pending_approvals
-            .insert(key, PendingApproval { turn_id, tx })
+            .insert(
+                key,
+                PendingApproval {
+                    turn_id,
+                    legacy_response_allowed,
+                    tx,
+                },
+            )
             .map(|pending| pending.tx)
     }
 
@@ -134,7 +143,10 @@ impl TurnState {
         if self
             .pending_approvals
             .get(key)
-            .is_some_and(|pending| turn_id.is_none_or(|turn_id| pending.turn_id == turn_id))
+            .is_some_and(|pending| match turn_id {
+                Some(turn_id) => pending.turn_id == turn_id,
+                None => pending.legacy_response_allowed,
+            })
         {
             self.pending_approvals.remove(key).map(|pending| pending.tx)
         } else {

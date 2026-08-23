@@ -610,8 +610,9 @@ pub enum Op {
         id: String,
         /// Turn id associated with the approval event, when available.
         ///
-        /// When omitted, the legacy ID-only approval path is used. A supplied
-        /// turn id must match the turn that owns the pending approval.
+        /// When omitted, this resolves only the first registration of an ID
+        /// in a session. After reuse, a `turn_id` is required and must match
+        /// the turn that owns the pending approval.
         turn_id: Option<String>,
         /// The user's decision in response to the request.
         decision: ReviewDecision,
@@ -623,8 +624,9 @@ pub enum Op {
         id: String,
         /// Turn id associated with the approval event, when available.
         ///
-        /// When omitted, the legacy ID-only approval path is used. A supplied
-        /// turn id must match the turn that owns the pending approval.
+        /// When omitted, this resolves only the first registration of an ID
+        /// in a session. After reuse, a `turn_id` is required and must match
+        /// the turn that owns the pending approval.
         turn_id: Option<String>,
         /// The user's decision in response to the request.
         decision: ReviewDecision,

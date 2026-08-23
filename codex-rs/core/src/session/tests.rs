@@ -6106,6 +6106,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        seen_approval_ids: std::sync::Mutex::new(HashSet::new()),
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
@@ -6527,14 +6528,13 @@ async fn notify_request_permissions_response_ignores_unmatched_call_id() {
 async fn stale_abort_does_not_interrupt_reused_exec_approval() {
     let (session, _turn_context) = make_session_and_context().await;
     let session = Arc::new(session);
-    let active_turn = ActiveTurn::default();
-    let turn_state = Arc::clone(&active_turn.turn_state);
-    *session.active_turn.lock().await = Some(active_turn);
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
     let (tx, mut rx) = tokio::sync::oneshot::channel();
-    turn_state.lock().await.insert_pending_approval(
-        "reused-approval".to_string(),
-        "new-turn".to_string(),
-        tx,
+    assert!(
+        session
+            .register_pending_approval("reused-approval".to_string(), "new-turn".to_string(), tx)
+            .await
+            .is_none()
     );
 
     handlers::exec_approval(
@@ -6566,14 +6566,13 @@ async fn stale_abort_does_not_interrupt_reused_exec_approval() {
 async fn stale_abort_does_not_interrupt_reused_patch_approval() {
     let (session, _turn_context) = make_session_and_context().await;
     let session = Arc::new(session);
-    let active_turn = ActiveTurn::default();
-    let turn_state = Arc::clone(&active_turn.turn_state);
-    *session.active_turn.lock().await = Some(active_turn);
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
     let (tx, mut rx) = tokio::sync::oneshot::channel();
-    turn_state.lock().await.insert_pending_approval(
-        "reused-approval".to_string(),
-        "new-turn".to_string(),
-        tx,
+    assert!(
+        session
+            .register_pending_approval("reused-approval".to_string(), "new-turn".to_string(), tx)
+            .await
+            .is_none()
     );
 
     handlers::patch_approval(
@@ -6605,14 +6604,17 @@ async fn stale_abort_does_not_interrupt_reused_patch_approval() {
 async fn legacy_exec_approval_without_turn_id_resolves_pending_approval() {
     let (session, _turn_context) = make_session_and_context().await;
     let session = Arc::new(session);
-    let active_turn = ActiveTurn::default();
-    let turn_state = Arc::clone(&active_turn.turn_state);
-    *session.active_turn.lock().await = Some(active_turn);
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
     let (tx, rx) = tokio::sync::oneshot::channel();
-    turn_state.lock().await.insert_pending_approval(
-        "legacy-approval".to_string(),
-        "current-turn".to_string(),
-        tx,
+    assert!(
+        session
+            .register_pending_approval(
+                "legacy-approval".to_string(),
+                "current-turn".to_string(),
+                tx,
+            )
+            .await
+            .is_none()
     );
 
     handlers::exec_approval(
@@ -6633,14 +6635,17 @@ async fn legacy_exec_approval_without_turn_id_resolves_pending_approval() {
 async fn legacy_patch_approval_without_turn_id_resolves_pending_approval() {
     let (session, _turn_context) = make_session_and_context().await;
     let session = Arc::new(session);
-    let active_turn = ActiveTurn::default();
-    let turn_state = Arc::clone(&active_turn.turn_state);
-    *session.active_turn.lock().await = Some(active_turn);
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
     let (tx, rx) = tokio::sync::oneshot::channel();
-    turn_state.lock().await.insert_pending_approval(
-        "legacy-approval".to_string(),
-        "current-turn".to_string(),
-        tx,
+    assert!(
+        session
+            .register_pending_approval(
+                "legacy-approval".to_string(),
+                "current-turn".to_string(),
+                tx,
+            )
+            .await
+            .is_none()
     );
 
     handlers::patch_approval(
@@ -6653,6 +6658,62 @@ async fn legacy_patch_approval_without_turn_id_resolves_pending_approval() {
 
     assert_eq!(
         rx.await.expect("legacy patch approval receives abort"),
+        codex_protocol::protocol::ReviewDecision::Abort
+    );
+}
+
+#[tokio::test]
+async fn legacy_exec_approval_without_turn_id_ignores_reused_approval() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let session = Arc::new(session);
+
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
+    let (first_tx, _first_rx) = tokio::sync::oneshot::channel();
+    assert!(
+        session
+            .register_pending_approval(
+                "reused-approval".to_string(),
+                "first-turn".to_string(),
+                first_tx,
+            )
+            .await
+            .is_none()
+    );
+
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
+    let (second_tx, mut second_rx) = tokio::sync::oneshot::channel();
+    assert!(
+        session
+            .register_pending_approval(
+                "reused-approval".to_string(),
+                "second-turn".to_string(),
+                second_tx,
+            )
+            .await
+            .is_none()
+    );
+
+    handlers::exec_approval(
+        &session,
+        "reused-approval".to_string(),
+        None,
+        codex_protocol::protocol::ReviewDecision::Abort,
+    )
+    .await;
+    assert!(matches!(
+        second_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    handlers::exec_approval(
+        &session,
+        "reused-approval".to_string(),
+        Some("second-turn".to_string()),
+        codex_protocol::protocol::ReviewDecision::Abort,
+    )
+    .await;
+    assert_eq!(
+        second_rx.await.expect("turn-bound approval receives abort"),
         codex_protocol::protocol::ReviewDecision::Abort
     );
 }
@@ -8503,6 +8564,7 @@ where
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        seen_approval_ids: std::sync::Mutex::new(HashSet::new()),
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
