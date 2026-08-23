@@ -439,11 +439,13 @@ impl CodexThread {
             .map_err(|_| CodexErr::Fatal("thread session has stopped".to_string()))?;
         let outcome = result
             .await
-            .map_err(|_| CodexErr::Fatal("thread suspension reply was lost".to_string()))??;
-        if matches!(&outcome, SuspendTurnOutcome::Suspended { .. }) {
+            .map_err(|_| CodexErr::Fatal("thread suspension reply was lost".to_string()))?;
+        if matches!(&outcome, Ok(SuspendTurnOutcome::Suspended { .. }))
+            || matches!(self.io.agent_status().await, AgentStatus::Shutdown)
+        {
             self.io.session_loop_termination.clone().await;
         }
-        Ok(outcome)
+        outcome
     }
 
     /// Steers only if `expected_turn_id` is still the active regular turn.

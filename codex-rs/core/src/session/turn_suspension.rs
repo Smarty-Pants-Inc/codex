@@ -188,19 +188,11 @@ pub(super) async fn suspend_turn_and_shutdown(
     // The runtime is terminal even when persistence reports an error, so release extension-owned
     // thread state before the submission loop closes.
     handlers::emit_thread_stop_lifecycle(session.as_ref()).await;
-    match (flush_result, shutdown_result, discard_result) {
-        (Ok(()), Ok(()), None) => {
-            session
-                .deliver_event_raw(Event {
-                    id: submission_id,
-                    msg: EventMsg::ShutdownComplete,
-                })
-                .await;
-            SuspensionResult::terminal(Ok(SuspendTurnOutcome::Suspended {
-                turn_id,
-                idle_turn_source,
-            }))
-        }
+    let outcome = match (flush_result, shutdown_result, discard_result) {
+        (Ok(()), Ok(()), None) => Ok(SuspendTurnOutcome::Suspended {
+            turn_id,
+            idle_turn_source,
+        }),
         (flush_result, shutdown_result, discard_result) => {
             let flush_error = flush_result
                 .err()
@@ -220,7 +212,21 @@ pub(super) async fn suspend_turn_and_shutdown(
                 .flatten()
                 .collect::<Vec<_>>()
                 .join("; ");
-            SuspensionResult::terminal(Err(CodexErr::Fatal(message)))
+            let error = CodexErr::Fatal(message);
+            session
+                .send_event_raw(Event {
+                    id: submission_id.clone(),
+                    msg: EventMsg::Error(error.to_error_event(/*message_prefix*/ None)),
+                })
+                .await;
+            Err(error)
         }
-    }
+    };
+    session
+        .deliver_event_raw(Event {
+            id: submission_id,
+            msg: EventMsg::ShutdownComplete,
+        })
+        .await;
+    SuspensionResult::terminal(outcome)
 }

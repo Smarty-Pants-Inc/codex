@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use codex_protocol::error::CodexErrorDetails;
+use codex_protocol::protocol::AgentStatus;
+use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
@@ -26,6 +28,7 @@ use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use futures::FutureExt;
 use regex_lite::Regex;
 use serde_json::json;
 
@@ -254,7 +257,21 @@ async fn root_turn_suspension_close_failure_quarantines_session() {
                 && message.contains("session was quarantined and its writer was discarded")
     ));
 
+    let expected_error_message = error.to_string();
+    let terminal_error = wait_for_event(&codex, |event| matches!(event, EventMsg::Error(_))).await;
+    let EventMsg::Error(terminal_error) = terminal_error else {
+        unreachable!("wait_for_event returned unexpected event");
+    };
+    assert_eq!(terminal_error.message, expected_error_message);
+    assert_eq!(terminal_error.codex_error_info, Some(CodexErrorInfo::Other));
+    wait_for_event(&codex, |event| matches!(event, EventMsg::ShutdownComplete)).await;
+    assert_eq!(codex.agent_status().await, AgentStatus::Shutdown);
+    assert!(
+        codex.wait_until_terminated().now_or_never().is_some(),
+        "suspension must await session-loop termination before returning"
+    );
     let calls_after = thread_store.calls().await;
+
     assert!(calls_after.flush_thread >= calls_before.flush_thread + 2);
     assert_eq!(
         calls_after.shutdown_thread,
@@ -272,7 +289,6 @@ async fn root_turn_suspension_close_failure_quarantines_session() {
         rejected.details(),
         CodexErrorDetails::InternalAgentDied
     ));
-    codex.wait_until_terminated().await;
 }
 
 /// After an interrupt we expect the next request to the model to include both
