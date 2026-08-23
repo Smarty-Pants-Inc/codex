@@ -1,6 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 
 use crate::ExtensionData;
 use crate::ExtensionMetrics;
@@ -67,24 +65,6 @@ pub enum ThreadIdleCause {
     Failed,
 }
 
-/// Per-emission gate for later idle contributors that may submit automatic work.
-#[derive(Debug, Default)]
-pub struct ThreadIdleContinuation {
-    blocked: AtomicBool,
-}
-
-impl ThreadIdleContinuation {
-    /// Prevents later contributors in this idle pass from starting automatic work.
-    pub fn block(&self) {
-        self.blocked.store(true, Ordering::Release);
-    }
-
-    /// Returns whether no earlier contributor blocked this idle pass.
-    pub fn is_allowed(&self) -> bool {
-        !self.blocked.load(Ordering::Acquire)
-    }
-}
-
 /// Input supplied when the host has no immediately pending thread work.
 pub struct ThreadIdleInput<'a> {
     /// Why the thread became idle.
@@ -93,8 +73,6 @@ pub struct ThreadIdleInput<'a> {
     pub session_store: &'a ExtensionData,
     /// Store scoped to this thread runtime.
     pub thread_store: &'a ExtensionData,
-    /// Gate shared only by contributors in this one idle emission.
-    pub continuation: &'a ThreadIdleContinuation,
 }
 
 /// Input supplied when the host stops a thread runtime.

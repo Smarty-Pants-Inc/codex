@@ -43,7 +43,6 @@ pub use projects::StoredProjectRoot;
 pub use projects::StoredProjectsPage;
 pub use projects::UpdateProjectParams;
 pub use projects::UpdatedProject;
-pub use queue_store::QueueEmptyReservation;
 
 pub use queue_store::LocalQueueStore;
 pub use queue_store::QueueStore;

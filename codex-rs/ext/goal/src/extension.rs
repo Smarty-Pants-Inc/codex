@@ -78,7 +78,6 @@ fn auto_continue_capability_for(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codex_extension_api::ThreadIdleContinuation;
 
     #[test]
     fn auto_continue_follows_current_host_for_root_threads() {
@@ -120,27 +119,17 @@ mod tests {
     }
 
     #[test]
-    fn idle_continuation_respects_interrupts_and_higher_priority_blockers() {
-        let session_store = ExtensionData::new("session");
-        let thread_store = ExtensionData::new("thread");
-        let continuation = ThreadIdleContinuation::default();
-        let input = |cause| ThreadIdleInput {
-            cause,
-            session_store: &session_store,
-            thread_store: &thread_store,
-            continuation: &continuation,
-        };
-
-        assert!(goal_continuation_is_allowed(&input(
-            ThreadIdleCause::Completed
-        )));
-        assert!(!goal_continuation_is_allowed(&input(
-            ThreadIdleCause::Interrupted
-        )));
-        continuation.block();
-        assert!(!goal_continuation_is_allowed(&input(
-            ThreadIdleCause::Completed
-        )));
+    fn idle_continuation_respects_interrupts() {
+        assert!(goal_continuation_is_allowed(&ThreadIdleInput {
+            cause: ThreadIdleCause::Completed,
+            session_store: &ExtensionData::new("session"),
+            thread_store: &ExtensionData::new("thread"),
+        }));
+        assert!(!goal_continuation_is_allowed(&ThreadIdleInput {
+            cause: ThreadIdleCause::Interrupted,
+            session_store: &ExtensionData::new("session"),
+            thread_store: &ExtensionData::new("thread"),
+        }));
     }
 }
 
@@ -633,7 +622,7 @@ fn goal_runtime_handle(thread_store: &ExtensionData) -> Option<Arc<GoalRuntimeHa
 }
 
 fn goal_continuation_is_allowed(input: &ThreadIdleInput<'_>) -> bool {
-    input.cause != ThreadIdleCause::Interrupted && input.continuation.is_allowed()
+    input.cause != ThreadIdleCause::Interrupted
 }
 
 fn tool_attempt_counts_for_goal_progress(outcome: ToolCallOutcome) -> bool {

@@ -619,6 +619,16 @@ enabled = false
 }
 
 #[test]
+fn spawn_tool_spec_makes_explorer_conditional_and_requires_verification() {
+    let spec = spawn_tool_spec::build(&BTreeMap::new());
+
+    assert!(spec.contains("Use `explorer` when a focused codebase question"));
+    assert!(spec.contains("Normal verification is still required"));
+    assert!(!spec.contains("Explorers are fast and authoritative"));
+    assert!(!spec.contains("They must be used"));
+}
+
+#[test]
 fn spawn_tool_spec_build_deduplicates_user_defined_built_in_roles() {
     let user_defined_roles = BTreeMap::from([
         (

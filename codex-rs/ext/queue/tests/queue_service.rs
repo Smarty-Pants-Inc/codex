@@ -20,7 +20,6 @@ use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ExtensionWarning;
 use codex_extension_api::NoopExtensionEventSink;
 use codex_extension_api::ThreadIdleCause;
-use codex_extension_api::ThreadIdleContinuation;
 use codex_extension_api::ThreadIdleInput;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadResumeInput;
@@ -231,45 +230,19 @@ async fn emit_idle_with_cause(
 ) {
     let session_store = ExtensionData::new("session");
     let thread_store = ExtensionData::new(thread_id.to_string());
-    let continuation = ThreadIdleContinuation::default();
     <QueuedItemService as ThreadLifecycleContributor<()>>::on_thread_idle(
         service,
         ThreadIdleInput {
             cause,
             session_store: &session_store,
             thread_store: &thread_store,
-            continuation: &continuation,
         },
     )
     .await;
-}
-
-#[tokio::test]
-async fn idle_dispatch_failure_blocks_later_continuation() -> anyhow::Result<()> {
-    let (queue, _home) = test_queue().await?;
-    let service = QueuedItemService::new(queue, Weak::new(), Arc::new(NoopExtensionEventSink));
-    let thread_id = ThreadId::new();
-    let session_store = ExtensionData::new("session");
-    let thread_store = ExtensionData::new(thread_id.to_string());
-    let continuation = ThreadIdleContinuation::default();
-
-    <QueuedItemService as ThreadLifecycleContributor<()>>::on_thread_idle(
-        &service,
-        ThreadIdleInput {
-            cause: ThreadIdleCause::Completed,
-            session_store: &session_store,
-            thread_store: &thread_store,
-            continuation: &continuation,
-        },
-    )
-    .await;
-
-    assert!(!continuation.is_allowed());
-    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn successful_idle_dispatch_blocks_later_continuation() -> anyhow::Result<()> {
+async fn successful_idle_dispatches_queued_input() -> anyhow::Result<()> {
     let server = start_mock_server().await;
     responses::mount_sse_once(&server, responses::sse_completed("queued-turn")).await;
     let test = test_codex().build_with_auto_env(&server).await?;
@@ -284,7 +257,6 @@ async fn successful_idle_dispatch_blocks_later_continuation() -> anyhow::Result<
         .await?;
     let session_store = ExtensionData::new("session");
     let thread_store = ExtensionData::new(thread_id.to_string());
-    let continuation = ThreadIdleContinuation::default();
 
     <QueuedItemService as ThreadLifecycleContributor<()>>::on_thread_idle(
         &service,
@@ -292,12 +264,10 @@ async fn successful_idle_dispatch_blocks_later_continuation() -> anyhow::Result<
             cause: ThreadIdleCause::Completed,
             session_store: &session_store,
             thread_store: &thread_store,
-            continuation: &continuation,
         },
     )
     .await;
 
-    assert!(!continuation.is_allowed());
     assert!(service.list(thread_id).await?.is_empty());
     Ok(())
 }

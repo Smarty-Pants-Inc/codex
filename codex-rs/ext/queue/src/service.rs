@@ -29,7 +29,6 @@ use codex_protocol::protocol::W3cTraceContext;
 use codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS;
 use codex_protocol::user_input::UserInput;
 use codex_thread_store::MAX_QUEUE_ITEMS;
-use codex_thread_store::QueueEmptyReservation;
 
 use codex_thread_store::QueueStore;
 use codex_thread_store::QueuedUserSubmissionRecord;
@@ -72,7 +71,7 @@ struct QueueDispatchState {
 /// Couples the durable empty-queue reservation to Core's in-memory reservation.
 struct QueueAutomaticAdmission {
     dispatch: Arc<QueueDispatchState>,
-    queue_reservation: StdMutex<Option<Box<dyn QueueEmptyReservation>>>,
+    queue_reservation: StdMutex<Option<Box<dyn Send>>>,
 }
 
 /// Retains the weakly indexed state until after its mutex guard is released.
@@ -709,17 +708,11 @@ where
                     level_id = input.thread_store.level_id(),
                     "queue extension received an invalid thread id"
                 );
-                input.continuation.block();
                 return;
             };
             let _guard = self.dispatch_guard(thread_id).await;
-            match self.dispatch_if_idle(thread_id).await {
-                Ok(true) => {}
-                Ok(false) => input.continuation.block(),
-                Err(error) => {
-                    input.continuation.block();
-                    tracing::warn!(%thread_id, %error, "failed to dispatch queued user input");
-                }
+            if let Err(error) = self.dispatch_if_idle(thread_id).await {
+                tracing::warn!(%thread_id, %error, "failed to dispatch queued user input");
             }
         })
     }

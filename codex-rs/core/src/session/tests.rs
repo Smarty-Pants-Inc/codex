@@ -2521,11 +2521,15 @@ async fn local_media_provenance_preserves_attachment_numbering() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(labels.len(), 4);
-    assert!(labels[0].contains("[Image #1]"));
-    assert!(labels[1].contains("[Image #2]"));
-    assert!(labels[2].contains("[Audio #1]"));
-    assert!(labels[3].contains("[Audio #2]"));
+    assert_eq!(
+        labels,
+        vec![
+            "<image name=[Image #1]>",
+            "<image name=[Image #2]>",
+            "<audio name=[Audio #1]>",
+            "<audio name=[Audio #2]>",
+        ]
+    );
 }
 
 #[tokio::test]
@@ -10773,7 +10777,6 @@ async fn task_finish_emits_detached_thread_idle_lifecycle_after_active_turn_clea
                     self.expected_thread_id.to_string(),
                     input.thread_store.level_id()
                 );
-                assert!(input.continuation.is_allowed());
                 assert!(
                     Span::current().id().is_none(),
                     "thread idle lifecycle must not inherit the completed turn span"

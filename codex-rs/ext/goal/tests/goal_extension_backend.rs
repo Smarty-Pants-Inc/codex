@@ -1758,14 +1758,12 @@ impl GoalExtensionHarness {
     }
 
     async fn idle_thread(&self) {
-        let continuation = codex_extension_api::ThreadIdleContinuation::default();
         for contributor in self.registry.thread_lifecycle_contributors() {
             contributor
                 .on_thread_idle(ThreadIdleInput {
                     cause: ThreadIdleCause::Completed,
                     session_store: &self.session_store,
                     thread_store: &self.thread_store,
-                    continuation: &continuation,
                 })
                 .await;
         }

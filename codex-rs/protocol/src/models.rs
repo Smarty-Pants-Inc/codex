@@ -1590,10 +1590,9 @@ pub fn local_image_label_text(label_number: usize) -> String {
     format!("[Image #{label_number}]")
 }
 
-pub fn local_image_open_tag_text_with_path(label_number: usize, path: &std::path::Path) -> String {
+pub fn local_image_open_tag_text(label_number: usize) -> String {
     let label = local_image_label_text(label_number);
-    let path = path.display();
-    format!("{LOCAL_IMAGE_OPEN_TAG_PREFIX}{label} path=\"{path}\"{LOCAL_IMAGE_OPEN_TAG_SUFFIX}")
+    format!("{LOCAL_IMAGE_OPEN_TAG_PREFIX}{label}{LOCAL_IMAGE_OPEN_TAG_SUFFIX}")
 }
 
 pub fn is_local_image_open_tag_text(text: &str) -> bool {
@@ -1625,10 +1624,9 @@ pub fn local_audio_label_text(label_number: usize) -> String {
     format!("[Audio #{label_number}]")
 }
 
-pub fn local_audio_open_tag_text_with_path(label_number: usize, path: &std::path::Path) -> String {
+pub fn local_audio_open_tag_text(label_number: usize) -> String {
     let label = local_audio_label_text(label_number);
-    let path = path.display();
-    format!("{LOCAL_AUDIO_OPEN_TAG_PREFIX}{label} path=\"{path}\"{LOCAL_AUDIO_OPEN_TAG_SUFFIX}")
+    format!("{LOCAL_AUDIO_OPEN_TAG_PREFIX}{label}{LOCAL_AUDIO_OPEN_TAG_SUFFIX}")
 }
 
 pub fn is_local_audio_open_tag_text(text: &str) -> bool {
@@ -1672,7 +1670,7 @@ pub fn local_image_content_items_with_label_number(
     };
 
     match load_for_prompt_bytes(path, file_bytes, mode) {
-        Ok(image) => local_image_content_items(path, image.into_data_url(), label_number, detail),
+        Ok(image) => local_image_content_items(image.into_data_url(), label_number, detail),
         Err(err) => match &err {
             ImageProcessingError::Read { .. }
             | ImageProcessingError::Encode { .. }
@@ -1717,7 +1715,7 @@ fn local_audio_content_items(
 
     vec![
         ContentItem::InputText {
-            text: local_audio_open_tag_text_with_path(label_number, path),
+            text: local_audio_open_tag_text(label_number),
         },
         ContentItem::InputAudio {
             audio_url: data_url_from_bytes(mime, file_bytes),
@@ -1729,7 +1727,6 @@ fn local_audio_content_items(
 }
 
 fn local_image_content_items(
-    path: &std::path::Path,
     image_url: String,
     label_number: Option<usize>,
     detail: ImageDetail,
@@ -1737,7 +1734,7 @@ fn local_image_content_items(
     let mut items = Vec::with_capacity(3);
     if let Some(label_number) = label_number {
         items.push(ContentItem::InputText {
-            text: local_image_open_tag_text_with_path(label_number, path),
+            text: local_image_open_tag_text(label_number),
         });
     }
     items.push(ContentItem::InputImage {
@@ -1922,7 +1919,6 @@ fn converted_user_input_content(
                             )
                         }
                         LocalImagePreparation::Defer => local_image_content_items(
-                            &path,
                             data_url_from_bytes("application/octet-stream", &file_bytes),
                             Some(image_index),
                             detail,
@@ -3829,10 +3825,7 @@ mod tests {
                     role: "user".to_string(),
                     content: vec![
                         ContentItem::InputText {
-                            text: local_audio_open_tag_text_with_path(
-                                /*label_number*/ 1,
-                                &audio_path,
-                            ),
+                            text: local_audio_open_tag_text(/*label_number*/ 1),
                         },
                         ContentItem::InputAudio {
                             audio_url: format!("data:{mime};base64,YXVkaW8="),
@@ -4161,7 +4154,7 @@ mod tests {
                 detail: None,
             },
             UserInput::LocalImage {
-                path: local_path.clone(),
+                path: local_path,
                 detail: None,
             },
         ]);
@@ -4178,10 +4171,7 @@ mod tests {
                 assert_eq!(
                     content.get(1),
                     Some(&ContentItem::InputText {
-                        text: local_image_open_tag_text_with_path(
-                            /*label_number*/ 2,
-                            &local_path
-                        ),
+                        text: local_image_open_tag_text(/*label_number*/ 2),
                     })
                 );
                 assert!(matches!(
@@ -4213,7 +4203,7 @@ mod tests {
                 audio_url: audio_url.clone(),
             },
             UserInput::LocalAudio {
-                path: local_path.clone(),
+                path: local_path,
             },
         ]);
 
@@ -4224,10 +4214,7 @@ mod tests {
                 content: vec![
                     ContentItem::InputAudio { audio_url },
                     ContentItem::InputText {
-                        text: local_audio_open_tag_text_with_path(
-                            /*label_number*/ 2,
-                            &local_path,
-                        ),
+                        text: local_audio_open_tag_text(/*label_number*/ 2),
                     },
                     ContentItem::InputAudio {
                         audio_url: "data:audio/mpeg;base64,YXVkaW8=".to_string(),
@@ -4244,13 +4231,10 @@ mod tests {
     }
 
     #[test]
-    fn local_image_open_tag_preserves_path() {
+    fn local_image_open_tag_is_path_free() {
         assert_eq!(
-            local_image_open_tag_text_with_path(
-                /*label_number*/ 1,
-                std::path::Path::new(r#"/tmp/a&"<b>.png"#),
-            ),
-            r#"<image name=[Image #1] path="/tmp/a&"<b>.png">"#
+            local_image_open_tag_text(/*label_number*/ 1),
+            r#"<image name=[Image #1]>"#
         );
     }
 

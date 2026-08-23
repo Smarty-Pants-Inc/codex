@@ -437,13 +437,12 @@ async fn sends_local_audio_to_responses() -> anyhow::Result<()> {
         .rev()
         .find(|item| item.get("role").and_then(serde_json::Value::as_str) == Some("user"))
         .expect("request should include a user message");
-    let audio_path = audio_path.display();
     assert_eq!(
         user_message["content"],
         json!([
             {
                 "type": "input_text",
-                "text": format!(r#"<audio name=[Audio #1] path="{audio_path}">"#),
+                "text": "<audio name=[Audio #1]>",
             },
             {
                 "type": "input_audio",
