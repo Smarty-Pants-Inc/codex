@@ -47,7 +47,7 @@ async fn submit_user_message(
 }
 
 #[tokio::test]
-async fn start_turn_if_idle_rejects_non_user_input_that_requests_plan_mode() {
+async fn start_turn_if_idle_rejects_automatic_input_in_plan_mode() {
     let server = responses::start_mock_server().await;
     let test = test_codex()
         .build_with_auto_env(&server)
@@ -58,20 +58,19 @@ async fn start_turn_if_idle_rejects_non_user_input_that_requests_plan_mode() {
     let submission = test
         .codex
         .start_turn_if_idle(
-            TurnInputRequest::new(TurnInput::ResponseItem(responses::user_message_item(
-                "automatic input",
-            )))
-            .with_thread_settings(ThreadSettingsOverrides {
-                collaboration_mode: Some(CollaborationMode {
-                    mode: ModeKind::Plan,
-                    settings: Settings {
-                        model: test.session_configured.model.clone(),
-                        reasoning_effort: None,
-                        developer_instructions: None,
-                    },
-                }),
-                ..Default::default()
-            }),
+            TurnInputRequest::user_input(Vec::new()).with_thread_settings(
+                ThreadSettingsOverrides {
+                    collaboration_mode: Some(CollaborationMode {
+                        mode: ModeKind::Plan,
+                        settings: Settings {
+                            model: test.session_configured.model.clone(),
+                            reasoning_effort: None,
+                            developer_instructions: None,
+                        },
+                    }),
+                    ..Default::default()
+                },
+            ),
         )
         .await
         .expect("idle turn submission should return a typed rejection");
