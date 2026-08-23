@@ -126,12 +126,12 @@ impl QueuedInterrupt {
     fn matches_resolved_prompt(&self, request: &ResolvedAppServerRequest) -> bool {
         match self {
             QueuedInterrupt::ExecApproval(ev) => {
-                matches!(request, ResolvedAppServerRequest::ExecApproval { id, .. }
-                    if ev.effective_approval_id() == id.as_str())
+                matches!(request, ResolvedAppServerRequest::ExecApproval { turn_id, id, .. }
+                    if ev.turn_id == *turn_id && ev.effective_approval_id() == id.as_str())
             }
             QueuedInterrupt::ApplyPatchApproval(ev) => {
-                matches!(request, ResolvedAppServerRequest::FileChangeApproval { id, .. }
-                    if ev.call_id == id.as_str())
+                matches!(request, ResolvedAppServerRequest::FileChangeApproval { turn_id, id, .. }
+                    if ev.turn_id == *turn_id && ev.call_id == id.as_str())
             }
             QueuedInterrupt::Elicitation { request_id, params } => {
                 matches!(request, ResolvedAppServerRequest::McpElicitation {
@@ -140,8 +140,8 @@ impl QueuedInterrupt {
                 } if params.server_name == server_name.as_str() && request_id == resolved_request_id)
             }
             QueuedInterrupt::RequestPermissions(ev) => {
-                matches!(request, ResolvedAppServerRequest::PermissionsApproval { id, .. }
-                    if ev.call_id == id.as_str())
+                matches!(request, ResolvedAppServerRequest::PermissionsApproval { turn_id, id, .. }
+                    if ev.turn_id == *turn_id && ev.call_id == id.as_str())
             }
             QueuedInterrupt::RequestUserInput(ev) => {
                 matches!(request, ResolvedAppServerRequest::UserInput { call_id }
@@ -154,6 +154,7 @@ impl QueuedInterrupt {
 
 #[cfg(test)]
 mod tests {
+    use crate::approval_events::ApplyPatchApprovalRequestEvent;
     use crate::approval_events::ExecApprovalRequestEvent;
     use codex_app_server_protocol::CommandExecutionSource;
     use codex_app_server_protocol::CommandExecutionStatus;
@@ -174,11 +175,15 @@ mod tests {
         }
     }
 
-    fn exec_approval(call_id: &str, approval_id: Option<&str>) -> ExecApprovalRequestEvent {
+    fn exec_approval(
+        call_id: &str,
+        approval_id: Option<&str>,
+        turn_id: &str,
+    ) -> ExecApprovalRequestEvent {
         ExecApprovalRequestEvent {
             call_id: call_id.to_string(),
             approval_id: approval_id.map(str::to_string),
-            turn_id: "turn".to_string(),
+            turn_id: turn_id.to_string(),
             environment_id: None,
             command: vec!["true".to_string()],
             cwd: AbsolutePathBuf::current_dir().expect("current dir"),
@@ -188,6 +193,28 @@ mod tests {
             proposed_network_policy_amendments: None,
             additional_permissions: None,
             available_decisions: None,
+        }
+    }
+
+    fn patch_approval(call_id: &str, turn_id: &str) -> ApplyPatchApprovalRequestEvent {
+        ApplyPatchApprovalRequestEvent {
+            call_id: call_id.to_string(),
+            turn_id: turn_id.to_string(),
+            changes: Default::default(),
+            reason: None,
+            grant_root: None,
+        }
+    }
+
+    fn permissions_approval(call_id: &str, turn_id: &str) -> RequestPermissionsEvent {
+        RequestPermissionsEvent {
+            call_id: call_id.to_string(),
+            turn_id: turn_id.to_string(),
+            environment_id: None,
+            started_at_ms: 0,
+            reason: None,
+            permissions: Default::default(),
+            cwd: None,
         }
     }
 
@@ -236,27 +263,69 @@ mod tests {
     }
 
     #[test]
-    fn remove_resolved_prompt_matches_exec_approval_id() {
+    fn remove_resolved_prompt_matches_exec_turn_and_approval_id() {
         let mut manager = InterruptManager::new();
-        manager.push_exec_approval(exec_approval("call", Some("approval")));
+        manager.push_exec_approval(exec_approval("call", Some("approval"), "turn-1"));
+        manager.push_exec_approval(exec_approval("call", Some("approval"), "turn-2"));
 
         assert!(
             !manager.remove_resolved_prompt(&ResolvedAppServerRequest::ExecApproval {
                 thread_id: "thread-1".to_string(),
-                turn_id: "turn".to_string(),
+                turn_id: "turn-1".to_string(),
                 id: "call".to_string(),
             })
         );
-        assert_eq!(manager.queue.len(), 1);
+        assert_eq!(manager.queue.len(), 2);
 
         assert!(
             manager.remove_resolved_prompt(&ResolvedAppServerRequest::ExecApproval {
                 thread_id: "thread-1".to_string(),
-                turn_id: "turn".to_string(),
+                turn_id: "turn-1".to_string(),
                 id: "approval".to_string(),
             })
         );
-        assert!(manager.queue.is_empty());
+        assert!(matches!(
+            manager.queue.front(),
+            Some(QueuedInterrupt::ExecApproval(remaining)) if remaining.turn_id == "turn-2"
+        ));
+    }
+
+    #[test]
+    fn remove_resolved_prompt_matches_patch_turn_and_call_id() {
+        let mut manager = InterruptManager::new();
+        manager.push_apply_patch_approval(patch_approval("call", "turn-1"));
+        manager.push_apply_patch_approval(patch_approval("call", "turn-2"));
+
+        assert!(
+            manager.remove_resolved_prompt(&ResolvedAppServerRequest::FileChangeApproval {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                id: "call".to_string(),
+            })
+        );
+        assert!(matches!(
+            manager.queue.front(),
+            Some(QueuedInterrupt::ApplyPatchApproval(remaining)) if remaining.turn_id == "turn-2"
+        ));
+    }
+
+    #[test]
+    fn remove_resolved_prompt_matches_permissions_turn_and_call_id() {
+        let mut manager = InterruptManager::new();
+        manager.push_request_permissions(permissions_approval("call", "turn-1"));
+        manager.push_request_permissions(permissions_approval("call", "turn-2"));
+
+        assert!(
+            manager.remove_resolved_prompt(&ResolvedAppServerRequest::PermissionsApproval {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                id: "call".to_string(),
+            })
+        );
+        assert!(matches!(
+            manager.queue.front(),
+            Some(QueuedInterrupt::RequestPermissions(remaining)) if remaining.turn_id == "turn-2"
+        ));
     }
 
     #[test]

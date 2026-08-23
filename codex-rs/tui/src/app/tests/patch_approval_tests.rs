@@ -143,7 +143,11 @@ fn assert_decision(
             submitted.push((thread_id, op));
         }
     }
-    let expected_op = AppCommand::patch_approval(ITEM_ID.to_string(), decision.clone());
+    let expected_op = AppCommand::patch_approval(
+        ITEM_ID.to_string(),
+        Some(TURN_ID.to_string()),
+        decision.clone(),
+    );
     assert_eq!(submitted, vec![(thread_id, expected_op.clone())]);
     let thread_id = thread_id.to_string();
     assert_eq!(

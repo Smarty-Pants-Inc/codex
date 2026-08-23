@@ -61,6 +61,7 @@ pub(crate) enum ResolvedAppServerRequest {
     },
     PermissionsApproval {
         thread_id: String,
+        turn_id: String,
         id: String,
     },
     UserInput {
@@ -370,16 +371,18 @@ impl PendingAppServerRequests {
             });
         }
 
-        if let Some(key) =
+        if let Some((key, turn_id)) =
             self.permissions_approvals
                 .iter()
-                .find_map(|(key, (_, pending_request_id))| {
-                    (key.0 == thread_id && pending_request_id == request_id).then(|| key.clone())
+                .find_map(|(key, (turn_id, pending_request_id))| {
+                    (key.0 == thread_id && pending_request_id == request_id)
+                        .then(|| (key.clone(), turn_id.clone()))
                 })
         {
             self.permissions_approvals.remove(&key);
             return Some(ResolvedAppServerRequest::PermissionsApproval {
                 thread_id: key.0,
+                turn_id,
                 id: key.1,
             });
         }
@@ -886,6 +889,45 @@ mod tests {
                 .expect("turn-b request should remain pending")
                 .request_id,
             AppServerRequestId::Integer(8)
+        );
+    }
+
+    #[test]
+    fn resolve_notification_preserves_permissions_turn_id() {
+        let mut pending = PendingAppServerRequests::default();
+        let request_id = AppServerRequestId::Integer(9);
+        assert_eq!(
+            pending.note_server_request(&ServerRequest::PermissionsRequestApproval {
+                request_id: request_id.clone(),
+                params: PermissionsRequestApprovalParams {
+                    thread_id: "thread-1".to_string(),
+                    turn_id: "turn-1".to_string(),
+                    item_id: "perm-1".to_string(),
+                    environment_id: None,
+                    started_at_ms: 0,
+                    cwd: AbsolutePathBuf::try_from(PathBuf::from(if cfg!(windows) {
+                        r"C:\tmp"
+                    } else {
+                        "/tmp"
+                    }))
+                    .expect("path must be absolute"),
+                    reason: None,
+                    permissions: codex_app_server_protocol::RequestPermissionProfile {
+                        network: None,
+                        file_system: None,
+                    },
+                },
+            }),
+            None
+        );
+
+        assert_eq!(
+            pending.resolve_notification("thread-1", &request_id),
+            Some(ResolvedAppServerRequest::PermissionsApproval {
+                thread_id: "thread-1".to_string(),
+                turn_id: "turn-1".to_string(),
+                id: "perm-1".to_string(),
+            })
         );
     }
 

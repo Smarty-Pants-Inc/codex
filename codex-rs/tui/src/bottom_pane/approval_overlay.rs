@@ -157,8 +157,16 @@ impl ApprovalRequest {
             }
             (
                 ApprovalRequest::Permissions(request),
-                ResolvedAppServerRequest::PermissionsApproval { thread_id, id },
-            ) => request.thread_id.to_string() == *thread_id && request.call_id == *id,
+                ResolvedAppServerRequest::PermissionsApproval {
+                    thread_id,
+                    turn_id,
+                    id,
+                },
+            ) => {
+                request.thread_id.to_string() == *thread_id
+                    && request.turn_id == *turn_id
+                    && request.call_id == *id
+            }
             (
                 ApprovalRequest::ApplyPatch(request),
                 ResolvedAppServerRequest::FileChangeApproval {
@@ -1539,6 +1547,32 @@ mod tests {
             rx.try_recv().is_err(),
             "dismissing a stale request should not emit an approval op"
         );
+    }
+
+    #[test]
+    fn resolved_permissions_request_does_not_dismiss_reused_id_from_another_turn() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx);
+        let request = make_permissions_request();
+        let thread_id = request.thread_id();
+        let mut view = make_overlay(request, tx, Features::with_defaults());
+
+        assert!(
+            !view.dismiss_app_server_request(&ResolvedAppServerRequest::PermissionsApproval {
+                thread_id: thread_id.to_string(),
+                turn_id: "turn-2".to_string(),
+                id: "test".to_string(),
+            })
+        );
+        assert!(!view.is_complete());
+        assert!(
+            view.dismiss_app_server_request(&ResolvedAppServerRequest::PermissionsApproval {
+                thread_id: thread_id.to_string(),
+                turn_id: "turn-1".to_string(),
+                id: "test".to_string(),
+            })
+        );
+        assert!(view.is_complete());
     }
 
     #[test]
