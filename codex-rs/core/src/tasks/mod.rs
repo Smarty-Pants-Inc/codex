@@ -288,9 +288,10 @@ impl Session {
         task: T,
         mailbox_parent_provenance: MailboxParentProvenance,
     ) {
+        let mut input = input;
         self.start_task_inner(
             turn_context,
-            input,
+            &mut input,
             task,
             mailbox_parent_provenance,
             /*reserved_turn_state*/ None,
@@ -301,7 +302,7 @@ impl Session {
     pub(crate) async fn start_reserved_task<T: SessionTask>(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
-        input: Vec<TurnInput>,
+        input: &mut Vec<TurnInput>,
         task: T,
         mailbox_parent_provenance: MailboxParentProvenance,
         reserved_turn_state: &Arc<tokio::sync::Mutex<crate::state::TurnState>>,
@@ -323,7 +324,7 @@ impl Session {
     async fn start_task_inner<T: SessionTask>(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
-        input: Vec<TurnInput>,
+        input: &mut Vec<TurnInput>,
         task: T,
         mailbox_parent_provenance: MailboxParentProvenance,
         reserved_turn_state: Option<&Arc<tokio::sync::Mutex<crate::state::TurnState>>>,
@@ -415,7 +416,7 @@ impl Session {
         let session = Arc::clone(self);
         let ctx = Arc::clone(&turn_context);
         let task_for_run = Arc::clone(&task);
-        let task_input = input;
+        let task_input = std::mem::take(input);
         let task_cancellation_token = cancellation_token.child_token();
         // Task-owned turn spans keep a core-owned span open for the
         // full task lifecycle after the submission dispatch span ends.
@@ -544,13 +545,14 @@ impl Session {
             let active_turn = active_turn.insert(ActiveTurn::default());
             Arc::clone(&active_turn.turn_state)
         };
-
         let turn_context = self.new_default_turn_with_sub_id(sub_id).await;
         self.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
             .await;
+
+        let mut task_input = Vec::new();
         self.start_reserved_task(
             turn_context,
-            Vec::new(),
+            &mut task_input,
             RegularTask::new(),
             MailboxParentProvenance::Attribute,
             &reserved_turn_state,

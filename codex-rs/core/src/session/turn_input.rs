@@ -139,6 +139,17 @@ impl PreparedTurnInputSettings {
     }
 }
 
+#[derive(Clone, Copy)]
+enum NoActiveTurnBehavior {
+    Reject,
+    Reserve,
+}
+
+enum SteerInputOutcome {
+    Steered(String),
+    Reserved(Arc<tokio::sync::Mutex<TurnState>>),
+}
+
 pub(super) async fn handle(
     session: &Arc<Session>,
     request: TurnInputRequest,
@@ -182,73 +193,113 @@ async fn start_or_steer(
         ..
     } = request;
     let (mut items, client_id, is_user_input) = into_steerable_input(input)?;
+    let has_direct_input = !items.is_empty();
     let can_start_root_turn = start.parent_turn_id.is_none() && start.root_turn_id.is_none();
     let incoming_root_turn_id = start
         .parent_turn_id
         .as_ref()
         .map(|_| start.root_turn_id.clone());
     let settings = PreparedTurnInputSettings::prepare(session, thread_settings, start).await?;
-    match session
+    let required_active_schema = settings.required_active_final_output_json_schema().cloned();
+    let responsesapi_client_metadata_for_retry = responsesapi_client_metadata.clone();
+    let mut reserved_turn_state = match session
         .steer_input(
             &mut items,
             is_user_input,
             additional_context.clone(),
             /*expected_turn_id*/ None,
-            settings.required_active_final_output_json_schema(),
+            required_active_schema.as_ref(),
             client_id.clone(),
             responsesapi_client_metadata.clone(),
-            incoming_root_turn_id,
+            incoming_root_turn_id.clone(),
+            NoActiveTurnBehavior::Reserve,
         )
         .await
     {
-        Ok(turn_id) => {
+        Ok(SteerInputOutcome::Steered(turn_id)) => {
             settings.apply_steered(session, submission_id).await?;
-            Ok(TurnInputSubmission::Steered { turn_id })
+            return Ok(TurnInputSubmission::Steered { turn_id });
         }
-        Err(NotSubmittedReason::NoActiveTurn) => {
-            let turn_context = settings
-                .apply_started(session, submission_id.clone())
-                .await?;
-            if can_start_root_turn
-                && !items.is_empty()
-                && turn_context
-                    .turn_metadata_state
-                    .can_start_root_turn(&turn_context.session_source)
-            {
-                turn_context
-                    .turn_metadata_state
-                    .set_root_turn_id(submission_id.clone());
-            }
-            if let Some(responsesapi_client_metadata) = responsesapi_client_metadata {
-                turn_context
-                    .turn_metadata_state
-                    .set_responsesapi_client_metadata(responsesapi_client_metadata);
-            }
-            session
-                .maybe_emit_model_warnings_for_turn(turn_context.as_ref())
-                .await;
-            if is_user_input {
-                turn_context.session_telemetry.user_prompt(&items);
-            }
-            let mut task_input = merge_additional_context_input(session, additional_context).await;
-            if !items.is_empty() {
-                if is_user_input {
-                    task_input.push(TurnInput::UserInput {
-                        content: items,
-                        client_id,
-                    });
-                } else {
-                    task_input.push(TurnInput::DeveloperInput { content: items });
-                }
-            }
-            session
-                .spawn_task(turn_context, task_input, RegularTask::new())
-                .await;
-            Ok(TurnInputSubmission::Started {
+        Ok(SteerInputOutcome::Reserved(turn_state)) => turn_state,
+        Err(reason) => return Ok(TurnInputSubmission::NotSubmitted { reason }),
+    };
+
+    let turn_context = match settings.apply_started(session, submission_id.clone()).await {
+        Ok(turn_context) => turn_context,
+        Err(error) => {
+            session.clear_reserved_idle_turn(&reserved_turn_state).await;
+            return Err(error);
+        }
+    };
+    if can_start_root_turn
+        && has_direct_input
+        && turn_context
+            .turn_metadata_state
+            .can_start_root_turn(&turn_context.session_source)
+    {
+        turn_context
+            .turn_metadata_state
+            .set_root_turn_id(submission_id.clone());
+    }
+    if let Some(responsesapi_client_metadata) = responsesapi_client_metadata {
+        turn_context
+            .turn_metadata_state
+            .set_responsesapi_client_metadata(responsesapi_client_metadata);
+    }
+    session
+        .maybe_emit_model_warnings_for_turn(turn_context.as_ref())
+        .await;
+    if is_user_input {
+        turn_context.session_telemetry.user_prompt(&items);
+    }
+    let mut task_input = merge_additional_context_input(session, additional_context).await;
+    if !items.is_empty() {
+        if is_user_input {
+            task_input.push(TurnInput::UserInput {
+                content: items,
+                client_id,
+            });
+        } else {
+            task_input.push(TurnInput::DeveloperInput { content: items });
+        }
+    }
+
+    loop {
+        if session
+            .start_reserved_task(
+                Arc::clone(&turn_context),
+                &mut task_input,
+                RegularTask::new(),
+                MailboxParentProvenance::Ignore,
+                &reserved_turn_state,
+            )
+            .await
+        {
+            return Ok(TurnInputSubmission::Started {
                 turn_id: submission_id,
-            })
+            });
         }
-        Err(reason) => Ok(TurnInputSubmission::NotSubmitted { reason }),
+
+        match session
+            .steer_prepared_input(
+                &mut task_input,
+                has_direct_input,
+                /*expected_turn_id*/ None,
+                required_active_schema.as_ref(),
+                /*responsesapi_client_metadata*/
+                responsesapi_client_metadata_for_retry.clone(),
+                incoming_root_turn_id.clone(),
+            )
+            .await
+        {
+            Ok(SteerInputOutcome::Steered(turn_id)) => {
+                return Ok(TurnInputSubmission::Steered { turn_id });
+            }
+            Ok(SteerInputOutcome::Reserved(turn_state)) => {
+                reserved_turn_state = turn_state;
+            }
+            Err(reason) => return Ok(TurnInputSubmission::NotSubmitted { reason }),
+        }
     }
 }
 
@@ -415,7 +466,7 @@ async fn start_if_idle(
     if !session
         .start_reserved_task(
             turn_context,
-            task_input,
+            &mut task_input,
             RegularTask::new(),
             MailboxParentProvenance::Ignore,
             &turn_state,
@@ -461,13 +512,15 @@ async fn steer(
             client_id,
             responsesapi_client_metadata,
             incoming_root_turn_id,
+            NoActiveTurnBehavior::Reject,
         )
         .await
     {
-        Ok(turn_id) => {
+        Ok(SteerInputOutcome::Steered(turn_id)) => {
             settings.apply_steered(session, submission_id).await?;
             Ok(TurnInputSubmission::Steered { turn_id })
         }
+        Ok(SteerInputOutcome::Reserved(_)) => unreachable!("steer-only input cannot reserve"),
         Err(reason) => Ok(TurnInputSubmission::NotSubmitted { reason }),
     }
 }
@@ -538,13 +591,28 @@ impl Session {
         client_user_message_id: Option<String>,
         responsesapi_client_metadata: Option<HashMap<String, String>>,
         incoming_root_turn_id: Option<Option<String>>,
-    ) -> Result<String, NotSubmittedReason> {
+        no_active_turn_behavior: NoActiveTurnBehavior,
+    ) -> Result<SteerInputOutcome, NotSubmittedReason> {
         let mut active = self.active_turn.lock().await;
         let Some(active_turn) = active.as_mut() else {
-            return Err(NotSubmittedReason::NoActiveTurn);
+            return match no_active_turn_behavior {
+                NoActiveTurnBehavior::Reject => Err(NotSubmittedReason::NoActiveTurn),
+                NoActiveTurnBehavior::Reserve => {
+                    let active_turn = active.insert(ActiveTurn::default());
+                    Ok(SteerInputOutcome::Reserved(Arc::clone(
+                        &active_turn.turn_state,
+                    )))
+                }
+            };
         };
 
         let Some(active_task) = active_turn.task.as_ref() else {
+            if matches!(no_active_turn_behavior, NoActiveTurnBehavior::Reserve) {
+                let active_turn = active.insert(ActiveTurn::default());
+                return Ok(SteerInputOutcome::Reserved(Arc::clone(
+                    &active_turn.turn_state,
+                )));
+            }
             if is_user_input {
                 *active = None;
             }
@@ -626,7 +694,86 @@ impl Session {
                 pending_input,
             )
             .await;
-        Ok(active_turn_id.clone())
+        Ok(SteerInputOutcome::Steered(active_turn_id.clone()))
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "displaced StartOrSteer input must be re-arbitrated atomically"
+    )]
+    async fn steer_prepared_input(
+        &self,
+        input: &mut Vec<TurnInput>,
+        has_direct_input: bool,
+        expected_turn_id: Option<&str>,
+        required_final_output_json_schema: Option<&Value>,
+        responsesapi_client_metadata: Option<HashMap<String, String>>,
+        incoming_root_turn_id: Option<Option<String>>,
+    ) -> Result<SteerInputOutcome, NotSubmittedReason> {
+        let mut active = self.active_turn.lock().await;
+        let Some(active_turn) = active.as_mut() else {
+            let active_turn = active.insert(ActiveTurn::default());
+            return Ok(SteerInputOutcome::Reserved(Arc::clone(
+                &active_turn.turn_state,
+            )));
+        };
+        let Some(active_task) = active_turn.task.as_ref() else {
+            let active_turn = active.insert(ActiveTurn::default());
+            return Ok(SteerInputOutcome::Reserved(Arc::clone(
+                &active_turn.turn_state,
+            )));
+        };
+        let active_turn_id = &active_task.turn_context.sub_id;
+        if let Some(expected_turn_id) = expected_turn_id
+            && expected_turn_id != active_turn_id
+        {
+            return Err(NotSubmittedReason::ExpectedTurnMismatch {
+                expected: expected_turn_id.to_string(),
+                actual: active_turn_id.clone(),
+            });
+        }
+        match active_task.kind {
+            crate::state::TaskKind::Regular => {}
+            crate::state::TaskKind::Review => {
+                return Err(NotSubmittedReason::ActiveTurnNotSteerable {
+                    turn_kind: NonSteerableTurnKind::Review,
+                });
+            }
+            crate::state::TaskKind::Compact => {
+                return Err(NotSubmittedReason::ActiveTurnNotSteerable {
+                    turn_kind: NonSteerableTurnKind::Compact,
+                });
+            }
+        }
+        if !has_direct_input {
+            return Err(NotSubmittedReason::EmptyInput);
+        }
+        if let Some(required_schema) = required_final_output_json_schema
+            && active_task.turn_context.final_output_json_schema.as_ref() != Some(required_schema)
+        {
+            return Err(NotSubmittedReason::ActiveTurnOutputSchemaMismatch);
+        }
+        if let Some(responsesapi_client_metadata) = responsesapi_client_metadata {
+            active_task
+                .turn_context
+                .turn_metadata_state
+                .set_responsesapi_client_metadata(responsesapi_client_metadata);
+        }
+        if let Some(incoming_root_turn_id) = incoming_root_turn_id
+            && active_task.turn_context.turn_metadata_state.root_turn_id() != incoming_root_turn_id
+        {
+            active_task
+                .turn_context
+                .turn_metadata_state
+                .mark_root_turn_ambiguous();
+        }
+        self.input_queue
+            .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
+                active_turn.turn_state.as_ref(),
+                std::mem::take(input),
+            )
+            .await;
+        Ok(SteerInputOutcome::Steered(active_turn_id.clone()))
     }
 }
 

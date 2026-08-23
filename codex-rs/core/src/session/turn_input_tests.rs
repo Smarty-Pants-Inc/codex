@@ -260,7 +260,7 @@ async fn direct_user_replaces_taskless_reservation_and_stale_auto_start_fails() 
         text: "direct user input".to_string(),
         text_elements: Vec::new(),
     }];
-    assert_eq!(
+    assert!(matches!(
         session
             .steer_input(
                 &mut direct_input,
@@ -271,10 +271,11 @@ async fn direct_user_replaces_taskless_reservation_and_stale_auto_start_fails() 
                 /*client_user_message_id*/ None,
                 /*responsesapi_client_metadata*/ None,
                 /*incoming_root_turn_id*/ None,
+                NoActiveTurnBehavior::Reject,
             )
             .await,
         Err(NotSubmittedReason::NoActiveTurn)
-    );
+    ));
     assert!(session.active_turn.lock().await.is_none());
 
     let direct_turn_context = session
@@ -298,11 +299,12 @@ async fn direct_user_replaces_taskless_reservation_and_stale_auto_start_fails() 
     let automatic_turn_context = session
         .new_default_turn_with_sub_id("stale-automatic-turn".to_string())
         .await;
+    let mut automatic_input = Vec::new();
     assert!(
         !session
             .start_reserved_task(
                 automatic_turn_context,
-                Vec::new(),
+                &mut automatic_input,
                 NeverEndingTask {
                     kind: TaskKind::Regular,
                     listen_to_cancellation_token: true,

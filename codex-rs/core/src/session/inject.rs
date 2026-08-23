@@ -24,7 +24,8 @@ pub(crate) fn validate_live_response_items(items: &[ResponseItem]) -> CodexResul
 }
 
 impl Session {
-    /// Returns the input if there is no active turn to inject into.
+    /// Returns the input when it cannot be injected because the thread has no active turn or the
+    /// input contains a forbidden user-role response item.
     #[expect(
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
