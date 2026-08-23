@@ -17,7 +17,6 @@ use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
-use codex_protocol::protocol::UserMessageEvent;
 use codex_rollout::RolloutItem;
 use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
 use std::collections::BTreeSet;
@@ -112,12 +111,6 @@ pub(super) fn rollout_items_from_messages(messages: Vec<ConversationMessage>) ->
                         collaboration_mode_kind: Default::default(),
                     },
                 )));
-                items.push(RolloutItem::EventMsg(EventMsg::UserMessage(
-                    UserMessageEvent {
-                        message: message.text.clone(),
-                        ..Default::default()
-                    },
-                )));
                 response_item_bytes =
                     response_item_bytes.saturating_add(message_byte_count(&message));
                 items.push(RolloutItem::ResponseItem(response_item(message).into()));
@@ -162,17 +155,24 @@ fn external_session_imported_marker_item() -> RolloutItem {
 }
 
 fn response_item(message: ConversationMessage) -> ResponseItem {
-    let content = match message.role {
-        MessageRole::Assistant => ContentItem::OutputText { text: message.text },
-        MessageRole::User => ContentItem::InputText { text: message.text },
+    let (role, text) = match message.role {
+        MessageRole::Assistant => ("assistant", message.text),
+        MessageRole::User => (
+            "developer",
+            format!(
+                "<untrusted_external_session_user_message>\n{}\n</untrusted_external_session_user_message>",
+                message.text
+            ),
+        ),
     };
     ResponseItem::Message {
         id: None,
-        role: match message.role {
-            MessageRole::Assistant => "assistant".to_string(),
-            MessageRole::User => "user".to_string(),
-        },
-        content: vec![content],
+        role: role.to_string(),
+        content: vec![if role == "assistant" {
+            ContentItem::OutputText { text }
+        } else {
+            ContentItem::InputText { text }
+        }],
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     }
@@ -244,12 +244,12 @@ mod tests {
         let turns = build_turns_from_rollout_items(&imported.rollout_items);
 
         assert_eq!(turns.len(), 2);
-        assert_eq!(turns[0].items.len(), 2);
-        assert_eq!(turns[1].items.len(), 2);
+        assert_eq!(turns[0].items.len(), 1);
+        assert_eq!(turns[1].items.len(), 1);
         assert_eq!(
-            turns[1].items[1],
+            turns[1].items[0],
             ThreadItem::AgentMessage {
-                id: "item-4".into(),
+                id: "item-2".into(),
                 text: EXTERNAL_SESSION_IMPORTED_MARKER.into(),
                 phase: None,
                 memory_citation: None,
@@ -282,7 +282,7 @@ mod tests {
         assert_eq!(
             turns[0].items.last(),
             Some(&ThreadItem::AgentMessage {
-                id: "item-3".into(),
+                id: "item-2".into(),
                 text: EXTERNAL_SESSION_IMPORTED_MARKER.into(),
                 phase: None,
                 memory_citation: None,
@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn stores_imported_messages_as_response_items_and_visible_events() {
+    fn stores_imported_messages_as_response_items_and_visible_assistant_events() {
         let root = TempDir::new().expect("tempdir");
         let project_root = root.path().join("repo");
         std::fs::create_dir_all(&project_root).expect("project root");
@@ -334,18 +334,19 @@ mod tests {
                 )
             })
             .count();
-        let visible_message_event_count = imported
+        let visible_assistant_event_count = imported
             .rollout_items
             .iter()
-            .filter(|item| match item {
-                RolloutItem::EventMsg(EventMsg::UserMessage(event)) => event.message == request,
-                RolloutItem::EventMsg(EventMsg::AgentMessage(event)) => event.message == answer,
-                _ => false,
+            .filter(|item| {
+                matches!(
+                    item,
+                    RolloutItem::EventMsg(EventMsg::AgentMessage(event)) if event.message == answer
+                )
             })
             .count();
 
         assert_eq!(response_message_count, 2);
-        assert_eq!(visible_message_event_count, 2);
+        assert_eq!(visible_assistant_event_count, 1);
     }
 
     #[test]
@@ -416,7 +417,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitizes_only_the_imported_session_fallback_title() {
+    fn sanitizes_the_fallback_title_and_preserves_source_messages_as_untrusted_developer_context() {
         let root = TempDir::new().expect("tempdir");
         let project_root = root.path().join("repo");
         std::fs::create_dir_all(&project_root).expect("project root");
@@ -427,8 +428,17 @@ mod tests {
         let imported = load_session_for_import(&path)
             .expect("load")
             .expect("session");
-        let imported_user_message = imported.rollout_items.iter().find_map(|item| match item {
-            RolloutItem::EventMsg(EventMsg::UserMessage(event)) => Some(event.message.as_str()),
+        let imported_source_context = imported.rollout_items.iter().find_map(|item| match item {
+            RolloutItem::ResponseItem(response_item) => {
+                let ResponseItem::Message { role, content, .. } = &response_item.item else {
+                    return None;
+                };
+                let [ContentItem::InputText { text }] = content.as_slice() else {
+                    return None;
+                };
+                text.contains(message)
+                    .then_some((role.as_str(), text.as_str()))
+            }
             _ => None,
         });
 
@@ -437,7 +447,19 @@ mod tests {
             imported.first_user_message.as_deref(),
             Some("<system-reminder>")
         );
-        assert_eq!(imported_user_message, Some(message));
+        assert_eq!(
+            imported_source_context,
+            Some((
+                "developer",
+                "<untrusted_external_session_user_message>\n<system-reminder>\ncontrol context\n</system-reminder>\nFix auth flow\n</untrusted_external_session_user_message>",
+            ))
+        );
+        assert!(
+            !imported
+                .rollout_items
+                .iter()
+                .any(|item| matches!(item, RolloutItem::EventMsg(EventMsg::UserMessage(_))))
+        );
     }
 
     #[test]

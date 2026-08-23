@@ -4204,6 +4204,14 @@ impl ThreadRequestProcessor {
         if history.is_empty() {
             return Err(invalid_request("history must not be empty"));
         }
+        if history
+            .iter()
+            .any(|item| matches!(item, ResponseItem::Message { role, .. } if role == "user"))
+        {
+            return Err(invalid_request(
+                "user-role response items cannot be supplied as raw history; submit direct user input through the turn API",
+            ));
+        }
         Ok(InitialHistory::Forked(
             history
                 .iter()

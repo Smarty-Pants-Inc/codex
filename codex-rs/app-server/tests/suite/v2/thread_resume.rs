@@ -5107,7 +5107,7 @@ async fn thread_resume_supports_history_and_overrides() -> Result<()> {
     let history_text = "Hello from history";
     let history = vec![ResponseItem::Message {
         id: None,
-        role: "user".to_string(),
+        role: "developer".to_string(),
         content: vec![ContentItem::InputText {
             text: history_text.to_string(),
         }],
@@ -5134,6 +5134,44 @@ async fn thread_resume_supports_history_and_overrides() -> Result<()> {
     assert_eq!(model_provider, "mock_provider");
     assert_eq!(resumed.preview, history_text);
     assert_eq!(resumed.status, ThreadStatus::Idle);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_resume_rejects_raw_user_history() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("unused").await;
+    let codex_home = TempDir::new()?;
+    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let request_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: "not-a-valid-thread-id".to_string(),
+            history: Some(vec![ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "raw user history".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }]),
+            ..Default::default()
+        })
+        .await?;
+
+    let error = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    assert_eq!(
+        error.error.message,
+        "user-role response items cannot be supplied as raw history; submit direct user input through the turn API"
+    );
 
     Ok(())
 }

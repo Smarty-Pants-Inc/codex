@@ -639,18 +639,8 @@ source = {:?}
         timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
     assert_eq!(response.thread.turns.len(), 1);
     let imported_items = &response.thread.turns[0].items;
-    assert_eq!(imported_items.len(), 3);
+    assert_eq!(imported_items.len(), 2);
     match &imported_items[0] {
-        ThreadItem::UserMessage { content, .. } => assert_eq!(
-            content,
-            &vec![UserInput::Text {
-                text: "first request".to_string(),
-                text_elements: Vec::new(),
-            }]
-        ),
-        other => panic!("expected user message item, got {other:?}"),
-    }
-    match &imported_items[1] {
         ThreadItem::AgentMessage { text, .. } => assert_eq!(text, "first answer"),
         other => panic!("expected agent message item, got {other:?}"),
     }
@@ -2009,38 +1999,17 @@ async fn external_agent_config_import_creates_session_rollouts() -> Result<()> {
     let response: ThreadReadResponse =
         timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
     assert_eq!(response.thread.turns.len(), 2);
-    let control_items = &response.thread.turns[0].items;
-    assert_eq!(control_items.len(), 1);
-    match &control_items[0] {
-        ThreadItem::UserMessage { content, .. } => {
-            assert_eq!(
-                content,
-                &vec![UserInput::Text {
-                    text: control_request.to_string(),
-                    text_elements: Vec::new(),
-                }]
-            );
-        }
-        other => panic!("expected user message item, got {other:?}"),
-    }
+    assert!(response.thread.turns[0].items.is_empty());
     let imported_items = &response.thread.turns[1].items;
-    assert_eq!(imported_items.len(), 3);
+    assert_eq!(imported_items.len(), 2);
     match &imported_items[0] {
-        ThreadItem::UserMessage { content, .. } => {
-            assert_eq!(
-                content,
-                &vec![UserInput::Text {
-                    text: first_request.to_string(),
-                    text_elements: Vec::new(),
-                }]
-            );
-        }
-        other => panic!("expected user message item, got {other:?}"),
+        ThreadItem::AgentMessage { text, .. } => assert_eq!(text, "first answer"),
+        other => panic!("expected agent message item, got {other:?}"),
     }
     assert_eq!(
         imported_items.last(),
         Some(&ThreadItem::AgentMessage {
-            id: "item-4".into(),
+            id: "item-2".into(),
             text: "<EXTERNAL SESSION IMPORTED>".into(),
             phase: None,
             memory_citation: None,

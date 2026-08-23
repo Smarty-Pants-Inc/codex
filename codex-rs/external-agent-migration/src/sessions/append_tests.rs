@@ -123,8 +123,14 @@ fn model_messages(items: &[RolloutItem]) -> Vec<(MessageRole, &str)> {
                     return None;
                 };
                 match (role.as_str(), content.as_slice()) {
-                    ("user", [ContentItem::InputText { text }]) => {
-                        Some((MessageRole::User, text.as_str()))
+                    ("developer", [ContentItem::InputText { text }]) => {
+                        let text = text
+                            .strip_prefix("<untrusted_external_session_user_message>\n")
+                            .and_then(|text| {
+                                text.strip_suffix("\n</untrusted_external_session_user_message>")
+                            })
+                            .unwrap_or(text);
+                        Some((MessageRole::User, text))
                     }
                     ("assistant", [ContentItem::OutputText { text }]) => {
                         Some((MessageRole::Assistant, text.as_str()))
