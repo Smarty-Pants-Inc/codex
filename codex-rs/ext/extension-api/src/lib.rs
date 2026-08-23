@@ -81,6 +81,7 @@ pub use contributors::TurnItemContributor;
 pub use contributors::TurnLifecycleContributor;
 pub use contributors::TurnStartInput;
 pub use contributors::TurnStopInput;
+pub use contributors::TurnSuspendInput;
 pub use contributors::WorldStateContributionInput;
 pub use contributors::WorldStateSectionContribution;
 pub use registry::ExtensionRegistry;

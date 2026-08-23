@@ -25,6 +25,7 @@ use codex_extension_api::TurnErrorInput;
 use codex_extension_api::TurnLifecycleContributor;
 use codex_extension_api::TurnStartInput;
 use codex_extension_api::TurnStopInput;
+use codex_extension_api::TurnSuspendInput;
 use codex_otel::MetricsClient;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::CodexErrorInfo;
@@ -354,6 +355,31 @@ where
             {
                 accounting.mark_turn_goal_active(input.turn_id, goal.goal_id);
             }
+        })
+    }
+
+    fn on_turn_suspend<'a>(
+        &'a self,
+        input: TurnSuspendInput<'a>,
+    ) -> ExtensionFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let Some(runtime) = goal_runtime_handle(input.thread_store) else {
+                return Ok(());
+            };
+            if !runtime.is_enabled() {
+                return Ok(());
+            }
+
+            let turn_id = input.turn_store.level_id();
+            runtime
+                .account_active_goal_progress(
+                    turn_id,
+                    &format!("{turn_id}:turn-suspend"),
+                    codex_state::GoalAccountingMode::ActiveOnly,
+                    BudgetLimitedGoalDisposition::KeepActive,
+                )
+                .await
+                .map(|_| ())
         })
     }
 

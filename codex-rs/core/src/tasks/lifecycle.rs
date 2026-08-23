@@ -29,6 +29,22 @@ impl Session {
         }
     }
 
+    pub(crate) async fn emit_turn_suspend_lifecycle(
+        &self,
+        turn_store: &ExtensionData,
+    ) -> Result<(), String> {
+        for contributor in self.services.extensions.turn_lifecycle_contributors() {
+            contributor
+                .on_turn_suspend(codex_extension_api::TurnSuspendInput {
+                    session_store: &self.services.session_extension_data,
+                    thread_store: &self.services.thread_extension_data,
+                    turn_store,
+                })
+                .await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn emit_turn_stop_lifecycle(&self, turn_store: &ExtensionData) {
         for contributor in self.services.extensions.turn_lifecycle_contributors() {
             contributor

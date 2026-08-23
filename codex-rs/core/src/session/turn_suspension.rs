@@ -25,8 +25,8 @@ pub(super) async fn suspend_turn_and_shutdown(
         }
     }
 
-    // This is a snapshot of currently loaded descendants, not a spawn-admission seal.
-    // Previously closed descendants and concurrent future spawns remain best effort.
+    // Refuse obvious descendants before the durability barrier; admission is rechecked and
+    // sealed after the flush before handoff can be accepted.
     if session
         .services
         .agent_control
@@ -46,8 +46,38 @@ pub(super) async fn suspend_turn_and_shutdown(
         CodexErr::Fatal(format!("flush before root turn suspension failed: {error}"))
     })?;
 
-    // The flush can yield while the active turn completes or changes. Recheck its
-    // kind under the same lock used to remove it.
+    let Some(spawn_admission) = session
+        .services
+        .agent_control
+        .begin_root_turn_suspension_admission(session.thread_id)
+        .await?
+    else {
+        return Ok(SuspendTurnOutcome::HasLiveDescendants);
+    };
+
+    // Persist extension-owned resumable state while the task is still active. The admission
+    // write guard prevents a child spawn from crossing this yielding boundary.
+    let turn_context = {
+        let active = session.active_turn.lock().await;
+        let Some(task) = active.as_ref().and_then(|turn| turn.task.as_ref()) else {
+            return Ok(SuspendTurnOutcome::NotActive);
+        };
+        if task.kind != TaskKind::Regular {
+            return Ok(SuspendTurnOutcome::UnsupportedTask);
+        }
+        Arc::clone(&task.turn_context)
+    };
+    session
+        .emit_turn_suspend_lifecycle(turn_context.extension_data.as_ref())
+        .await
+        .map_err(|error| {
+            CodexErr::Fatal(format!(
+                "persist resumable state before root turn suspension failed: {error}"
+            ))
+        })?;
+
+    // The flush and extension hooks can yield while the active turn completes or changes.
+    // Remove only the exact regular turn whose resumable state was persisted.
     let mut turn = {
         let mut active = session.active_turn.lock().await;
         let Some(active_turn) = active.as_ref() else {
@@ -56,6 +86,9 @@ pub(super) async fn suspend_turn_and_shutdown(
         let Some(task) = active_turn.task.as_ref() else {
             return Ok(SuspendTurnOutcome::NotActive);
         };
+        if !Arc::ptr_eq(&task.turn_context, &turn_context) {
+            return Ok(SuspendTurnOutcome::NotActive);
+        }
         if task.kind != TaskKind::Regular {
             return Ok(SuspendTurnOutcome::UnsupportedTask);
         }
@@ -63,6 +96,7 @@ pub(super) async fn suspend_turn_and_shutdown(
             CodexErr::Fatal("accepted root turn suspension had no running turn".to_string())
         })?
     };
+    spawn_admission.seal();
 
     let task = turn.task.take().ok_or_else(|| {
         CodexErr::Fatal("accepted root turn suspension had no running task".to_string())

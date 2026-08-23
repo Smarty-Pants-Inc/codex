@@ -158,6 +158,58 @@ fn register_session_root_skips_threads_with_explicit_parent() {
     assert_eq!(control.state.agent_id_for_path(&AgentPath::root()), None);
 }
 
+#[tokio::test]
+async fn root_suspension_rechecks_after_in_flight_child_admission() {
+    let harness = AgentControlHarness::new().await;
+    let (root_thread_id, _root_thread) = harness.start_thread().await;
+    assert_eq!(
+        harness
+            .control
+            .list_live_agent_subtree_thread_ids(root_thread_id)
+            .await
+            .expect("initial descendant check"),
+        vec![root_thread_id]
+    );
+
+    // Model a child spawn that passed admission while the suspender yields in its first flush.
+    let spawn_admission = harness
+        .control
+        .acquire_spawn_admission()
+        .await
+        .expect("admit child spawn");
+    let control = harness.control.clone();
+    let suspension = tokio::spawn(async move {
+        control
+            .begin_root_turn_suspension_admission(root_thread_id)
+            .await
+    });
+    let child = harness
+        .manager
+        .start_thread(StartThreadOptions {
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            ..StartThreadOptions::new(harness.config.clone())
+        })
+        .await
+        .expect("finish admitted child spawn");
+    drop(spawn_admission);
+
+    assert!(
+        suspension
+            .await
+            .expect("join suspension admission")
+            .expect("recheck live descendants")
+            .is_none(),
+        "handoff must be refused after the admitted child becomes live"
+    );
+    assert!(harness.manager.get_thread(child.thread_id).await.is_ok());
+}
+
 fn spawn_agent_call(call_id: &str) -> ResponseItem {
     ResponseItem::FunctionCall {
         id: None,

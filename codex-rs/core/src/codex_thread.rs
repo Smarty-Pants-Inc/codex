@@ -407,9 +407,9 @@ impl CodexThread {
     /// TurnComplete, so another worker can recover its original turn ID.
     ///
     /// Suspension is refused while a currently loaded descendant exists. Past
-    /// descendants do not prevent recovery, and concurrent descendant admission
-    /// is not sealed. Queued user input and outstanding approval, elicitation,
-    /// or server-request waiters remain best effort and may be discarded.
+    /// descendants do not prevent recovery, and descendant admission is atomically
+    /// rechecked and sealed before handoff succeeds. Queued user input and outstanding
+    /// approval, elicitation, or server-request waiters remain best effort and may be discarded.
     ///
     /// The session processes an accepted request even if its caller disconnects.
     /// Callers must not transfer ownership until suspension succeeds, which

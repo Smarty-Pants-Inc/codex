@@ -277,6 +277,7 @@ impl AgentControl {
         if self.state.agent_metadata_for_thread(thread_id).is_none() {
             return Err(CodexErr::ThreadNotFound(thread_id));
         }
+        let _spawn_admission = self.acquire_spawn_admission().await?;
         let environment_selections = self.state.evicted_environments(thread_id);
 
         let stored_thread = state
@@ -420,6 +421,7 @@ impl AgentControl {
         if let Some(session_source) = session_source.as_ref() {
             self.ensure_execution_capacity(multi_agent_version, session_source)?;
         }
+        let spawn_admission = self.acquire_spawn_admission().await?;
         let agent_max_threads = config.effective_agent_max_threads(multi_agent_version);
         let spawn_uses_v2_residency = multi_agent_version == MultiAgentVersion::V2
             && session_source
@@ -562,6 +564,7 @@ impl AgentControl {
             notification_source.as_ref(),
         )
         .await;
+        drop(spawn_admission);
 
         match initial_input {
             SpawnInitialInput::UserInput(input) => {

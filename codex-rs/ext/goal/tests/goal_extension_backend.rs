@@ -29,6 +29,7 @@ use codex_extension_api::ToolPayload;
 use codex_extension_api::TurnErrorInput;
 use codex_extension_api::TurnStartInput;
 use codex_extension_api::TurnStopInput;
+use codex_extension_api::TurnSuspendInput;
 use codex_goal_extension::GoalAutoContinueCapability;
 use codex_goal_extension::GoalExtensionConfig;
 use codex_goal_extension::GoalObjectiveUpdate;
@@ -1109,6 +1110,100 @@ async fn thread_stop_unregisters_goal_runtime_from_service() -> anyhow::Result<(
 }
 
 #[tokio::test]
+async fn turn_suspension_persists_exact_goal_progress_for_recovery() -> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let harness = GoalExtensionHarness::new(runtime.clone(), thread_id).await?;
+    let suspended_usage = token_usage(
+        /*input_tokens*/ 20, /*cached_input_tokens*/ 5, /*output_tokens*/ 8,
+        /*reasoning_output_tokens*/ 2, /*total_tokens*/ 30,
+    );
+    harness.start_turn("turn-1", &TokenUsage::default()).await;
+    tool_by_name(&harness.tools(), "create_goal")
+        .handle(tool_call(
+            "create_goal",
+            "call-create-goal",
+            json!({ "objective": "survive graceful handoff" }),
+        ))
+        .await?;
+    harness.sink.clear();
+    harness.record_token_usage("turn-1", &suspended_usage).await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    harness
+        .suspend_turn("turn-1")
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+    let suspended_goal = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("goal should survive suspension"))?;
+    assert_eq!(23, suspended_goal.tokens_used);
+    assert_eq!(codex_state::ThreadGoalStatus::Active, suspended_goal.status);
+    assert!(
+        suspended_goal.time_used_seconds >= 1,
+        "suspension should persist elapsed active-goal wall-clock time"
+    );
+    assert_eq!(
+        vec![CapturedGoalEvent {
+            event_id: "turn-1:turn-suspend".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            status: ThreadGoalStatus::Active,
+            tokens_used: 23,
+        }],
+        harness.sink.goal_events()
+    );
+    assert!(harness.sink.events().iter().all(|event| !matches!(
+        &event.msg,
+        EventMsg::TurnAborted(_) | EventMsg::TurnComplete(_)
+    )));
+    let goal_id = suspended_goal.goal_id.clone();
+    let suspended_time_used_seconds = suspended_goal.time_used_seconds;
+    drop(harness);
+
+    let recovered = GoalExtensionHarness::new(runtime.clone(), thread_id).await?;
+    recovered.resume_thread().await;
+    recovered.start_turn("turn-1", &suspended_usage).await;
+    recovered
+        .record_token_usage(
+            "turn-1",
+            &token_usage(
+                /*input_tokens*/ 30, /*cached_input_tokens*/ 7,
+                /*output_tokens*/ 12, /*reasoning_output_tokens*/ 3,
+                /*total_tokens*/ 45,
+            ),
+        )
+        .await;
+    recovered.sink.clear();
+    recovered
+        .suspend_turn("turn-1")
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+    let recovered_goal = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("goal should remain active after recovery"))?;
+    assert_eq!(goal_id, recovered_goal.goal_id);
+    assert_eq!(35, recovered_goal.tokens_used);
+    assert_eq!(codex_state::ThreadGoalStatus::Active, recovered_goal.status);
+    assert!(recovered_goal.time_used_seconds >= suspended_time_used_seconds);
+    assert_eq!(
+        vec![CapturedGoalEvent {
+            event_id: "turn-1:turn-suspend".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            status: ThreadGoalStatus::Active,
+            tokens_used: 35,
+        }],
+        recovered.sink.goal_events()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_resume_rehydrates_active_goal_idle_accounting() -> anyhow::Result<()> {
     let runtime = test_runtime().await?;
     let thread_id = test_thread_id()?;
@@ -1603,6 +1698,20 @@ impl GoalExtensionHarness {
                 })
                 .await;
         }
+    }
+
+    async fn suspend_turn(&self, turn_id: &str) -> Result<(), String> {
+        let turn_store = ExtensionData::new(turn_id);
+        for contributor in self.registry.turn_lifecycle_contributors() {
+            contributor
+                .on_turn_suspend(TurnSuspendInput {
+                    session_store: &self.session_store,
+                    thread_store: &self.thread_store,
+                    turn_store: &turn_store,
+                })
+                .await?;
+        }
+        Ok(())
     }
 
     async fn stop_turn(&self, turn_id: &str) {

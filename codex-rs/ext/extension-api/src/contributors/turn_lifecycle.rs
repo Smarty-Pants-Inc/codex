@@ -21,6 +21,16 @@ pub struct TurnStartInput<'a> {
     pub turn_store: &'a ExtensionData,
 }
 
+/// Input supplied before the host suspends an unfinished turn for recovery.
+pub struct TurnSuspendInput<'a> {
+    /// Store scoped to the host session runtime.
+    pub session_store: &'a ExtensionData,
+    /// Store scoped to this thread runtime.
+    pub thread_store: &'a ExtensionData,
+    /// Store scoped to this turn runtime.
+    pub turn_store: &'a ExtensionData,
+}
+
 /// Input supplied when the host completes a turn.
 pub struct TurnStopInput<'a> {
     /// Store scoped to the host session runtime.

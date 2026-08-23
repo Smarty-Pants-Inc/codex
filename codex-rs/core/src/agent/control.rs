@@ -53,6 +53,9 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Weak;
+use tokio::sync::OwnedRwLockWriteGuard;
+use tokio::sync::RwLock;
+use tokio::sync::RwLockReadGuard;
 use tokio::sync::watch;
 use tracing::warn;
 use uuid::Uuid;
@@ -82,6 +85,16 @@ pub(crate) struct SpawnAgentOptions {
     pub(crate) root_turn_id: Option<String>,
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
     pub(crate) multi_agent_v2_usage_hints: Option<ResolvedMultiAgentV2UsageHints>,
+}
+
+pub(crate) struct RootTurnSuspensionAdmission {
+    sealed: OwnedRwLockWriteGuard<bool>,
+}
+
+impl RootTurnSuspensionAdmission {
+    pub(crate) fn seal(mut self) {
+        *self.sealed = true;
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -117,6 +130,7 @@ pub(crate) struct AgentControl {
     state: Arc<AgentRegistry>,
     v2_residency: Arc<V2Residency>,
     agent_execution_limiter: Arc<AgentExecutionLimiter>,
+    spawn_admission_sealed: Arc<RwLock<bool>>,
     /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
     rollout_budget: Arc<RolloutBudget>,
 }
@@ -148,6 +162,7 @@ impl AgentControl {
             state: Arc::default(),
             v2_residency: Arc::default(),
             agent_execution_limiter: Arc::default(),
+            spawn_admission_sealed: Arc::default(),
             rollout_budget: Arc::default(),
         };
         if let Some(rollout_budget) = rollout_budget {
@@ -367,6 +382,32 @@ impl AgentControl {
         self.state
             .agent_metadata_for_thread(agent_id)
             .ok_or_else(|| CodexErr::ThreadNotFound(agent_id))
+    }
+
+    async fn acquire_spawn_admission(&self) -> CodexResult<RwLockReadGuard<'_, bool>> {
+        let admission = self.spawn_admission_sealed.read().await;
+        if *admission {
+            return Err(CodexErr::UnsupportedOperation(
+                "agent admission is sealed after root turn suspension".to_string(),
+            ));
+        }
+        Ok(admission)
+    }
+
+    pub(crate) async fn begin_root_turn_suspension_admission(
+        &self,
+        root_thread_id: ThreadId,
+    ) -> CodexResult<Option<RootTurnSuspensionAdmission>> {
+        let admission = Arc::clone(&self.spawn_admission_sealed).write_owned().await;
+        if self
+            .list_live_agent_subtree_thread_ids(root_thread_id)
+            .await?
+            .len()
+            > 1
+        {
+            return Ok(None);
+        }
+        Ok(Some(RootTurnSuspensionAdmission { sealed: admission }))
     }
 
     pub(crate) async fn list_live_agent_subtree_thread_ids(

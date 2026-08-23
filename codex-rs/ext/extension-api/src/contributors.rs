@@ -50,6 +50,7 @@ pub use turn_lifecycle::TurnAbortInput;
 pub use turn_lifecycle::TurnErrorInput;
 pub use turn_lifecycle::TurnStartInput;
 pub use turn_lifecycle::TurnStopInput;
+pub use turn_lifecycle::TurnSuspendInput;
 pub use world_state::PreviousWorldStateSection;
 pub use world_state::RenderedWorldStateFragment;
 pub use world_state::WorldStateContributionInput;
@@ -184,6 +185,19 @@ pub trait TurnLifecycleContributor: Send + Sync {
         Box::pin(async move {
             let _self = self;
             let _input = input;
+        })
+    }
+
+    /// Called before the host suspends an unfinished turn without a terminal event.
+    /// Contributors must persist any resumable turn-scoped state before returning success.
+    fn on_turn_suspend<'a>(
+        &'a self,
+        input: TurnSuspendInput<'a>,
+    ) -> ExtensionFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let _self = self;
+            let _input = input;
+            Ok(())
         })
     }
 
