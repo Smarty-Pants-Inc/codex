@@ -93,6 +93,15 @@ impl SessionState {
         I::Item: std::ops::Deref<Target = ResponseItem>,
     {
         self.history.record_items(items, policy);
+        self.prune_direct_user_response_items();
+    }
+    pub(crate) fn record_annotated_items(
+        &mut self,
+        items: &[ResponseItemEnvelope],
+        policy: TruncationPolicy,
+    ) {
+        self.history.record_annotated_items(items, policy);
+        self.prune_direct_user_response_items();
     }
 
     pub(crate) fn previous_turn_settings(&self) -> Option<PreviousTurnSettings> {
@@ -133,6 +142,15 @@ impl SessionState {
 
     pub(crate) fn record_direct_user_response_items(&mut self, items: Vec<ResponseItem>) {
         self.direct_user_response_items.extend(items);
+        self.prune_direct_user_response_items();
+    }
+
+    fn prune_direct_user_response_items(&mut self) {
+        self.direct_user_response_items.retain(|direct_item| {
+            self.history
+                .raw_items()
+                .any(|history_item| response_items_match_for_provenance(direct_item, history_item))
+        });
     }
 
     #[cfg(test)]
@@ -144,6 +162,7 @@ impl SessionState {
         self.history.replace(items);
         self.history
             .set_reference_context_item(reference_context_item);
+        self.prune_direct_user_response_items();
         self.auto_compact_window.clear_prefill();
     }
 
@@ -155,6 +174,7 @@ impl SessionState {
         self.history.replace_annotated(items);
         self.history
             .set_reference_context_item(reference_context_item);
+        self.prune_direct_user_response_items();
         self.auto_compact_window.clear_prefill();
     }
 
