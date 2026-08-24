@@ -414,9 +414,18 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
                 "task_name": {
                     "type": "string",
                     "description": "Canonical task name for the spawned agent."
+                },
+                "model": {
+                    "type": "string",
+                    "description": "Effective model selected for the spawned agent."
+                },
+                "multi_agent_version": {
+                    "type": "string",
+                    "enum": ["disabled", "v1", "v2"],
+                    "description": "Resolved multi-agent runtime available to the spawned agent."
                 }
             },
-            "required": ["task_name"],
+            "required": ["task_name", "model", "multi_agent_version"],
             "additionalProperties": false
         });
     }
@@ -431,9 +440,18 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
             "nickname": {
                 "type": ["string", "null"],
                 "description": "User-facing nickname for the spawned agent when available."
+            },
+            "model": {
+                "type": "string",
+                "description": "Effective model selected for the spawned agent."
+            },
+            "multi_agent_version": {
+                "type": "string",
+                "enum": ["disabled", "v1", "v2"],
+                "description": "Resolved multi-agent runtime available to the spawned agent."
             }
         },
-        "required": ["task_name", "nickname"],
+        "required": ["task_name", "nickname", "model", "multi_agent_version"],
         "additionalProperties": false
     })
 }
@@ -468,9 +486,18 @@ fn list_agents_output_schema() -> Value {
                         "agent_status": {
                             "description": "Last known status of the agent.",
                             "allOf": [agent_status_output_schema()]
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "Effective model selected for the agent."
+                        },
+                        "multi_agent_version": {
+                            "type": ["string", "null"],
+                            "enum": ["disabled", "v1", "v2", null],
+                            "description": "Resolved multi-agent runtime available to the agent, when initialized."
                         }
                     },
-                    "required": ["agent_name", "agent_status"],
+                    "required": ["agent_name", "agent_status", "model", "multi_agent_version"],
                     "additionalProperties": false
                 },
                 "description": "Live agents visible in the current root thread tree."

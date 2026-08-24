@@ -7,6 +7,7 @@
 //! before the writer makes its second streaming pass.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
@@ -32,6 +33,7 @@ struct CompactionFrame {
 #[derive(Clone)]
 struct PendingUserResponse {
     boundary: usize,
+    item_id: Option<String>,
     content: Vec<ContentItem>,
 }
 
@@ -86,6 +88,7 @@ pub(super) struct RollbackPlanner {
     pending_user_response: Option<PendingUserResponse>,
     pending_delivery_boundary: Option<usize>,
     turn_boundaries: HashMap<String, usize>,
+    direct_user_item_ids: HashSet<String>,
     compactions: Vec<CompactionFrame>,
     model_replay: ModelReplayPlanner,
 }
@@ -101,6 +104,7 @@ impl RollbackPlanner {
             pending_context_records: Vec::new(),
             pending_user_response: None,
             pending_delivery_boundary: None,
+            direct_user_item_ids: HashSet::new(),
             turn_boundaries: HashMap::new(),
             compactions: Vec::new(),
             model_replay: ModelReplayPlanner::new(),
@@ -112,14 +116,21 @@ impl RollbackPlanner {
         self.model_replay.observe(index, &line.item);
         self.record_boundaries
             .push(self.boundary_stack.last().copied());
-        let paired_user_boundary = match (&self.pending_user_response, &line.item) {
+        let paired_user = match (&self.pending_user_response, &line.item) {
             (Some(pending), RolloutItem::EventMsg(EventMsg::UserMessage(event)))
                 if user_response_matches_event(&pending.content, event) =>
             {
-                Some(pending.boundary)
+                Some((pending.boundary, pending.item_id.clone()))
             }
             _ => None,
         };
+        if let Some(item_id) = paired_user
+            .as_ref()
+            .and_then(|(_, item_id)| item_id.as_ref())
+        {
+            self.direct_user_item_ids.insert(item_id.clone());
+        }
+        let paired_user_boundary = paired_user.map(|(boundary, _)| boundary);
         let paired_delivery_boundary = match (&self.pending_delivery_boundary, &line.item) {
             (Some(boundary), RolloutItem::ResponseItem(response))
                 if matches!(&response.item, ResponseItem::AgentMessage { .. }) =>
@@ -143,6 +154,10 @@ impl RollbackPlanner {
                     {
                         self.pending_user_response = Some(PendingUserResponse {
                             boundary,
+                            item_id: response
+                                .item
+                                .id()
+                                .map(|item_id| item_id.as_str().to_string()),
                             content: content.clone(),
                         });
                     }
@@ -313,6 +328,7 @@ impl RollbackPlanner {
                 .is_none_or(|boundary| self.boundary_alive[boundary])
         });
         if let Some(compaction_index) = compaction_index {
+            let direct_user_item_ids = &self.direct_user_item_ids;
             let frame = &mut self.compactions[compaction_index];
             let post_compaction_turns = depth_before.saturating_sub(frame.boundary_depth);
             let remaining = count.saturating_sub(post_compaction_turns);
@@ -330,7 +346,7 @@ impl RollbackPlanner {
                     )
                 })?;
                 if let Some(summary) = replacement_history.last_mut() {
-                    migrate_legacy_local_summary(&mut summary.item, message);
+                    migrate_legacy_local_summary(&mut summary.item, message, direct_user_item_ids);
                 }
                 rollback::drop_last_n_user_turns(
                     replacement_history,
@@ -347,8 +363,15 @@ impl RollbackPlanner {
     }
 }
 
-fn migrate_legacy_local_summary(item: &mut ResponseItem, compacted_message: &str) {
+fn migrate_legacy_local_summary(
+    item: &mut ResponseItem,
+    compacted_message: &str,
+    direct_user_item_ids: &HashSet<String>,
+) {
     if !compacted_message.is_empty()
+        && !item
+            .id()
+            .is_some_and(|item_id| direct_user_item_ids.contains(item_id.as_str()))
         && let ResponseItem::Message { role, content, .. } = item
         && role == "user"
         && matches!(content.as_slice(), [ContentItem::InputText { text }] if text == compacted_message)
@@ -418,13 +441,13 @@ mod tests {
             internal_chat_message_metadata_passthrough: None,
         };
 
-        migrate_legacy_local_summary(&mut item, "legacy summary");
+        migrate_legacy_local_summary(&mut item, "legacy summary", &HashSet::new());
         assert!(matches!(
             &item,
             ResponseItem::Message { role, .. } if role == "user"
         ));
 
-        migrate_legacy_local_summary(&mut item, "direct user input");
+        migrate_legacy_local_summary(&mut item, "direct user input", &HashSet::new());
         assert!(matches!(
             &item,
             ResponseItem::Message { role, .. } if role == "developer"

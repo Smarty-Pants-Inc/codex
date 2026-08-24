@@ -107,6 +107,37 @@ impl DirectUserReplayProvenance {
     }
 }
 
+impl Session {
+    pub(crate) async fn direct_user_response_items_from_rollout(
+        &self,
+    ) -> CodexResult<Vec<ResponseItem>> {
+        let Some(live_thread) = self.live_thread() else {
+            // Without persistence there is no durable provenance proof. The caller must then
+            // drop provider-returned raw user-role items rather than infer authority from text.
+            return Ok(Vec::new());
+        };
+        let history = live_thread
+            .load_history(/*include_archived*/ true)
+            .await
+            .map_err(|error| CodexErr::Fatal(error.to_string()))?;
+        let provenance = DirectUserReplayProvenance::from_rollout(&history.items);
+        Ok(history
+            .items
+            .into_iter()
+            .filter_map(|item| match item {
+                RolloutItem::ResponseItem(envelope)
+                    if envelope.item.id().is_some_and(|id| {
+                        provenance.direct_user_item_ids.contains(id.as_str())
+                    }) =>
+                {
+                    Some(envelope.item)
+                }
+                _ => None,
+            })
+            .collect())
+    }
+}
+
 fn mark_latest_direct_user_item(
     pending_by_turn: &mut HashMap<String, Vec<(String, String)>>,
     direct_user_item_ids: &mut HashSet<String>,
@@ -573,18 +604,31 @@ fn reconstructed_replacement_history(
         migrate_unproven_legacy_contextual_user_message(item, direct_user_provenance);
     }
     if let Some(summary) = replacement_history.last_mut() {
-        migrate_replayed_compaction_summary(summary, compacted_message);
+        migrate_replayed_compaction_summary(summary, compacted_message, direct_user_provenance);
     }
     replacement_history
 }
 
-fn migrate_replayed_compaction_summary(item: &mut ResponseItemEnvelope, compacted_message: &str) {
-    if compacted_message.is_empty() {
+fn migrate_replayed_compaction_summary(
+    item: &mut ResponseItemEnvelope,
+    compacted_message: &str,
+    direct_user_provenance: &DirectUserReplayProvenance,
+) {
+    if compacted_message.is_empty()
+        || item.item.id().is_some_and(|item_id| {
+            direct_user_provenance
+                .direct_user_item_ids
+                .contains(item_id.as_str())
+        })
+    {
         return;
     }
     let ResponseItem::Message { role, content, .. } = &mut item.item else {
         return;
     };
+    if role != "user" {
+        return;
+    }
     let [ContentItem::InputText { text }] = content.as_mut_slice() else {
         return;
     };

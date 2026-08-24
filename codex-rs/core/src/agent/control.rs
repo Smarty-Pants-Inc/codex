@@ -102,12 +102,14 @@ pub(crate) struct LiveAgent {
     pub(crate) thread_id: ThreadId,
     pub(crate) metadata: AgentMetadata,
     pub(crate) status: AgentStatus,
+    pub(crate) multi_agent_version: MultiAgentVersion,
 }
-
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ListedAgent {
     pub(crate) agent_name: String,
     pub(crate) agent_status: AgentStatus,
+    pub(crate) model: String,
+    pub(crate) multi_agent_version: Option<MultiAgentVersion>,
 }
 
 /// Control-plane handle for multi-agent operations.
@@ -523,9 +525,12 @@ impl AgentControl {
             && let Some(root_thread_id) = self.state.agent_id_for_path(&root_path)
             && let Ok(root_thread) = state.get_thread(root_thread_id).await
         {
+            let snapshot = root_thread.config_snapshot().await;
             agents.push(ListedAgent {
                 agent_name: root_path.to_string(),
                 agent_status: root_thread.agent_status().await,
+                model: snapshot.model,
+                multi_agent_version: root_thread.multi_agent_version(),
             });
         }
 
@@ -543,6 +548,7 @@ impl AgentControl {
             let Ok(thread) = state.get_thread(thread_id).await else {
                 continue;
             };
+            let snapshot = thread.config_snapshot().await;
             let agent_name = metadata
                 .agent_path
                 .as_ref()
@@ -551,6 +557,8 @@ impl AgentControl {
             agents.push(ListedAgent {
                 agent_name,
                 agent_status: thread.agent_status().await,
+                model: snapshot.model,
+                multi_agent_version: thread.multi_agent_version(),
             });
         }
 

@@ -130,7 +130,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     );
     assert_eq!(
         output_schema.expect("spawn_agent output schema")["required"],
-        json!(["task_name", "nickname"])
+        json!(["task_name", "nickname", "model", "multi_agent_version"])
     );
 }
 
@@ -462,7 +462,7 @@ fn list_agents_tool_includes_path_prefix_and_agent_fields() {
     );
     assert_eq!(
         output_schema.expect("list_agents output schema")["properties"]["agents"]["items"]["required"],
-        json!(["agent_name", "agent_status"])
+        json!(["agent_name", "agent_status", "model", "multi_agent_version"])
     );
 }
 

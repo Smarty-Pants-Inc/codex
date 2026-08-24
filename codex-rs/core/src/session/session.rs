@@ -61,6 +61,8 @@ pub(crate) struct Session {
     pub(super) mcp_prewarm_task: std::sync::Mutex<Option<JoinHandle<()>>>,
     pub(crate) conversation: Arc<RealtimeConversationManager>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
+    /// Serializes turn-input admission through settings application and task installation.
+    pub(crate) turn_input_admission: tokio::sync::Mutex<()>,
     /// Approval IDs registered in this session for legacy response routing.
     pub(super) seen_approval_ids: std::sync::Mutex<HashSet<String>>,
     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
@@ -1476,6 +1478,7 @@ impl Session {
                 mcp_prewarm_task: std::sync::Mutex::new(None),
                 conversation: Arc::new(RealtimeConversationManager::new()),
                 active_turn: Mutex::new(None),
+                turn_input_admission: tokio::sync::Mutex::new(()),
                 seen_approval_ids: std::sync::Mutex::new(HashSet::new()),
                 async_hook_results,
                 input_queue: InputQueue::new(),

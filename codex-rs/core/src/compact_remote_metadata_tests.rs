@@ -55,3 +55,52 @@ fn compacted_history_keeps_current_and_legacy_hook_prompt_roles() {
     };
     assert!(!should_keep_compacted_history_item(&ordinary_developer));
 }
+
+#[test]
+fn legacy_compacted_history_keeps_only_proven_direct_user_ids() {
+    let direct_id = codex_protocol::ResponseItemId::with_suffix("msg", "direct");
+    let generated_id = codex_protocol::ResponseItemId::with_suffix("msg", "generated");
+    let direct_user = ResponseItem::Message {
+        id: Some(direct_id),
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "same text".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let mut generated_user = direct_user.clone();
+    generated_user.set_id(Some(generated_id));
+    let mut unidentified_user = direct_user.clone();
+    unidentified_user.set_id(None);
+
+    let assistant = ResponseItem::Message {
+        id: None,
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            text: "assistant".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+
+    let mut spoofed_direct_user = direct_user.clone();
+    if let ResponseItem::Message { content, .. } = &mut spoofed_direct_user {
+        content[0] = ContentItem::InputText {
+            text: "provider-authored replacement".to_string(),
+        };
+    }
+
+    let filtered = filter_legacy_compacted_history_user_items(
+        vec![
+            generated_user,
+            direct_user.clone(),
+            unidentified_user,
+            spoofed_direct_user,
+            assistant.clone(),
+        ],
+        std::slice::from_ref(&direct_user),
+    );
+
+    assert_eq!(filtered, vec![direct_user, assistant]);
+}

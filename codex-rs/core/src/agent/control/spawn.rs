@@ -606,6 +606,7 @@ impl AgentControl {
             thread_id: new_thread.thread_id,
             metadata: agent_metadata,
             status: self.get_status(new_thread.thread_id).await,
+            multi_agent_version,
         })
     }
 

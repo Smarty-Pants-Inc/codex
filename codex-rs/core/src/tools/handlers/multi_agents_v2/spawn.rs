@@ -248,14 +248,24 @@ async fn handle_spawn_agent(
         &[("role", role_tag), ("version", "v2")],
     );
     let task_name = String::from(new_agent_path);
-
+    let model = agent_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.model.clone())
+        .unwrap_or_else(|| turn.model_info.slug.clone());
+    let multi_agent_version = Some(spawned_agent.multi_agent_version);
     let hide_agent_metadata = turn.config.multi_agent_v2.hide_spawn_agent_metadata;
     let output = if hide_agent_metadata {
-        SpawnAgentResult::HiddenMetadata { task_name }
+        SpawnAgentResult::HiddenMetadata {
+            task_name,
+            model,
+            multi_agent_version,
+        }
     } else {
         SpawnAgentResult::WithNickname {
             task_name,
             nickname,
+            model,
+            multi_agent_version,
         }
     };
     Ok((output, new_thread_id, agent_status, agent_snapshot))
@@ -323,9 +333,13 @@ pub(crate) enum SpawnAgentResult {
     WithNickname {
         task_name: String,
         nickname: Option<String>,
+        model: String,
+        multi_agent_version: Option<MultiAgentVersion>,
     },
     HiddenMetadata {
         task_name: String,
+        model: String,
+        multi_agent_version: Option<MultiAgentVersion>,
     },
 }
 

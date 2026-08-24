@@ -263,11 +263,17 @@ async fn run_remote_compact_task_inner_impl(
     };
     let RemoteCompactAttempt {
         new_history,
+        direct_user_items,
         trace_input_history,
     } = attempt;
     let (new_window_number, new_window_ids) = sess.advance_auto_compact_window().await;
-    let (new_history, world_state_baseline) =
-        process_compacted_history(sess.as_ref(), new_history, &initial_context_injection).await;
+    let (new_history, world_state_baseline) = process_compacted_history_with_direct_user_items(
+        sess.as_ref(),
+        new_history,
+        &direct_user_items,
+        &initial_context_injection,
+    )
+    .await;
 
     let reference_context_item = match initial_context_injection {
         InitialContextInjection::DoNotInject => None,
@@ -308,6 +314,7 @@ async fn run_remote_compact_task_inner_impl(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) async fn process_compacted_history(
     sess: &Session,
     compacted_history: Vec<ResponseItem>,
@@ -329,6 +336,56 @@ pub(crate) async fn process_compacted_history(
     )
 }
 
+async fn process_compacted_history_with_direct_user_items(
+    sess: &Session,
+    compacted_history: Vec<ResponseItem>,
+    direct_user_items: &[ResponseItem],
+    initial_context_injection: &InitialContextInjection,
+) -> (Vec<ResponseItem>, Option<Arc<WorldState>>) {
+    let compacted_history =
+        filter_legacy_compacted_history_user_items(compacted_history, direct_user_items)
+            .into_iter()
+            .map(ResponseItemEnvelope::new)
+            .collect();
+    let (compacted_history, world_state_baseline) =
+        process_annotated_compacted_history(sess, compacted_history, initial_context_injection)
+            .await;
+    (
+        compacted_history
+            .into_iter()
+            .map(ResponseItemEnvelope::into_item)
+            .collect(),
+        world_state_baseline,
+    )
+}
+fn filter_legacy_compacted_history_user_items(
+    compacted_history: Vec<ResponseItem>,
+    direct_user_items: &[ResponseItem],
+) -> Vec<ResponseItem> {
+    compacted_history
+        .into_iter()
+        .filter(|item| {
+            !item.is_user_message()
+                || direct_user_items
+                    .iter()
+                    .any(|direct_item| response_items_match_for_provenance(direct_item, item))
+        })
+        .collect()
+}
+
+fn response_items_match_for_provenance(
+    direct_item: &ResponseItem,
+    compacted_item: &ResponseItem,
+) -> bool {
+    if direct_item.id() != compacted_item.id() {
+        return false;
+    }
+    let mut direct_item = direct_item.clone();
+    direct_item.clear_internal_chat_message_metadata_passthrough();
+    let mut compacted_item = compacted_item.clone();
+    compacted_item.clear_internal_chat_message_metadata_passthrough();
+    direct_item == compacted_item
+}
 /// Installs already-annotated remote compaction output without dropping its metadata sidecar.
 pub(crate) async fn process_annotated_compacted_history(
     sess: &Session,

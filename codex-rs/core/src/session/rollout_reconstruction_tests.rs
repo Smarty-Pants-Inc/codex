@@ -455,6 +455,33 @@ async fn reconstruction_migrates_only_local_legacy_compaction_summary_for_root_t
 }
 
 #[tokio::test]
+async fn reconstruction_preserves_direct_user_message_equal_to_legacy_compaction_summary() {
+    let (session, turn_context) = make_session_and_context().await;
+    let turn_id = "direct-turn";
+    let text = "same as legacy summary";
+    let direct = user_message_with_turn(text, turn_id, "direct");
+    let rollout_items = [
+        RolloutItem::ResponseItem(direct.clone().into()),
+        completed_user_message_event(text, turn_id),
+        RolloutItem::Compacted(CompactedItem {
+            message: text.to_string(),
+            replacement_history: Some(annotated(vec![direct.clone()])),
+            mcp_resource_origins: None,
+            window_number: None,
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+        }),
+    ];
+
+    let reconstruction = session
+        .reconstruct_history_from_rollout(&turn_context, &rollout_items)
+        .await;
+
+    assert_eq!(reconstruction.history, annotated(vec![direct]));
+}
+
+#[tokio::test]
 async fn record_initial_history_restores_world_state_baseline() {
     let (session, turn_context) = make_session_and_context().await;
     let turn_context = Arc::new(turn_context);

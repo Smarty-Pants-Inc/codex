@@ -202,6 +202,7 @@ async fn start_or_steer(
     let settings = PreparedTurnInputSettings::prepare(session, thread_settings, start).await?;
     let required_active_schema = settings.required_active_final_output_json_schema().cloned();
     let responsesapi_client_metadata_for_retry = responsesapi_client_metadata.clone();
+    let _turn_input_admission = session.turn_input_admission.lock().await;
     let mut reserved_turn_state = match session
         .steer_input(
             &mut items,
@@ -343,12 +344,14 @@ async fn start_if_idle(
             reason: NotSubmittedReason::PlanMode,
         });
     }
+    let settings = PreparedTurnInputSettings::prepare(session, thread_settings, start).await?;
+    let _turn_input_admission = session.turn_input_admission.lock().await;
 
     let turn_state = {
         let mut active_turn = session.active_turn.lock().await;
         if active_turn
             .as_ref()
-            .is_some_and(|active_turn| active_turn.task.is_some())
+            .is_some_and(|active_turn| active_turn.task.is_some() || is_automatic_idle_work)
         {
             return Ok(TurnInputSubmission::NotSubmitted {
                 reason: NotSubmittedReason::NotIdle,
@@ -394,16 +397,6 @@ async fn start_if_idle(
             reason: NotSubmittedReason::PendingTriggerTurn,
         });
     }
-
-    let settings = match PreparedTurnInputSettings::prepare(session, thread_settings, start).await {
-        Ok(settings) => settings,
-        Err(error) => {
-            session.clear_reserved_idle_turn(&turn_state).await;
-            return Err(error);
-        }
-    };
-    // Automatic work must not use persistent settings to start a turn
-    // whose effective collaboration mode is Plan.
     if is_automatic_idle_work && settings.would_enter_plan_mode() {
         session.clear_reserved_idle_turn(&turn_state).await;
         return Ok(TurnInputSubmission::NotSubmitted {
@@ -502,6 +495,7 @@ async fn steer(
         .as_ref()
         .map(|_| start.root_turn_id.clone());
     let settings = PreparedTurnInputSettings::prepare(session, thread_settings, start).await?;
+    let _turn_input_admission = session.turn_input_admission.lock().await;
     match session
         .steer_input(
             &mut items,

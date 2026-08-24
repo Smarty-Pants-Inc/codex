@@ -53,6 +53,7 @@ use codex_protocol::protocol::FileSystemPath;
 use codex_protocol::protocol::FileSystemSandboxEntry;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::NetworkSandboxPolicy;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SandboxPolicy;
@@ -212,6 +213,8 @@ struct ListAgentsResult {
 struct ListedAgentResult {
     agent_name: String,
     agent_status: serde_json::Value,
+    model: String,
+    multi_agent_version: Option<MultiAgentVersion>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1075,13 +1078,14 @@ async fn spawn_agent_errors_when_manager_dropped() {
         FunctionCallError::RespondToModel("collab manager unavailable".to_string())
     );
 }
-
 #[tokio::test]
 async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_path() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         task_name: String,
         nickname: Option<String>,
+        model: String,
+        multi_agent_version: Option<MultiAgentVersion>,
     }
 
     let (mut session, mut turn) = make_session_and_context().await;
@@ -1131,6 +1135,12 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
         .expect("child thread should exist")
         .config_snapshot()
         .await;
+    assert!(!spawn_result.model.is_empty());
+    assert_eq!(
+        spawn_result.multi_agent_version,
+        Some(MultiAgentVersion::V2)
+    );
+    assert_eq!(spawn_result.model, child_snapshot.model);
     assert_eq!(
         child_snapshot.session_source.get_agent_path().as_deref(),
         Some("/root/test_process")
@@ -1536,6 +1546,8 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
         .iter()
         .find(|agent| agent.agent_name == "/root/worker")
         .expect("worker agent should be listed");
+    assert!(!worker.model.is_empty());
+    assert_eq!(worker.multi_agent_version, Some(MultiAgentVersion::V2));
     assert_eq!(worker.agent_status, json!({"completed": "done"}));
     assert_eq!(success, Some(true));
 }

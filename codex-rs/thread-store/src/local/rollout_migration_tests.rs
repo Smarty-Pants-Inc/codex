@@ -11,6 +11,7 @@ use codex_extension_items::ExtensionItem;
 use codex_extension_items::image_generation::ImageGenerationFailure;
 use codex_extension_items::image_generation::ImageGenerationItem;
 use codex_protocol::AgentPath;
+use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::items::HookPromptFragment;
@@ -173,6 +174,12 @@ fn input_response_message(role: &str, text: &str) -> ResponseItem {
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     }
+}
+
+fn identified_input_response_message(role: &str, suffix: &str, text: &str) -> ResponseItem {
+    let mut item = input_response_message(role, text);
+    item.set_id(Some(ResponseItemId::with_suffix("msg", suffix)));
+    item
 }
 
 fn rollout_response_item(item: ResponseItem) -> RolloutItem {
@@ -1175,6 +1182,79 @@ async fn migration_rolls_back_pre_compaction_turns_from_sqlite_history() {
         .expect("retained compaction");
     assert_eq!(checkpoint.replacement_history, Some(Vec::new()));
     assert_eq!(checkpoint.mcp_resource_origins, None);
+}
+
+#[tokio::test]
+async fn migration_preserves_direct_user_message_equal_to_compaction_summary() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let old_question = identified_input_response_message("user", "old", "old question");
+    let old_answer = ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", "old-answer")),
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            text: "old answer".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let base_checkpoint = compacted(vec![identified_input_response_message(
+        "user",
+        "base",
+        "base question",
+    )]);
+    let direct_summary =
+        identified_input_response_message("user", "direct-summary", "same as summary");
+    let RolloutItem::Compacted(mut checkpoint) = compacted(vec![
+        old_question.clone(),
+        old_answer.clone(),
+        direct_summary.clone(),
+    ]) else {
+        unreachable!("compacted helper always creates a compaction checkpoint");
+    };
+    checkpoint.message = "same as summary".to_string();
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            base_checkpoint,
+            started("old-turn"),
+            rollout_response_item(old_question.clone()),
+            user_message("old question"),
+            completed("old-turn"),
+            started("direct-summary-turn"),
+            rollout_response_item(direct_summary),
+            user_message("same as summary"),
+            completed("direct-summary-turn"),
+            RolloutItem::Compacted(checkpoint),
+            started("post-compaction-turn"),
+            user_message("new question"),
+            completed("post-compaction-turn"),
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                num_turns: 2,
+            })),
+            user_message("replacement question"),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate rollback without deleting direct-user history");
+
+    let checkpoint = read_rollout(&path)
+        .into_iter()
+        .find_map(|line| match line.item {
+            RolloutItem::Compacted(item) if item.message == "same as summary" => Some(item),
+            _ => None,
+        })
+        .expect("retained compaction");
+    assert_eq!(
+        checkpoint.replacement_history,
+        Some(vec![old_question.into(), old_answer.into()])
+    );
 }
 
 #[tokio::test]

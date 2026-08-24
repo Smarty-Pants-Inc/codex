@@ -250,6 +250,42 @@ async fn start_only_rejects_user_role_response_item() {
 }
 
 #[tokio::test]
+async fn automatic_goal_start_rejects_taskless_direct_reservation() {
+    let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
+    let reserved_turn = ActiveTurn::default();
+    let reserved_turn_state = Arc::clone(&reserved_turn.turn_state);
+    *session.active_turn.lock().await = Some(reserved_turn);
+
+    let submission = handle(
+        &session,
+        TurnInputRequest::new(SubmittedTurnInput::DeveloperInput {
+            content: vec![UserInput::Text {
+                text: "automatic goal continuation".to_string(),
+                text_elements: Vec::new(),
+            }],
+        })
+        .with_idle_turn_source(IdleTurnSource::GoalContinuation),
+        TurnInputMode::StartIfIdle,
+        "automatic-goal".to_string(),
+    )
+    .await
+    .expect("automatic goal admission should return a submission outcome");
+
+    assert_eq!(
+        submission,
+        TurnInputSubmission::NotSubmitted {
+            reason: NotSubmittedReason::NotIdle,
+        }
+    );
+    let active_turn = session.active_turn.lock().await;
+    let active_turn_state = active_turn
+        .as_ref()
+        .map(|turn| Arc::clone(&turn.turn_state))
+        .expect("direct reservation must remain active");
+    assert!(Arc::ptr_eq(&active_turn_state, &reserved_turn_state));
+}
+
+#[tokio::test]
 async fn direct_user_replaces_taskless_reservation_and_stale_auto_start_fails() {
     let (session, _turn_context, _rx) = make_session_and_context_with_rx().await;
     let reserved_turn = ActiveTurn::default();

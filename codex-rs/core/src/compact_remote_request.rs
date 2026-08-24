@@ -17,6 +17,7 @@ use tracing::info;
 
 pub(super) struct RemoteCompactAttempt {
     pub(super) new_history: Vec<ResponseItem>,
+    pub(super) direct_user_items: Vec<ResponseItem>,
     pub(super) trace_input_history: Option<Vec<ResponseItem>>,
 }
 
@@ -29,6 +30,7 @@ pub(super) async fn run_remote_compact_attempt(
     analytics_details: &mut CompactionAnalyticsDetails,
 ) -> CodexResult<RemoteCompactAttempt> {
     let turn_context = &step_context.turn;
+    let direct_user_items = sess.direct_user_response_items_from_rollout().await?;
     let mut history = sess.clone_history().await;
     let base_instructions = sess.get_base_instructions().await;
     let (rewritten_outputs, estimated_deleted_tokens) =
@@ -97,6 +99,7 @@ pub(super) async fn run_remote_compact_attempt(
         .await?;
     Ok(RemoteCompactAttempt {
         new_history,
+        direct_user_items,
         trace_input_history,
     })
 }
