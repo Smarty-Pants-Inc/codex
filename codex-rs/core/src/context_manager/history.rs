@@ -84,6 +84,7 @@ impl ConversationHistorySnapshot for SharedConversationHistory {
                             if role == "developer"
                                 && !metadata.is_some_and(|metadata| metadata.client_authored)
                                 && is_contextual_dev_message_content(content)
+                                && !has_non_contextual_dev_message_content(content)
                     )
                 })
                 .map(|envelope| &envelope.item),

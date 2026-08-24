@@ -112,9 +112,7 @@ impl Session {
         &self,
     ) -> CodexResult<Vec<ResponseItem>> {
         let Some(live_thread) = self.live_thread() else {
-            // Without persistence there is no durable provenance proof. The caller must then
-            // drop provider-returned raw user-role items rather than infer authority from text.
-            return Ok(Vec::new());
+            return Ok(self.state.lock().await.direct_user_response_items());
         };
         let history = live_thread
             .load_history(/*include_archived*/ true)

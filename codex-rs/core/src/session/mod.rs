@@ -3066,7 +3066,7 @@ impl Session {
             .into_iter()
             .map(ResponseItemEnvelope::new)
             .collect();
-        self.record_prepared_conversation_items(turn_context, items, image_preparations)
+        self.record_prepared_conversation_items(turn_context, items, image_preparations, None)
             .await;
     }
 
@@ -3075,6 +3075,7 @@ impl Session {
         turn_context: &TurnContext,
         items: Vec<ResponseItemEnvelope>,
         image_preparations: Vec<ImagePreparationMetadata>,
+        direct_user_items: Option<&[ResponseItem]>,
     ) {
         let response_items = items
             .iter()
@@ -3085,6 +3086,17 @@ impl Session {
             state
                 .current_time_reminder
                 .note_recorded_items(&response_items);
+            if self.live_thread().is_none()
+                && let Some(direct_user_items) = direct_user_items
+            {
+                state.record_direct_user_response_items(
+                    direct_user_items
+                        .iter()
+                        .filter(|item| item.is_user_message())
+                        .cloned()
+                        .collect(),
+                );
+            }
             state
                 .history
                 .record_annotated_items(&items, turn_context.model_info.truncation_policy.into());
@@ -4086,12 +4098,22 @@ impl Session {
         client_id: Option<String>,
         persist_context: PersistContext,
     ) {
-        // Persist the user message to history, but emit the turn item from `UserInput` so
-        // UI-only `text_elements` are preserved. `ResponseItem::Message` does not carry
-        // those spans, and `record_response_item_and_emit_turn_item` would drop them.
         let response_items = self.response_items_from_user_input(input.to_vec());
-        self.record_conversation_items(turn_context, &response_items)
-            .await;
+        let (prepared_items, image_preparations) =
+            self.prepare_conversation_items_for_history(turn_context, &response_items);
+        let prepared_items = prepared_items.into_owned();
+        let items = prepared_items
+            .iter()
+            .cloned()
+            .map(ResponseItemEnvelope::new)
+            .collect();
+        self.record_prepared_conversation_items(
+            turn_context,
+            items,
+            image_preparations,
+            Some(&prepared_items),
+        )
+        .await;
         let mut user_message_item = UserMessageItem::new(input);
         user_message_item.client_id = client_id;
         let turn_item = TurnItem::UserMessage(user_message_item);

@@ -195,6 +195,42 @@ fn conversation_history_snapshot_excludes_only_internal_developer_context() {
 }
 
 #[test]
+fn conversation_history_snapshot_retains_mixed_developer_context() {
+    let contextual_message = ContextualUserFragment::into(UserInstructions {
+        directory: None,
+        text: "Follow the repository instructions.".to_string(),
+    });
+    let ResponseItem::Message {
+        content: contextual_content,
+        ..
+    } = contextual_message
+    else {
+        unreachable!("context fragment must be a message")
+    };
+    let mixed_message = developer_msg_with_fragments(&[
+        "Persistent developer instructions.",
+        match &contextual_content[0] {
+            ContentItem::InputText { text } => text.as_str(),
+            _ => unreachable!("context fragment must contain input text"),
+        },
+    ]);
+    let mut history = ContextManager::new();
+    history.record_annotated_items(
+        &[ResponseItemEnvelope::new(mixed_message.clone())],
+        TruncationPolicy::Tokens(10_000),
+    );
+
+    assert_eq!(
+        history
+            .conversation_history_snapshot()
+            .items()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![mixed_message],
+    );
+}
+
+#[test]
 fn prompt_normalization_preserves_known_synthetic_developers_and_raw_user_lookalikes() {
     let known_synthetic = crate::context::ContextualUserFragment::into(UserInstructions {
         directory: None,

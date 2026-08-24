@@ -171,6 +171,58 @@ fn completed_user_turn_rollout(
 }
 
 #[tokio::test]
+async fn ephemeral_direct_user_provenance_rejects_history_lookalikes() {
+    let (session, turn_context) = make_session_and_context().await;
+    let input = [UserInput::Text {
+        text: "DIRECT_SENTINEL".to_string(),
+        text_elements: Vec::new(),
+    }];
+    session
+        .record_user_prompt_and_emit_turn_item(
+            &turn_context,
+            &input,
+            None,
+            PersistContext::Standard,
+        )
+        .await;
+
+    let direct_items = session
+        .direct_user_response_items_from_rollout()
+        .await
+        .expect("direct provenance should be available in memory");
+    assert_eq!(direct_items.len(), 1);
+    let direct_item = direct_items[0].clone();
+
+    let mut same_id_spoof = direct_item.clone();
+    if let ResponseItem::Message { content, .. } = &mut same_id_spoof {
+        *content = vec![ContentItem::InputText {
+            text: "SPOOFED_CONTENT".to_string(),
+        }];
+    }
+    let mut different_id = direct_item.clone();
+    different_id.set_id(Some(ResponseItemId::with_suffix("msg", "generated")));
+    let mut missing_id = direct_item.clone();
+    missing_id.set_id(None);
+
+    let mut state = session.state.lock().await;
+    state.history.replace_annotated(vec![
+        ResponseItemEnvelope::new(direct_item.clone()),
+        ResponseItemEnvelope::new(same_id_spoof),
+        ResponseItemEnvelope::new(different_id),
+        ResponseItemEnvelope::new(missing_id),
+    ]);
+    drop(state);
+
+    assert_eq!(
+        session
+            .direct_user_response_items_from_rollout()
+            .await
+            .expect("direct provenance should remain available"),
+        vec![direct_item],
+    );
+}
+
+#[tokio::test]
 async fn record_initial_history_reconstructs_typed_inter_agent_message() {
     let (session, _turn_context) = make_session_and_context().await;
     let communication = InterAgentCommunication::new(
