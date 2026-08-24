@@ -179,6 +179,10 @@ pub(super) async fn handle_recovery(
     start_if_idle(session, request, submission_id, /*is_recovery*/ true).await
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "turn input admission must serialize turn arbitration"
+)]
 async fn start_or_steer(
     session: &Arc<Session>,
     request: TurnInputRequest,
@@ -304,6 +308,10 @@ async fn start_or_steer(
     }
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "turn input admission must serialize turn arbitration"
+)]
 async fn start_if_idle(
     session: &Arc<Session>,
     request: TurnInputRequest,
@@ -475,6 +483,10 @@ async fn start_if_idle(
     })
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "turn input admission must serialize turn arbitration"
+)]
 async fn steer(
     session: &Arc<Session>,
     request: TurnInputRequest,

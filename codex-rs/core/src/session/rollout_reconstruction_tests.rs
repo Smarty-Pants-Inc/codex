@@ -171,6 +171,10 @@ fn completed_user_turn_rollout(
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "test mutates session history while holding its state lock"
+)]
 async fn ephemeral_direct_user_provenance_rejects_history_lookalikes() {
     let (session, turn_context) = make_session_and_context().await;
     let input = [UserInput::Text {

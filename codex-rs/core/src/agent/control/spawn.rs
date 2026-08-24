@@ -264,6 +264,10 @@ impl AgentControl {
         .await
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "spawn admission must serialize agent restoration"
+    )]
     pub(crate) async fn ensure_v2_agent_loaded(
         &self,
         mut config: Config,
@@ -401,6 +405,10 @@ impl AgentControl {
         }
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "spawn admission must serialize agent creation"
+    )]
     async fn spawn_agent_internal(
         &self,
         config: Config,

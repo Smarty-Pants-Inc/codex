@@ -158,6 +158,10 @@ fn register_session_root_skips_threads_with_explicit_parent() {
     assert_eq!(control.state.agent_id_for_path(&AgentPath::root()), None);
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "test holds spawn admission while an admitted child starts"
+)]
 #[tokio::test]
 async fn root_suspension_rechecks_after_in_flight_child_admission() {
     let harness = AgentControlHarness::new().await;

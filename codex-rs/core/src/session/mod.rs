@@ -2363,14 +2363,12 @@ impl Session {
         tx: oneshot::Sender<ReviewDecision>,
     ) -> Option<oneshot::Sender<ReviewDecision>> {
         let mut active = self.active_turn.lock().await;
-        let Some(active_turn) = active.as_mut() else {
-            return None;
-        };
+        let active_turn = active.as_mut()?;
         let mut turn_state = active_turn.turn_state.lock().await;
         let legacy_response_allowed = self
             .seen_approval_ids
             .lock()
-            .expect("seen approval IDs lock")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(approval_id.clone());
         turn_state.insert_pending_approval(approval_id, turn_id, legacy_response_allowed, tx)
     }
@@ -2746,6 +2744,10 @@ impl Session {
         }
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn checks and turn state updates must remain atomic"
+    )]
     pub async fn notify_request_permissions_response(
         &self,
         call_id: &str,
