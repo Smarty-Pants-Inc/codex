@@ -3,6 +3,22 @@
 use super::*;
 
 impl App {
+    pub(super) fn disable_ambient_pet_before_shutdown(&mut self, tui: &mut tui::Tui) -> Result<()> {
+        self.chat_widget.disable_ambient_pet_for_session();
+        if let Err(clear_err) = tui.clear_ambient_pet_image() {
+            match clear_err {
+                crate::pets::PetImageRenderError::Terminal(err) => return Err(err.into()),
+                crate::pets::PetImageRenderError::Asset(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "failed to clear ambient pet image before shutdown feedback"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn handle_ambient_pet_image_render_error(
         &mut self,
         tui: &mut tui::Tui,
@@ -66,18 +82,18 @@ impl App {
         let frame_requester = tui.frame_requester();
         let animations_enabled = self.config.animations;
         let tx = self.app_event_tx.clone();
-        std::mem::drop(tokio::task::spawn_blocking(move || {
-            let result = crate::pets::ensure_builtin_pack_for_pet(&pet_id, &codex_home)
-                .and_then(|()| {
-                    crate::pets::AmbientPet::load(
-                        Some(&pet_id),
-                        &codex_home,
-                        frame_requester,
-                        animations_enabled,
-                    )
-                })
-                .map(Some)
-                .map_err(|err| err.to_string());
+        let pet_http_client = self.chat_widget.pet_http_client.clone();
+        std::mem::drop(tokio::spawn(async move {
+            let result = crate::pets::load_pet_with_assets(
+                pet_id.clone(),
+                codex_home,
+                frame_requester,
+                animations_enabled,
+                &pet_http_client,
+            )
+            .await
+            .map(Some)
+            .map_err(|err| err.to_string());
             tx.send(AppEvent::PetSelectionLoaded {
                 request_id,
                 pet_id,

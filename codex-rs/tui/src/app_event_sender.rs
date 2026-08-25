@@ -11,7 +11,6 @@ use codex_app_server_protocol::FileChangeApprovalDecision;
 use codex_app_server_protocol::McpServerElicitationAction;
 use codex_app_server_protocol::RequestId as AppServerRequestId;
 use codex_app_server_protocol::ReviewTarget;
-use codex_app_server_protocol::ThreadRealtimeAudioChunk;
 use codex_app_server_protocol::ToolRequestUserInputResponse;
 use codex_protocol::ThreadId;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
@@ -66,13 +65,6 @@ impl AppEventSender {
         )));
     }
 
-    #[cfg_attr(target_os = "linux", allow(dead_code))]
-    pub(crate) fn realtime_conversation_audio(&self, frame: ThreadRealtimeAudioChunk) {
-        self.send(AppEvent::CodexOp(AppCommand::realtime_conversation_audio(
-            frame,
-        )));
-    }
-
     pub(crate) fn user_input_answer(&self, id: String, response: ToolRequestUserInputResponse) {
         self.send(AppEvent::CodexOp(AppCommand::user_input_answer(
             id, response,
@@ -83,11 +75,12 @@ impl AppEventSender {
         &self,
         thread_id: ThreadId,
         id: String,
+        turn_id: String,
         decision: CommandExecutionApprovalDecision,
     ) {
         self.send(AppEvent::SubmitThreadOp {
             thread_id,
-            op: AppCommand::exec_approval(id, /*turn_id*/ None, decision),
+            op: AppCommand::exec_approval(id, Some(turn_id), decision),
         });
     }
 
@@ -95,11 +88,12 @@ impl AppEventSender {
         &self,
         thread_id: ThreadId,
         id: String,
+        turn_id: String,
         response: RequestPermissionsResponse,
     ) {
         self.send(AppEvent::SubmitThreadOp {
             thread_id,
-            op: AppCommand::request_permissions_response(id, response),
+            op: AppCommand::request_permissions_response(id, turn_id, response),
         });
     }
 
@@ -107,11 +101,12 @@ impl AppEventSender {
         &self,
         thread_id: ThreadId,
         id: String,
+        turn_id: String,
         decision: FileChangeApprovalDecision,
     ) {
         self.send(AppEvent::SubmitThreadOp {
             thread_id,
-            op: AppCommand::patch_approval(id, decision),
+            op: AppCommand::patch_approval(id, Some(turn_id), decision),
         });
     }
 

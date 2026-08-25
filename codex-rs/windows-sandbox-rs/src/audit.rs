@@ -7,11 +7,12 @@ use crate::cap::workspace_write_root_contains_path;
 use crate::logging::debug_log;
 use crate::logging::log_note;
 use crate::path_normalization::canonical_path_key;
-use crate::policy::SandboxPolicy;
-use crate::setup::effective_write_roots_for_setup;
+use crate::resolved_permissions::ResolvedWindowsSandboxPermissions;
+use crate::setup::effective_write_roots_for_permissions;
 use crate::token::LocalSid;
 use crate::token::world_sid;
 use anyhow::Result;
+use anyhow::anyhow;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::ffi::c_void;
@@ -217,37 +218,38 @@ pub fn audit_everyone_writable(
     Ok(Vec::new())
 }
 
-pub fn apply_world_writable_scan_and_denies(
+pub fn apply_world_writable_scan_and_denies_for_permissions(
     codex_home: &Path,
     cwd: &Path,
     env_map: &std::collections::HashMap<String, String>,
-    sandbox_policy: &SandboxPolicy,
+    permissions: &ResolvedWindowsSandboxPermissions,
     logs_base_dir: Option<&Path>,
 ) -> Result<()> {
     let flagged = audit_everyone_writable(cwd, env_map, logs_base_dir)?;
     if flagged.is_empty() {
         return Ok(());
     }
-    if let Err(err) = apply_capability_denies_for_world_writable(
+    let result = apply_capability_denies_for_world_writable_for_permissions(
         codex_home,
         &flagged,
-        sandbox_policy,
+        permissions,
         cwd,
         env_map,
         logs_base_dir,
-    ) {
+    );
+    if let Err(err) = &result {
         log_note(
             &format!("AUDIT: failed to apply capability deny ACEs: {err}"),
             logs_base_dir,
         );
     }
-    Ok(())
+    result
 }
 
-pub fn apply_capability_denies_for_world_writable(
+fn apply_capability_denies_for_world_writable_for_permissions(
     codex_home: &Path,
     flagged: &[PathBuf],
-    sandbox_policy: &SandboxPolicy,
+    permissions: &ResolvedWindowsSandboxPermissions,
     cwd: &Path,
     env_map: &std::collections::HashMap<String, String>,
     logs_base_dir: Option<&Path>,
@@ -259,11 +261,13 @@ pub fn apply_capability_denies_for_world_writable(
     let cap_path = cap_sid_file(codex_home);
     let caps = load_or_create_cap_sids(codex_home)?;
     std::fs::write(&cap_path, serde_json::to_string(&caps)?)?;
-    let (active_sids, workspace_roots): (Vec<LocalSid>, Vec<PathBuf>) = match sandbox_policy {
-        SandboxPolicy::WorkspaceWrite { .. } => {
-            let roots = effective_write_roots_for_setup(
-                sandbox_policy,
-                cwd,
+    if !permissions.is_enforceable_by_windows_sandbox() {
+        return Ok(());
+    }
+    let (active_sids, workspace_roots): (Vec<LocalSid>, Vec<PathBuf>) =
+        if permissions.uses_write_capabilities_for_cwd(cwd, env_map) {
+            let roots = effective_write_roots_for_permissions(
+                permissions,
                 cwd,
                 env_map,
                 codex_home,
@@ -277,14 +281,26 @@ pub fn apply_capability_denies_for_world_writable(
                 })
                 .collect::<Result<Vec<_>>>()?;
             (active_sids, roots)
-        }
-        SandboxPolicy::ReadOnly { .. } => {
+        } else {
             (vec![LocalSid::from_string(&caps.readonly)?], Vec::new())
-        }
-        SandboxPolicy::DangerFullAccess | SandboxPolicy::ExternalSandbox { .. } => {
-            return Ok(());
-        }
-    };
+        };
+    apply_capability_denies_to_paths(
+        flagged,
+        &workspace_roots,
+        &active_sids,
+        logs_base_dir,
+        |path, sid| unsafe { add_deny_write_ace(path, sid) },
+    )
+}
+
+fn apply_capability_denies_to_paths(
+    flagged: &[PathBuf],
+    workspace_roots: &[PathBuf],
+    active_sids: &[LocalSid],
+    logs_base_dir: Option<&Path>,
+    mut apply_deny: impl FnMut(&Path, *mut c_void) -> Result<bool>,
+) -> Result<()> {
+    let mut errors = Vec::new();
     for path in flagged {
         if workspace_roots
             .iter()
@@ -292,31 +308,39 @@ pub fn apply_capability_denies_for_world_writable(
         {
             continue;
         }
-        for active_sid in &active_sids {
-            let res = unsafe { add_deny_write_ace(path, active_sid.as_ptr()) };
-            match res {
+        for active_sid in active_sids {
+            match apply_deny(path, active_sid.as_ptr()) {
                 Ok(true) => log_note(
                     &format!("AUDIT: applied capability deny ACE to {}", path.display()),
                     logs_base_dir,
                 ),
                 Ok(false) => {}
-                Err(err) => log_note(
-                    &format!(
+                Err(err) => {
+                    let error = format!(
                         "AUDIT: failed to apply capability deny ACE to {}: {}",
                         path.display(),
                         err
-                    ),
-                    logs_base_dir,
-                ),
+                    );
+                    log_note(&error, logs_base_dir);
+                    errors.push(error);
+                }
             }
         }
     }
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow!(errors.join("; ")))
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::apply_capability_denies_to_paths;
     use super::gather_candidates;
+    use crate::token::LocalSid;
+    use anyhow::anyhow;
+    use pretty_assertions::assert_eq;
     use std::collections::HashMap;
     use std::fs;
 
@@ -349,5 +373,28 @@ mod tests {
         assert!(candidates.contains(&canon_a));
         assert!(candidates.contains(&canon_b));
         assert!(candidates.contains(&canon_space));
+    }
+
+    #[test]
+    fn deny_ace_failure_is_propagated_after_other_paths_are_attempted() {
+        let failed_path = std::path::PathBuf::from(r"C:\failed");
+        let successful_path = std::path::PathBuf::from(r"C:\protected");
+        let flagged = vec![failed_path.clone(), successful_path];
+        let active_sids = vec![LocalSid::from_string("S-1-1-0").expect("world SID")];
+        let mut attempted = Vec::new();
+
+        let error =
+            apply_capability_denies_to_paths(&flagged, &[], &active_sids, None, |path, _sid| {
+                attempted.push(path.to_path_buf());
+                if path == failed_path {
+                    Err(anyhow!("access denied"))
+                } else {
+                    Ok(true)
+                }
+            })
+            .expect_err("a failed deny ACE must fail preflight");
+
+        assert_eq!(attempted, flagged);
+        assert!(error.to_string().contains(r"C:\failed"));
     }
 }

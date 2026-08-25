@@ -62,19 +62,19 @@ pub(crate) struct StopOutput {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct PreCompactOutput {
-    pub universal: UniversalOutput,
-    pub invalid_reason: Option<String>,
-}
-
-#[derive(Debug, Clone)]
 pub(crate) struct StatelessHookOutput {
     pub universal: UniversalOutput,
     pub invalid_reason: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct InterruptOutput {
+    pub system_message: Option<String>,
+}
+
 use crate::schema::BlockDecisionWire;
 use crate::schema::HookUniversalOutputWire;
+use crate::schema::InterruptCommandOutputWire;
 use crate::schema::PermissionRequestBehaviorWire;
 use crate::schema::PermissionRequestCommandOutputWire;
 use crate::schema::PermissionRequestDecisionWire;
@@ -86,17 +86,36 @@ use crate::schema::PreToolUseDecisionWire;
 use crate::schema::PreToolUsePermissionDecisionWire;
 use crate::schema::SessionStartCommandOutputWire;
 use crate::schema::StopCommandOutputWire;
+use crate::schema::SubagentStartCommandOutputWire;
+use crate::schema::SubagentStopCommandOutputWire;
 use crate::schema::UserPromptSubmitCommandOutputWire;
 
 pub(crate) fn parse_session_start(stdout: &str) -> Option<SessionStartOutput> {
     let wire: SessionStartCommandOutputWire = parse_json(stdout)?;
-    let additional_context = wire
-        .hook_specific_output
-        .and_then(|output| output.additional_context);
-    Some(SessionStartOutput {
-        universal: UniversalOutput::from(wire.universal),
+    Some(session_start_output(
+        wire.universal,
+        wire.hook_specific_output
+            .and_then(|output| output.additional_context),
+    ))
+}
+
+pub(crate) fn parse_subagent_start(stdout: &str) -> Option<SessionStartOutput> {
+    let wire: SubagentStartCommandOutputWire = parse_json(stdout)?;
+    Some(session_start_output(
+        wire.universal,
+        wire.hook_specific_output
+            .and_then(|output| output.additional_context),
+    ))
+}
+
+fn session_start_output(
+    universal: HookUniversalOutputWire,
+    additional_context: Option<String>,
+) -> SessionStartOutput {
+    SessionStartOutput {
+        universal: UniversalOutput::from(universal),
         additional_context,
-    })
+    }
 }
 
 pub(crate) fn parse_pre_tool_use(stdout: &str) -> Option<PreToolUseOutput> {
@@ -219,10 +238,10 @@ pub(crate) fn parse_post_tool_use(stdout: &str) -> Option<PostToolUseOutput> {
     })
 }
 
-pub(crate) fn parse_pre_compact(stdout: &str) -> Option<PreCompactOutput> {
+pub(crate) fn parse_pre_compact(stdout: &str) -> Option<StatelessHookOutput> {
     let wire: PreCompactCommandOutputWire = parse_json(stdout)?;
     let universal = UniversalOutput::from(wire.universal);
-    Some(PreCompactOutput {
+    Some(StatelessHookOutput {
         universal,
         invalid_reason: None,
     })
@@ -234,6 +253,13 @@ pub(crate) fn parse_post_compact(stdout: &str) -> Option<StatelessHookOutput> {
     Some(StatelessHookOutput {
         universal,
         invalid_reason: None,
+    })
+}
+
+pub(crate) fn parse_interrupt(stdout: &str) -> Option<InterruptOutput> {
+    let wire: InterruptCommandOutputWire = parse_json(stdout)?;
+    Some(InterruptOutput {
+        system_message: wire.system_message,
     })
 }
 
@@ -263,22 +289,46 @@ pub(crate) fn parse_user_prompt_submit(stdout: &str) -> Option<UserPromptSubmitO
 
 pub(crate) fn parse_stop(stdout: &str) -> Option<StopOutput> {
     let wire: StopCommandOutputWire = parse_json(stdout)?;
-    let should_block = matches!(wire.decision, Some(BlockDecisionWire::Block));
+    Some(stop_output(
+        wire.universal,
+        wire.decision,
+        wire.reason,
+        "Stop",
+    ))
+}
+
+pub(crate) fn parse_subagent_stop(stdout: &str) -> Option<StopOutput> {
+    let wire: SubagentStopCommandOutputWire = parse_json(stdout)?;
+    Some(stop_output(
+        wire.universal,
+        wire.decision,
+        wire.reason,
+        "SubagentStop",
+    ))
+}
+
+fn stop_output(
+    universal: HookUniversalOutputWire,
+    decision: Option<BlockDecisionWire>,
+    reason: Option<String>,
+    event_name: &str,
+) -> StopOutput {
+    let should_block = matches!(decision, Some(BlockDecisionWire::Block));
     let invalid_block_reason = if should_block
-        && match wire.reason.as_deref() {
+        && match reason.as_deref() {
             Some(reason) => reason.trim().is_empty(),
             None => true,
         } {
-        Some(invalid_block_message("Stop"))
+        Some(invalid_block_message(event_name))
     } else {
         None
     };
-    Some(StopOutput {
-        universal: UniversalOutput::from(wire.universal),
+    StopOutput {
+        universal: UniversalOutput::from(universal),
         should_block: should_block && invalid_block_reason.is_none(),
-        reason: wire.reason,
+        reason,
         invalid_block_reason,
-    })
+    }
 }
 
 impl From<HookUniversalOutputWire> for UniversalOutput {
@@ -476,6 +526,25 @@ mod tests {
     use serde_json::json;
 
     use super::parse_permission_request;
+    use super::parse_user_prompt_submit;
+
+    #[test]
+    fn structured_output_rejects_invalid_shapes_and_types() {
+        for stdout in [
+            "[]",
+            r#"{"systemMessage":123}"#,
+            r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":123}}"#,
+            r#"{"hookSpecificOutput":{"additionalContext":"missing event name"}}"#,
+            r#"{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","updatedInput":{}}}"#,
+            r#"{"unexpectedField":true}"#,
+            "{",
+        ] {
+            assert!(
+                parse_user_prompt_submit(stdout).is_none(),
+                "invalid structured output should fail: {stdout}",
+            );
+        }
+    }
 
     #[test]
     fn permission_request_rejects_reserved_updated_input_field() {

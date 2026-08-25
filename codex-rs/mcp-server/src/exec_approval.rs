@@ -56,6 +56,7 @@ pub(crate) async fn handle_exec_approval_request(
     request_id: RequestId,
     tool_call_id: String,
     event_id: String,
+    turn_id: String,
     call_id: String,
     approval_id: String,
     codex_parsed_cmd: Vec<ParsedCommand>,
@@ -86,9 +87,7 @@ pub(crate) async fn handle_exec_approval_request(
             let message = format!("Failed to serialize ExecApprovalElicitRequestParams: {err}");
             error!("{message}");
 
-            outgoing
-                .send_error(request_id.clone(), ErrorData::invalid_params(message, None))
-                .await;
+            outgoing.send_error(request_id.clone(), ErrorData::invalid_params(message, None));
 
             return;
         }
@@ -100,18 +99,17 @@ pub(crate) async fn handle_exec_approval_request(
 
     // Listen for the response on a separate task so we don't block the main agent loop.
     {
-        let codex = codex.clone();
         let approval_id = approval_id.clone();
-        let event_id = event_id.clone();
+        let turn_id = turn_id.clone();
         tokio::spawn(async move {
-            on_exec_approval_response(approval_id, event_id, on_response, codex).await;
+            on_exec_approval_response(approval_id, turn_id, on_response, codex).await;
         });
     }
 }
 
 async fn on_exec_approval_response(
     approval_id: String,
-    event_id: String,
+    turn_id: String,
     receiver: tokio::sync::oneshot::Receiver<serde_json::Value>,
     codex: Arc<CodexThread>,
 ) {
@@ -130,14 +128,14 @@ async fn on_exec_approval_response(
         // If we cannot deserialize the response, we deny the request to be
         // conservative.
         ExecApprovalResponse {
-            decision: ReviewDecision::Denied,
+            decision: ReviewDecision::denied("approval request failed"),
         }
     });
 
     if let Err(err) = codex
         .submit(Op::ExecApproval {
             id: approval_id,
-            turn_id: Some(event_id),
+            turn_id: Some(turn_id),
             decision: response.decision,
         })
         .await

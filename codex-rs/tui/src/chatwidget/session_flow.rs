@@ -19,12 +19,18 @@ impl ChatWidget {
         self.set_skills(/*skills*/ None);
         self.session_network_proxy = session.network_proxy.clone();
         let previous_thread_id = self.thread_id;
+        let connector_scope_changed = previous_thread_id != Some(session.thread_id)
+            || self.config.cwd.as_path() != session.cwd.as_path();
         self.thread_id = Some(session.thread_id);
+        self.bottom_pane
+            .set_queue_submissions(/*queue_submissions*/ false);
         if previous_thread_id != self.thread_id {
+            self.pending_automatic_thread_names.clear();
             self.review.recent_auto_review_denials = RecentAutoReviewDenials::default();
+            self.clear_thread_usage_state();
         }
-        self.refresh_plan_mode_nudge();
         self.turn_lifecycle.reset_thread();
+        self.clear_safety_buffering();
         self.thread_name = session.thread_name.clone();
         self.current_goal_status_indicator = None;
         self.current_goal_status = None;
@@ -33,6 +39,14 @@ impl ChatWidget {
         self.current_rollout_path = session.rollout_path.clone();
         self.current_cwd = Some(session.cwd.to_path_buf());
         self.config.cwd = session.cwd.clone();
+        if connector_scope_changed {
+            self.invalidate_connector_scope();
+        }
+        let runtime_workspace_roots = session.runtime_workspace_roots.clone();
+        self.config.workspace_roots = runtime_workspace_roots.clone();
+        self.config
+            .permissions
+            .set_workspace_roots(runtime_workspace_roots);
         self.effective_service_tier = session.service_tier.clone();
         if let Err(err) = self
             .config
@@ -44,34 +58,59 @@ impl ChatWidget {
             self.config.permissions.approval_policy =
                 Constrained::allow_only(session.approval_policy.to_core());
         }
+        let permission_snapshot = PermissionProfileSnapshot::from_session_snapshot(
+            session.permission_profile.clone(),
+            session.active_permission_profile.clone(),
+        );
         let permission_sync = self
             .config
             .permissions
-            .set_permission_profile_with_active_profile(
-                session.permission_profile.clone(),
-                session.active_permission_profile.clone(),
-            );
+            .set_permission_profile_from_session_snapshot(permission_snapshot.clone());
         if let Err(err) = permission_sync {
             tracing::warn!(%err, "failed to sync permissions from SessionConfigured");
-            self.config.permissions.permission_profile =
-                Constrained::allow_only(session.permission_profile.clone());
-            self.config.permissions.active_permission_profile =
-                session.active_permission_profile.clone();
+            if let Err(replace_err) = self
+                .config
+                .permissions
+                .replace_permission_profile_from_session_snapshot(permission_snapshot)
+            {
+                tracing::error!(
+                    %replace_err,
+                    "failed to replace permissions from SessionConfigured after constraint fallback"
+                );
+            }
         }
         self.config.approvals_reviewer = session.approvals_reviewer;
+        self.config.personality = session.personality;
         self.status_line_project_root_name_cache = None;
         let forked_from_id = session.forked_from_id;
-        let model_for_header = session.model.clone();
-        self.session_header.set_model(&model_for_header);
+        let default_model = session.model.clone();
         self.current_collaboration_mode = self.current_collaboration_mode.with_updates(
-            Some(model_for_header.clone()),
-            Some(session.reasoning_effort),
+            Some(default_model.clone()),
+            Some(session.reasoning_effort.clone()),
             /*developer_instructions*/ None,
         );
-        if let Some(mask) = self.active_collaboration_mask.as_mut() {
-            mask.model = Some(model_for_header.clone());
-            mask.reasoning_effort = Some(session.reasoning_effort);
+        if session.reasoning_effort == Some(ReasoningEffortConfig::Ultra) {
+            self.set_plan_mode_reasoning_effort(Some(ReasoningEffortConfig::Ultra));
         }
+        match session.collaboration_mode.as_deref() {
+            Some(collaboration_mode) => {
+                self.set_effective_collaboration_mode(collaboration_mode.clone());
+            }
+            None => {
+                self.active_collaboration_mask = Self::initial_collaboration_mask(
+                    &self.config,
+                    self.model_catalog.as_ref(),
+                    Some(&default_model),
+                );
+                if let Some(mask) = self.active_collaboration_mask.as_mut() {
+                    mask.reasoning_effort = Some(session.reasoning_effort.clone());
+                }
+                self.update_collaboration_mode_indicator();
+            }
+        }
+        let effort = self.effective_reasoning_effort();
+        self.bottom_pane
+            .set_active_reasoning_effort_baseline(effort.as_ref());
         self.refresh_model_display();
         self.refresh_status_surfaces();
         self.sync_service_tier_commands();
@@ -79,7 +118,11 @@ impl ChatWidget {
         self.sync_plugins_command_enabled();
         self.sync_goal_command_enabled();
         self.refresh_plugin_mentions();
-        if display == SessionConfiguredDisplay::Normal {
+        let model_for_header = self.current_model().to_string();
+        if matches!(
+            display,
+            SessionConfiguredDisplay::Normal | SessionConfiguredDisplay::PromptEdit
+        ) {
             let startup_tooltip_override = self.startup_tooltip_override.take();
             let show_fast_status = self
                 .should_show_fast_status(&model_for_header, self.effective_service_tier.as_deref());
@@ -104,15 +147,13 @@ impl ChatWidget {
         }
         self.transcript.saw_copy_source_this_turn = false;
         self.refresh_skills_for_current_cwd(/*force_reload*/ true);
-        if self.connectors_enabled() {
-            self.prefetch_connectors();
-        }
-        if let Some(user_message) = self.initial_user_message.take() {
-            if self.suppress_initial_user_message_submit {
-                self.initial_user_message = Some(user_message);
-            } else {
-                self.submit_user_message(user_message);
-            }
+        self.refresh_connector_mentions(/*force_refresh*/ false);
+        let initial_user_message_pending = self.initial_user_message.is_some();
+        self.submit_initial_user_message_if_pending();
+        if self.mcp_startup_status.is_none()
+            && (!initial_user_message_pending || self.is_user_turn_pending_or_running())
+        {
+            self.maybe_send_next_queued_input();
         }
         if display == SessionConfiguredDisplay::Normal
             && let Some(forked_from_id) = forked_from_id
@@ -140,6 +181,16 @@ impl ChatWidget {
             session,
             SessionConfiguredDisplay::Quiet,
             /*fork_parent_title*/ None,
+        );
+    }
+
+    pub(crate) fn handle_prompt_edit_thread_session(&mut self, session: ThreadSessionState) {
+        self.instruction_source_paths = session.instruction_source_paths.clone();
+        let fork_parent_title = session.fork_parent_title.clone();
+        self.on_session_configured_with_display_and_fork_parent_title(
+            session,
+            SessionConfiguredDisplay::PromptEdit,
+            fork_parent_title,
         );
     }
 
@@ -184,16 +235,49 @@ impl ChatWidget {
         )));
     }
 
+    pub(crate) fn emit_prompt_edit_thread_event(&mut self) {
+        let line: Line<'static> = vec![
+            "• ".dim(),
+            "You’re continuing from this point in a new conversation".into(),
+        ]
+        .into();
+        self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+            PlainHistoryCell::new(vec![line]),
+        )));
+    }
+
+    /// Apply a persisted automatic name immediately and suppress its confirmation.
+    pub(crate) fn expect_automatic_thread_name(&mut self, name: String) {
+        self.thread_name = Some(name.clone());
+        self.pending_automatic_thread_names.insert(name);
+    }
+
+    /// Make a confirmed manual rename visible before its queued server notification arrives.
+    pub(crate) fn expect_manual_thread_name(&mut self, thread_id: ThreadId, name: String) {
+        if self.thread_id == Some(thread_id) {
+            self.thread_name = Some(name);
+            self.refresh_status_surfaces();
+            self.request_redraw();
+        }
+    }
+
     pub(super) fn on_thread_name_updated(
         &mut self,
         thread_id: ThreadId,
         thread_name: Option<String>,
     ) {
         if self.thread_id == Some(thread_id) {
-            if let Some(name) = thread_name.as_deref() {
+            let automatic = thread_name
+                .as_ref()
+                .is_some_and(|name| self.pending_automatic_thread_names.remove(name));
+
+            if let Some(name) = thread_name.as_deref()
+                && !automatic
+            {
                 let cell = Self::rename_confirmation_cell(name, self.thread_id);
                 self.add_boxed_history(Box::new(cell));
             }
+
             self.thread_name = thread_name;
             self.refresh_status_surfaces();
             self.request_redraw();

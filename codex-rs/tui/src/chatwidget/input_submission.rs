@@ -3,6 +3,18 @@
 use super::*;
 
 impl ChatWidget {
+    pub(crate) fn set_task_mentions_enabled(&mut self, enabled: bool) {
+        self.bottom_pane.set_task_mentions_enabled(enabled);
+    }
+
+    pub(crate) fn on_task_search_result(
+        &mut self,
+        query: &str,
+        matches: Vec<crate::task_mentions::TaskMention>,
+    ) {
+        self.bottom_pane.on_task_search_result(query, matches);
+    }
+
     pub(super) fn user_message_from_submission(
         &mut self,
         text: String,
@@ -21,15 +33,153 @@ impl ChatWidget {
         }
     }
 
+    pub(super) fn app_server_user_inputs(&self, user_message: &UserMessage) -> Vec<UserInput> {
+        let UserMessage {
+            text,
+            local_images,
+            remote_image_urls,
+            text_elements,
+            mention_bindings,
+        } = user_message;
+        let mut items = Vec::new();
+
+        for image_url in remote_image_urls {
+            items.push(UserInput::Image {
+                url: image_url.clone(),
+                detail: None,
+            });
+        }
+
+        for image in local_images {
+            items.push(UserInput::LocalImage {
+                path: image.path.clone(),
+                detail: None,
+            });
+        }
+
+        if !text.is_empty() {
+            items.push(UserInput::Text {
+                text: text.clone(),
+                text_elements: app_server_text_elements(text_elements),
+            });
+        }
+
+        let mentions = collect_tool_mentions(text, &HashMap::new());
+        let bound_names: HashSet<String> = mention_bindings
+            .iter()
+            .map(|binding| binding.mention.clone())
+            .collect();
+        let mut skill_names_lower = HashSet::new();
+        let mut selected_skill_paths = HashSet::new();
+        let mut selected_plugin_ids = HashSet::new();
+
+        if let Some(skills) = self.bottom_pane.skills() {
+            skill_names_lower = skills
+                .iter()
+                .map(|skill| skill.name.to_ascii_lowercase())
+                .collect();
+
+            for binding in mention_bindings {
+                let path = binding
+                    .path
+                    .strip_prefix("skill://")
+                    .unwrap_or(binding.path.as_str());
+                let path = Path::new(path);
+                if let Some(skill) = skills.iter().find(|skill| skill.path.as_path() == path)
+                    && selected_skill_paths.insert(skill.path.clone())
+                {
+                    items.push(UserInput::Skill {
+                        name: skill.name.clone(),
+                        path: skill.path.to_path_buf(),
+                    });
+                }
+            }
+
+            for skill in find_skill_mentions_with_tool_mentions(&mentions, skills) {
+                if bound_names.contains(skill.name.as_str())
+                    || !selected_skill_paths.insert(skill.path.clone())
+                {
+                    continue;
+                }
+                items.push(UserInput::Skill {
+                    name: skill.name.clone(),
+                    path: skill.path.to_path_buf(),
+                });
+            }
+        }
+
+        if let Some(plugins) = self.plugins_for_mentions() {
+            for binding in mention_bindings {
+                let Some(plugin_config_name) = binding
+                    .path
+                    .strip_prefix("plugin://")
+                    .filter(|id| !id.is_empty())
+                else {
+                    continue;
+                };
+                if !selected_plugin_ids.insert(plugin_config_name.to_string()) {
+                    continue;
+                }
+                if let Some(plugin) = plugins
+                    .iter()
+                    .find(|plugin| plugin.config_name == plugin_config_name)
+                {
+                    items.push(UserInput::Mention {
+                        name: plugin.display_name.clone(),
+                        path: binding.path.clone(),
+                    });
+                }
+            }
+        }
+
+        let mut selected_app_ids = HashSet::new();
+        if let Some(apps) = self.connectors_for_mentions() {
+            for binding in mention_bindings {
+                let Some(app_id) = binding
+                    .path
+                    .strip_prefix("app://")
+                    .filter(|id| !id.is_empty())
+                else {
+                    continue;
+                };
+                if selected_app_ids.contains(app_id) {
+                    continue;
+                }
+                if let Some(app) = apps
+                    .iter()
+                    .find(|app| app.id == app_id && is_app_mentionable(app))
+                {
+                    selected_app_ids.insert(app_id.to_string());
+                    items.push(UserInput::Mention {
+                        name: app.name.clone(),
+                        path: binding.path.clone(),
+                    });
+                }
+            }
+
+            for app in find_app_mentions(&mentions, apps, &skill_names_lower) {
+                let slug = codex_connectors::metadata::connector_mention_slug(&app);
+                if bound_names.contains(&slug) || !selected_app_ids.insert(app.id.clone()) {
+                    continue;
+                }
+                let app_id = app.id.as_str();
+                items.push(UserInput::Mention {
+                    name: app.name.clone(),
+                    path: format!("app://{app_id}"),
+                });
+            }
+        }
+
+        items
+    }
+
     fn submit_shell_command(&mut self, command: &str) -> QueueDrain {
         let cmd = command.trim();
         if cmd.is_empty() {
-            self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
-                history_cell::new_info_event(
-                    USER_SHELL_COMMAND_HELP_TITLE.to_string(),
-                    Some(USER_SHELL_COMMAND_HELP_HINT.to_string()),
-                ),
-            )));
+            self.add_to_history(history_cell::new_info_event(
+                USER_SHELL_COMMAND_HELP_TITLE.to_string(),
+                Some(USER_SHELL_COMMAND_HELP_HINT.to_string()),
+            ));
             QueueDrain::Continue
         } else {
             self.submit_op(AppCommand::run_user_shell_command(cmd.to_string()));
@@ -101,6 +251,9 @@ impl ChatWidget {
         history_record: UserMessageHistoryRecord,
         shell_escape_policy: ShellEscapePolicy,
     ) -> (bool, Option<AppCommand>) {
+        if self.misalignment_policy_violation {
+            return (false, None);
+        }
         if !self.is_session_configured() {
             tracing::warn!("cannot submit user message before session is configured; queueing");
             self.input_queue
@@ -137,153 +290,33 @@ impl ChatWidget {
             );
             return (false, None);
         }
+        let render_in_history = !self.turn_lifecycle.agent_turn_running;
+
+        // Special-case: "!cmd" executes a local shell command instead of sending to the model.
+        if shell_escape_policy == ShellEscapePolicy::Allow
+            && let Some(stripped) = user_message.text.strip_prefix('!')
+        {
+            let app_command =
+                match self.submit_shell_command_with_history(stripped, &user_message.text) {
+                    QueueDrain::Continue => None,
+                    QueueDrain::Stop => Some(AppCommand::run_user_shell_command(
+                        stripped.trim().to_string(),
+                    )),
+                };
+            return (app_command.is_some(), app_command);
+        }
+
+        let mut items = self.app_server_user_inputs(&user_message);
         let UserMessage {
             text,
             local_images,
             remote_image_urls,
             text_elements,
-            mention_bindings,
+            mut mention_bindings,
         } = user_message;
-
-        let render_in_history = !self.turn_lifecycle.agent_turn_running;
-        let mut items: Vec<UserInput> = Vec::new();
-
-        // Special-case: "!cmd" executes a local shell command instead of sending to the model.
-        if shell_escape_policy == ShellEscapePolicy::Allow
-            && let Some(stripped) = text.strip_prefix('!')
-        {
-            let app_command = match self.submit_shell_command_with_history(stripped, &text) {
-                QueueDrain::Continue => None,
-                QueueDrain::Stop => Some(AppCommand::run_user_shell_command(
-                    stripped.trim().to_string(),
-                )),
-            };
-            return (app_command.is_some(), app_command);
-        }
-
-        for image_url in &remote_image_urls {
-            items.push(UserInput::Image {
-                url: image_url.clone(),
-            });
-        }
-
-        for image in &local_images {
-            items.push(UserInput::LocalImage {
-                path: image.path.clone(),
-            });
-        }
-
-        if !text.is_empty() {
-            items.push(UserInput::Text {
-                text: text.clone(),
-                text_elements: app_server_text_elements(&text_elements),
-            });
-        }
-
-        let mentions = collect_tool_mentions(&text, &HashMap::new());
-        let bound_names: HashSet<String> = mention_bindings
-            .iter()
-            .map(|binding| binding.mention.clone())
-            .collect();
-        let mut skill_names_lower: HashSet<String> = HashSet::new();
-        let mut selected_skill_paths: HashSet<AbsolutePathBuf> = HashSet::new();
-        let mut selected_plugin_ids: HashSet<String> = HashSet::new();
-
-        if let Some(skills) = self.bottom_pane.skills() {
-            skill_names_lower = skills
-                .iter()
-                .map(|skill| skill.name.to_ascii_lowercase())
-                .collect();
-
-            for binding in &mention_bindings {
-                let path = binding
-                    .path
-                    .strip_prefix("skill://")
-                    .unwrap_or(binding.path.as_str());
-                let path = Path::new(path);
-                if let Some(skill) = skills
-                    .iter()
-                    .find(|skill| skill.path_to_skills_md.as_path() == path)
-                    && selected_skill_paths.insert(skill.path_to_skills_md.clone())
-                {
-                    items.push(UserInput::Skill {
-                        name: skill.name.clone(),
-                        path: skill.path_to_skills_md.to_path_buf(),
-                    });
-                }
-            }
-
-            let skill_mentions = find_skill_mentions_with_tool_mentions(&mentions, skills);
-            for skill in skill_mentions {
-                if bound_names.contains(skill.name.as_str())
-                    || !selected_skill_paths.insert(skill.path_to_skills_md.clone())
-                {
-                    continue;
-                }
-                items.push(UserInput::Skill {
-                    name: skill.name.clone(),
-                    path: skill.path_to_skills_md.to_path_buf(),
-                });
-            }
-        }
-
-        if let Some(plugins) = self.plugins_for_mentions() {
-            for binding in &mention_bindings {
-                let Some(plugin_config_name) = binding
-                    .path
-                    .strip_prefix("plugin://")
-                    .filter(|id| !id.is_empty())
-                else {
-                    continue;
-                };
-                if !selected_plugin_ids.insert(plugin_config_name.to_string()) {
-                    continue;
-                }
-                if let Some(plugin) = plugins
-                    .iter()
-                    .find(|plugin| plugin.config_name == plugin_config_name)
-                {
-                    items.push(UserInput::Mention {
-                        name: plugin.display_name.clone(),
-                        path: binding.path.clone(),
-                    });
-                }
-            }
-        }
-
-        let mut selected_app_ids: HashSet<String> = HashSet::new();
-        if let Some(apps) = self.connectors_for_mentions() {
-            for binding in &mention_bindings {
-                let Some(app_id) = binding
-                    .path
-                    .strip_prefix("app://")
-                    .filter(|id| !id.is_empty())
-                else {
-                    continue;
-                };
-                if !selected_app_ids.insert(app_id.to_string()) {
-                    continue;
-                }
-                if let Some(app) = apps.iter().find(|app| app.id == app_id && app.is_enabled) {
-                    items.push(UserInput::Mention {
-                        name: app.name.clone(),
-                        path: binding.path.clone(),
-                    });
-                }
-            }
-
-            let app_mentions = find_app_mentions(&mentions, apps, &skill_names_lower);
-            for app in app_mentions {
-                let slug = codex_connectors::metadata::connector_mention_slug(&app);
-                if bound_names.contains(&slug) || !selected_app_ids.insert(app.id.clone()) {
-                    continue;
-                }
-                let app_id = app.id.as_str();
-                items.push(UserInput::Mention {
-                    name: app.name.clone(),
-                    path: format!("app://{app_id}"),
-                });
-            }
+        if !self.bottom_pane.task_mentions_enabled() {
+            mention_bindings
+                .retain(|binding| crate::task_mentions::valid_thread_path(&binding.path).is_none());
         }
 
         let effective_mode = self.effective_collaboration_mode();
@@ -305,6 +338,7 @@ impl ChatWidget {
         }
 
         self.maybe_apply_ide_context(&mut items);
+        crate::task_mentions::apply_task_references(&mut items, &mention_bindings, self.thread_id);
 
         let collaboration_mode = if self.collaboration_modes_enabled() {
             self.active_collaboration_mask
@@ -329,17 +363,13 @@ impl ChatWidget {
             .personality
             .filter(|_| self.config.features.enabled(Feature::Personality))
             .filter(|_| self.current_model_supports_personality());
-        let service_tier = match self.config.service_tier.clone() {
-            Some(service_tier) => Some(Some(service_tier)),
-            None if self.config.notices.fast_default_opt_out == Some(true) => Some(None),
-            None => None,
-        };
-        let permission_profile = self.config.permissions.permission_profile();
+        let service_tier = self.service_tier_update_for_core();
+        let active_permission_profile = self.config.permissions.active_permission_profile();
         let op = AppCommand::user_turn(
             items,
             self.config.cwd.to_path_buf(),
             AskForApproval::from(self.config.permissions.approval_policy.value()),
-            permission_profile,
+            active_permission_profile,
             effective_mode.model().to_string(),
             effective_mode.reasoning_effort(),
             /*summary*/ None,
@@ -348,6 +378,25 @@ impl ChatWidget {
             collaboration_mode,
             personality,
         );
+        let submitted_message = UserMessage {
+            text,
+            local_images,
+            remote_image_urls,
+            text_elements,
+            mention_bindings,
+        };
+
+        // App-event submissions are handled serially, and turn/start can wait on remote work.
+        // Queue the optimistic prompt first so the user's input is visible while that happens.
+        // Direct submissions do not share that queue, so keep their existing failure behavior.
+        let render_before_submit =
+            render_in_history && matches!(&self.codex_op_target, CodexOpTarget::AppEvent);
+        if render_before_submit {
+            self.on_user_message_display(user_message_display_for_history(
+                submitted_message.clone(),
+                &history_record,
+            ));
+        }
 
         if !self.submit_op(op.clone()) {
             return (false, None);
@@ -358,26 +407,35 @@ impl ChatWidget {
 
         // Persist the submitted text to cross-session message history. Mentions are encoded into
         // placeholder syntax so recall can reconstruct the mention bindings in a future session.
-        let encoded_mentions = mention_bindings
+        let encoded_mentions = submitted_message
+            .mention_bindings
             .iter()
             .map(|binding| LinkedMention {
+                sigil: binding.sigil,
                 mention: binding.mention.clone(),
                 path: binding.path.clone(),
             })
             .collect::<Vec<_>>();
-        let history_text = match &history_record {
-            UserMessageHistoryRecord::UserMessageText if !text.is_empty() => {
-                Some(encode_history_mentions(&text, &encoded_mentions))
+        let history = match &history_record {
+            UserMessageHistoryRecord::UserMessageText if !submitted_message.text.is_empty() => {
+                Some((
+                    &submitted_message.text,
+                    submitted_message.text_elements.as_slice(),
+                ))
             }
             UserMessageHistoryRecord::Override(history) if !history.text.is_empty() => {
-                Some(encode_history_mentions(&history.text, &encoded_mentions))
+                Some((&history.text, history.text_elements.as_slice()))
             }
             UserMessageHistoryRecord::UserMessageText | UserMessageHistoryRecord::Override(_) => {
                 None
             }
         };
-        if let Some(history_text) = history_text {
-            self.append_message_history_entry(history_text);
+        if let Some((text, elements)) = history {
+            self.append_message_history_entry(encode_history_mentions_at_elements(
+                text,
+                &encoded_mentions,
+                elements,
+            ));
         }
 
         if let Some(pending_steer) = pending_steer {
@@ -386,21 +444,14 @@ impl ChatWidget {
             self.refresh_pending_input_preview();
         }
 
-        // Show replayable user content in conversation history.
-        let display_user_message = render_in_history.then(|| {
-            user_message_display_for_history(
-                UserMessage {
-                    text,
-                    local_images,
-                    remote_image_urls,
-                    text_elements,
-                    mention_bindings,
-                },
-                &history_record,
-            )
-        });
-        if let Some(display) = display_user_message {
-            self.on_user_message_display(display);
+        if render_in_history {
+            self.safety_buffering_prompt = Some(submitted_message.clone());
+            if !render_before_submit {
+                self.on_user_message_display(user_message_display_for_history(
+                    submitted_message,
+                    &history_record,
+                ));
+            }
         }
 
         self.transcript.needs_final_message_separator = false;

@@ -1,12 +1,15 @@
 use super::ApprovalsReviewer;
 use super::AskForApproval;
-use super::PermissionProfileSelectionParams;
 use super::SandboxPolicy;
 use super::Turn;
+use crate::JsonSchema;
+use crate::TS;
 use codex_experimental_api_macros::ExperimentalApi;
 use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::models::ImageDetail;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::plan_tool::PlanItemArg as CorePlanItemArg;
 use codex_protocol::plan_tool::StepStatus as CorePlanStepStatus;
@@ -14,13 +17,12 @@ use codex_protocol::user_input::ByteRange as CoreByteRange;
 use codex_protocol::user_input::TextElement as CoreTextElement;
 use codex_protocol::user_input::UserInput as CoreUserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use schemars::JsonSchema;
+use codex_utils_path_uri::LegacyAppPathString;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use ts_rs::TS;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
@@ -38,7 +40,27 @@ pub enum TurnStatus {
 #[ts(export_to = "v2/")]
 pub struct TurnEnvironmentParams {
     pub environment_id: String,
-    pub cwd: AbsolutePathBuf,
+    pub cwd: LegacyAppPathString,
+    /// Environment-native runtime workspace roots. Omitted defaults to `cwd`.
+    #[ts(optional = nullable)]
+    pub runtime_workspace_roots: Option<Vec<LegacyAppPathString>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(rename_all = "lowercase")]
+#[ts(export_to = "v2/")]
+pub enum AdditionalContextKind {
+    Untrusted,
+    Application,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct AdditionalContextEntry {
+    pub value: String,
+    pub kind: AdditionalContextKind,
 }
 
 #[derive(
@@ -48,12 +70,24 @@ pub struct TurnEnvironmentParams {
 #[ts(export_to = "v2/")]
 pub struct TurnStartParams {
     pub thread_id: String,
+    #[ts(optional = nullable)]
+    pub client_user_message_id: Option<String>,
     pub input: Vec<UserInput>,
-    /// Optional turn-scoped Responses API client metadata.
+    /// Optional metadata to enrich Codex's ResponsesAPI turn metadata.
+    ///
+    /// Entries are flattened into the JSON string sent as
+    /// `client_metadata["x-codex-turn-metadata"]` on ResponsesAPI HTTP and websocket requests.
+    ///
+    /// They are not sent as top-level ResponsesAPI `client_metadata` keys, and reserved keys
+    /// such as `session_id`, `thread_id`, `turn_id`, and `window_id` cannot be overridden.
     #[experimental("turn/start.responsesapiClientMetadata")]
     #[ts(optional = nullable)]
     pub responsesapi_client_metadata: Option<HashMap<String, String>>,
-    /// Optional turn-scoped environments.
+    /// Optional client-provided context fragments keyed by an opaque source identifier.
+    #[experimental("turn/start.additionalContext")]
+    #[ts(optional = nullable)]
+    pub additional_context: Option<HashMap<String, AdditionalContextEntry>>,
+    /// Optional environments for this turn and subsequent turns.
     ///
     /// Omitted uses the thread sticky environments. Empty disables
     /// environment access for this turn. Non-empty selects the first
@@ -64,6 +98,11 @@ pub struct TurnStartParams {
     /// Override the working directory for this turn and subsequent turns.
     #[ts(optional = nullable)]
     pub cwd: Option<PathBuf>,
+    /// Replace the thread's runtime workspace roots for this turn and
+    /// subsequent turns. Paths must be absolute.
+    #[experimental("turn/start.runtimeWorkspaceRoots")]
+    #[ts(optional = nullable)]
+    pub runtime_workspace_roots: Option<Vec<AbsolutePathBuf>>,
     /// Override the approval policy for this turn and subsequent turns.
     #[experimental(nested)]
     #[ts(optional = nullable)]
@@ -75,13 +114,11 @@ pub struct TurnStartParams {
     /// Override the sandbox policy for this turn and subsequent turns.
     #[ts(optional = nullable)]
     pub sandbox_policy: Option<SandboxPolicy>,
-    /// Select a named permissions profile for this turn and subsequent turns.
-    /// Cannot be combined with `sandboxPolicy`. Use bounded `modifications`
-    /// for supported turn adjustments instead of replacing the full
-    /// permissions profile.
+    /// Select a named permissions profile id for this turn and subsequent
+    /// turns. Cannot be combined with `sandboxPolicy`.
     #[experimental("turn/start.permissions")]
     #[ts(optional = nullable)]
-    pub permissions: Option<PermissionProfileSelectionParams>,
+    pub permissions: Option<String>,
     /// Override the model for this turn and subsequent turns.
     #[ts(optional = nullable)]
     pub model: Option<String>,
@@ -116,6 +153,11 @@ pub struct TurnStartParams {
     #[experimental("turn/start.collaborationMode")]
     #[ts(optional = nullable)]
     pub collaboration_mode: Option<CollaborationMode>,
+
+    /// @deprecated Ignored. Use `effort: "ultra"` for proactive multi-agent behavior.
+    #[experimental("turn/start.multiAgentMode")]
+    #[ts(optional = nullable)]
+    pub multi_agent_mode: Option<MultiAgentMode>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -132,11 +174,23 @@ pub struct TurnStartResponse {
 #[ts(export_to = "v2/")]
 pub struct TurnSteerParams {
     pub thread_id: String,
+    #[ts(optional = nullable)]
+    pub client_user_message_id: Option<String>,
     pub input: Vec<UserInput>,
-    /// Optional turn-scoped Responses API client metadata.
+    /// Optional metadata to enrich Codex's ResponsesAPI turn metadata.
+    ///
+    /// Entries are flattened into the JSON string sent as
+    /// `client_metadata["x-codex-turn-metadata"]` on ResponsesAPI HTTP and websocket requests.
+    ///
+    /// They are not sent as top-level ResponsesAPI `client_metadata` keys, and reserved keys
+    /// such as `session_id`, `thread_id`, `turn_id`, and `window_id` cannot be overridden.
     #[experimental("turn/steer.responsesapiClientMetadata")]
     #[ts(optional = nullable)]
     pub responsesapi_client_metadata: Option<HashMap<String, String>>,
+    /// Optional client-provided context fragments keyed by an opaque source identifier.
+    #[experimental("turn/steer.additionalContext")]
+    #[ts(optional = nullable)]
+    pub additional_context: Option<HashMap<String, AdditionalContextEntry>>,
     /// Required active turn id precondition. The request fails when it does not
     /// match the currently active turn.
     pub expected_turn_id: String,
@@ -243,9 +297,21 @@ pub enum UserInput {
         text_elements: Vec<TextElement>,
     },
     Image {
+        #[serde(default)]
+        #[ts(optional)]
+        detail: Option<ImageDetail>,
         url: String,
     },
     LocalImage {
+        #[serde(default)]
+        #[ts(optional)]
+        detail: Option<ImageDetail>,
+        path: PathBuf,
+    },
+    Audio {
+        url: String,
+    },
+    LocalAudio {
         path: PathBuf,
     },
     Skill {
@@ -268,8 +334,13 @@ impl UserInput {
                 text,
                 text_elements: text_elements.into_iter().map(Into::into).collect(),
             },
-            UserInput::Image { url } => CoreUserInput::Image { image_url: url },
-            UserInput::LocalImage { path } => CoreUserInput::LocalImage { path },
+            UserInput::Image { url, detail } => CoreUserInput::Image {
+                image_url: url,
+                detail,
+            },
+            UserInput::LocalImage { path, detail } => CoreUserInput::LocalImage { path, detail },
+            UserInput::Audio { url } => CoreUserInput::Audio { audio_url: url },
+            UserInput::LocalAudio { path } => CoreUserInput::LocalAudio { path },
             UserInput::Skill { name, path } => CoreUserInput::Skill { name, path },
             UserInput::Mention { name, path } => CoreUserInput::Mention { name, path },
         }
@@ -286,8 +357,13 @@ impl From<CoreUserInput> for UserInput {
                 text,
                 text_elements: text_elements.into_iter().map(Into::into).collect(),
             },
-            CoreUserInput::Image { image_url } => UserInput::Image { url: image_url },
-            CoreUserInput::LocalImage { path } => UserInput::LocalImage { path },
+            CoreUserInput::Image { image_url, detail } => UserInput::Image {
+                url: image_url,
+                detail,
+            },
+            CoreUserInput::LocalImage { path, detail } => UserInput::LocalImage { path, detail },
+            CoreUserInput::Audio { audio_url } => UserInput::Audio { url: audio_url },
+            CoreUserInput::LocalAudio { path } => UserInput::LocalAudio { path },
             CoreUserInput::Skill { name, path } => UserInput::Skill { name, path },
             CoreUserInput::Mention { name, path } => UserInput::Mention { name, path },
             _ => unreachable!("unsupported user input variant"),
@@ -301,6 +377,8 @@ impl UserInput {
             UserInput::Text { text, .. } => text.chars().count(),
             UserInput::Image { .. }
             | UserInput::LocalImage { .. }
+            | UserInput::Audio { .. }
+            | UserInput::LocalAudio { .. }
             | UserInput::Skill { .. }
             | UserInput::Mention { .. } => 0,
         }

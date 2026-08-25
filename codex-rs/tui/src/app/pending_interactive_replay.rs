@@ -82,7 +82,6 @@ impl PendingInteractiveReplayState {
                 | AppCommand::ResolveElicitation { .. }
                 | AppCommand::RequestPermissionsResponse { .. }
                 | AppCommand::UserInputAnswer { .. }
-                | AppCommand::Shutdown
         )
     }
 
@@ -93,25 +92,32 @@ impl PendingInteractiveReplayState {
         let op: AppCommand = op.into();
         match &op {
             AppCommand::ExecApproval { id, turn_id, .. } => {
-                self.exec_approval_call_ids.remove(id);
                 if let Some(turn_id) = turn_id {
                     Self::remove_call_id_from_turn_map_entry(
                         &mut self.exec_approval_call_ids_by_turn_id,
                         turn_id,
                         id,
                     );
+                    self.pending_requests_by_request_id.retain(
+                        |_, pending| {
+                            !matches!(pending, PendingInteractiveRequest::ExecApproval { turn_id: pending_turn_id, approval_id } if pending_turn_id == turn_id && approval_id == id)
+                        },
+                    );
                 }
-                self.pending_requests_by_request_id
-                    .retain(|_, pending| !matches!(pending, PendingInteractiveRequest::ExecApproval { approval_id, .. } if approval_id == id));
             }
-            AppCommand::PatchApproval { id, .. } => {
-                self.patch_approval_call_ids.remove(id);
-                Self::remove_call_id_from_turn_map(
-                    &mut self.patch_approval_call_ids_by_turn_id,
-                    id,
-                );
-                self.pending_requests_by_request_id
-                    .retain(|_, pending| !matches!(pending, PendingInteractiveRequest::PatchApproval { item_id, .. } if item_id == id));
+            AppCommand::PatchApproval { id, turn_id, .. } => {
+                if let Some(turn_id) = turn_id {
+                    Self::remove_call_id_from_turn_map_entry(
+                        &mut self.patch_approval_call_ids_by_turn_id,
+                        turn_id,
+                        id,
+                    );
+                    self.pending_requests_by_request_id.retain(
+                        |_, pending| {
+                            !matches!(pending, PendingInteractiveRequest::PatchApproval { turn_id: pending_turn_id, item_id } if pending_turn_id == turn_id && item_id == id)
+                        },
+                    );
+                }
             }
             AppCommand::ResolveElicitation {
                 server_name,
@@ -129,17 +135,24 @@ impl PendingInteractiveReplayState {
                     },
                 );
             }
-            AppCommand::RequestPermissionsResponse { id, .. } => {
-                self.request_permissions_call_ids.remove(id);
-                Self::remove_call_id_from_turn_map(
+            AppCommand::RequestPermissionsResponse { id, turn_id, .. } => {
+                Self::remove_call_id_from_turn_map_entry(
                     &mut self.request_permissions_call_ids_by_turn_id,
+                    turn_id,
                     id,
                 );
                 self.pending_requests_by_request_id.retain(
                     |_, pending| {
-                        !matches!(pending, PendingInteractiveRequest::RequestPermissions { item_id, .. } if item_id == id)
+                        !matches!(pending, PendingInteractiveRequest::RequestPermissions { turn_id: pending_turn_id, item_id } if pending_turn_id == turn_id && item_id == id)
                     },
                 );
+                if !self
+                    .request_permissions_call_ids_by_turn_id
+                    .values()
+                    .any(|call_ids| call_ids.iter().any(|call_id| call_id == id))
+                {
+                    self.request_permissions_call_ids.remove(id);
+                }
             }
             // `Op::UserInputAnswer` identifies the turn, not the prompt call_id. The UI
             // answers queued prompts for the same turn in FIFO order, so remove the oldest
@@ -164,7 +177,6 @@ impl PendingInteractiveReplayState {
                     self.request_user_input_call_ids_by_turn_id.remove(id);
                 }
             }
-            AppCommand::Shutdown => self.clear(),
             _ => {}
         }
     }
@@ -254,16 +266,28 @@ impl PendingInteractiveReplayState {
             ServerNotification::ItemStarted(notification) => match &notification.item {
                 ThreadItem::CommandExecution { id, .. } => {
                     self.exec_approval_call_ids.remove(id);
-                    Self::remove_call_id_from_turn_map(
+                    Self::remove_call_id_from_turn_map_entry(
                         &mut self.exec_approval_call_ids_by_turn_id,
+                        &notification.turn_id,
                         id,
+                    );
+                    self.pending_requests_by_request_id.retain(
+                        |_, pending| {
+                            !matches!(pending, PendingInteractiveRequest::ExecApproval { turn_id, approval_id } if turn_id == &notification.turn_id && approval_id == id)
+                        },
                     );
                 }
                 ThreadItem::FileChange { id, .. } => {
                     self.patch_approval_call_ids.remove(id);
-                    Self::remove_call_id_from_turn_map(
+                    Self::remove_call_id_from_turn_map_entry(
                         &mut self.patch_approval_call_ids_by_turn_id,
+                        &notification.turn_id,
                         id,
+                    );
+                    self.pending_requests_by_request_id.retain(
+                        |_, pending| {
+                            !matches!(pending, PendingInteractiveRequest::PatchApproval { turn_id, item_id } if turn_id == &notification.turn_id && item_id == id)
+                        },
                     );
                 }
                 _ => {}
@@ -353,12 +377,11 @@ impl PendingInteractiveReplayState {
 
     pub(super) fn should_replay_snapshot_request(&self, request: &ServerRequest) -> bool {
         match request {
-            ServerRequest::CommandExecutionRequestApproval { params, .. } => self
-                .exec_approval_call_ids
-                .contains(params.approval_id.as_ref().unwrap_or(&params.item_id)),
-            ServerRequest::FileChangeRequestApproval { params, .. } => {
-                self.patch_approval_call_ids.contains(&params.item_id)
-            }
+            ServerRequest::CommandExecutionRequestApproval { .. }
+            | ServerRequest::FileChangeRequestApproval { .. } => self
+                .pending_requests_by_request_id
+                .values()
+                .any(|pending| Self::request_matches_server_request(pending, request)),
             ServerRequest::McpServerElicitationRequest { request_id, params } => self
                 .elicitation_requests
                 .contains(&ElicitationRequestKey::new(
@@ -368,9 +391,10 @@ impl PendingInteractiveReplayState {
             ServerRequest::ToolRequestUserInput { params, .. } => {
                 self.request_user_input_call_ids.contains(&params.item_id)
             }
-            ServerRequest::PermissionsRequestApproval { params, .. } => {
-                self.request_permissions_call_ids.contains(&params.item_id)
-            }
+            ServerRequest::PermissionsRequestApproval { .. } => self
+                .pending_requests_by_request_id
+                .values()
+                .any(|pending| Self::request_matches_server_request(pending, request)),
             _ => true,
         }
     }
@@ -436,16 +460,6 @@ impl PendingInteractiveReplayState {
                 !matches!(pending, PendingInteractiveRequest::PatchApproval { turn_id: pending_turn_id, .. } if pending_turn_id == turn_id)
             },
         );
-    }
-
-    fn remove_call_id_from_turn_map(
-        call_ids_by_turn_id: &mut HashMap<String, Vec<String>>,
-        call_id: &str,
-    ) {
-        call_ids_by_turn_id.retain(|_, call_ids| {
-            call_ids.retain(|queued_call_id| queued_call_id != call_id);
-            !call_ids.is_empty()
-        });
     }
 
     fn remove_call_id_from_turn_map_entry(
@@ -573,6 +587,7 @@ mod tests {
     use codex_app_server_protocol::McpServerElicitationAction;
     use codex_app_server_protocol::McpServerElicitationRequest;
     use codex_app_server_protocol::McpServerElicitationRequestParams;
+    use codex_app_server_protocol::PermissionsRequestApprovalParams;
     use codex_app_server_protocol::RequestId as AppServerRequestId;
     use codex_app_server_protocol::ServerNotification;
     use codex_app_server_protocol::ServerRequest;
@@ -597,6 +612,8 @@ mod tests {
                 turn_id: turn_id.to_string(),
                 item_id: call_id.to_string(),
                 questions: Vec::new(),
+                is_blocking: true,
+                auto_resolution_ms: None,
             },
         }
     }
@@ -609,15 +626,17 @@ mod tests {
         ServerRequest::CommandExecutionRequestApproval {
             request_id: AppServerRequestId::Integer(2),
             params: CommandExecutionRequestApprovalParams {
+                kind: Default::default(),
                 thread_id: "thread-1".to_string(),
                 turn_id: turn_id.to_string(),
                 item_id: call_id.to_string(),
                 started_at_ms: 0,
                 approval_id: approval_id.map(str::to_string),
+                environment_id: None,
                 reason: None,
                 network_approval_context: None,
                 command: Some("echo hi".to_string()),
-                cwd: Some(test_path_buf("/tmp").abs()),
+                cwd: Some(test_path_buf("/tmp").abs().into()),
                 command_actions: None,
                 additional_permissions: None,
                 proposed_execpolicy_amendment: None,
@@ -637,6 +656,29 @@ mod tests {
                 started_at_ms: 0,
                 reason: None,
                 grant_root: None,
+            },
+        }
+    }
+
+    fn permissions_approval_request(
+        request_id: i64,
+        call_id: &str,
+        turn_id: &str,
+    ) -> ServerRequest {
+        ServerRequest::PermissionsRequestApproval {
+            request_id: AppServerRequestId::Integer(request_id),
+            params: PermissionsRequestApprovalParams {
+                thread_id: "thread-1".to_string(),
+                turn_id: turn_id.to_string(),
+                item_id: call_id.to_string(),
+                environment_id: None,
+                started_at_ms: 0,
+                cwd: test_path_buf("/tmp").abs(),
+                reason: None,
+                permissions: codex_app_server_protocol::RequestPermissionProfile {
+                    network: None,
+                    file_system: None,
+                },
             },
         }
     }
@@ -702,8 +744,12 @@ mod tests {
         assert_eq!(snapshot.events.len(), 1);
         assert!(matches!(
             snapshot.events.first(),
-            Some(ThreadBufferedEvent::Request(ServerRequest::ToolRequestUserInput { params, .. }))
-                if params.item_id == "call-1"
+            Some(ThreadBufferedEvent::Request(request))
+                if matches!(
+                    request.as_ref(),
+                    ServerRequest::ToolRequestUserInput { params, .. }
+                        if params.item_id == "call-1"
+                )
         ));
     }
 
@@ -738,7 +784,11 @@ mod tests {
             snapshot.events.iter().all(|event| {
                 !matches!(
                     event,
-                    ThreadBufferedEvent::Request(ServerRequest::ToolRequestUserInput { .. })
+                    ThreadBufferedEvent::Request(request)
+                        if matches!(
+                            request.as_ref(),
+                            ServerRequest::ToolRequestUserInput { .. }
+                        )
                 )
             }),
             "server-resolved request_user_input prompt should not replay on thread switch"
@@ -783,9 +833,11 @@ mod tests {
             snapshot.events.iter().all(|event| {
                 !matches!(
                     event,
-                    ThreadBufferedEvent::Request(
-                        ServerRequest::CommandExecutionRequestApproval { .. }
-                    )
+                    ThreadBufferedEvent::Request(request)
+                        if matches!(
+                            request.as_ref(),
+                            ServerRequest::CommandExecutionRequestApproval { .. }
+                        )
                 )
             }),
             "server-resolved exec approval prompt should not replay on thread switch"
@@ -810,8 +862,12 @@ mod tests {
         assert_eq!(snapshot.events.len(), 1);
         assert!(matches!(
             snapshot.events.first(),
-            Some(ThreadBufferedEvent::Request(ServerRequest::ToolRequestUserInput { params, .. }))
-                if params.item_id == "call-2"
+            Some(ThreadBufferedEvent::Request(request))
+                if matches!(
+                    request.as_ref(),
+                    ServerRequest::ToolRequestUserInput { params, .. }
+                        if params.item_id == "call-2"
+                )
         ));
     }
 
@@ -832,8 +888,12 @@ mod tests {
         assert_eq!(snapshot.events.len(), 1);
         assert!(matches!(
             snapshot.events.first(),
-            Some(ThreadBufferedEvent::Request(ServerRequest::ToolRequestUserInput { params, .. }))
-                if params.item_id == "call-2"
+            Some(ThreadBufferedEvent::Request(request))
+                if matches!(
+                    request.as_ref(),
+                    ServerRequest::ToolRequestUserInput { params, .. }
+                        if params.item_id == "call-2"
+                )
         ));
     }
 
@@ -844,14 +904,84 @@ mod tests {
 
         store.note_outbound_op(&Op::PatchApproval {
             id: "call-1".to_string(),
+            turn_id: Some("turn-1".to_string()),
             decision: codex_app_server_protocol::FileChangeApprovalDecision::Accept,
         });
 
-        let snapshot = store.snapshot();
-        assert!(
-            snapshot.events.is_empty(),
-            "resolved patch approval prompt should not replay on thread switch"
-        );
+        assert!(store.snapshot().events.is_empty());
+    }
+
+    #[test]
+    fn stale_exec_abort_does_not_clear_reused_approval_on_new_turn() {
+        let mut store = ThreadEventStore::new(/*capacity*/ 8);
+        store.push_request(exec_approval_request(
+            "call-1",
+            Some("approval-1"),
+            "turn-1",
+        ));
+        store.push_request(exec_approval_request(
+            "call-1",
+            Some("approval-1"),
+            "turn-2",
+        ));
+        store.note_outbound_op(&Op::ExecApproval {
+            id: "approval-1".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            decision: CommandExecutionApprovalDecision::Cancel,
+        });
+
+        assert!(store.snapshot().events.iter().any(|event| {
+            matches!(event, ThreadBufferedEvent::Request(request) if matches!(request.as_ref(), ServerRequest::CommandExecutionRequestApproval { params, .. } if params.turn_id == "turn-2"))
+        }));
+    }
+
+    #[test]
+    fn stale_patch_abort_does_not_clear_reused_approval_on_new_turn() {
+        let mut store = ThreadEventStore::new(/*capacity*/ 8);
+        store.push_request(patch_approval_request("call-1", "turn-1"));
+        store.push_request(patch_approval_request("call-1", "turn-2"));
+        store.note_outbound_op(&Op::PatchApproval {
+            id: "call-1".to_string(),
+            turn_id: Some("turn-1".to_string()),
+            decision: codex_app_server_protocol::FileChangeApprovalDecision::Cancel,
+        });
+
+        assert!(store.snapshot().events.iter().any(|event| {
+            matches!(event, ThreadBufferedEvent::Request(request) if matches!(request.as_ref(), ServerRequest::FileChangeRequestApproval { params, .. } if params.turn_id == "turn-2"))
+        }));
+    }
+
+    #[test]
+    fn stale_permissions_response_preserves_reused_call_id_on_new_turn() {
+        let mut store = ThreadEventStore::new(/*capacity*/ 8);
+        store.push_request(permissions_approval_request(4, "call-1", "turn-1"));
+        store.push_request(permissions_approval_request(5, "call-1", "turn-2"));
+        store.note_outbound_op(&Op::RequestPermissionsResponse {
+            id: "call-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            response: codex_protocol::request_permissions::RequestPermissionsResponse {
+                permissions: Default::default(),
+                scope: codex_protocol::request_permissions::PermissionGrantScope::Turn,
+                strict_auto_review: false,
+            },
+        });
+
+        let pending_turns = store
+            .snapshot()
+            .events
+            .into_iter()
+            .filter_map(|event| match event {
+                ThreadBufferedEvent::Request(request) => match request.as_ref() {
+                    ServerRequest::PermissionsRequestApproval { params, .. } => {
+                        Some(params.turn_id.clone())
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(pending_turns, vec!["turn-2"]);
+        assert!(store.has_pending_thread_approvals());
     }
 
     #[test]
@@ -869,8 +999,12 @@ mod tests {
         assert!(snapshot.events.iter().all(|event| {
             !matches!(
                 event,
-                ThreadBufferedEvent::Request(ServerRequest::CommandExecutionRequestApproval { .. })
-                    | ThreadBufferedEvent::Request(ServerRequest::FileChangeRequestApproval { .. })
+                ThreadBufferedEvent::Request(request)
+                    if matches!(
+                        request.as_ref(),
+                        ServerRequest::CommandExecutionRequestApproval { .. }
+                            | ServerRequest::FileChangeRequestApproval { .. }
+                    )
             )
         }));
     }
@@ -935,7 +1069,11 @@ mod tests {
         assert!(store.snapshot().events.iter().all(|event| {
             !matches!(
                 event,
-                ThreadBufferedEvent::Request(ServerRequest::CommandExecutionRequestApproval { .. })
+                ThreadBufferedEvent::Request(request)
+                    if matches!(
+                        request.as_ref(),
+                        ServerRequest::CommandExecutionRequestApproval { .. }
+                    )
             )
         }));
     }

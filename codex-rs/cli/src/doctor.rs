@@ -39,7 +39,13 @@ use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::find_codex_home;
 use codex_features::FEATURES;
+use codex_http_client::ClientRouteClass;
+use codex_http_client::HttpClientFactory;
+use codex_http_client::OutboundProxyPolicy;
+use codex_http_client::RouteAwareClientPool;
+use codex_install_context::CodexPackageLayout;
 use codex_install_context::InstallContext;
+use codex_install_context::InstallMethod;
 use codex_install_context::StandalonePlatform;
 use codex_login::AuthDotJson;
 use codex_login::AuthManager;
@@ -47,10 +53,11 @@ use codex_login::CODEX_ACCESS_TOKEN_ENV_VAR;
 use codex_login::CODEX_API_KEY_ENV_VAR;
 use codex_login::CodexAuth;
 use codex_login::OPENAI_API_KEY_ENV_VAR;
-use codex_login::default_client::build_reqwest_client;
+use codex_login::default_client::create_client_without_request_logging;
 use codex_login::default_client::default_headers;
 use codex_login::load_auth_dot_json;
 use codex_model_provider::create_model_provider;
+use codex_protocol::auth::AuthMode;
 use codex_protocol::protocol::AskForApproval;
 use codex_terminal_detection::Multiplexer;
 use codex_terminal_detection::TerminalInfo;
@@ -60,16 +67,33 @@ use codex_tui::Cli as TuiCli;
 use codex_utils_cli::CliConfigOverrides;
 use http::HeaderMap;
 use http::HeaderValue;
+use http::Method;
 use serde::Serialize;
 use supports_color::Stream;
 
 mod background;
+mod desktop;
+mod disk;
+mod git;
+mod network;
 mod output;
 mod progress;
 mod runtime;
+mod sandbox;
+mod security;
+mod system;
+mod thread_inventory;
+mod title;
 mod updates;
+#[cfg(target_os = "windows")]
+mod windows_dev_drive;
+
+#[cfg(test)]
+#[path = "doctor/desktop_tests.rs"]
+mod desktop_tests;
 
 use background::background_server_check;
+use git::git_check;
 use output::HumanOutputOptions;
 use output::redact_detail;
 use output::render_human_report;
@@ -77,6 +101,10 @@ use progress::DoctorProgress;
 use progress::doctor_progress;
 use runtime::runtime_check;
 use runtime::search_check;
+use sandbox::sandbox_check;
+use system::system_check;
+use thread_inventory::thread_inventory_check;
+use title::terminal_title_check;
 use updates::updates_check;
 
 const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
@@ -105,6 +133,10 @@ const COLOR_ENV_VARS: &[&str] = &[
 const TERMINAL_DIMENSION_ENV_VARS: &[&str] = &["COLUMNS", "LINES"];
 const TERMINFO_ENV_VARS: &[&str] = &["TERMINFO", "TERMINFO_DIRS"];
 const LOCALE_ENV_VARS: &[&str] = &["LC_ALL", "LC_CTYPE", "LANG"];
+#[cfg(windows)]
+const NPM_COMMAND: &str = "npm.cmd";
+#[cfg(not(windows))]
+const NPM_COMMAND: &str = "npm";
 const REMOTE_TERMINAL_ENV_VARS: &[&str] = &[
     "SSH_TTY",
     "SSH_CONNECTION",
@@ -324,6 +356,8 @@ async fn build_report(
 ) -> DoctorReport {
     let progress = doctor_progress(command.json);
     let mut checks = Vec::new();
+    checks.push(run_sync_check("system", progress.clone(), system_check));
+    checks.push(run_async_check("endpoint protection", progress.clone(), security::check()).await);
     checks.push(run_sync_check("installation", progress.clone(), || {
         installation_check(!command.summary)
     }));
@@ -332,11 +366,34 @@ async fn build_report(
 
     progress.begin("config");
     let config_result = load_config(root_config_overrides, interactive, arg0_paths).await;
+    let cwd = config_result
+        .as_ref()
+        .map(|config| config.cwd.as_path().to_path_buf())
+        .unwrap_or_else(|_| {
+            let mut cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+            if let Some(requested_cwd) = &interactive.cwd {
+                cwd.push(requested_cwd);
+            }
+            cwd
+        });
+    checks.push(run_sync_check("disk", progress.clone(), || {
+        disk::check(config_result.as_ref().ok(), &cwd)
+    }));
+    #[cfg(target_os = "windows")]
+    checks.push(run_sync_check("dev drive", progress.clone(), || {
+        windows_dev_drive::check(&cwd)
+    }));
     match &config_result {
         Ok(config) => {
-            let auth_manager =
+            let auth_manager_result =
                 AuthManager::shared_from_config(config, /*enable_codex_api_key_env*/ true).await;
+            let auth_manager = auth_manager_result.as_ref().ok().cloned();
             let reachability_plan = provider_reachability_plan(config);
+            #[cfg(target_os = "macos")]
+            let reachability_url = reachability_plan
+                .endpoints
+                .first()
+                .map(|endpoint| endpoint.url.clone());
             let (
                 config_check,
                 auth_check,
@@ -346,18 +403,37 @@ async fn build_report(
                 mcp_check,
                 sandbox_check,
                 terminal_check,
+                git_check,
+                terminal_title_check,
                 state_check,
+                thread_inventory_check,
                 background_server_check,
                 reachability_check,
             ) = tokio::join!(
                 async { run_sync_check("config", progress.clone(), || config_check(config)) },
-                async { run_sync_check("auth", progress.clone(), || auth_check(config)) },
+                async {
+                    run_sync_check("auth", progress.clone(), || match &auth_manager_result {
+                        Ok(_) => auth_check(config),
+                        Err(error) => DoctorCheck::new(
+                            "auth.load",
+                            "auth",
+                            CheckStatus::Fail,
+                            "authentication could not be initialized",
+                        )
+                        .detail(error.to_string())
+                        .remediation(
+                            "Fix the reported authentication error, then rerun codex doctor.",
+                        ),
+                    })
+                },
                 async { run_sync_check("updates", progress.clone(), || updates_check(config)) },
-                async { run_sync_check("network", progress.clone(), network_check) },
+                async {
+                    run_sync_check("network", progress.clone(), || network::check(Some(config)))
+                },
                 run_async_check(
                     "websocket",
                     progress.clone(),
-                    websocket_reachability_check(config, Some(auth_manager)),
+                    websocket_reachability_check(config, auth_manager),
                 ),
                 run_async_check("MCP", progress.clone(), mcp_check(config)),
                 async {
@@ -370,17 +446,34 @@ async fn build_report(
                         terminal_check(command.no_color)
                     })
                 },
-                run_async_check("state", progress.clone(), state_check(config)),
+                run_async_check("git", progress.clone(), git_check(config.cwd.as_path())),
                 async {
-                    run_sync_check("app-server", progress.clone(), || {
-                        background_server_check(config)
+                    run_sync_check("terminal title", progress.clone(), || {
+                        terminal_title_check(config)
                     })
                 },
+                run_async_check("state", progress.clone(), state_check(config)),
+                run_async_check(
+                    "thread inventory",
+                    progress.clone(),
+                    thread_inventory_check(config),
+                ),
+                run_async_check(
+                    "app-server",
+                    progress.clone(),
+                    background_server_check(config)
+                ),
                 run_async_check(
                     "provider reachability",
                     progress.clone(),
                     provider_reachability_check(reachability_plan),
                 ),
+            );
+            #[cfg(target_os = "macos")]
+            let reachability_check = network::with_system_proxy_remediation(
+                reachability_check,
+                config,
+                reachability_url.as_deref(),
             );
             checks.extend([
                 config_check,
@@ -391,14 +484,24 @@ async fn build_report(
                 mcp_check,
                 sandbox_check,
                 terminal_check,
+                git_check,
+                terminal_title_check,
                 state_check,
+                thread_inventory_check,
                 background_server_check,
                 reachability_check,
             ]);
         }
         Err(err) => {
             let reachability_plan = default_reachability_plan();
-            let (config_check, network_check, terminal_check, state_check, reachability_check) = tokio::join!(
+            let (
+                config_check,
+                network_check,
+                terminal_check,
+                git_check,
+                state_check,
+                reachability_check,
+            ) = tokio::join!(
                 async {
                     run_sync_check("config", progress.clone(), || {
                         DoctorCheck::new(
@@ -411,12 +514,17 @@ async fn build_report(
                         .remediation("Fix the reported config error, then rerun codex doctor.")
                     })
                 },
-                async { run_sync_check("network", progress.clone(), network_check) },
+                async {
+                    run_sync_check("network", progress.clone(), || {
+                        network::check(/*config*/ None)
+                    })
+                },
                 async {
                     run_sync_check("terminal", progress.clone(), || {
                         terminal_check(command.no_color)
                     })
                 },
+                run_async_check("git", progress.clone(), git_check(&cwd)),
                 async { run_sync_check("state", progress.clone(), fallback_state_check) },
                 run_async_check(
                     "provider reachability",
@@ -428,10 +536,22 @@ async fn build_report(
                 config_check,
                 network_check,
                 terminal_check,
+                git_check,
                 state_check,
                 reachability_check,
             ]);
         }
+    }
+
+    progress.begin("desktop");
+    if let Some(desktop) = desktop::collect().await {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(application) = desktop.application.as_ref() {
+            updates::append_desktop_update(&mut checks, config_result.as_ref().ok(), application)
+                .await;
+        }
+        progress.finish("desktop", overall_status(&desktop.checks));
+        checks.extend(desktop.checks);
     }
 
     progress.settle();
@@ -490,7 +610,6 @@ fn config_overrides_from_interactive(
     };
     ConfigOverrides {
         model: interactive.model.clone(),
-        config_profile: interactive.config_profile.clone(),
         approval_policy,
         sandbox_mode,
         cwd: interactive.cwd.clone(),
@@ -638,7 +757,7 @@ fn structured_json_details(details: &[String]) -> (BTreeMap<String, JsonDetailVa
             notes.push(redacted);
             continue;
         }
-        let value = value.to_string();
+        let value = json_detail_value(key, value);
         match structured.get_mut(key) {
             Some(existing) => existing.push(value),
             None => {
@@ -647,6 +766,21 @@ fn structured_json_details(details: &[String]) -> (BTreeMap<String, JsonDetailVa
         }
     }
     (structured, notes)
+}
+
+fn json_detail_value(key: &str, value: &str) -> String {
+    if matches!(
+        key,
+        "VISUAL" | "EDITOR" | "PAGER" | "GIT_PAGER" | "GH_PAGER" | "LESS"
+    ) && !value.eq_ignore_ascii_case("not set")
+    {
+        // Editor and pager configuration can contain arbitrary arguments or
+        // inline environment assignments. Keep full values local to human output
+        // because the JSON report may be attached to feedback.
+        "set".to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 fn run_sync_check(
@@ -737,6 +871,10 @@ fn installation_check(show_details: bool) -> DoctorCheck {
         "managed by bun: {}",
         env::var_os("CODEX_MANAGED_BY_BUN").is_some()
     ));
+    details.push(format!(
+        "managed by pnpm: {}",
+        env::var_os("CODEX_MANAGED_BY_PNPM").is_some()
+    ));
     push_env_path_detail(
         &mut details,
         "managed package root",
@@ -808,7 +946,10 @@ fn installation_check(show_details: bool) -> DoctorCheck {
 
 fn doctor_install_context(current_exe: Option<&Path>) -> InstallContext {
     if inherited_managed_env_for_cargo_binary(current_exe) {
-        InstallContext::Other
+        InstallContext {
+            method: InstallMethod::Other,
+            package_layout: None,
+        }
     } else {
         InstallContext::current().clone()
     }
@@ -822,6 +963,7 @@ fn doctor_managed_by_npm(current_exe: Option<&Path>) -> bool {
 fn inherited_managed_env_for_cargo_binary(current_exe: Option<&Path>) -> bool {
     if env::var_os("CODEX_MANAGED_BY_NPM").is_none()
         && env::var_os("CODEX_MANAGED_BY_BUN").is_none()
+        && env::var_os("CODEX_MANAGED_BY_PNPM").is_none()
     {
         return false;
     }
@@ -839,8 +981,8 @@ fn inherited_managed_env_for_cargo_binary(current_exe: Option<&Path>) -> bool {
 }
 
 fn describe_install_context(context: &InstallContext) -> String {
-    match context {
-        InstallContext::Standalone {
+    match &context.method {
+        InstallMethod::Standalone {
             release_dir,
             resources_dir,
             platform,
@@ -849,20 +991,64 @@ fn describe_install_context(context: &InstallContext) -> String {
                 StandalonePlatform::Unix => "unix",
                 StandalonePlatform::Windows => "windows",
             };
-            let resources = resources_dir
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "none".to_string());
+            match &context.package_layout {
+                Some(package_layout) => {
+                    let resources = display_optional_path(package_layout.resources_dir.as_deref());
+                    let path = display_optional_path(package_layout.path_dir.as_deref());
+                    format!(
+                        "standalone ({platform}, package {}, bin {}, resources {resources}, path {path})",
+                        package_layout.package_dir.display(),
+                        package_layout.bin_dir.display()
+                    )
+                }
+                None => {
+                    let resources = display_optional_path(resources_dir.as_deref());
+                    format!(
+                        "standalone ({platform}, release {}, resources {resources})",
+                        release_dir.display()
+                    )
+                }
+            }
+        }
+        InstallMethod::Npm => {
+            describe_method_with_package_layout("npm", context.package_layout.as_ref())
+        }
+        InstallMethod::Bun => {
+            describe_method_with_package_layout("bun", context.package_layout.as_ref())
+        }
+        InstallMethod::Pnpm => {
+            describe_method_with_package_layout("pnpm", context.package_layout.as_ref())
+        }
+        InstallMethod::Brew => {
+            describe_method_with_package_layout("brew", context.package_layout.as_ref())
+        }
+        InstallMethod::Other => {
+            describe_method_with_package_layout("other", context.package_layout.as_ref())
+        }
+    }
+}
+
+fn describe_method_with_package_layout(
+    method: &str,
+    package_layout: Option<&CodexPackageLayout>,
+) -> String {
+    match package_layout {
+        Some(package_layout) => {
+            let resources = display_optional_path(package_layout.resources_dir.as_deref());
+            let path = display_optional_path(package_layout.path_dir.as_deref());
             format!(
-                "standalone ({platform}, release {}, resources {resources})",
-                release_dir.display()
+                "{method} (package {}, bin {}, resources {resources}, path {path})",
+                package_layout.package_dir.display(),
+                package_layout.bin_dir.display()
             )
         }
-        InstallContext::Npm => "npm".to_string(),
-        InstallContext::Bun => "bun".to_string(),
-        InstallContext::Brew => "brew".to_string(),
-        InstallContext::Other => "other".to_string(),
+        None => method.to_string(),
     }
+}
+
+fn display_optional_path(path: Option<&Path>) -> String {
+    path.map(|path| path.display().to_string())
+        .unwrap_or_else(|| "none".to_string())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -884,7 +1070,7 @@ fn npm_global_root_check() -> NpmRootCheck {
         return NpmRootCheck::MissingPackageRoot;
     };
 
-    let output = match run_command("npm", ["root", "-g"]) {
+    let output = match run_command(NPM_COMMAND, ["root", "-g"]) {
         Ok(output) => output,
         Err(err) => return NpmRootCheck::NpmUnavailable(err),
     };
@@ -977,7 +1163,10 @@ fn config_check(config: &Config) -> DoctorCheck {
     ));
     details.push(format!("model provider: {}", config.model_provider_id));
     details.push(format!("log dir: {}", config.log_dir.display()));
-    details.push(format!("sqlite home: {}", config.sqlite_home.display()));
+    details.push(format!(
+        "sqlite home: {}",
+        config.sqlite_config().home().display()
+    ));
     details.push(format!("mcp servers: {}", config.mcp_servers.get().len()));
     feature_flag_details(config, &mut details);
     config_toml_details(config, &mut details);
@@ -985,6 +1174,7 @@ fn config_check(config: &Config) -> DoctorCheck {
     let status = if config.startup_warnings.is_empty() {
         CheckStatus::Ok
     } else {
+        push_startup_warning_counts(&mut details, &config.startup_warnings);
         details.extend(
             config
                 .startup_warnings
@@ -995,6 +1185,23 @@ fn config_check(config: &Config) -> DoctorCheck {
     };
 
     DoctorCheck::new("config.load", "config", status, "config loaded").details(details)
+}
+
+fn push_startup_warning_counts(details: &mut Vec<String>, warnings: &[String]) {
+    details.push(format!("startup warnings: {}", warnings.len()));
+    for (label, needle) in [
+        ("startup warning skills", "skill"),
+        ("startup warning hooks", "hook"),
+        ("startup warning plugins", "plugin"),
+        ("startup warning MCP", "mcp"),
+        ("startup warning deprecated", "deprecated"),
+    ] {
+        let count = warnings
+            .iter()
+            .filter(|warning| warning.to_ascii_lowercase().contains(needle))
+            .count();
+        details.push(format!("{label}: {count}"));
+    }
 }
 
 fn feature_flag_details(config: &Config, details: &mut Vec<String>) {
@@ -1075,7 +1282,11 @@ fn auth_check(config: &Config) -> DoctorCheck {
         return check;
     }
 
-    match load_auth_dot_json(&config.codex_home, config.cli_auth_credentials_store_mode) {
+    match load_auth_dot_json(
+        &config.codex_home,
+        config.cli_auth_credentials_store_mode,
+        config.auth_keyring_backend_kind(),
+    ) {
         Ok(Some(auth)) => {
             details.push(format!("stored auth mode: {}", stored_auth_mode(&auth)));
             details.push(format!("stored API key: {}", auth.openai_api_key.is_some()));
@@ -1198,21 +1409,31 @@ fn provider_specific_auth_check(
 
 fn stored_auth_mode(auth: &codex_login::AuthDotJson) -> &'static str {
     match stored_auth_mode_value(auth) {
-        codex_app_server_protocol::AuthMode::ApiKey => "api_key",
-        codex_app_server_protocol::AuthMode::Chatgpt => "chatgpt",
-        codex_app_server_protocol::AuthMode::ChatgptAuthTokens => "chatgpt_auth_tokens",
-        codex_app_server_protocol::AuthMode::AgentIdentity => "agent_identity",
+        AuthMode::ApiKey => "api_key",
+        AuthMode::Chatgpt => "chatgpt",
+        AuthMode::ChatgptAuthTokens => "chatgpt_auth_tokens",
+        AuthMode::Headers => "headers",
+        AuthMode::AgentIdentity => "agent_identity",
+        AuthMode::PersonalAccessToken => "personal_access_token",
+        AuthMode::BedrockApiKey => "bedrock_api_key",
+        AuthMode::BedrockAccessKeys => "bedrock_access_keys",
     }
 }
 
-fn stored_auth_mode_value(auth: &AuthDotJson) -> codex_app_server_protocol::AuthMode {
+fn stored_auth_mode_value(auth: &AuthDotJson) -> AuthMode {
     if let Some(mode) = auth.auth_mode {
         return mode;
     }
-    if auth.openai_api_key.is_some() {
-        codex_app_server_protocol::AuthMode::ApiKey
+    if auth.personal_access_token.is_some() {
+        AuthMode::PersonalAccessToken
+    } else if auth.bedrock_api_key.is_some() {
+        AuthMode::BedrockApiKey
+    } else if auth.bedrock_access_keys.is_some() {
+        AuthMode::BedrockAccessKeys
+    } else if auth.openai_api_key.is_some() {
+        AuthMode::ApiKey
     } else {
-        codex_app_server_protocol::AuthMode::Chatgpt
+        AuthMode::Chatgpt
     }
 }
 
@@ -1222,7 +1443,7 @@ fn stored_auth_issues(
 ) -> Vec<&'static str> {
     let mut issues = Vec::new();
     match stored_auth_mode_value(auth) {
-        codex_app_server_protocol::AuthMode::ApiKey => {
+        AuthMode::ApiKey => {
             let stored_key_present = auth
                 .openai_api_key
                 .as_deref()
@@ -1233,7 +1454,7 @@ fn stored_auth_issues(
                 issues.push("API key auth is missing an API key");
             }
         }
-        codex_app_server_protocol::AuthMode::Chatgpt => {
+        AuthMode::Chatgpt => {
             match auth.tokens.as_ref() {
                 Some(tokens) => {
                     if tokens.access_token.trim().is_empty() {
@@ -1249,7 +1470,7 @@ fn stored_auth_issues(
                 issues.push("ChatGPT auth is missing refresh metadata");
             }
         }
-        codex_app_server_protocol::AuthMode::ChatgptAuthTokens => {
+        AuthMode::ChatgptAuthTokens => {
             match auth.tokens.as_ref() {
                 Some(tokens) => {
                     if tokens.access_token.trim().is_empty() {
@@ -1265,53 +1486,45 @@ fn stored_auth_issues(
                 issues.push("external ChatGPT auth is missing refresh metadata");
             }
         }
-        codex_app_server_protocol::AuthMode::AgentIdentity => {
+        AuthMode::Headers => {
+            issues.push("header auth cannot be loaded from auth storage");
+        }
+        AuthMode::AgentIdentity => {
             if auth
                 .agent_identity
-                .as_deref()
-                .is_none_or(|token| token.trim().is_empty())
+                .as_ref()
+                .is_none_or(|agent_identity| !agent_identity.has_auth_material())
             {
                 issues.push("agent identity auth is missing an agent identity token");
             }
         }
-    }
-    issues
-}
-
-fn network_check() -> DoctorCheck {
-    let mut details = Vec::new();
-    push_proxy_env_details(&mut details);
-
-    let mut status = CheckStatus::Ok;
-    let mut summary = "network-related environment looks readable".to_string();
-    for name in ["CODEX_CA_CERTIFICATE", "SSL_CERT_FILE"] {
-        if let Some(raw) = env::var_os(name) {
-            let path = PathBuf::from(raw);
-            match std::fs::metadata(&path) {
-                Ok(metadata) if metadata.is_file() => {
-                    if let Err(err) = read_probe_file(&path) {
-                        status = CheckStatus::Warning;
-                        summary = "custom CA env var points at an unreadable file".to_string();
-                        details.push(format!("{name}: {} ({err})", path.display()));
-                    } else {
-                        details.push(format!("{name}: readable file {}", path.display()));
-                    }
-                }
-                Ok(_) => {
-                    status = CheckStatus::Warning;
-                    summary = "custom CA env var does not point at a file".to_string();
-                    details.push(format!("{name}: not a file {}", path.display()));
-                }
-                Err(err) => {
-                    status = CheckStatus::Warning;
-                    summary = "custom CA env var points at an unreadable path".to_string();
-                    details.push(format!("{name}: {} ({err})", path.display()));
-                }
+        AuthMode::PersonalAccessToken => {
+            if auth
+                .personal_access_token
+                .as_deref()
+                .is_none_or(|token| token.trim().is_empty())
+            {
+                issues.push("personal access token auth is missing a personal access token");
             }
         }
+        AuthMode::BedrockApiKey => {
+            if auth.bedrock_api_key.is_none() {
+                issues.push("Bedrock API key auth is missing a Bedrock API key");
+            }
+        }
+        AuthMode::BedrockAccessKeys => match auth.bedrock_access_keys.as_ref() {
+            Some(access_keys) => {
+                if access_keys.access_key_id.trim().is_empty() {
+                    issues.push("Bedrock access key auth is missing an access key ID");
+                }
+                if access_keys.secret_access_key.trim().is_empty() {
+                    issues.push("Bedrock access key auth is missing a secret access key");
+                }
+            }
+            None => issues.push("Bedrock access key auth is missing AWS access keys"),
+        },
     }
-
-    DoctorCheck::new("network.env", "network", status, summary).details(details)
+    issues
 }
 
 fn push_proxy_env_details(details: &mut Vec<String>) {
@@ -1375,19 +1588,35 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
                 if disabled_server {
                     continue;
                 }
-                if let Some(cwd) = cwd
-                    && !cwd.exists()
-                {
-                    missing_env.push(format!("{name}: cwd does not exist ({})", cwd.display()));
-                }
-                if command.trim().is_empty() {
+                let command_is_empty = command.trim().is_empty();
+                if command_is_empty {
                     missing_env.push(format!("{name}: stdio command is empty"));
-                } else if let Err(err) =
-                    stdio_command_resolves(command, cwd.as_deref(), env.as_ref())
-                {
-                    missing_env.push(format!(
-                        "{name}: stdio command {command:?} is not resolvable ({err})"
-                    ));
+                }
+                if server.is_local_environment() {
+                    let host_native_cwd = cwd.as_ref().map(|cwd| Path::new(cwd.as_str()));
+                    if let Some(cwd) = host_native_cwd
+                        && !cwd.exists()
+                    {
+                        missing_env.push(format!("{name}: cwd does not exist ({})", cwd.display()));
+                    }
+                    if !command_is_empty
+                        && let Err(err) =
+                            stdio_command_resolves(command, host_native_cwd, env.as_ref())
+                    {
+                        missing_env.push(format!(
+                            "{name}: stdio command {command:?} is not resolvable ({err})"
+                        ));
+                    }
+                } else {
+                    match cwd {
+                        Some(cwd) if cwd.to_inferred_path_uri().is_none() => {
+                            missing_env
+                                .push(format!("{name}: remote stdio cwd is not absolute ({cwd})"));
+                        }
+                        None => missing_env
+                            .push(format!("{name}: remote stdio requires an explicit cwd")),
+                        Some(_) => {}
+                    }
                 }
                 if let Some(env) = env {
                     for key in env.keys().filter(|key| key.trim().is_empty()) {
@@ -1396,10 +1625,12 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
                 }
                 for env_var in env_vars {
                     if env_var.is_remote_source() {
-                        missing_env.push(format!(
-                            "{name}: env_vars entry `{}` uses source `remote`, which requires remote MCP stdio",
-                            env_var.name()
-                        ));
+                        if server.is_local_environment() {
+                            missing_env.push(format!(
+                                "{name}: env_vars entry `{}` uses source `remote`, which requires remote MCP stdio",
+                                env_var.name()
+                            ));
+                        }
                     } else if !env_var_present(env_var.name()) {
                         missing_env.push(format!("{name}: env var {} is not set", env_var.name()));
                     }
@@ -1483,41 +1714,6 @@ async fn mcp_check_from_servers(servers: &HashMap<String, McpServerConfig>) -> D
     check
 }
 
-fn sandbox_check(config: &Config, arg0_paths: &Arg0DispatchPaths) -> DoctorCheck {
-    let mut details = Vec::new();
-    details.push(format!(
-        "approval policy: {:?}",
-        config.permissions.approval_policy.value()
-    ));
-    let file_system_sandbox = config.permissions.file_system_sandbox_policy();
-    details.push(format!("filesystem sandbox: {}", file_system_sandbox.kind));
-    details.push(format!(
-        "network sandbox: {}",
-        config.permissions.network_sandbox_policy()
-    ));
-    push_path_detail(
-        &mut details,
-        "codex-linux-sandbox helper",
-        arg0_paths.codex_linux_sandbox_exe.as_deref(),
-    );
-    push_path_detail(
-        &mut details,
-        "execve wrapper helper",
-        arg0_paths.main_execve_wrapper_exe.as_deref(),
-    );
-
-    let mut status = CheckStatus::Ok;
-    let mut summary = "sandbox configuration is readable".to_string();
-    if let Some(helper) = arg0_paths.codex_linux_sandbox_exe.as_deref()
-        && !helper.exists()
-    {
-        status = CheckStatus::Warning;
-        summary = "Linux sandbox helper path does not exist".to_string();
-    }
-
-    DoctorCheck::new("sandbox.helpers", "sandbox", status, summary).details(details)
-}
-
 #[derive(Clone, Debug)]
 struct TerminalCheckInputs {
     info: TerminalInfo,
@@ -1530,6 +1726,7 @@ struct TerminalCheckInputs {
     stream_supports_color: bool,
     terminal_size: Result<(u16, u16), String>,
     tmux_details: Vec<String>,
+    windows_console_details: Vec<String>,
 }
 
 impl TerminalCheckInputs {
@@ -1543,6 +1740,7 @@ impl TerminalCheckInputs {
         } else {
             Vec::new()
         };
+        let windows_console_details = windows_console_details();
         Self {
             info,
             env,
@@ -1554,6 +1752,7 @@ impl TerminalCheckInputs {
             stream_supports_color: supports_color::on(Stream::Stdout).is_some(),
             terminal_size,
             tmux_details,
+            windows_console_details,
         }
     }
 
@@ -1568,6 +1767,51 @@ impl TerminalCheckInputs {
 
 fn terminal_check(no_color_flag: bool) -> DoctorCheck {
     terminal_check_from_inputs(TerminalCheckInputs::detect(no_color_flag))
+}
+
+#[cfg(windows)]
+fn windows_console_details() -> Vec<String> {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+    use windows_sys::Win32::System::Console::GetConsoleCP;
+    use windows_sys::Win32::System::Console::GetConsoleMode;
+    use windows_sys::Win32::System::Console::GetConsoleOutputCP;
+    use windows_sys::Win32::System::Console::GetStdHandle;
+    use windows_sys::Win32::System::Console::STD_ERROR_HANDLE;
+    use windows_sys::Win32::System::Console::STD_OUTPUT_HANDLE;
+
+    let mut details = Vec::new();
+    details.push(format!("console input code page: {}", unsafe {
+        GetConsoleCP()
+    }));
+    details.push(format!("console output code page: {}", unsafe {
+        GetConsoleOutputCP()
+    }));
+    details.push(console_mode_detail("stdout console mode", unsafe {
+        GetStdHandle(STD_OUTPUT_HANDLE)
+    }));
+    details.push(console_mode_detail("stderr console mode", unsafe {
+        GetStdHandle(STD_ERROR_HANDLE)
+    }));
+
+    fn console_mode_detail(label: &str, handle: isize) -> String {
+        if handle == 0 || handle == INVALID_HANDLE_VALUE {
+            return format!("{label}: unavailable");
+        }
+        let mut mode = 0_u32;
+        if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
+            return format!("{label}: unavailable");
+        }
+        let vt_enabled = mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING != 0;
+        format!("{label}: 0x{mode:08x} (VT processing: {vt_enabled})")
+    }
+
+    details
+}
+
+#[cfg(not(windows))]
+fn windows_console_details() -> Vec<String> {
+    Vec::new()
 }
 
 fn terminal_check_from_inputs(inputs: TerminalCheckInputs) -> DoctorCheck {
@@ -1603,6 +1847,7 @@ fn terminal_check_from_inputs(inputs: TerminalCheckInputs) -> DoctorCheck {
     }
     push_presence_env_values(&mut details, &inputs, REMOTE_TERMINAL_ENV_VARS);
     details.extend(inputs.tmux_details.iter().cloned());
+    details.extend(inputs.windows_console_details.iter().cloned());
 
     let locale_warning = locale.as_deref().is_some_and(is_non_utf8_locale);
     let mut issues = Vec::new();
@@ -1938,14 +2183,19 @@ async fn state_check(config: &Config) -> DoctorCheck {
     let mut details = Vec::new();
     path_readiness(&mut details, "CODEX_HOME", &config.codex_home);
     path_readiness(&mut details, "log dir", &config.log_dir);
-    path_readiness(&mut details, "sqlite home", &config.sqlite_home);
-    let state_db = codex_state::state_db_path(&config.sqlite_home);
-    let log_db = codex_state::logs_db_path(&config.sqlite_home);
-    path_readiness(&mut details, "state DB", &state_db);
-    path_readiness(&mut details, "log DB", &log_db);
+    path_readiness(&mut details, "sqlite home", config.sqlite_config().home());
     let mut integrity_failures = Vec::new();
-    sqlite_integrity_detail(&mut details, &mut integrity_failures, "state DB", &state_db).await;
-    sqlite_integrity_detail(&mut details, &mut integrity_failures, "log DB", &log_db).await;
+    for db in config.sqlite_config().runtime_db_paths() {
+        path_readiness(&mut details, db.label, &db.path);
+        sqlite_integrity_detail(
+            config.sqlite_config(),
+            &mut details,
+            &mut integrity_failures,
+            db.label,
+            &db.path,
+        )
+        .await;
+    }
     rollout_stats_details(&mut details, &config.codex_home);
     standalone_release_cache_details(&mut details);
 
@@ -1961,13 +2211,15 @@ async fn state_check(config: &Config) -> DoctorCheck {
     };
     let mut check = DoctorCheck::new("state.paths", "state", status, summary).details(details);
     if status == CheckStatus::Fail {
-        check = check
-            .remediation("Back up CODEX_HOME, then remove or repair the affected SQLite database.");
+        check = check.remediation(
+            "Move the damaged SQLite database aside, then restart the interactive CLI or app server so it can rebuild that runtime database from saved data. Other entry points may not rebuild automatically.",
+        );
     }
     check
 }
 
 async fn sqlite_integrity_detail(
+    sqlite: &codex_state::SqliteConfig,
     details: &mut Vec<String>,
     integrity_failures: &mut Vec<String>,
     label: &str,
@@ -1978,7 +2230,7 @@ async fn sqlite_integrity_detail(
         return;
     }
 
-    match codex_state::sqlite_integrity_check(path).await {
+    match codex_state::sqlite_integrity_check(sqlite, path).await {
         Ok(rows) if rows.iter().all(|row| row == "ok") => {
             details.push(format!("{label} integrity: ok"));
         }
@@ -2023,11 +2275,7 @@ struct RolloutStats {
 
 impl RolloutStats {
     fn average_bytes(&self) -> u64 {
-        if self.files == 0 {
-            0
-        } else {
-            self.total_bytes / self.files
-        }
+        self.total_bytes.checked_div(self.files).unwrap_or(0)
     }
 }
 
@@ -2163,9 +2411,11 @@ async fn websocket_reachability_check(
         HeaderValue::from_static(RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE),
     );
     let client = ResponsesWebsocketClient::new(api_provider, api_auth);
+    let http_client_factory = config.http_client_factory();
     match tokio::time::timeout(
         provider.websocket_connect_timeout(),
         client.probe_handshake(
+            &http_client_factory,
             extra_headers,
             default_headers(),
             WEBSOCKET_IMMEDIATE_CLOSE_GRACE,
@@ -2176,10 +2426,6 @@ async fn websocket_reachability_check(
         Ok(Ok(probe)) => {
             details.push(format!("handshake result: HTTP {}", probe.status));
             details.push(format!("reasoning header: {}", probe.reasoning_included));
-            details.push(format!(
-                "models etag present: {}",
-                probe.models_etag_present
-            ));
             details.push(format!(
                 "server model present: {}",
                 probe.server_model_present
@@ -2249,16 +2495,21 @@ fn websocket_error_detail(err: &ApiError) -> String {
         | ApiError::RateLimit(_)
         | ApiError::InvalidRequest { .. }
         | ApiError::CyberPolicy { .. }
+        | ApiError::MisalignmentPolicyViolation { .. }
         | ApiError::ServerOverloaded => format!("handshake error: {err}"),
     }
 }
 
 fn auth_mode_name(auth: &CodexAuth) -> &'static str {
     match auth.auth_mode() {
-        codex_app_server_protocol::AuthMode::ApiKey => "api_key",
-        codex_app_server_protocol::AuthMode::Chatgpt => "chatgpt",
-        codex_app_server_protocol::AuthMode::ChatgptAuthTokens => "chatgpt_auth_tokens",
-        codex_app_server_protocol::AuthMode::AgentIdentity => "agent_identity",
+        AuthMode::ApiKey => "api_key",
+        AuthMode::Chatgpt => "chatgpt",
+        AuthMode::ChatgptAuthTokens => "chatgpt_auth_tokens",
+        AuthMode::Headers => "headers",
+        AuthMode::AgentIdentity => "agent_identity",
+        AuthMode::PersonalAccessToken => "personal_access_token",
+        AuthMode::BedrockApiKey => "bedrock_api_key",
+        AuthMode::BedrockAccessKeys => "bedrock_access_keys",
     }
 }
 
@@ -2313,6 +2564,7 @@ fn fallback_state_check() -> DoctorCheck {
 struct ReachabilityPlan {
     description: String,
     endpoints: Vec<ReachabilityEndpoint>,
+    http_client_factory: HttpClientFactory,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2341,24 +2593,37 @@ impl ProviderAuthReachabilityMode {
 }
 
 fn provider_reachability_plan(config: &Config) -> ReachabilityPlan {
-    let stored_auth =
-        load_auth_dot_json(&config.codex_home, config.cli_auth_credentials_store_mode)
-            .ok()
-            .flatten();
+    let query_params = config.model_provider.query_params.as_ref().map(|params| {
+        params
+            .iter()
+            .map(|(name, value)| (name.clone(), value.as_str().to_owned()))
+            .collect::<HashMap<_, _>>()
+    });
+    let stored_auth = load_auth_dot_json(
+        &config.codex_home,
+        config.cli_auth_credentials_store_mode,
+        config.auth_keyring_backend_kind(),
+    )
+    .ok()
+    .flatten();
     let mode = provider_auth_reachability_mode_from_auth(
         config.model_provider.requires_openai_auth,
+        config.model_provider.env_key.as_deref(),
+        config.model_provider.base_url.as_deref(),
         env_var_present,
         stored_auth.as_ref(),
     );
-    provider_reachability_plan_from_parts(
+    let mut plan = provider_reachability_plan_from_parts(
         mode,
         &config.model_provider_id,
         &config.model_provider.name,
         config.model_provider.base_url.as_deref(),
-        config.model_provider.query_params.as_ref(),
+        query_params.as_ref(),
         config.model_provider.is_amazon_bedrock(),
         &config.chatgpt_base_url,
-    )
+    );
+    plan.http_client_factory = config.http_client_factory();
+    plan
 }
 
 fn default_reachability_plan() -> ReachabilityPlan {
@@ -2375,24 +2640,34 @@ fn default_reachability_plan() -> ReachabilityPlan {
 
 fn provider_auth_reachability_mode_from_auth(
     requires_openai_auth: bool,
+    provider_env_key: Option<&str>,
+    provider_base_url: Option<&str>,
     env_var_present: impl Fn(&str) -> bool,
     stored_auth: Option<&AuthDotJson>,
 ) -> ProviderAuthReachabilityMode {
     if !requires_openai_auth {
         return ProviderAuthReachabilityMode::NotRequired;
     }
-    if env_var_present(OPENAI_API_KEY_ENV_VAR) || env_var_present(CODEX_API_KEY_ENV_VAR) {
+    if provider_base_url.is_some_and(|url| !url.trim().is_empty())
+        && provider_env_key
+            .is_some_and(|env_key| !env_key.trim().is_empty() && env_var_present(env_key))
+        || env_var_present(CODEX_API_KEY_ENV_VAR)
+    {
         return ProviderAuthReachabilityMode::ApiKey;
     }
     if env_var_present(CODEX_ACCESS_TOKEN_ENV_VAR) {
         return ProviderAuthReachabilityMode::Chatgpt;
     }
     match stored_auth.map(stored_auth_mode_value) {
-        Some(codex_app_server_protocol::AuthMode::ApiKey) => ProviderAuthReachabilityMode::ApiKey,
+        Some(AuthMode::ApiKey | AuthMode::BedrockApiKey | AuthMode::BedrockAccessKeys) => {
+            ProviderAuthReachabilityMode::ApiKey
+        }
         Some(
-            codex_app_server_protocol::AuthMode::Chatgpt
-            | codex_app_server_protocol::AuthMode::ChatgptAuthTokens
-            | codex_app_server_protocol::AuthMode::AgentIdentity,
+            AuthMode::Chatgpt
+            | AuthMode::ChatgptAuthTokens
+            | AuthMode::Headers
+            | AuthMode::AgentIdentity
+            | AuthMode::PersonalAccessToken,
         )
         | None => ProviderAuthReachabilityMode::Chatgpt,
     }
@@ -2415,35 +2690,29 @@ fn provider_reachability_plan_from_parts(
             should_probe_models_route(provider_name, url, is_amazon_bedrock)
                 .then(|| provider_url_for_path(url, "models", provider_query_params))
         });
-    let endpoints = match mode {
-        ProviderAuthReachabilityMode::ApiKey => vec![ReachabilityEndpoint {
+    let endpoints = match (mode, provider_base_url) {
+        (ProviderAuthReachabilityMode::ApiKey, _) | (_, Some(_)) => vec![ReachabilityEndpoint {
             label: format!("{provider_id} API"),
-            url: provider_base_url
-                .unwrap_or("https://api.openai.com/v1")
-                .to_string(),
+            url: provider_url_for_path(
+                provider_base_url.unwrap_or("https://api.openai.com/v1"),
+                "responses",
+                provider_query_params,
+            ),
             required: true,
             route_probe_url: provider_route_probe_url,
         }],
-        ProviderAuthReachabilityMode::Chatgpt => vec![ReachabilityEndpoint {
+        (ProviderAuthReachabilityMode::Chatgpt, None) => vec![ReachabilityEndpoint {
             label: "ChatGPT".to_string(),
-            url: chatgpt_base_url.to_string(),
+            url: provider_url_for_path(chatgpt_base_url, "codex/responses", provider_query_params),
             required: true,
             route_probe_url: None,
         }],
-        ProviderAuthReachabilityMode::NotRequired => provider_base_url
-            .map(|url| {
-                vec![ReachabilityEndpoint {
-                    label: format!("{provider_id} API"),
-                    url: url.to_string(),
-                    required: true,
-                    route_probe_url: provider_route_probe_url,
-                }]
-            })
-            .unwrap_or_default(),
+        (ProviderAuthReachabilityMode::NotRequired, None) => Vec::new(),
     };
     ReachabilityPlan {
         description: mode.description().to_string(),
         endpoints,
+        http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
     }
 }
 
@@ -2494,15 +2763,20 @@ async fn provider_reachability_check(plan: ReachabilityPlan) -> DoctorCheck {
         .details(details);
     }
 
+    let client = RouteAwareClientPool::with_chatgpt_cloudflare_cookies_without_request_logging(
+        plan.http_client_factory,
+        ClientRouteClass::Api,
+    )
+    .with_legacy_custom_ca_fallback();
     let mut failures = Vec::new();
     let mut optional_failures = Vec::new();
     let mut route_failures = Vec::new();
     let mut route_warnings = Vec::new();
     let mut issues = Vec::new();
     for endpoint in plan.endpoints {
-        match http_probe_url(&endpoint.url).await {
+        match network::probe_status(&client, &endpoint.url, Method::HEAD, default_headers()).await {
             Ok(status) => details.push(format!(
-                "{} base URL: {} reachable ({status})",
+                "{} inference URL: {} reachable (HTTP {status})",
                 endpoint.label, endpoint.url
             )),
             Err(err) => {
@@ -2512,7 +2786,7 @@ async fn provider_reachability_check(plan: ReachabilityPlan) -> DoctorCheck {
                     "optional"
                 };
                 details.push(format!(
-                    "{} base URL: {} {err} ({requirement})",
+                    "{} inference URL: {} {err} ({requirement})",
                     endpoint.label, endpoint.url
                 ));
                 if endpoint.required {
@@ -2527,7 +2801,7 @@ async fn provider_reachability_check(plan: ReachabilityPlan) -> DoctorCheck {
         let Some(route_probe_url) = endpoint.route_probe_url.as_deref() else {
             continue;
         };
-        match provider_route_probe_url(route_probe_url).await {
+        match provider_route_probe_url(&client, route_probe_url).await {
             RouteProbeOutcome::Ok(status) => {
                 details.push(format!(
                     "{} route probe: {route_probe_url} route exists ({status})",
@@ -2605,8 +2879,8 @@ enum RouteProbeOutcome {
     TransportError(String),
 }
 
-async fn provider_route_probe_url(url: &str) -> RouteProbeOutcome {
-    match http_get_probe_status_with_timeout(url, Duration::from_secs(3)).await {
+async fn provider_route_probe_url(client: &RouteAwareClientPool, url: &str) -> RouteProbeOutcome {
+    match network::probe_status(client, url, Method::GET, default_headers()).await {
         Ok(status) if (200..300).contains(&status) || matches!(status, 401 | 403) => {
             RouteProbeOutcome::Ok(format!("HTTP {status}"))
         }
@@ -2636,10 +2910,6 @@ fn provider_reachability_outcome(
     }
 }
 
-async fn http_probe_url(url: &str) -> Result<String, String> {
-    http_probe_url_with_timeout(url, Duration::from_secs(3)).await
-}
-
 async fn mcp_http_probe_url(url: &str) -> Result<String, String> {
     mcp_http_probe_url_with_timeout(url, Duration::from_secs(3)).await
 }
@@ -2655,7 +2925,7 @@ async fn mcp_http_probe_url_with_timeout(url: &str, timeout: Duration) -> Result
 }
 
 async fn http_probe_url_with_timeout(url: &str, timeout: Duration) -> Result<String, String> {
-    let response = build_reqwest_client()
+    let response = create_client_without_request_logging()
         .head(url)
         .timeout(timeout)
         .send()
@@ -2681,7 +2951,7 @@ async fn http_get_probe_url_with_timeout(url: &str, timeout: Duration) -> Result
 }
 
 async fn http_get_probe_status_with_timeout(url: &str, timeout: Duration) -> Result<u16, String> {
-    let response = build_reqwest_client()
+    let response = create_client_without_request_logging()
         .get(url)
         .timeout(timeout)
         .send()
@@ -2789,13 +3059,14 @@ fn path_readiness(details: &mut Vec<String>, label: &str, path: &Path) {
 }
 
 fn standalone_release_cache_details(details: &mut Vec<String>) {
-    let InstallContext::Standalone { release_dir, .. } = InstallContext::current() else {
+    let context = InstallContext::current();
+    let InstallMethod::Standalone { release_dir, .. } = &context.method else {
         return;
     };
     let Some(releases_dir) = release_dir.parent() else {
         return;
     };
-    let Ok(entries) = std::fs::read_dir(releases_dir) else {
+    let Ok(entries) = std::fs::read_dir(&releases_dir) else {
         return;
     };
     let release_count = entries.filter_map(Result::ok).count();
@@ -2983,6 +3254,31 @@ mod tests {
     }
 
     #[test]
+    fn startup_warning_counts_group_known_sources() {
+        let warnings = vec![
+            "Skipped loading 2 skill(s) due to invalid SKILL.md files.".to_string(),
+            "[features].codex_hooks is deprecated. Use [features].hooks instead.".to_string(),
+            "plugin example failed to load".to_string(),
+            "MCP server example failed to start".to_string(),
+        ];
+        let mut details = Vec::new();
+
+        push_startup_warning_counts(&mut details, &warnings);
+
+        assert_eq!(
+            details,
+            vec![
+                "startup warnings: 4",
+                "startup warning skills: 1",
+                "startup warning hooks: 1",
+                "startup warning plugins: 1",
+                "startup warning MCP: 1",
+                "startup warning deprecated: 1",
+            ]
+        );
+    }
+
+    #[test]
     fn config_overrides_from_interactive_preserves_global_options() {
         let interactive = TuiCli::parse_from([
             "codex",
@@ -3038,6 +3334,18 @@ mod tests {
             codex_version: "0.0.0".to_string(),
             checks: vec![
                 DoctorCheck::new(
+                    "system.environment",
+                    "system",
+                    CheckStatus::Ok,
+                    "OS language en-US",
+                )
+                .detail("VISUAL: code --wait")
+                .detail("EDITOR: env AWS_ACCESS_KEY_ID=AKIAEXAMPLE vim")
+                .detail("PAGER: env PRIVATE_PAGER_VALUE=pager-secret less")
+                .detail("GIT_PAGER: delta")
+                .detail("GH_PAGER: less")
+                .detail("LESS: -FRX"),
+                DoctorCheck::new(
                     "mcp.config",
                     "mcp",
                     CheckStatus::Warning,
@@ -3071,8 +3379,35 @@ mod tests {
         assert!(!redacted.contains("user:pass"));
         assert!(!redacted.contains("x=abc"));
         assert!(!redacted.contains("sk-live-secret"));
+        assert!(!redacted.contains("AKIAEXAMPLE"));
+        assert!(!redacted.contains("pager-secret"));
+        assert!(!redacted.contains("code --wait"));
         assert!(redacted.contains("https://example.com/mcp"));
         assert_eq!(json["checks"].is_object(), true);
+        assert_eq!(
+            json["checks"]["system.environment"]["details"]["VISUAL"],
+            "set"
+        );
+        assert_eq!(
+            json["checks"]["system.environment"]["details"]["EDITOR"],
+            "set"
+        );
+        assert_eq!(
+            json["checks"]["system.environment"]["details"]["PAGER"],
+            "set"
+        );
+        assert_eq!(
+            json["checks"]["system.environment"]["details"]["GIT_PAGER"],
+            "set"
+        );
+        assert_eq!(
+            json["checks"]["system.environment"]["details"]["GH_PAGER"],
+            "set"
+        );
+        assert_eq!(
+            json["checks"]["system.environment"]["details"]["LESS"],
+            "set"
+        );
         assert_eq!(json["checks"]["mcp.config"]["id"], "mcp.config");
         assert_eq!(
             json["checks"]["mcp.config"]["details"]["OPENAI_API_KEY"],
@@ -3178,6 +3513,26 @@ mod tests {
         }));
     }
 
+    #[tokio::test]
+    async fn mcp_check_does_not_probe_environment_stdio_on_the_host() {
+        let remote_server: McpServerConfig = toml::from_str(
+            r#"
+                command = "remote-only-command"
+                environment_id = "remote"
+                cwd = "C:\\plugins\\demo"
+                required = true
+                env_vars = [{ name = "REMOTE_ONLY_TOKEN", source = "remote" }]
+            "#,
+        )
+        .expect("remote MCP config");
+        let servers = HashMap::from([("remote".to_string(), remote_server)]);
+
+        let check = mcp_check_from_servers(&servers).await;
+
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert_eq!(check.summary, "MCP configuration is locally consistent");
+    }
+
     #[test]
     fn provider_specific_auth_allows_non_openai_provider_without_env_key() {
         let check = provider_specific_auth_check(
@@ -3221,11 +3576,14 @@ mod tests {
     #[test]
     fn stored_auth_validation_rejects_missing_api_key() {
         let auth = AuthDotJson {
-            auth_mode: Some(codex_app_server_protocol::AuthMode::ApiKey),
+            auth_mode: Some(AuthMode::ApiKey),
             openai_api_key: None,
             tokens: None,
             last_refresh: None,
             agent_identity: None,
+            personal_access_token: None,
+            bedrock_api_key: None,
+            bedrock_access_keys: None,
         };
 
         assert_eq!(
@@ -3243,6 +3601,9 @@ mod tests {
             tokens: None,
             last_refresh: None,
             agent_identity: None,
+            personal_access_token: None,
+            bedrock_api_key: None,
+            bedrock_access_keys: None,
         };
 
         assert_eq!(
@@ -3255,18 +3616,47 @@ mod tests {
     }
 
     #[test]
+    fn stored_auth_validation_handles_personal_access_token() {
+        let mut auth = AuthDotJson {
+            auth_mode: None,
+            openai_api_key: None,
+            tokens: None,
+            last_refresh: None,
+            agent_identity: None,
+            personal_access_token: Some("at-test".to_string()),
+            bedrock_api_key: None,
+            bedrock_access_keys: None,
+        };
+
+        assert_eq!(stored_auth_mode(&auth), "personal_access_token");
+        assert!(stored_auth_issues(&auth, |_| false).is_empty());
+
+        auth.auth_mode = Some(AuthMode::PersonalAccessToken);
+        auth.personal_access_token = None;
+        assert_eq!(
+            stored_auth_issues(&auth, |_| false),
+            vec!["personal access token auth is missing a personal access token"]
+        );
+    }
+
+    #[test]
     fn provider_reachability_mode_uses_api_key_auth() {
         let api_key_auth = AuthDotJson {
-            auth_mode: Some(codex_app_server_protocol::AuthMode::ApiKey),
+            auth_mode: Some(AuthMode::ApiKey),
             openai_api_key: Some("sk-test".to_string()),
             tokens: None,
             last_refresh: None,
             agent_identity: None,
+            personal_access_token: None,
+            bedrock_api_key: None,
+            bedrock_access_keys: None,
         };
 
         assert_eq!(
             provider_auth_reachability_mode_from_auth(
                 /*requires_openai_auth*/ true,
+                /*provider_env_key*/ None,
+                /*provider_base_url*/ None,
                 |_| false,
                 Some(&api_key_auth),
             ),
@@ -3275,8 +3665,46 @@ mod tests {
         assert_eq!(
             provider_auth_reachability_mode_from_auth(
                 /*requires_openai_auth*/ true,
-                |name| name == OPENAI_API_KEY_ENV_VAR,
+                /*provider_env_key*/ None,
+                /*provider_base_url*/ None,
+                |name| name == CODEX_API_KEY_ENV_VAR,
                 /*stored_auth*/ None,
+            ),
+            ProviderAuthReachabilityMode::ApiKey
+        );
+
+        let chatgpt_auth = AuthDotJson {
+            auth_mode: Some(AuthMode::Chatgpt),
+            openai_api_key: None,
+            ..api_key_auth
+        };
+        assert_eq!(
+            provider_auth_reachability_mode_from_auth(
+                /*requires_openai_auth*/ true,
+                /*provider_env_key*/ None,
+                Some("https://custom.example/v1"),
+                |name| name == OPENAI_API_KEY_ENV_VAR,
+                Some(&chatgpt_auth),
+            ),
+            ProviderAuthReachabilityMode::Chatgpt
+        );
+        assert_eq!(
+            provider_auth_reachability_mode_from_auth(
+                /*requires_openai_auth*/ true,
+                Some(OPENAI_API_KEY_ENV_VAR),
+                Some("https://custom.example/v1"),
+                |name| name == OPENAI_API_KEY_ENV_VAR,
+                Some(&chatgpt_auth),
+            ),
+            ProviderAuthReachabilityMode::ApiKey
+        );
+        assert_eq!(
+            provider_auth_reachability_mode_from_auth(
+                /*requires_openai_auth*/ true,
+                /*provider_env_key*/ None,
+                /*provider_base_url*/ None,
+                |name| name == CODEX_API_KEY_ENV_VAR,
+                Some(&chatgpt_auth),
             ),
             ProviderAuthReachabilityMode::ApiKey
         );
@@ -3298,10 +3726,11 @@ mod tests {
                 description: "provider auth".to_string(),
                 endpoints: vec![ReachabilityEndpoint {
                     label: "azure API".to_string(),
-                    url: "https://example.openai.azure.com/openai/v1".to_string(),
+                    url: "https://example.openai.azure.com/openai/v1/responses".to_string(),
                     required: true,
                     route_probe_url: None,
                 }],
+                http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
             }
         );
     }
@@ -3310,28 +3739,38 @@ mod tests {
     fn provider_reachability_adds_models_route_probe_for_openai_compatible_base_urls() {
         let query_params = HashMap::from([("api-version".to_string(), "2026-01-01".to_string())]);
 
-        assert_eq!(
-            provider_reachability_plan_from_parts(
-                ProviderAuthReachabilityMode::NotRequired,
-                "custom",
-                "Custom",
-                Some("https://example.com/openai/v1/"),
-                Some(&query_params),
-                /*is_amazon_bedrock*/ false,
-                "https://chatgpt.com/backend-api/",
-            ),
-            ReachabilityPlan {
-                description: "provider auth".to_string(),
-                endpoints: vec![ReachabilityEndpoint {
-                    label: "custom API".to_string(),
-                    url: "https://example.com/openai/v1/".to_string(),
-                    required: true,
-                    route_probe_url: Some(
-                        "https://example.com/openai/v1/models?api-version=2026-01-01".to_string()
+        for (mode, description) in [
+            (ProviderAuthReachabilityMode::NotRequired, "provider auth"),
+            (ProviderAuthReachabilityMode::Chatgpt, "ChatGPT auth"),
+        ] {
+            assert_eq!(
+                provider_reachability_plan_from_parts(
+                    mode,
+                    "custom",
+                    "Custom",
+                    Some("https://example.com/openai/v1/"),
+                    Some(&query_params),
+                    /*is_amazon_bedrock*/ false,
+                    "https://chatgpt.com/backend-api/",
+                ),
+                ReachabilityPlan {
+                    description: description.to_string(),
+                    endpoints: vec![ReachabilityEndpoint {
+                        label: "custom API".to_string(),
+                        url: "https://example.com/openai/v1/responses?api-version=2026-01-01"
+                            .to_string(),
+                        required: true,
+                        route_probe_url: Some(
+                            "https://example.com/openai/v1/models?api-version=2026-01-01"
+                                .to_string()
+                        ),
+                    }],
+                    http_client_factory: HttpClientFactory::new(
+                        OutboundProxyPolicy::ReqwestDefault
                     ),
-                }],
-            }
-        );
+                }
+            );
+        }
     }
 
     #[test]
@@ -3365,9 +3804,22 @@ mod tests {
             plan.endpoints,
             vec![ReachabilityEndpoint {
                 label: "openai API".to_string(),
-                url: "https://api.openai.com/v1".to_string(),
+                url: "https://api.openai.com/v1/responses".to_string(),
                 required: true,
                 route_probe_url: Some("https://api.openai.com/v1/models".to_string()),
+            }]
+        );
+    }
+
+    #[test]
+    fn provider_reachability_chatgpt_uses_inference_endpoint() {
+        assert_eq!(
+            default_reachability_plan().endpoints,
+            vec![ReachabilityEndpoint {
+                label: "ChatGPT".to_string(),
+                url: "https://chatgpt.com/backend-api/codex/responses".to_string(),
+                required: true,
+                route_probe_url: None,
             }]
         );
     }
@@ -3507,7 +3959,9 @@ mod tests {
                 .expect("write response");
         });
 
-        let status = http_probe_url(&format!("http://{addr}/mcp")).await;
+        let status =
+            http_probe_url_with_timeout(&format!("http://{addr}/mcp"), Duration::from_secs(3))
+                .await;
         server.join().expect("probe server thread should finish");
 
         assert_eq!(status, Ok("HTTP 405".to_string()));
@@ -3569,6 +4023,70 @@ mod tests {
                 "required: stdio command \"definitely-missing-codex-doctor-mcp\" is not resolvable",
             )
         }));
+    }
+
+    #[tokio::test]
+    async fn mcp_check_skips_host_path_checks_for_remote_stdio() {
+        #[cfg(not(windows))]
+        let cwd = r"C:\Users\openai\share";
+        #[cfg(windows)]
+        let cwd = "/home/openai/share";
+        let cwd = toml::Value::String(cwd.to_string());
+        let remote_server: McpServerConfig = toml::from_str(&format!(
+            r#"
+                command = "definitely-missing-codex-doctor-mcp"
+                environment_id = "remote"
+                cwd = {cwd}
+                required = true
+                env_vars = [{{ name = "REMOTE_ONLY_TOKEN", source = "remote" }}]
+            "#,
+        ))
+        .expect("should deserialize remote MCP config");
+        let servers = HashMap::from([("remote".to_string(), remote_server)]);
+
+        let check = mcp_check_from_servers(&servers).await;
+
+        assert_eq!(check.status, CheckStatus::Ok);
+        assert_eq!(check.summary, "MCP configuration is locally consistent");
+    }
+
+    #[tokio::test]
+    async fn mcp_check_validates_remote_stdio_cwd() {
+        let missing_cwd: McpServerConfig = toml::from_str(
+            r#"
+                command = "echo"
+                environment_id = "remote"
+                required = true
+            "#,
+        )
+        .expect("should deserialize remote MCP config without cwd");
+        let relative_cwd: McpServerConfig = toml::from_str(
+            r#"
+                command = "echo"
+                environment_id = "remote"
+                cwd = "relative"
+                required = true
+            "#,
+        )
+        .expect("should deserialize remote MCP config with relative cwd");
+        let servers = HashMap::from([
+            ("missing".to_string(), missing_cwd),
+            ("relative".to_string(), relative_cwd),
+        ]);
+
+        let check = mcp_check_from_servers(&servers).await;
+
+        assert_eq!(check.status, CheckStatus::Fail);
+        assert!(
+            check
+                .details
+                .contains(&"missing: remote stdio requires an explicit cwd".to_string())
+        );
+        assert!(
+            check
+                .details
+                .contains(&"relative: remote stdio cwd is not absolute (relative)".to_string())
+        );
     }
 
     #[cfg(unix)]
@@ -3675,6 +4193,7 @@ mod tests {
             stream_supports_color: true,
             terminal_size: Ok((120, 40)),
             tmux_details: Vec::new(),
+            windows_console_details: Vec::new(),
         }
     }
 
@@ -3805,6 +4324,22 @@ mod tests {
                 .details
                 .iter()
                 .any(|detail| detail.contains("10.0.0.1"))
+        );
+    }
+
+    #[test]
+    fn terminal_check_includes_windows_console_details() {
+        let mut inputs = terminal_inputs();
+        inputs
+            .windows_console_details
+            .push("stdout console mode: 0x00000004 (VT processing: true)".to_string());
+
+        let check = terminal_check_from_inputs(inputs);
+
+        assert!(
+            check
+                .details
+                .contains(&"stdout console mode: 0x00000004 (VT processing: true)".to_string())
         );
     }
 
