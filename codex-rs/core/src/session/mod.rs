@@ -21,6 +21,8 @@ use crate::compact::CompactedHistoryMetadata;
 use crate::config::ManagedFeatures;
 use crate::config::resolve_tool_suggest_config_from_layer_stack;
 use crate::context::ContextualUserFragment;
+use crate::context::DeveloperInstructions;
+use crate::context::GuardianPolicy;
 use crate::context::ManagedDeveloperInstructions;
 use crate::context::ModelSwitchInstructions;
 use crate::context::MultiAgentRoleInstructions;
@@ -56,7 +58,6 @@ use codex_analytics::SubAgentThreadStartedInput;
 use codex_analytics::TurnCodexErrorFact;
 use codex_async_utils::OrCancelExt;
 use codex_connectors::connector_runtime_context_key;
-use codex_context_fragments::AnnotatedContent;
 use codex_context_fragments::RenderedFragment;
 use codex_exec_server::Environment;
 use codex_exec_server::EnvironmentManager;
@@ -100,13 +101,13 @@ use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::EnteredReviewModeItem;
+use codex_protocol::items::SubAgentActivityItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::BaseInstructionsProvenance;
-use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::openai_models::ModelInfo;
@@ -123,6 +124,7 @@ use codex_protocol::protocol::MULTI_AGENT_MODE_OPEN_TAG;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RawResponseItemEvent;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentActivityKind;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsOverrides;
@@ -2019,6 +2021,52 @@ impl Session {
             return;
         };
 
+        if matches!(status, AgentStatus::Completed(_))
+            && let Some(parent_turn_id) = turn_context.turn_metadata_state.parent_turn_id()
+        {
+            let initiating_thread_id = match turn_context
+                .turn_metadata_state
+                .initiating_agent_path()
+            {
+                Some(initiating_agent_path) if initiating_agent_path != &parent_agent_path => self
+                    .services
+                    .agent_control
+                    .resolve_agent_reference(
+                        self.thread_id,
+                        &turn_context.session_source,
+                        initiating_agent_path.as_str(),
+                    )
+                    .await
+                    .inspect_err(|err| {
+                        debug!(
+                            "failed to resolve completed activity initiator {initiating_agent_path}: {err}"
+                        );
+                    })
+                    .ok(),
+                _ => Some(parent_thread_id),
+            };
+            if let Some(initiating_thread_id) = initiating_thread_id
+                && let Err(err) = self
+                    .services
+                    .agent_control
+                    .emit_sub_agent_activity(
+                        initiating_thread_id,
+                        parent_turn_id,
+                        SubAgentActivityItem {
+                            id: format!("subagent-completed-{}", turn_context.sub_id),
+                            kind: SubAgentActivityKind::Completed,
+                            agent_thread_id: self.thread_id,
+                            agent_path: child_agent_path.clone(),
+                        },
+                    )
+                    .await
+            {
+                debug!(
+                    "failed to emit completed activity to initiating thread {initiating_thread_id}: {err}"
+                );
+            }
+        }
+
         let Some(message) = format_inter_agent_completion_message(
             parent_agent_path.clone(),
             child_agent_path.clone(),
@@ -3539,13 +3587,8 @@ impl Session {
             && let Some(developer_instructions) = turn_context.developer_instructions.as_deref()
             && !developer_instructions.is_empty()
         {
-            developer_sections.push(RenderedFragment::new(
-                "developer",
-                AnnotatedContent::input_text(
-                    developer_instructions,
-                    ContentItemKind("generic.developer_instructions".to_string()),
-                ),
-            ));
+            developer_sections
+                .push(DeveloperInstructions::new(developer_instructions).render_fragment());
         }
         let loaded_plugins = self
             .services
@@ -3717,13 +3760,7 @@ impl Session {
             && !developer_instructions.is_empty()
             && let Some(guardian_developer_message) =
                 crate::context_manager::updates::build_rendered_message(vec![
-                    RenderedFragment::new(
-                        "developer",
-                        AnnotatedContent::input_text(
-                            developer_instructions,
-                            ContentItemKind("guardian.policy".to_string()),
-                        ),
-                    ),
+                    GuardianPolicy::new(developer_instructions).render_fragment(),
                 ])
         {
             items.push(guardian_developer_message);

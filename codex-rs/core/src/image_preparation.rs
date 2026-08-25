@@ -6,8 +6,12 @@ use crate::context::ResizedImage;
 use crate::original_image_detail::can_request_original_image_detail;
 use codex_analytics::ImageDetailSetting;
 use codex_analytics::ImagePreparationMetadata;
+use codex_context_fragments::AnnotatedContent;
+use codex_context_fragments::set_annotated_content;
+use codex_context_fragments::to_annotated_content;
 use codex_features::Feature;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageDetail;
@@ -18,6 +22,7 @@ use codex_utils_image::ImageProcessingError;
 use codex_utils_image::PromptImageMode;
 use codex_utils_image::PromptImageResizeLimits;
 use codex_utils_image::load_data_url_for_prompt;
+use std::collections::HashSet;
 use tracing::warn;
 
 pub(crate) const IMAGE_PROCESSING_ERROR_PLACEHOLDER: &str =
@@ -122,34 +127,92 @@ pub(crate) fn prepare_response_items(
             })
         };
     for mut item in std::mem::take(items) {
-        if matches!(&item, ResponseItem::Message { role, .. } if role == "user") {
-            prepared_items.extend(prepare_user_message(
-                item,
-                resize_notice_mode,
-                &mut metadata,
-                mode,
-            ));
-            continue;
-        }
-        let resize_notice = match &mut item {
-            ResponseItem::Message { role, content, .. } => {
-                prepare_message_content(
-                    content,
-                    ImageOrigin {
-                        message_role: Some(role),
-                        item_id: None,
-                    },
-                    &mut metadata,
-                    mode,
-                );
-                None
+        let had_metadata = matches!(
+            &item,
+            ResponseItem::Message {
+                internal_chat_message_metadata_passthrough: Some(_),
+                ..
+            }
+        );
+        let mut annotated_content = to_annotated_content(&mut item);
+        let had_image = annotated_content.as_ref().is_some_and(|content| {
+            content
+                .iter()
+                .any(|item| matches!(item.content(), ContentItem::InputImage { .. }))
+        });
+        let existing_texts = annotated_content
+            .as_ref()
+            .map_or_else(HashSet::new, |content| {
+                content
+                    .iter()
+                    .filter_map(|item| match item.content() {
+                        ContentItem::InputText { text } => Some(text.clone()),
+                        _ => None,
+                    })
+                    .collect()
+            });
+        let mut typed_notice = None;
+        let user_notice = match &mut item {
+            ResponseItem::Message { role, .. } => {
+                let Some(content) = annotated_content.take() else {
+                    continue;
+                };
+                if role == "user" {
+                    let (content, notices) = prepare_user_message_content(
+                        content,
+                        resize_notice_mode,
+                        &mut metadata,
+                        mode,
+                        &existing_texts,
+                    );
+                    let content_is_empty = content.is_empty();
+                    let _ = set_annotated_content(&mut item, content);
+                    if content_is_empty
+                        && !had_metadata
+                        && let ResponseItem::Message {
+                            internal_chat_message_metadata_passthrough,
+                            ..
+                        } = &mut item
+                    {
+                        *internal_chat_message_metadata_passthrough = None;
+                    }
+                    Some(notices)
+                } else {
+                    let mut content = content;
+                    prepare_message_content(
+                        &mut content,
+                        ImageOrigin {
+                            message_role: Some(role.as_str()),
+                            item_id: None,
+                        },
+                        &mut metadata,
+                        mode,
+                    );
+                    let _ = set_annotated_content(&mut item, content);
+                    if !had_metadata
+                        && !had_image
+                        && let ResponseItem::Message {
+                            internal_chat_message_metadata_passthrough,
+                            ..
+                        } = &mut item
+                    {
+                        *internal_chat_message_metadata_passthrough = None;
+                    }
+                    None
+                }
             }
             ResponseItem::FunctionCallOutput {
                 call_id, output, ..
-            } => prepare_tool_output(output, call_id.as_deref(), &mut metadata),
+            } => {
+                typed_notice = prepare_tool_output(output, call_id.as_deref(), &mut metadata);
+                None
+            }
             ResponseItem::CustomToolCallOutput {
                 call_id, output, ..
-            } => prepare_tool_output(output, Some(call_id.as_str()), &mut metadata),
+            } => {
+                typed_notice = prepare_tool_output(output, Some(call_id.as_str()), &mut metadata);
+                None
+            }
             ResponseItem::AdditionalTools { .. }
             | ResponseItem::Reasoning { .. }
             | ResponseItem::AgentMessage { .. }
@@ -166,40 +229,40 @@ pub(crate) fn prepare_response_items(
             | ResponseItem::Other => None,
         };
         prepared_items.push(item);
-        if let Some(resize_notice) = resize_notice {
-            prepared_items.push(ContextualUserFragment::into(resize_notice));
+        if let Some(notices) = user_notice.filter(|notices| !notices.is_empty()) {
+            prepared_items.push(ResponseItem::Message {
+                id: None,
+                role: "developer".to_string(),
+                content: notices,
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            });
+        }
+        if let Some(typed_notice) = typed_notice {
+            prepared_items.push(ContextualUserFragment::into(typed_notice));
         }
     }
     *items = prepared_items;
     metadata
 }
 
-fn prepare_user_message(
-    item: ResponseItem,
+fn prepare_user_message_content(
+    items: Vec<AnnotatedContent>,
     resize_notice_mode: ImageResizeNoticeMode,
     metadata: &mut Vec<ImagePreparationMetadata>,
     mode: ImagePreparationMode,
-) -> Vec<ResponseItem> {
-    let ResponseItem::Message {
-        id,
-        role,
-        content,
-        phase,
-        internal_chat_message_metadata_passthrough,
-    } = item
-    else {
-        unreachable!("user media preparation requires a message");
-    };
-    let image_count = content
+    existing_texts: &HashSet<String>,
+) -> (Vec<AnnotatedContent>, Vec<ContentItem>) {
+    let image_count = items
         .iter()
-        .filter(|item| matches!(item, ContentItem::InputImage { .. }))
+        .filter(|item| matches!(item.content(), ContentItem::InputImage { .. }))
         .count();
     let mut image_number = 0;
-    let mut prepared_content = Vec::with_capacity(content.len());
+    let mut prepared_content = Vec::with_capacity(items.len());
     let mut developer_notices = Vec::new();
-
-    for content_item in content {
-        match content_item {
+    for item in items {
+        let (content, kind) = item.into_parts();
+        match content {
             ContentItem::InputImage {
                 mut image_url,
                 mut detail,
@@ -216,7 +279,10 @@ fn prepare_user_message(
                     mode,
                 ) {
                     Ok(resize) => {
-                        prepared_content.push(ContentItem::InputImage { image_url, detail });
+                        prepared_content.push(AnnotatedContent::new(
+                            ContentItem::InputImage { image_url, detail },
+                            kind,
+                        ));
                         if let Some(resize) = resize
                             && resize_notice_mode == ImageResizeNoticeMode::Enabled
                         {
@@ -232,71 +298,59 @@ fn prepare_user_message(
                     }
                     Err(error) => {
                         warn!(%error, "failed to prepare message image");
-                        developer_notices.push(ContentItem::InputText {
-                            text: error.placeholder().to_string(),
-                        });
+                        let notice = error.placeholder().to_string();
+                        if !existing_texts.contains(&notice) {
+                            developer_notices.push(ContentItem::InputText { text: notice });
+                        }
                     }
                 }
             }
             ContentItem::InputAudio { mut audio_url } => {
                 if let Some(placeholder) = prepare_audio_item(&mut audio_url) {
-                    developer_notices.push(ContentItem::InputText { text: placeholder });
+                    if !existing_texts.contains(&placeholder) {
+                        developer_notices.push(ContentItem::InputText { text: placeholder });
+                    }
                 } else {
-                    prepared_content.push(ContentItem::InputAudio { audio_url });
+                    prepared_content.push(AnnotatedContent::new(
+                        ContentItem::InputAudio { audio_url },
+                        kind,
+                    ));
                 }
             }
-            content_item => prepared_content.push(content_item),
+            content => prepared_content.push(AnnotatedContent::new(content, kind)),
         }
     }
-
-    let mut prepared = vec![ResponseItem::Message {
-        id,
-        role,
-        content: prepared_content,
-        phase,
-        internal_chat_message_metadata_passthrough,
-    }];
-    if !developer_notices.is_empty() {
-        prepared.push(ResponseItem::Message {
-            id: None,
-            role: "developer".to_string(),
-            content: developer_notices,
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        });
-    }
-    prepared
+    (prepared_content, developer_notices)
 }
 
 fn prepare_message_content(
-    items: &mut Vec<ContentItem>,
+    items: &mut [AnnotatedContent],
     origin: ImageOrigin<'_>,
     metadata: &mut Vec<ImagePreparationMetadata>,
     mode: ImagePreparationMode,
 ) {
-    let mut prepared_content = Vec::with_capacity(items.len());
-    for mut item in std::mem::take(items) {
-        let error_placeholder = match &mut item {
+    for item in items {
+        match item.content_mut() {
             ContentItem::InputImage { image_url, detail } => {
-                match prepare_image(image_url, detail, origin, metadata, mode) {
-                    Ok(_) => None,
-                    Err(error) => {
-                        warn!(%error, "failed to prepare message image");
-                        Some(error.placeholder().to_string())
-                    }
+                if let Err(error) = prepare_image(image_url, detail, origin, metadata, mode) {
+                    warn!(%error, "failed to prepare message image");
+                    *item = AnnotatedContent::input_text(
+                        error.placeholder(),
+                        ContentItemKind("images.preparation_error".to_string()),
+                    );
                 }
             }
-            ContentItem::InputAudio { audio_url } => prepare_audio_item(audio_url),
-            _ => None,
-        };
-        if let Some(error_placeholder) = error_placeholder {
-            item = ContentItem::InputText {
-                text: error_placeholder,
-            };
+            ContentItem::InputAudio { audio_url } => {
+                if let Some(placeholder) = prepare_audio_item(audio_url) {
+                    *item = AnnotatedContent::input_text(
+                        placeholder,
+                        ContentItemKind("audio.preparation_error".to_string()),
+                    );
+                }
+            }
+            _ => {}
         }
-        prepared_content.push(item);
     }
-    *items = prepared_content;
 }
 
 fn image_resize_notice(image: ResizedImage) -> ContentItem {

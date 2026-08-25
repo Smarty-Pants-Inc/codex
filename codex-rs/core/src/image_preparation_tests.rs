@@ -55,6 +55,16 @@ fn preparation_preserves_small_image_bytes_and_emits_remote_url_notice_as_develo
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     }];
+    items.push(ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputImage {
+            image_url: "https://example.com/developer-image.png".to_string(),
+            detail: Some(ImageDetail::High),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    });
 
     prepare_response_items(
         &mut items,
@@ -77,15 +87,22 @@ fn preparation_preserves_small_image_bytes_and_emits_remote_url_notice_as_develo
     assert_eq!(decoded_image(image_url).0, original_bytes);
     assert_eq!(text, REMOTE_IMAGE_URL_PLACEHOLDER);
     assert_eq!(
-        items[1],
-        ResponseItem::Message {
+        &items[1],
+        &ResponseItem::Message {
             id: None,
             role: "developer".to_string(),
             content: vec![ContentItem::InputText {
                 text: REMOTE_IMAGE_URL_PLACEHOLDER.to_string(),
             }],
             phase: None,
-            internal_chat_message_metadata_passthrough: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    content_item_kinds: Some(vec![ContentItemKind(
+                        "images.preparation_error".to_string()
+                    )]),
+                    ..Default::default()
+                }
+            ),
         }
     );
 }
@@ -216,7 +233,16 @@ fn resize_notices_preserve_original_image_positions_and_skip_failed_images() {
                 },
             ],
             phase: None,
-            internal_chat_message_metadata_passthrough: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    content_item_kinds: Some(vec![
+                        ContentItemKind("user.image".to_string()),
+                        ContentItemKind("user.image".to_string()),
+                        ContentItemKind("user.image".to_string()),
+                    ]),
+                    ..Default::default()
+                },
+            ),
         },
         ResponseItem::FunctionCallOutput {
             id: None,

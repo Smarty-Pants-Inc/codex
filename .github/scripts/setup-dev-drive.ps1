@@ -1,9 +1,9 @@
 # Configure a fast drive for Windows CI jobs.
 #
 # GitHub-hosted Windows runners do not always expose a secondary D: volume. When
-# they do not, create a Dev Drive VHD. CI depends on this path for its
-# build directories where CI spends significant time doing I/O, so fail the
-# job if no real Dev Drive is available.
+# they do not, create a Dev Drive VHD. Older images may not support the
+# Format-Volume -DevDrive switch, so use a ReFS fallback while keeping the same
+# fast build-root path.
 
 function Test-DevDrive {
     param([string]$Drive)
@@ -43,18 +43,28 @@ if ((Test-Path "D:\") -and (Test-DevDrive "D:")) {
         $Disk = $Mounted | Get-Disk -ErrorAction Stop
         $Disk | Initialize-Disk -PartitionStyle GPT -ErrorAction Stop
         $Partition = $Disk | New-Partition -AssignDriveLetter -UseMaximumSize -ErrorAction Stop
-        $Volume = $Partition | Format-Volume -FileSystem ReFS -NewFileSystemLabel "CodexDevDrive" -DevDrive -Confirm:$false -Force -ErrorAction Stop
+        $SupportsDevDrive = (Get-Command Format-Volume -ErrorAction Stop).Parameters.ContainsKey("DevDrive")
+        if ($SupportsDevDrive) {
+            $Volume = $Partition | Format-Volume -FileSystem ReFS -NewFileSystemLabel "CodexDevDrive" -DevDrive -Confirm:$false -Force -ErrorAction Stop
+        } else {
+            Write-Warning "Format-Volume does not support -DevDrive; using a ReFS build volume."
+            $Volume = $Partition | Format-Volume -FileSystem ReFS -NewFileSystemLabel "CodexDevDrive" -Confirm:$false -Force -ErrorAction Stop
+        }
 
         $Drive = "$($Volume.DriveLetter):"
 
-        if (-not (Test-DevDrive $Drive)) {
-            throw "Provisioned volume at $Drive did not pass Dev Drive verification."
+        if ($SupportsDevDrive) {
+            if (-not (Test-DevDrive $Drive)) {
+                throw "Provisioned volume at $Drive did not pass Dev Drive verification."
+            }
+
+            Invoke-BestEffort { fsutil devdrv trust $Drive } "Trusting Dev Drive $Drive"
+            Invoke-BestEffort { fsutil devdrv enable /disallowAv } "Disabling AV filter attachment for Dev Drives"
+
+            Write-Output "Using Dev Drive at $Drive"
+        } else {
+            Write-Warning "Using ReFS fallback build volume at $Drive without Dev Drive verification."
         }
-
-        Invoke-BestEffort { fsutil devdrv trust $Drive } "Trusting Dev Drive $Drive"
-        Invoke-BestEffort { fsutil devdrv enable /disallowAv } "Disabling AV filter attachment for Dev Drives"
-
-        Write-Output "Using Dev Drive at $Drive"
     } catch {
         throw "Failed to create Dev Drive: $($_.Exception.Message)"
     }

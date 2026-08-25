@@ -4,6 +4,8 @@ use super::*;
 use super::tests::build_world_state_from_turn_context;
 use super::tests::make_session_and_context;
 use super::tests::raw_history_items;
+use crate::context::CompactionSummary;
+use crate::context::ContextualUserFragment;
 use codex_history::CompactedItem;
 use codex_history::InitialHistory;
 use codex_history::ResponseItemEnvelope;
@@ -18,6 +20,7 @@ use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
+use codex_protocol::protocol::ItemStartedEvent;
 use codex_protocol::protocol::SessionContextWindow;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
@@ -26,6 +29,7 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::WorldStateItem;
 use codex_protocol::security_risk::SecurityRiskScore;
 use codex_protocol::user_input::UserInput;
+use core_test_support::responses::strip_metadata_from_items;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -85,17 +89,55 @@ fn user_message_with_turn(text: &str, turn_id: &str, item_id: &str) -> ResponseI
     item
 }
 
-fn completed_user_message_event(text: &str, turn_id: &str) -> RolloutItem {
+fn user_message_turn_item(text: &str, item_id: &str) -> TurnItem {
+    TurnItem::UserMessage(UserMessageItem {
+        id: item_id.to_string(),
+        client_id: None,
+        content: vec![UserInput::Text {
+            text: text.to_string(),
+            text_elements: Vec::new(),
+        }],
+    })
+}
+
+fn started_user_message_event(text: &str, turn_id: &str, item_id: &str) -> RolloutItem {
+    RolloutItem::EventMsg(EventMsg::ItemStarted(ItemStartedEvent {
+        thread_id: ThreadId::default(),
+        turn_id: turn_id.to_string(),
+        item: user_message_turn_item(text, item_id),
+        started_at_ms: 0,
+    }))
+}
+
+fn completed_user_message_event(text: &str, turn_id: &str, item_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
         thread_id: ThreadId::default(),
         turn_id: turn_id.to_string(),
-        item: TurnItem::UserMessage(UserMessageItem::new(&[UserInput::Text {
-            text: text.to_string(),
-            text_elements: Vec::new(),
-        }])),
+        item: user_message_turn_item(text, item_id),
         started_at_ms: None,
         completed_at_ms: 0,
     }))
+}
+
+fn turn_started_event(turn_id: &str) -> RolloutItem {
+    RolloutItem::EventMsg(EventMsg::TurnStarted(
+        codex_protocol::protocol::TurnStartedEvent {
+            turn_id: turn_id.to_string(),
+            trace_id: None,
+            started_at: None,
+            model_context_window: Some(128_000),
+            collaboration_mode_kind: ModeKind::Default,
+        },
+    ))
+}
+
+fn legacy_user_message_event(text: &str) -> RolloutItem {
+    RolloutItem::EventMsg(EventMsg::UserMessage(
+        codex_protocol::protocol::UserMessageEvent {
+            message: text.to_string(),
+            ..Default::default()
+        },
+    ))
 }
 fn migrated_legacy_generated_context(mut item: ResponseItem) -> ResponseItem {
     let ResponseItem::Message { role, content, .. } = &mut item else {
@@ -274,7 +316,9 @@ async fn record_initial_history_ignores_security_risk_scores() {
         .await;
 
     assert_eq!(
-        raw_history_items(&session.state.lock().await.clone_history()),
+        strip_metadata_from_items(&raw_history_items(
+            &session.state.lock().await.clone_history()
+        )),
         vec![user_item]
     );
 }
@@ -427,9 +471,148 @@ async fn reconstruction_uses_user_lifecycle_provenance_for_legacy_context_lookal
         .reconstruct_history_from_rollout(
             &turn_context,
             &[
+                turn_started_event(turn_id),
                 RolloutItem::ResponseItem(generated.into()),
                 RolloutItem::ResponseItem(direct.clone().into()),
-                completed_user_message_event(text, turn_id),
+                started_user_message_event(text, turn_id, "direct-lifecycle"),
+                completed_user_message_event(text, turn_id, "direct-lifecycle"),
+                legacy_user_message_event(text),
+            ],
+        )
+        .await;
+
+    assert_eq!(
+        reconstruction.history,
+        annotated(vec![expected_generated, direct])
+    );
+}
+
+#[tokio::test]
+async fn reconstruction_preserves_repeated_same_text_direct_user_lifecycle_events() {
+    let (session, turn_context) = make_session_and_context().await;
+    let turn_id = "direct-turn";
+    let text =
+        "<subagent_notification>{\"status\":{\"completed\":\"same text\"}}</subagent_notification>";
+    let generated = user_message_with_turn(text, turn_id, "generated");
+    let first_direct = user_message_with_turn(text, turn_id, "first-direct");
+    let second_direct = user_message_with_turn(text, turn_id, "second-direct");
+    let expected_generated = migrated_legacy_generated_context(generated.clone());
+
+    let reconstruction = session
+        .reconstruct_history_from_rollout(
+            &turn_context,
+            &[
+                turn_started_event(turn_id),
+                RolloutItem::ResponseItem(generated.into()),
+                RolloutItem::ResponseItem(first_direct.clone().into()),
+                started_user_message_event(text, turn_id, "first-lifecycle"),
+                completed_user_message_event(text, turn_id, "first-lifecycle"),
+                legacy_user_message_event(text),
+                RolloutItem::ResponseItem(second_direct.clone().into()),
+                started_user_message_event(text, turn_id, "second-lifecycle"),
+                completed_user_message_event(text, turn_id, "second-lifecycle"),
+                legacy_user_message_event(text),
+            ],
+        )
+        .await;
+
+    assert_eq!(
+        reconstruction.history,
+        annotated(vec![expected_generated, first_direct, second_direct])
+    );
+}
+
+#[tokio::test]
+async fn reconstruction_does_not_reuse_missing_legacy_fanout_across_items() {
+    let (session, turn_context) = make_session_and_context().await;
+    let turn_id = "direct-turn";
+    let text =
+        "<subagent_notification>{\"status\":{\"completed\":\"same text\"}}</subagent_notification>";
+    let generated = user_message_with_turn(text, turn_id, "generated");
+    let typed_direct = user_message_with_turn(text, turn_id, "typed-direct");
+    let legacy_direct = user_message_with_turn(text, turn_id, "legacy-direct");
+    let expected_generated = migrated_legacy_generated_context(generated.clone());
+
+    let reconstruction = session
+        .reconstruct_history_from_rollout(
+            &turn_context,
+            &[
+                turn_started_event(turn_id),
+                RolloutItem::ResponseItem(generated.into()),
+                RolloutItem::ResponseItem(typed_direct.clone().into()),
+                completed_user_message_event(text, turn_id, "typed-lifecycle"),
+                RolloutItem::ResponseItem(legacy_direct.clone().into()),
+                legacy_user_message_event(text),
+            ],
+        )
+        .await;
+
+    assert_eq!(
+        reconstruction.history,
+        annotated(vec![expected_generated, typed_direct, legacy_direct])
+    );
+}
+
+#[tokio::test]
+async fn reconstruction_uses_completion_provenance_for_interleaved_response_items() {
+    let (session, turn_context) = make_session_and_context().await;
+    let turn_id = "direct-turn";
+    let text =
+        "<subagent_notification>{\"status\":{\"completed\":\"same text\"}}</subagent_notification>";
+    let generated = user_message_with_turn(text, turn_id, "generated");
+    let direct = user_message_with_turn(text, turn_id, "direct");
+    let expected_generated = migrated_legacy_generated_context(generated.clone());
+
+    let reconstruction = session
+        .reconstruct_history_from_rollout(
+            &turn_context,
+            &[
+                turn_started_event(turn_id),
+                RolloutItem::ResponseItem(generated.into()),
+                started_user_message_event(text, turn_id, "direct-lifecycle"),
+                RolloutItem::ResponseItem(direct.clone().into()),
+                completed_user_message_event(text, turn_id, "direct-lifecycle"),
+                legacy_user_message_event(text),
+            ],
+        )
+        .await;
+
+    assert_eq!(
+        reconstruction.history,
+        annotated(vec![expected_generated, direct])
+    );
+}
+
+#[tokio::test]
+async fn reconstruction_keeps_typed_fanout_marker_across_same_turn_events() {
+    let (session, turn_context) = make_session_and_context().await;
+    let turn_id = "direct-turn";
+    let text =
+        "<subagent_notification>{\"status\":{\"completed\":\"same text\"}}</subagent_notification>";
+    let generated = user_message_with_turn(text, turn_id, "generated");
+    let direct = user_message_with_turn(text, turn_id, "direct");
+    let expected_generated = migrated_legacy_generated_context(generated.clone());
+
+    let reconstruction = session
+        .reconstruct_history_from_rollout(
+            &turn_context,
+            &[
+                turn_started_event(turn_id),
+                RolloutItem::ResponseItem(generated.into()),
+                RolloutItem::ResponseItem(direct.clone().into()),
+                completed_user_message_event(text, turn_id, "direct-lifecycle"),
+                RolloutItem::EventMsg(EventMsg::TurnComplete(
+                    codex_protocol::protocol::TurnCompleteEvent {
+                        turn_id: turn_id.to_string(),
+                        last_agent_message: None,
+                        error: None,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: None,
+                        time_to_first_token_ms: None,
+                    },
+                )),
+                legacy_user_message_event(text),
             ],
         )
         .await;
@@ -455,9 +638,11 @@ async fn reconstruction_migrates_only_proven_generated_items_in_replacement_hist
         .reconstruct_history_from_rollout(
             &turn_context,
             &[
+                turn_started_event(turn_id),
                 RolloutItem::ResponseItem(generated.clone().into()),
                 RolloutItem::ResponseItem(direct.clone().into()),
-                completed_user_message_event(text, turn_id),
+                completed_user_message_event(text, turn_id, "direct-lifecycle"),
+                legacy_user_message_event(text),
                 RolloutItem::Compacted(CompactedItem {
                     message: String::new(),
                     replacement_history: Some(annotated(vec![
@@ -518,7 +703,7 @@ async fn reconstruction_preserves_direct_user_message_equal_to_legacy_compaction
     let direct = user_message_with_turn(text, turn_id, "direct");
     let rollout_items = [
         RolloutItem::ResponseItem(direct.clone().into()),
-        completed_user_message_event(text, turn_id),
+        completed_user_message_event(text, turn_id, "direct-lifecycle"),
         RolloutItem::Compacted(CompactedItem {
             message: text.to_string(),
             replacement_history: Some(annotated(vec![direct.clone()])),
@@ -1627,12 +1812,12 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_does_
         .reconstruct_history_from_rollout(&turn_context, &rollout_items)
         .await;
 
+    let expected_summary = ContextualUserFragment::into(CompactionSummary::new(
+        compact::frame_compacted_summary("legacy summary"),
+    ));
     assert_eq!(
         reconstructed.history,
-        annotated(vec![
-            user_message("before compact"),
-            developer_message(&compact::frame_compacted_summary("legacy summary")),
-        ])
+        annotated(vec![user_message("before compact"), expected_summary,])
     );
     assert!(reconstructed.reference_context_item.is_none());
 }

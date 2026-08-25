@@ -6,6 +6,7 @@ use crate::config::ConfigBuilder;
 use crate::config::ConfigOverrides;
 use crate::config::test_config;
 use crate::context::ContextualUserFragment;
+use crate::context::DeveloperInstructions;
 use crate::context::TurnAborted;
 use crate::environment_selection::EnvironmentConfigOrigin;
 use crate::environment_selection::ThreadEnvironments;
@@ -259,7 +260,10 @@ fn user_message(text: &str) -> ResponseItem {
             text: text.to_string(),
         }],
         phase: None,
-        internal_chat_message_metadata_passthrough: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            content_item_kinds: Some(vec![ContentItemKind("unknown".to_string())]),
+            ..Default::default()
+        }),
     }
 }
 
@@ -322,7 +326,10 @@ fn assistant_message(text: &str) -> ResponseItem {
             text: text.to_string(),
         }],
         phase: None,
-        internal_chat_message_metadata_passthrough: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            content_item_kinds: Some(vec![ContentItemKind("unknown".to_string())]),
+            ..Default::default()
+        }),
     }
 }
 
@@ -683,6 +690,7 @@ fn test_model_client_session() -> crate::client::ModelClientSession {
         codex_protocol::protocol::SessionSource::Exec,
         "test_originator".to_string(),
         /*model_verbosity*/ None,
+        /*content_item_kinds_enabled*/ true,
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
         /*beta_features_header*/ None,
@@ -2577,7 +2585,12 @@ async fn prepares_resumed_history_before_installing_it() {
                     text: "keep me".to_string(),
                 }],
                 phase: None,
-                internal_chat_message_metadata_passthrough: None,
+                internal_chat_message_metadata_passthrough: Some(
+                    InternalChatMessageMetadataPassthrough {
+                        content_item_kinds: Some(vec![ContentItemKind("unknown".to_string())]),
+                        ..Default::default()
+                    },
+                ),
             },
             ResponseItem::Message {
                 id: None,
@@ -3410,10 +3423,8 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
     .await;
     let rollout_path =
         attach_thread_persistence(Arc::get_mut(&mut session).expect("unique session")).await;
-    let response_item = crate::context_manager::updates::build_developer_update_item(vec![
-        "Subagent guidance.".to_string(),
-    ])
-    .expect("developer message");
+    let response_item =
+        ContextualUserFragment::into(DeveloperInstructions::new("Subagent guidance."));
     let mut expected_item = ResponseItem::Message {
         id: None,
         role: "developer".to_string(),
@@ -3422,7 +3433,9 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
         }],
         phase: None,
         internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
-            content_item_kinds: Some(vec![ContentItemKind("unknown".to_string())]),
+            content_item_kinds: Some(vec![ContentItemKind(
+                "generic.developer_instructions".to_string(),
+            )]),
             ..Default::default()
         }),
     };
@@ -6068,6 +6081,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             session_configuration.session_source.clone(),
             session_configuration.originator.clone(),
             config.model_verbosity,
+            config.features.enabled(Feature::ContentItemKinds),
             config.features.enabled(Feature::EnableRequestCompression),
             config.features.enabled(Feature::RuntimeMetrics),
             Session::build_model_client_beta_features_header(config.as_ref()),
@@ -8527,6 +8541,7 @@ where
             session_configuration.session_source.clone(),
             session_configuration.originator.clone(),
             config.model_verbosity,
+            config.features.enabled(Feature::ContentItemKinds),
             config.features.enabled(Feature::EnableRequestCompression),
             config.features.enabled(Feature::RuntimeMetrics),
             Session::build_model_client_beta_features_header(config.as_ref()),
@@ -11531,30 +11546,14 @@ async fn sample_rollout(
         reconstruction_turn.model_info.truncation_policy.into(),
     );
 
-    let user1 = ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "first user".to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    };
+    let user1 = user_message("first user");
     live_history.record_items(
         std::iter::once(&user1),
         reconstruction_turn.model_info.truncation_policy.into(),
     );
     rollout_items.push(RolloutItem::ResponseItem(user1.clone().into()));
 
-    let assistant1 = ResponseItem::Message {
-        id: None,
-        role: "assistant".to_string(),
-        content: vec![ContentItem::OutputText {
-            text: "assistant reply one".to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    };
+    let assistant1 = assistant_message("assistant reply one");
     live_history.record_items(
         std::iter::once(&assistant1),
         reconstruction_turn.model_info.truncation_policy.into(),
@@ -11580,30 +11579,14 @@ async fn sample_rollout(
         window_id: Some(window_ids.window_id.to_string()),
     }));
 
-    let user2 = ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "second user".to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    };
+    let user2 = user_message("second user");
     live_history.record_items(
         std::iter::once(&user2),
         reconstruction_turn.model_info.truncation_policy.into(),
     );
     rollout_items.push(RolloutItem::ResponseItem(user2.clone().into()));
 
-    let assistant2 = ResponseItem::Message {
-        id: None,
-        role: "assistant".to_string(),
-        content: vec![ContentItem::OutputText {
-            text: "assistant reply two".to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    };
+    let assistant2 = assistant_message("assistant reply two");
     live_history.record_items(
         std::iter::once(&assistant2),
         reconstruction_turn.model_info.truncation_policy.into(),
@@ -11629,40 +11612,21 @@ async fn sample_rollout(
         window_id: Some(window_ids.window_id.to_string()),
     }));
 
-    let user3 = ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: "third user".to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    };
+    let user3 = user_message("third user");
     live_history.record_items(
         std::iter::once(&user3),
         reconstruction_turn.model_info.truncation_policy.into(),
     );
     rollout_items.push(RolloutItem::ResponseItem(user3.into()));
 
-    let assistant3 = ResponseItem::Message {
-        id: None,
-        role: "assistant".to_string(),
-        content: vec![ContentItem::OutputText {
-            text: "assistant reply three".to_string(),
-        }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    };
+    let assistant3 = assistant_message("assistant reply three");
     live_history.record_items(
         std::iter::once(&assistant3),
         reconstruction_turn.model_info.truncation_policy.into(),
     );
     rollout_items.push(RolloutItem::ResponseItem(assistant3.into()));
 
-    (
-        rollout_items,
-        live_history.for_prompt(&reconstruction_turn.model_info.input_modalities),
-    )
+    (rollout_items, raw_history_items(&live_history))
 }
 
 #[tokio::test]

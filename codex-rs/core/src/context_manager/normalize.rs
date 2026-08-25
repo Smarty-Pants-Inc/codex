@@ -1,3 +1,5 @@
+use codex_context_fragments::set_annotated_content;
+use codex_context_fragments::to_annotated_content;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::ResponseItemId;
 use codex_protocol::models::ContentItem;
@@ -7,6 +9,9 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::InputModality;
 use std::collections::HashSet;
 use uuid::Uuid;
+
+use crate::context::ContextualUserFragment;
+use crate::context::UnsupportedMedia;
 
 use crate::util::error_or_panic;
 use tracing::info;
@@ -356,86 +361,123 @@ fn strip_unsupported_media(
 
     let mut normalized_items = Vec::with_capacity(items.len());
     for mut envelope in std::mem::take(items) {
-        let omitted_content = match &mut envelope.item {
-            ResponseItem::Message { role, content, .. } if role == "user" => {
-                let mut direct_content = Vec::with_capacity(content.len());
+        let message_state = match &envelope.item {
+            ResponseItem::Message { role, content, .. } => Some((
+                role == "user",
+                content.iter().any(|content_item| match content_item {
+                    ContentItem::InputImage { .. } => !supports_images,
+                    ContentItem::InputAudio { .. } => !supports_audio,
+                    _ => false,
+                }),
+            )),
+            _ => None,
+        };
+        let (omitted_content, omitted_content_has_kinds) = match message_state {
+            Some((_, false)) => (Vec::new(), false),
+            Some((direct_user_message, true)) => {
+                let original_metadata = match &envelope.item {
+                    ResponseItem::Message {
+                        internal_chat_message_metadata_passthrough,
+                        ..
+                    } => internal_chat_message_metadata_passthrough.clone(),
+                    _ => None,
+                };
+                let has_content_item_kinds = original_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.content_item_kinds.as_ref())
+                    .is_some();
+                let Some(annotated_content) = to_annotated_content(&mut envelope.item) else {
+                    error_or_panic("message changed shape during media normalization");
+                    normalized_items.push(envelope);
+                    continue;
+                };
+                let mut normalized_content = Vec::with_capacity(annotated_content.len());
                 let mut omitted_content = Vec::new();
-                for content_item in std::mem::take(content) {
-                    match content_item {
+                for annotated in annotated_content {
+                    let unsupported_media = match annotated.content() {
                         ContentItem::InputImage { .. } if !supports_images => {
-                            omitted_content.push(ContentItem::InputText {
-                                text: IMAGE_CONTENT_OMITTED_PLACEHOLDER.to_string(),
-                            });
+                            Some(UnsupportedMedia::IMAGE)
                         }
                         ContentItem::InputAudio { .. } if !supports_audio => {
-                            omitted_content.push(ContentItem::InputText {
-                                text: AUDIO_CONTENT_OMITTED_PLACEHOLDER.to_string(),
-                            });
+                            Some(UnsupportedMedia::AUDIO)
                         }
-                        content_item => direct_content.push(content_item),
+                        _ => None,
+                    };
+                    let Some(unsupported_media) = unsupported_media else {
+                        normalized_content.push(annotated);
+                        continue;
+                    };
+                    let (_, replacement) = unsupported_media.render_fragment().into_parts();
+                    if direct_user_message {
+                        omitted_content.push(replacement);
+                    } else {
+                        normalized_content.push(replacement);
                     }
                 }
-                *content = direct_content;
-                omitted_content
-            }
-            ResponseItem::Message { content, .. } => {
-                for content_item in content {
-                    match content_item {
-                        ContentItem::InputImage { .. } if !supports_images => {
-                            *content_item = ContentItem::InputText {
-                                text: IMAGE_CONTENT_OMITTED_PLACEHOLDER.to_string(),
-                            };
-                        }
-                        ContentItem::InputAudio { .. } if !supports_audio => {
-                            *content_item = ContentItem::InputText {
-                                text: AUDIO_CONTENT_OMITTED_PLACEHOLDER.to_string(),
-                            };
-                        }
-                        _ => {}
-                    }
+                let _ = set_annotated_content(&mut envelope.item, normalized_content);
+                if !has_content_item_kinds
+                    && let ResponseItem::Message {
+                        internal_chat_message_metadata_passthrough,
+                        ..
+                    } = &mut envelope.item
+                {
+                    *internal_chat_message_metadata_passthrough = original_metadata;
                 }
-                Vec::new()
+                (omitted_content, has_content_item_kinds)
             }
-            ResponseItem::FunctionCallOutput { output, .. }
-            | ResponseItem::CustomToolCallOutput { output, .. } => {
-                if let Some(content_items) = output.content_items_mut() {
-                    for content_item in content_items {
-                        match content_item {
-                            FunctionCallOutputContentItem::InputImage { .. }
-                                if !supports_images =>
-                            {
-                                *content_item = FunctionCallOutputContentItem::InputText {
-                                    text: IMAGE_CONTENT_OMITTED_PLACEHOLDER.to_string(),
-                                };
+            None => match &mut envelope.item {
+                ResponseItem::FunctionCallOutput { output, .. }
+                | ResponseItem::CustomToolCallOutput { output, .. } => {
+                    if let Some(content_items) = output.content_items_mut() {
+                        for content_item in content_items {
+                            match content_item {
+                                FunctionCallOutputContentItem::InputImage { .. }
+                                    if !supports_images =>
+                                {
+                                    *content_item = FunctionCallOutputContentItem::InputText {
+                                        text: IMAGE_CONTENT_OMITTED_PLACEHOLDER.to_string(),
+                                    };
+                                }
+                                FunctionCallOutputContentItem::InputAudio { .. }
+                                    if !supports_audio =>
+                                {
+                                    *content_item = FunctionCallOutputContentItem::InputText {
+                                        text: AUDIO_CONTENT_OMITTED_PLACEHOLDER.to_string(),
+                                    };
+                                }
+                                _ => {}
                             }
-                            FunctionCallOutputContentItem::InputAudio { .. } if !supports_audio => {
-                                *content_item = FunctionCallOutputContentItem::InputText {
-                                    text: AUDIO_CONTENT_OMITTED_PLACEHOLDER.to_string(),
-                                };
-                            }
-                            _ => {}
                         }
                     }
+                    (Vec::new(), false)
                 }
-                Vec::new()
-            }
-            ResponseItem::ImageGenerationCall { result, .. } => {
-                if !supports_images {
-                    result.clear();
+                ResponseItem::ImageGenerationCall { result, .. } => {
+                    if !supports_images {
+                        result.clear();
+                    }
+                    (Vec::new(), false)
                 }
-                Vec::new()
-            }
-            _ => Vec::new(),
+                _ => (Vec::new(), false),
+            },
         };
         normalized_items.push(envelope);
         if !omitted_content.is_empty() {
-            normalized_items.push(ResponseItemEnvelope::new(ResponseItem::Message {
+            let mut notice = ResponseItem::Message {
                 id: None,
                 role: "developer".to_string(),
-                content: omitted_content,
+                content: Vec::new(),
                 phase: None,
                 internal_chat_message_metadata_passthrough: None,
-            }));
+            };
+            if omitted_content_has_kinds {
+                let _ = set_annotated_content(&mut notice, omitted_content);
+            } else if let ResponseItem::Message { content, .. } = &mut notice {
+                *content = omitted_content
+                    .into_iter()
+                    .map(|annotated| annotated.into_parts().0)
+                    .collect();
+            }
+            normalized_items.push(ResponseItemEnvelope::new(notice));
         }
     }
     *items = normalized_items;

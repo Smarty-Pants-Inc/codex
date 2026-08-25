@@ -17,7 +17,6 @@ use codex_api::ResponsesWebsocketConnection;
 use codex_api::ResponsesWsRequest;
 use codex_api::TransportError;
 use codex_api::build_session_headers;
-use codex_api::create_text_param_for_request;
 use codex_extension_api::ExtensionMetrics;
 use codex_http_client::HttpClientFactory;
 use codex_login::AgentIdentityAuthPolicy;
@@ -37,7 +36,6 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TokenUsage;
 use http::HeaderValue;
 use http::StatusCode;
-use serde_json::Value;
 use serde_json::json;
 use thiserror::Error;
 use tokio::sync::OwnedSemaphorePermit;
@@ -48,7 +46,7 @@ pub(crate) const MODEL: &str = "gpt-5.6-luna";
 pub(crate) const CLASSIFICATION_TOKEN_USAGE_METRIC: &str =
     "codex.guardian_v2.classification.token_usage";
 const MAX_OUTPUT_BYTES: usize = 8 * 1024;
-const INITIAL_WEBSOCKET_CONNECTIONS: usize = 2;
+pub(super) const INITIAL_WEBSOCKET_CONNECTIONS: usize = 8;
 const MAX_WEBSOCKET_CONNECTIONS: usize = 16;
 const MAX_SAMPLING_RETRIES: usize = 2;
 const MAX_WEBSOCKET_AGE: Duration = Duration::from_secs(55 * 60);
@@ -81,7 +79,7 @@ pub struct LunaSamplerConfig {
     pub metrics: Option<Arc<dyn ExtensionMetrics>>,
 }
 
-/// One tool-less structured Luna request over an already-open connection.
+/// One tool-less Luna classification request over an already-open connection.
 pub struct LunaSamplingRequest {
     /// Trusted instructions describing the requested classification.
     pub instructions: String,
@@ -95,8 +93,6 @@ pub struct LunaSamplingRequest {
     pub parent_compaction: Option<ResponseItem>,
     /// Current parent model's encrypted-compaction compatibility hash.
     pub parent_compaction_hash: Option<String>,
-    /// Strict JSON schema constraining the model response.
-    pub output_schema: Value,
     /// Reasoning budget explicitly selected for this request.
     pub reasoning_effort: ReasoningEffort,
     /// Owning turn identifier used for request attribution.
@@ -407,7 +403,7 @@ impl LunaSampler {
         false
     }
 
-    /// Sends one structured, tool-less request on an exclusively leased WebSocket.
+    /// Sends one tool-less classification request on an exclusively leased WebSocket.
     pub async fn sample(&self, request: LunaSamplingRequest) -> Result<String, LunaSamplerError> {
         let turn_id = request.turn_id;
         let mut input = vec![
@@ -460,7 +456,7 @@ impl LunaSampler {
         }
         input.push(ResponseItem::Message {
             id: None,
-            role: "developer".to_owned(),
+            role: "user".to_owned(),
             content: std::iter::once(ContentItem::InputText {
                 text: UNTRUSTED_GUARDIAN_EVIDENCE_NOTICE.to_owned(),
             })
@@ -498,11 +494,7 @@ impl LunaSampler {
             include: Vec::new(),
             service_tier: self.config.service_tier.clone(),
             prompt_cache_key: Some(format!("guardian-v2:{}", self.config.thread_id)),
-            text: create_text_param_for_request(
-                /*verbosity*/ None,
-                &Some(request.output_schema),
-                /*output_schema_strict*/ true,
-            ),
+            text: None,
             client_metadata: None,
         };
         let (supersede, mut superseded) = oneshot::channel();
@@ -633,27 +625,29 @@ impl LunaSampler {
                     }
                     ResponseEvent::Completed { token_usage, .. } => {
                         record_token_usage(self.config.metrics.as_deref(), token_usage.as_ref());
+                        let classification = if matches!(output.as_str(), "high" | "low") {
+                            Some(output)
+                        } else if matches!(deltas.as_str(), "high" | "low") {
+                            Some(deltas)
+                        } else {
+                            None
+                        };
                         lease.reuse();
-                        if !output.is_empty() {
-                            return Ok(output);
-                        }
-                        if !deltas.is_empty() {
-                            return Ok(deltas);
-                        }
-                        return Err(LunaSamplerError::MissingOutput);
+                        return classification.ok_or(LunaSamplerError::MissingOutput);
                     }
                     _ => {}
                 }
                 if output.len() > MAX_OUTPUT_BYTES || deltas.len() > MAX_OUTPUT_BYTES {
                     return Err(LunaSamplerError::OutputTooLarge);
                 }
-                if !output.is_empty() {
-                    if serde_json::from_str::<serde_json::Map<String, Value>>(&output).is_ok() {
-                        scored.store(true, Ordering::Relaxed);
-                    }
-                    continue;
-                }
-                if serde_json::from_str::<serde_json::Map<String, Value>>(&deltas).is_ok() {
+                let classification = if matches!(output.as_str(), "high" | "low") {
+                    Some(output.clone())
+                } else if matches!(deltas.as_str(), "high" | "low") {
+                    Some(deltas.clone())
+                } else {
+                    None
+                };
+                if let Some(classification) = classification {
                     scored.store(true, Ordering::Relaxed);
                     let mut remaining_events = stream.rx_event;
                     let metrics = self.config.metrics.clone();
@@ -674,7 +668,7 @@ impl LunaSampler {
                             }
                         }
                     });
-                    return Ok(deltas);
+                    return Ok(classification);
                 }
             }
             return Err(LunaSamplerError::MissingOutput);

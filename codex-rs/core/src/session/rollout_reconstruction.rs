@@ -42,11 +42,16 @@ impl DirectUserReplayProvenance {
         let mut pending_by_turn = HashMap::<String, Vec<(String, String)>>::new();
         let mut observed_user_item_ids = HashSet::new();
         let mut direct_user_item_ids = HashSet::new();
+        let mut processed_direct_user_lifecycle_ids = HashSet::<(String, String)>::new();
+        let mut pending_legacy_user_message_fanout: Option<(String, String)> = None;
         let mut active_turn_id: Option<&str> = None;
 
         for item in rollout_items {
             match item {
                 RolloutItem::ResponseItem(response_item) => {
+                    // A new persisted response item can be the next direct message. It must not
+                    // inherit a legacy fanout marker from an earlier completed item.
+                    pending_legacy_user_message_fanout = None;
                     let Some((item_id, turn_id, message)) =
                         replayed_user_message_provenance(&response_item.item)
                     else {
@@ -59,29 +64,42 @@ impl DirectUserReplayProvenance {
                         .push((item_id.to_string(), message));
                 }
                 RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
+                    if pending_legacy_user_message_fanout
+                        .as_ref()
+                        .is_some_and(|(turn_id, _)| turn_id != &event.turn_id)
+                    {
+                        pending_legacy_user_message_fanout = None;
+                    }
                     active_turn_id = Some(event.turn_id.as_str());
                 }
-                RolloutItem::EventMsg(EventMsg::ItemStarted(event)) => {
-                    if let TurnItem::UserMessage(user) = &event.item {
-                        mark_latest_direct_user_item(
-                            &mut pending_by_turn,
-                            &mut direct_user_item_ids,
-                            event.turn_id.as_str(),
-                            &user.message(),
-                        );
-                    }
-                }
+                RolloutItem::EventMsg(EventMsg::ItemStarted(_)) => {}
                 RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => {
                     if let TurnItem::UserMessage(user) = &event.item {
-                        mark_latest_direct_user_item(
-                            &mut pending_by_turn,
-                            &mut direct_user_item_ids,
-                            event.turn_id.as_str(),
-                            &user.message(),
-                        );
+                        let message = user.message();
+                        let lifecycle_key = (event.turn_id.clone(), user.id.clone());
+                        if processed_direct_user_lifecycle_ids.insert(lifecycle_key) {
+                            mark_latest_direct_user_item(
+                                &mut pending_by_turn,
+                                &mut direct_user_item_ids,
+                                event.turn_id.as_str(),
+                                &message,
+                            );
+                        }
+                        // Every typed completion emits a legacy UserMessage fanout, including
+                        // duplicate persisted completion records. Keep the marker for that
+                        // adjacent event, but never let a duplicate completion claim a new item.
+                        pending_legacy_user_message_fanout = Some((event.turn_id.clone(), message));
                     }
                 }
                 RolloutItem::EventMsg(EventMsg::UserMessage(event)) => {
+                    let is_legacy_fanout = pending_legacy_user_message_fanout.take().is_some_and(
+                        |(turn_id, message)| {
+                            active_turn_id == Some(turn_id.as_str()) && message == event.message
+                        },
+                    );
+                    if is_legacy_fanout {
+                        continue;
+                    }
                     if let Some(turn_id) = active_turn_id {
                         mark_latest_direct_user_item(
                             &mut pending_by_turn,
