@@ -199,6 +199,7 @@ async fn run_codex_tool_session_inner(
                     EventMsg::ExecApprovalRequest(ev) => {
                         let approval_id = ev.effective_approval_id();
                         let ExecApprovalRequestEvent {
+                            kind: _,
                             turn_id,
                             environment_id: _,
                             started_at_ms: _,

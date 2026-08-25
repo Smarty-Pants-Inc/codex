@@ -114,6 +114,8 @@ pub(crate) struct TurnMetadataState {
     subagent_kind: Option<String>,
     thread_source: Option<ThreadSource>,
     turn_id: String,
+    // TODO(anp): Derive this cached tag from TurnEnvironment::sandbox_context
+    // so metadata reflects the selected environment's backend.
     sandbox: Option<String>,
     sandbox_mode: Option<String>,
     auto_review_enabled: bool,
@@ -128,6 +130,12 @@ pub(crate) struct TurnMetadataState {
     user_input_requested_during_turn: AtomicBool,
     enrichment_task: Mutex<Option<JoinHandle<()>>>,
     git_enrichment_complete: watch::Sender<bool>,
+}
+
+impl codex_analytics::TurnAnalyticsMetadata for TurnMetadataState {
+    fn root_turn_id(&self) -> Option<String> {
+        TurnMetadataState::root_turn_id(self)
+    }
 }
 
 impl TurnMetadataState {

@@ -32,9 +32,11 @@ use codex_config::loader::project_trust_key;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
 use codex_config::types::ToolSuggestDisabledTool;
+use codex_config::types::WindowsSandboxModeToml;
 use core_test_support::test_codex::TurnInputRequest as ExternalTurnInputRequest;
 
 use codex_features::Feature;
+use codex_file_system::FileSystemSandboxContext;
 use codex_http_client::ClientRouteClass;
 use codex_http_client::HttpClientFactory;
 use codex_http_client::OutboundProxyPolicy;
@@ -1141,6 +1143,7 @@ async fn new_turn_refreshes_managed_network_proxy_for_sandbox_change() -> anyhow
     let mut network_config = NetworkProxyConfig::default();
     network_config.set_allowed_domains(vec!["evil.com".to_string()]);
     let requirements = NetworkConstraints {
+        enabled: Some(true),
         domains: Some(NetworkDomainPermissionsToml {
             entries: std::collections::BTreeMap::from([(
                 "*.example.com".to_string(),
@@ -1208,6 +1211,51 @@ async fn new_turn_refreshes_managed_network_proxy_for_sandbox_change() -> anyhow
         Some(vec!["*.example.com".to_string()])
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn refresh_clears_disabled_managed_network_proxy() -> anyhow::Result<()> {
+    let permission_profile = PermissionProfile::workspace_write();
+    let enabled_spec = crate::config::NetworkProxySpec::from_config_and_constraints(
+        NetworkProxyConfig::default(),
+        Some(NetworkConstraints {
+            enabled: Some(true),
+            ..Default::default()
+        }),
+        &permission_profile,
+    )?;
+    let disabled_spec = crate::config::NetworkProxySpec::from_config_and_constraints(
+        NetworkProxyConfig::default(),
+        Some(NetworkConstraints {
+            enabled: Some(false),
+            ..Default::default()
+        }),
+        &permission_profile,
+    )?;
+    let session = make_session_with_config(move |config| {
+        config
+            .permissions
+            .set_permission_profile(permission_profile)
+            .expect("test setup should allow permission profile");
+        config.permissions.network = Some(enabled_spec);
+    })
+    .await?;
+    assert!(session.services.network_proxy.load_full().is_some());
+
+    {
+        let mut state = session.state.lock().await;
+        let mut config = (*state.session_configuration.original_config_do_not_use).clone();
+        config.permissions.network = Some(disabled_spec);
+        state.session_configuration.original_config_do_not_use = Arc::new(config);
+    }
+
+    session
+        .refresh_managed_network_proxy_for_current_permission_profile()
+        .await;
+
+    assert!(session.services.network_proxy.load_full().is_none());
+    assert!(session.new_default_turn().await.network.is_none());
     Ok(())
 }
 
@@ -1380,6 +1428,41 @@ async fn workspace_write_turns_continue_to_expose_managed_network_proxy() -> any
 
     let turn_context = session.new_default_turn().await;
     assert!(turn_context.network.is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn disabled_managed_network_does_not_start_or_expose_proxy() -> anyhow::Result<()> {
+    let permission_profile = PermissionProfile::workspace_write();
+    let network_spec = crate::config::NetworkProxySpec::from_config_and_constraints(
+        NetworkProxyConfig::default(),
+        Some(NetworkConstraints {
+            enabled: Some(false),
+            ..Default::default()
+        }),
+        &permission_profile,
+    )?;
+
+    let (session, rx) = make_session_with_config_and_rx(move |config| {
+        config
+            .permissions
+            .set_permission_profile(permission_profile)
+            .expect("test setup should allow permission profile");
+        config.permissions.network = Some(network_spec);
+    })
+    .await?;
+
+    assert!(session.services.network_proxy.load_full().is_none());
+    assert!(session.new_default_turn().await.network.is_none());
+
+    loop {
+        let event = rx.recv().await.expect("channel open");
+        if let EventMsg::SessionConfigured(event) = event.msg {
+            assert!(event.network_proxy.is_none());
+            break;
+        }
+    }
+
     Ok(())
 }
 
@@ -3405,6 +3488,7 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
         | RolloutItem::SecurityRiskScore(_)
+        | RolloutItem::RealtimeItem(_)
         | RolloutItem::EventMsg(_) => None,
     });
     assert_eq!(
@@ -3483,6 +3567,7 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
         | RolloutItem::SecurityRiskScore(_)
+        | RolloutItem::RealtimeItem(_)
         | RolloutItem::EventMsg(_) => None,
     });
     let persisted_item = persisted_item.expect("forked response item should be persisted");
@@ -4346,6 +4431,8 @@ async fn set_rate_limits_retains_previous_credits() {
         allow_login_shell: config.permissions.allow_login_shell,
         shell_environment_policy: config.permissions.shell_environment_policy.clone(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
+        windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
+        use_legacy_landlock: config.features.use_legacy_landlock(),
         legacy_fallback_cwd: config.cwd.clone(),
         codex_home: config.codex_home.clone(),
         thread_name: None,
@@ -4457,6 +4544,8 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         allow_login_shell: config.permissions.allow_login_shell,
         shell_environment_policy: config.permissions.shell_environment_policy.clone(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
+        windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
+        use_legacy_landlock: config.features.use_legacy_landlock(),
         legacy_fallback_cwd: config.cwd.clone(),
         codex_home: config.codex_home.clone(),
         thread_name: None,
@@ -5013,6 +5102,8 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         allow_login_shell: config.permissions.allow_login_shell,
         shell_environment_policy: config.permissions.shell_environment_policy.clone(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
+        windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
+        use_legacy_landlock: config.features.use_legacy_landlock(),
         legacy_fallback_cwd: config.cwd.clone(),
         codex_home: config.codex_home.clone(),
         thread_name: None,
@@ -5800,6 +5891,8 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         allow_login_shell: config.permissions.allow_login_shell,
         shell_environment_policy: config.permissions.shell_environment_policy.clone(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
+        windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
+        use_legacy_landlock: config.features.use_legacy_landlock(),
         legacy_fallback_cwd: config.cwd.clone(),
         codex_home: config.codex_home.clone(),
         thread_name: None,
@@ -5948,6 +6041,8 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         allow_login_shell: config.permissions.allow_login_shell,
         shell_environment_policy: config.permissions.shell_environment_policy.clone(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
+        windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
+        use_legacy_landlock: config.features.use_legacy_landlock(),
         legacy_fallback_cwd: config.cwd.clone(),
         codex_home: config.codex_home.clone(),
         thread_name: None,
@@ -6238,6 +6333,8 @@ async fn make_session_with_config_and_rx(
         allow_login_shell: config.permissions.allow_login_shell,
         shell_environment_policy: config.permissions.shell_environment_policy.clone(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
+        windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
+        use_legacy_landlock: config.features.use_legacy_landlock(),
         legacy_fallback_cwd: config.cwd.clone(),
         codex_home: config.codex_home.clone(),
         thread_name: None,
@@ -6359,6 +6456,8 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         allow_login_shell: config.permissions.allow_login_shell,
         shell_environment_policy: config.permissions.shell_environment_policy.clone(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
+        windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
+        use_legacy_landlock: config.features.use_legacy_landlock(),
         legacy_fallback_cwd: config.cwd.clone(),
         codex_home: config.codex_home.clone(),
         thread_name: None,
@@ -8409,6 +8508,8 @@ where
         allow_login_shell: config.permissions.allow_login_shell,
         shell_environment_policy: config.permissions.shell_environment_policy.clone(),
         windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
+        windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
+        use_legacy_landlock: config.features.use_legacy_landlock(),
         legacy_fallback_cwd: config.cwd.clone(),
         codex_home: config.codex_home.clone(),
         thread_name: None,
@@ -9102,13 +9203,23 @@ async fn conflicting_ready_environment_root_ids_keep_first_location() {
     });
 }
 
+/// Capability discovery must use environment-owned permissions and sandbox backends,
+/// even when the thread defaults differ.
 #[tokio::test]
 async fn capability_discovery_uses_environment_permission_profile() {
     let (session, mut turn_context) = make_session_and_context().await;
-    Arc::make_mut(&mut turn_context.config)
+    let config = Arc::make_mut(&mut turn_context.config);
+    config
         .permissions
         .set_permission_profile(PermissionProfile::Disabled)
         .expect("unrestricted permission profile should be allowed");
+    config.permissions.windows_sandbox_mode = Some(WindowsSandboxModeToml::Unelevated);
+    config.permissions.windows_sandbox_private_desktop = true;
+    config
+        .features
+        .disable(Feature::UseLegacyLandlock)
+        .expect("disable legacy Landlock");
+    turn_context.windows_sandbox_level = WindowsSandboxLevel::RestrictedToken;
     let mut environment = turn_context
         .environments
         .primary()
@@ -9122,13 +9233,24 @@ async fn capability_discovery_uses_environment_permission_profile() {
         access: FileSystemAccessMode::Deny,
         missing_path_behavior: None,
     });
-    environment.config_mut().permission_profile =
+    let environment_config = environment.config_mut();
+    environment_config.permission_profile =
         PermissionProfileSnapshot::legacy(PermissionProfile::from_runtime_permissions(
             &file_system_policy,
             NetworkSandboxPolicy::Restricted,
         ));
-    let expected_sandbox = turn_context
-        .file_system_sandbox_context(/*additional_permissions*/ None, &environment);
+    environment_config.windows_sandbox_level = WindowsSandboxLevel::Elevated;
+    environment_config.windows_sandbox_private_desktop = false;
+    environment_config.use_legacy_landlock = true;
+    let expected_sandbox = FileSystemSandboxContext {
+        permissions: environment.permission_profile().clone().into(),
+        cwd: Some(environment.cwd().clone()),
+        workspace_roots: environment.workspace_roots().to_vec(),
+        windows_sandbox_level: WindowsSandboxLevel::Elevated,
+        windows_sandbox_private_desktop: false,
+        windows_sandbox_proxy_settings_mode: None,
+        use_legacy_landlock: true,
+    };
     let environment_id = environment.selection.environment_id.clone();
     turn_context.environments.environments[0] = TurnEnvironmentState::Ready(environment);
 
@@ -9137,7 +9259,6 @@ async fn capability_discovery_uses_environment_permission_profile() {
             &turn_context.config,
             /*ready_selected_capability_roots*/ &[],
             &turn_context.environments,
-            turn_context.windows_sandbox_level,
         )
         .await
         .expect("restricted environment should trigger capability discovery");

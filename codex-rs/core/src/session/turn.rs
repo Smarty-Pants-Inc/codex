@@ -661,7 +661,7 @@ async fn required_mcp_servers_for_input(
     turn_context: &TurnContext,
     user_input: &[UserInput],
 ) -> (Vec<String>, Vec<crate::plugins::PluginCapabilitySummary>) {
-    if crate::guardian::is_guardian_reviewer_source(&turn_context.session_source) {
+    if crate::guardian::is_basic_session_source(&turn_context.session_source) {
         return (Vec::new(), Vec::new());
     }
 
@@ -767,7 +767,7 @@ async fn build_skills_and_plugins(
     let turn_context = step_context.turn.as_ref();
     // Guardian input embeds the parent transcript as untrusted evidence. Do not interpret skill or
     // plugin mentions from that generated prompt as requests to inject additional instructions.
-    if crate::guardian::is_guardian_reviewer_source(&turn_context.session_source) {
+    if crate::guardian::is_basic_session_source(&turn_context.session_source) {
         return Some((Vec::new(), HashSet::new()));
     }
 
@@ -974,6 +974,7 @@ async fn track_turn_resolved_config_analytics(
         .track_turn_resolved_config(TurnResolvedConfigFact {
             turn_id: turn_context.sub_id.clone(),
             thread_id: sess.thread_id.to_string(),
+            turn_metadata: turn_context.turn_metadata_state.clone(),
             num_input_images: input
                 .iter()
                 .filter_map(|item| match item {
@@ -1324,7 +1325,7 @@ pub(crate) fn build_prompt(
         parallel_tool_calls: true,
         base_instructions,
         output_schema: turn_context.final_output_json_schema.clone(),
-        output_schema_strict: !crate::guardian::is_guardian_reviewer_source(
+        output_schema_strict: !crate::guardian::is_basic_session_source(
             &turn_context.session_source,
         ),
     }

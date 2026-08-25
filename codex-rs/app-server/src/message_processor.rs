@@ -1504,6 +1504,9 @@ impl MessageProcessor {
                     .thread_realtime_stop(&request_id, params)
                     .await
             }
+            ClientRequest::ThreadTimelineList { params, .. } => {
+                self.thread_processor.thread_timeline_list(params).await
+            }
             ClientRequest::ThreadRealtimeListVoices { params: _, .. } => {
                 self.turn_processor.thread_realtime_list_voices().await
             }

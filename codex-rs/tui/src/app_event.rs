@@ -41,6 +41,7 @@ use codex_file_search::FileMatch;
 use codex_message_history::HistoryBatchCursor;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ModelPreset;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_approval_presets::ApprovalPreset;
 use strum_macros::IntoStaticStr;
@@ -62,7 +63,6 @@ use codex_plugin::PluginCapabilitySummary;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::config_types::Personality;
 use codex_protocol::models::ActivePermissionProfile;
-use codex_protocol::openai_models::ReasoningEffort;
 
 use crate::history_cell::HistoryCell;
 
@@ -196,6 +196,15 @@ pub(crate) enum TranscriptExportDestination {
     File(PathBuf),
 }
 
+/// Deliver a generated title to its originating automatic rename or editable prompt.
+#[derive(Debug)]
+pub(crate) enum ThreadTitleDestination {
+    /// Replace the provisional name only if the user has not renamed the thread.
+    Automatic { expected_title: String },
+    /// Prefill only the still-active rename prompt with the matching request ID.
+    RenameSuggestion { request_id: Uuid },
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, IntoStaticStr)]
 pub(crate) enum AppEvent {
@@ -219,6 +228,26 @@ pub(crate) enum AppEvent {
     RenameAgentsOverviewThread {
         thread_id: ThreadId,
         name: String,
+    },
+    /// Generate an editable title suggestion for the active rename prompt.
+    SuggestThreadName {
+        thread_id: ThreadId,
+        request_id: Uuid,
+    },
+    /// Register a hidden title-generation thread started in the background.
+    ThreadTitleStarted {
+        thread_id: ThreadId,
+        destination: ThreadTitleDestination,
+        prompt: String,
+        effort: Option<ReasoningEffort>,
+        result: Result<String, String>,
+    },
+    /// Route a hidden title request to its automatic rename or editable prompt.
+    GeneratedThreadTitle {
+        thread_id: ThreadId,
+        temporary_thread_id: ThreadId,
+        destination: ThreadTitleDestination,
+        result: Result<String, String>,
     },
     /// Interrupt a task directly from the shared dashboard.
     StopAgentsOverviewThread {

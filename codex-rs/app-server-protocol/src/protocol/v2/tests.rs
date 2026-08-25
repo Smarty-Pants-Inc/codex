@@ -1,6 +1,7 @@
 use super::*;
 use crate::ServerNotification;
 use codex_protocol::approvals::ElicitationRequest as CoreElicitationRequest;
+use codex_protocol::approvals::GuardianAssessmentAction as CoreGuardianAssessmentAction;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
@@ -70,6 +71,30 @@ fn absolute_path(path: &str) -> AbsolutePathBuf {
 
 fn test_absolute_path() -> AbsolutePathBuf {
     absolute_path("readable")
+}
+
+#[test]
+fn managed_hooks_requirements_default_interrupt_to_empty() {
+    let value = json!({
+        "managedDir": null,
+        "windowsManagedDir": null,
+        "PreToolUse": [],
+        "PermissionRequest": [],
+        "PostToolUse": [],
+        "PreCompact": [],
+        "PostCompact": [],
+        "SessionStart": [],
+        "SessionEnd": [],
+        "UserPromptSubmit": [],
+        "SubagentStart": [],
+        "SubagentStop": [],
+        "Stop": []
+    });
+
+    let parsed: ManagedHooksRequirements =
+        serde_json::from_value(value).expect("deserialize managed hooks requirements");
+
+    assert_eq!(parsed.interrupt, Vec::new());
 }
 
 #[test]
@@ -2808,6 +2833,46 @@ fn guardian_approval_review_action_round_trips_command_shape() {
         serde_json::to_value(&action).expect("serialize guardian review action"),
         value
     );
+}
+
+#[test]
+fn guardian_stdin_review_action_round_trips_native_and_foreign_paths() {
+    for (cwd_uri, cwd_native) in [
+        ("file:///home/alice/repo", "/home/alice/repo"),
+        (
+            "file:///C:/Users/Alice%20Smith/repo",
+            r"C:\Users\Alice Smith\repo",
+        ),
+        ("file://server/share/repo", r"\\server\share\repo"),
+    ] {
+        let core_action = CoreGuardianAssessmentAction::WriteStdin {
+            approval_id: "stdin-approval".into(),
+            process_id: "42".into(),
+            stdin: "yes\n".into(),
+            cwd: PathUri::parse(cwd_uri).expect("valid cwd URI"),
+        };
+        let action = GuardianApprovalReviewAction::from(core_action.clone());
+        let value = json!({
+            "type": "writeStdin",
+            "approvalId": "stdin-approval",
+            "processId": "42",
+            "stdin": "yes\n",
+            "cwd": cwd_native,
+        });
+
+        assert_eq!(
+            serde_json::to_value(&action).expect("serialize stdin review action"),
+            value,
+        );
+        let deserialized: GuardianApprovalReviewAction =
+            serde_json::from_value(value).expect("deserialize stdin review action");
+        assert_eq!(deserialized, action);
+        assert_eq!(
+            CoreGuardianAssessmentAction::try_from(deserialized)
+                .expect("convert stdin review action"),
+            core_action,
+        );
+    }
 }
 
 #[test]

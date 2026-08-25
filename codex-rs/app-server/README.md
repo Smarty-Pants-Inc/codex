@@ -218,6 +218,7 @@ Example with notification opt-out:
 - `thread/realtime/appendText` — append text input to the active realtime session with a required `role` of `user`, `developer`, or `assistant` (experimental); returns `{}`. Older clients that omit `role` default to `user`. Parent-owned Multi-Agent V2 subagents reject this request.
 - `thread/realtime/appendSpeech` — append text that the realtime model should speak to the user (experimental); returns `{}`. Parent-owned Multi-Agent V2 subagents reject this request.
 - `thread/realtime/stop` — stop the active realtime session for the thread (experimental); returns `{}`. Parent-owned Multi-Agent V2 subagents reject this request.
+- `thread/timeline/list` — page ordinary turn items, durable realtime facts, and turn boundaries together in rollout order (experimental). Entries are tagged `item`, `realtime`, `turnStarted`, or `turnCompleted`. Turn boundaries carry lifecycle metadata without duplicating the turn's items; completed boundaries also cover interrupted and failed turns. Each response contains an opaque continuation cursor and `activeRealtimeSessionAtPageStart`, allowing clients to render any bounded page without loading earlier thread history. Entries at the same rollout position have stable ordering and can span pages. Existing `thread/items/list` remains unchanged.
 - `review/start` — kick off Codex’s automated reviewer for a thread; responds like `turn/start`. Inline reviews emit `item/started`/`item/completed` notifications with `enteredReviewMode` and `exitedReviewMode` items, plus a final assistant `agentMessage` containing the review. Detached reviews stream ordinary turn items on the new review thread. Parent-owned Multi-Agent V2 subagents reject both inline and detached reviews.
 - `command/exec` — run a single command under the server sandbox without starting a thread/turn (handy for utilities and validation).
 - `command/exec/write` — write base64-decoded stdin bytes to a running `command/exec` session or close stdin; returns `{}`.
@@ -1565,7 +1566,9 @@ All filesystem paths in this section must be absolute.
 
 Event notifications are the server-initiated event stream for thread lifecycles, turn lifecycles, and the items within them. After you start or resume a thread, keep reading stdout for `thread/started`, `thread/archived`, `thread/unarchived`, `thread/closed`, `turn/*`, and `item/*` notifications.
 
-Thread realtime uses a separate thread-scoped notification surface. `thread/realtime/*` notifications are ephemeral transport events, not `ThreadItem`s, and are not returned by `thread/read`, `thread/resume`, or `thread/fork`.
+Thread realtime publishes thread-scoped timeline item lifecycle notifications for paginated threads alongside its existing realtime notifications. Completed timeline items are durably interleaved with ordinary turn items by `thread/timeline/list`. Neither surface changes `ThreadItem`, `thread/read`, `thread/resume`, or `thread/fork`; clients ignore notification methods they do not recognize.
+
+Each realtime item has an `id`, a `realtimeSessionId`, and one of four types: `realtimeSessionStarted`, `transcriptSegment`, `bemItemPromoted`, or `realtimeSessionClosed`. A `bemItemPromoted` item references an existing backing-agent item by `turnId` and `itemId`; its `presentation` is `wholeItem`, `inlineMarkdown`, or `inlineVisualization` with an `index`.
 
 Recoverable configuration and initialization warnings use the existing `configWarning` notification: `{ summary, details?, path?, range? }`. App-server may emit it during initialization for config parsing and related setup diagnostics, or to the requesting connection during `thread/start` when that thread's exec-policy rules fail to parse.
 
@@ -1600,6 +1603,9 @@ The thread realtime API emits thread-scoped notifications for session lifecycle 
 - `thread/realtime/itemAdded` — `{ threadId, item }` for raw non-audio realtime items that do not have a dedicated typed app-server notification, including `handoff_request` (experimental). `item` is forwarded as raw JSON while the upstream websocket item schema remains unstable.
 - `thread/realtime/transcript/delta` — `{ threadId, role, delta }` for live realtime transcript deltas (experimental).
 - `thread/realtime/transcript/done` — `{ threadId, role, text }` when realtime emits the final full text for a transcript part (experimental).
+- `thread/realtime/item/started` — `{ threadId, item }` when a realtime item begins. Session boundaries and artifacts complete immediately; transcript segment IDs remain stable through streaming and persistence (experimental).
+- `thread/realtime/item/transcript/delta` — `{ threadId, itemId, delta }` for text appended to a started transcript segment (experimental).
+- `thread/realtime/item/completed` — `{ threadId, item }` after a session boundary, transcript segment, or promoted backing-agent artifact has been durably committed (experimental).
 - `thread/realtime/outputAudio/delta` — `{ threadId, audio }` for streamed output audio chunks (experimental). `audio` uses camelCase fields (`data`, `sampleRate`, `numChannels`, `samplesPerChannel`).
 - `thread/realtime/error` — `{ threadId, message }` when realtime encounters a transport or backend error (experimental).
 - `thread/realtime/closed` — `{ threadId, reason }` when the realtime transport closes (experimental).
@@ -1661,7 +1667,7 @@ All items emit shared lifecycle events:
 - `item/autoApprovalReview/completed` — [UNSTABLE] temporary auto-review notification carrying `{threadId, turnId, targetItemId, review, action}` when approval auto-review resolves. This shape is expected to change soon.
 - `autoApprovalReview/strictReviewRequired` — experimental notification carrying `{threadId, turnId, startedAtMs}` whenever elevated or stale Guardian v2 risk requires synchronous approval review.
 
-`review` is [UNSTABLE] and currently has `{status, riskLevel?, userAuthorization?, rationale?}`, where `status` is one of `inProgress`, `approved`, `denied`, or `aborted`. `riskLevel` is one of `"low"`, `"medium"`, `"high"`, or `"critical"` when present. `userAuthorization` is one of `"unknown"`, `"low"`, `"medium"`, or `"high"` when present. `action` is a tagged union with `type: "command" | "execve" | "applyPatch" | "networkAccess" | "mcpToolCall"`. Command-like actions include a `source` discriminator (`"shell"` or `"unifiedExec"`). These notifications are separate from the target item's own `item/completed` lifecycle and are intentionally temporary while the auto-review app protocol is still being designed.
+`review` is [UNSTABLE] and currently has `{status, riskLevel?, userAuthorization?, rationale?}`, where `status` is one of `inProgress`, `approved`, `denied`, or `aborted`. `riskLevel` is one of `"low"`, `"medium"`, `"high"`, or `"critical"` when present. `userAuthorization` is one of `"unknown"`, `"low"`, `"medium"`, or `"high"` when present. `action` is a tagged union with `type: "command" | "execve" | "writeStdin" | "applyPatch" | "networkAccess" | "mcpToolCall" | "requestPermissions"`. Command-like actions include a `source` discriminator (`"shell"` or `"unifiedExec"`). A `writeStdin` action carries `approvalId`, `processId`, `stdin`, and `cwd`; it reviews input to an existing command item without changing that parent item's lifecycle. These notifications are separate from the target item's own `item/completed` lifecycle and are intentionally temporary while the auto-review app protocol is still being designed.
 
 There are additional item-specific events:
 
@@ -1727,10 +1733,12 @@ Certain actions (shell commands or modifying files) may require explicit user ap
 Order of messages:
 
 1. `item/started` — shows the pending `commandExecution` item with `command`, `cwd`, and other fields so you can render the proposed action.
-2. `item/commandExecution/requestApproval` (request) — carries the same `itemId`, `threadId`, `turnId`, the nullable `environmentId` where the command will run, optionally `approvalId` (for subcommand callbacks), and `reason`. New shell and unified-exec approvals set `environmentId`; older events that do not provide one are exposed as `null`. For normal command approvals, the request also includes `command`, `cwd`, and `commandActions` for friendly display. When `initialize.params.capabilities.experimentalApi = true`, it may also include experimental `additionalPermissions` describing requested per-command sandbox access; any filesystem paths in that payload are absolute on the wire, and network access is represented as `additionalPermissions.network.enabled`. For network-only approvals, those command fields may be omitted and `networkApprovalContext` is provided instead. Optional persistence hints may also be included via `proposedExecpolicyAmendment` and `proposedNetworkPolicyAmendments`. Clients can prefer `availableDecisions` when present to render the exact set of choices the server wants to expose, while still falling back to the older heuristics if it is omitted.
+2. `item/commandExecution/requestApproval` (request) — carries the same `itemId`, `threadId`, `turnId`, the nullable `environmentId` where the command will run, `kind` (`command` or `writeStdin`), optionally `approvalId` (for subcommand callbacks or stdin writes), and `reason`. New shell and unified-exec approvals set `environmentId`; older events that do not provide one are exposed as `null`. For normal command approvals, the request also includes `command`, `cwd`, and `commandActions` for friendly display. When `initialize.params.capabilities.experimentalApi = true`, it may also include experimental `additionalPermissions` describing requested per-command sandbox access; any filesystem paths in that payload are absolute on the wire, and network access is represented as `additionalPermissions.network.enabled`. For network-only approvals, those command fields may be omitted and `networkApprovalContext` is provided instead. Optional persistence hints may also be included via `proposedExecpolicyAmendment` and `proposedNetworkPolicyAmendments`. Clients can prefer `availableDecisions` when present to render the exact set of choices the server wants to expose, while still falling back to the older heuristics if it is omitted.
 3. Client response — for example `{ "decision": "accept" }`, `{ "decision": "acceptForSession" }`, `{ "decision": { "acceptWithExecpolicyAmendment": { "execpolicy_amendment": [...] } } }`, `{ "decision": { "applyNetworkPolicyAmendment": { "network_policy_amendment": { "host": "example.com", "action": "allow" } } } }`, `{ "decision": "decline" }`, or `{ "decision": "cancel" }`.
 4. `serverRequest/resolved` — `{ threadId, requestId }` confirms the pending request has been resolved or cleared, including lifecycle cleanup on turn start/complete/interrupt.
 5. `item/completed` — final `commandExecution` item with `status: "completed" | "failed" | "declined"` and execution output. Render this as the authoritative result.
+
+`kind` distinguishes command approvals from writes to an existing terminal. Requests from older servers without `kind` retain `command` semantics; `approvalId` alone does not distinguish stdin writes from execve interception.
 
 ### File change approvals
 
@@ -1915,6 +1923,7 @@ $skill-creator Add a new skill for triaging flaky CI and include step-by-step us
 ```
 
 Use `skills/list` to fetch the available skills (optionally scoped by `cwds`, with `forceReload`).
+Each skill includes a nullable `pluginId` matching its owning plugin's `id` in `plugin/list`, when known. Clients can use it to group plugin-owned skills without inferring ownership from names or paths. Older servers may omit this field.
 `skills/list` might reuse a cached skills result per `cwd`; setting `forceReload` to `true` refreshes the result from disk.
 The server also emits `skills/changed` notifications when watched local skill files change. Treat this as an invalidation signal and re-run `skills/list` with your current params when needed.
 Use `skills/extraRoots/set` to replace additional standalone skill roots for the current app-server process. These roots use the same layout as other standalone skill roots: each root contains skill directories, and each skill directory contains `SKILL.md`. Missing roots are accepted and load no skills until they exist. This setting is lost when app-server exits.
@@ -1932,6 +1941,7 @@ Use `skills/extraRoots/set` to replace additional standalone skill roots for the
               "name": "skill-creator",
               "description": "Create or update a Codex skill",
               "enabled": true,
+              "pluginId": null,
               "interface": {
                 "displayName": "Skill Creator",
                 "shortDescription": "Create or update a Codex skill",
