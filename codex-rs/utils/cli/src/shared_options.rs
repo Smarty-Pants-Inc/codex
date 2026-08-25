@@ -1,10 +1,12 @@
 //! Shared command-line flags used by both interactive and non-interactive Codex entry points.
 
+use crate::CliConfigOverrides;
 use crate::SandboxModeCliArg;
 use clap::Args;
+use codex_protocol::config_types::ProfileV2Name;
 use std::path::PathBuf;
 
-#[derive(Args, Debug, Default)]
+#[derive(Args, Clone, Debug, Default)]
 pub struct SharedCliOptions {
     /// Optional image(s) to attach to the initial prompt.
     #[arg(
@@ -29,14 +31,23 @@ pub struct SharedCliOptions {
     #[arg(long = "local-provider")]
     pub oss_provider: Option<String>,
 
-    /// Configuration profile from config.toml to specify default options.
+    /// Layer $CODEX_HOME/<name>.config.toml on top of the base user config.
     #[arg(long = "profile", short = 'p')]
-    pub config_profile: Option<String>,
+    pub config_profile_v2: Option<ProfileV2Name>,
 
     /// Select the sandbox policy to use when executing model-generated shell
     /// commands.
     #[arg(long = "sandbox", short = 's')]
     pub sandbox_mode: Option<SandboxModeCliArg>,
+
+    /// Route approval requests through automatic review using the workspace-write sandbox.
+    #[arg(
+        long = "approve-for-me",
+        alias = "not-so-yolo",
+        default_value_t = false,
+        conflicts_with_all = ["sandbox_mode", "dangerously_bypass_approvals_and_sandbox"]
+    )]
+    pub auto_review: bool,
 
     /// Skip all confirmation prompts and execute commands without sandboxing.
     /// EXTREMELY DANGEROUS. Intended solely for running in environments that are externally sandboxed.
@@ -62,16 +73,33 @@ pub struct SharedCliOptions {
 }
 
 impl SharedCliOptions {
+    pub fn take_auto_review_config_overrides(&mut self, overrides: &mut CliConfigOverrides) {
+        if self.auto_review {
+            overrides
+                .raw_overrides
+                .push(r#"approvals_reviewer="auto_review""#.to_string());
+            overrides
+                .raw_overrides
+                .push(r#"approval_policy="on-request""#.to_string());
+            overrides
+                .raw_overrides
+                .push(r#"sandbox_mode="workspace-write""#.to_string());
+            self.auto_review = false;
+        }
+    }
+
     pub fn inherit_exec_root_options(&mut self, root: &Self) {
-        let self_selected_sandbox_mode =
-            self.sandbox_mode.is_some() || self.dangerously_bypass_approvals_and_sandbox;
+        let self_selected_sandbox_mode = self.sandbox_mode.is_some()
+            || self.auto_review
+            || self.dangerously_bypass_approvals_and_sandbox;
         let Self {
             images,
             model,
             oss,
             oss_provider,
-            config_profile,
+            config_profile_v2,
             sandbox_mode,
+            auto_review,
             dangerously_bypass_approvals_and_sandbox,
             bypass_hook_trust,
             cwd,
@@ -82,8 +110,9 @@ impl SharedCliOptions {
             model: root_model,
             oss: root_oss,
             oss_provider: root_oss_provider,
-            config_profile: root_config_profile,
+            config_profile_v2: root_config_profile_v2,
             sandbox_mode: root_sandbox_mode,
+            auto_review: root_auto_review,
             dangerously_bypass_approvals_and_sandbox: root_dangerously_bypass_approvals_and_sandbox,
             bypass_hook_trust: root_bypass_hook_trust,
             cwd: root_cwd,
@@ -99,13 +128,12 @@ impl SharedCliOptions {
         if oss_provider.is_none() {
             oss_provider.clone_from(root_oss_provider);
         }
-        if config_profile.is_none() {
-            config_profile.clone_from(root_config_profile);
-        }
-        if sandbox_mode.is_none() {
-            *sandbox_mode = *root_sandbox_mode;
+        if config_profile_v2.is_none() {
+            config_profile_v2.clone_from(root_config_profile_v2);
         }
         if !self_selected_sandbox_mode {
+            *sandbox_mode = *root_sandbox_mode;
+            *auto_review = *root_auto_review;
             *dangerously_bypass_approvals_and_sandbox =
                 *root_dangerously_bypass_approvals_and_sandbox;
         }
@@ -129,14 +157,16 @@ impl SharedCliOptions {
 
     pub fn apply_subcommand_overrides(&mut self, subcommand: Self) {
         let subcommand_selected_sandbox_mode = subcommand.sandbox_mode.is_some()
+            || subcommand.auto_review
             || subcommand.dangerously_bypass_approvals_and_sandbox;
         let Self {
             images,
             model,
             oss,
             oss_provider,
-            config_profile,
+            config_profile_v2,
             sandbox_mode,
+            auto_review,
             dangerously_bypass_approvals_and_sandbox,
             bypass_hook_trust,
             cwd,
@@ -152,11 +182,12 @@ impl SharedCliOptions {
         if let Some(oss_provider) = oss_provider {
             self.oss_provider = Some(oss_provider);
         }
-        if let Some(config_profile) = config_profile {
-            self.config_profile = Some(config_profile);
+        if let Some(config_profile_v2) = config_profile_v2 {
+            self.config_profile_v2 = Some(config_profile_v2);
         }
         if subcommand_selected_sandbox_mode {
             self.sandbox_mode = sandbox_mode;
+            self.auto_review = auto_review;
             self.dangerously_bypass_approvals_and_sandbox =
                 dangerously_bypass_approvals_and_sandbox;
         }

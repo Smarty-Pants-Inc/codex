@@ -1,13 +1,26 @@
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItemKind;
 
 // This warning is not produced anymore but fragment definition is used to filter messaged from old sessions
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct LegacyApplyPatchExecCommandWarning;
 
 impl ContextualUserFragment for LegacyApplyPatchExecCommandWarning {
-    const ROLE: &'static str = "user";
-    const START_MARKER: &'static str = "";
-    const END_MARKER: &'static str = "";
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("apply_patch.legacy_exec_command_warning".to_string())
+    }
+
+    fn role(&self) -> &'static str {
+        "developer"
+    }
+
+    fn markers(&self) -> (&'static str, &'static str) {
+        Self::type_markers()
+    }
+
+    fn type_markers() -> (&'static str, &'static str) {
+        ("", "")
+    }
 
     fn matches_text(text: &str) -> bool {
         let trimmed = text.trim();

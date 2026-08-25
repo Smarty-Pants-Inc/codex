@@ -6,7 +6,6 @@ use crate::endpoint::realtime_websocket::protocol::ConversationItemContent;
 use crate::endpoint::realtime_websocket::protocol::ConversationItemPayload;
 use crate::endpoint::realtime_websocket::protocol::ConversationItemType;
 use crate::endpoint::realtime_websocket::protocol::ConversationMessageItem;
-use crate::endpoint::realtime_websocket::protocol::ConversationRole;
 use crate::endpoint::realtime_websocket::protocol::NoiseReductionType;
 use crate::endpoint::realtime_websocket::protocol::RealtimeOutboundMessage;
 use crate::endpoint::realtime_websocket::protocol::RealtimeOutputModality;
@@ -25,24 +24,35 @@ use crate::endpoint::realtime_websocket::protocol::SessionTurnDetection;
 use crate::endpoint::realtime_websocket::protocol::SessionType;
 use crate::endpoint::realtime_websocket::protocol::SessionUpdateSession;
 use crate::endpoint::realtime_websocket::protocol::TurnDetectionType;
+use codex_protocol::protocol::ConversationTextRole;
 use serde_json::json;
 
 const REALTIME_V2_OUTPUT_MODALITY_AUDIO: &str = "audio";
 const REALTIME_V2_OUTPUT_MODALITY_TEXT: &str = "text";
 const REALTIME_V2_TOOL_CHOICE: &str = "auto";
 const REALTIME_V2_BACKGROUND_AGENT_TOOL_NAME: &str = "background_agent";
-const REALTIME_V2_BACKGROUND_AGENT_TOOL_DESCRIPTION: &str = "Send a user request to the background agent. Use this as the default action. Do not rephrase the user's ask or rewrite it in your own words; pass along the user's own words. If the background agent is idle, this starts a new task and returns the final result to the user. If the background agent is already working on a task, this sends the request as guidance to steer that previous task. If the user asks to do something next, later, after this, or once current work finishes, call this tool so the work is actually queued instead of merely promising to do it later.";
+const REALTIME_V2_BACKGROUND_AGENT_TOOL_DESCRIPTION: &str = "Send a concrete request to the background agent when it needs execution, tools, or artifact generation. Preserve the user's wording and intent. If the agent is idle, this starts a new task and returns the final result. If it is already working, this steers that task. If the user explicitly asks to queue follow-up work, call this tool so the work is queued rather than merely promised.";
 const REALTIME_V2_SILENCE_TOOL_NAME: &str = "remain_silent";
 const REALTIME_V2_SILENCE_TOOL_DESCRIPTION: &str = "Call this when the best response is to say nothing. Use it instead of speaking after hidden system/control messages, after background agent updates in silent modes, or whenever acknowledging aloud would be distracting. This tool has no user-visible effect.";
 const REALTIME_V2_INPUT_TRANSCRIPTION_MODEL: &str = "gpt-4o-mini-transcribe";
 
-pub(super) fn conversation_item_create_message(text: String) -> RealtimeOutboundMessage {
+pub(super) fn conversation_item_create_message(
+    text: String,
+    role: ConversationTextRole,
+) -> RealtimeOutboundMessage {
+    let content_type = match role {
+        ConversationTextRole::Assistant => ConversationContentType::OutputText,
+        ConversationTextRole::User | ConversationTextRole::Developer => {
+            ConversationContentType::InputText
+        }
+    };
+
     RealtimeOutboundMessage::ConversationItemCreate {
         item: ConversationItemPayload::Message(ConversationMessageItem {
             r#type: ConversationItemType::Message,
-            role: ConversationRole::User,
+            role,
             content: vec![ConversationItemContent {
-                r#type: ConversationContentType::InputText,
+                r#type: content_type,
                 text,
             }],
         }),

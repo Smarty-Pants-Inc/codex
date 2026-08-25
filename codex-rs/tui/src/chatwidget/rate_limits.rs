@@ -3,10 +3,13 @@
 use super::*;
 use codex_app_server_protocol::CodexErrorInfo as AppServerCodexErrorInfo;
 
-pub(super) const NUDGE_MODEL_SLUG: &str = "gpt-5.4-mini";
+pub(super) const NUDGE_MODEL_SLUG: &str = "gpt-5.6-luna";
 pub(super) const RATE_LIMIT_SWITCH_PROMPT_THRESHOLD: f64 = 90.0;
+pub(super) const RATE_LIMIT_SWITCH_PROMPT_VIEW_ID: &str = "rate-limit-switch-prompt";
 
 const RATE_LIMIT_WARNING_THRESHOLDS: [f64; 3] = [75.0, 90.0, 95.0];
+const PRIMARY_LIMIT_FALLBACK_LABEL: &str = "usage";
+const SECONDARY_LIMIT_FALLBACK_LABEL: &str = "secondary usage";
 
 #[derive(Default)]
 pub(super) struct RateLimitWarningState {
@@ -40,9 +43,8 @@ impl RateLimitWarningState {
                 self.secondary_index += 1;
             }
             if let Some(threshold) = highest_secondary {
-                let limit_label = secondary_window_minutes
-                    .map(get_limits_duration)
-                    .unwrap_or_else(|| "weekly".to_string());
+                let limit_label =
+                    limit_label_for_window(secondary_window_minutes, /*is_secondary*/ true);
                 let remaining_percent = 100.0 - threshold;
                 warnings.push(format!(
                     "Heads up, you have less than {remaining_percent:.0}% of your {limit_label} limit left. Run /status for a breakdown."
@@ -59,9 +61,8 @@ impl RateLimitWarningState {
                 self.primary_index += 1;
             }
             if let Some(threshold) = highest_primary {
-                let limit_label = primary_window_minutes
-                    .map(get_limits_duration)
-                    .unwrap_or_else(|| "5h".to_string());
+                let limit_label =
+                    limit_label_for_window(primary_window_minutes, /*is_secondary*/ false);
                 let remaining_percent = 100.0 - threshold;
                 warnings.push(format!(
                     "Heads up, you have less than {remaining_percent:.0}% of your {limit_label} limit left. Run /status for a breakdown."
@@ -73,26 +74,49 @@ impl RateLimitWarningState {
     }
 }
 
-pub(crate) fn get_limits_duration(windows_minutes: i64) -> String {
+pub(crate) fn limit_label_for_window(window_minutes: Option<i64>, is_secondary: bool) -> String {
+    window_minutes
+        .and_then(get_limits_duration)
+        .unwrap_or_else(|| fallback_limit_label(is_secondary).to_string())
+}
+
+pub(crate) fn get_limits_duration(windows_minutes: i64) -> Option<String> {
     const MINUTES_PER_HOUR: i64 = 60;
+    const MINUTES_PER_5_HOURS: i64 = 5 * MINUTES_PER_HOUR;
     const MINUTES_PER_DAY: i64 = 24 * MINUTES_PER_HOUR;
     const MINUTES_PER_WEEK: i64 = 7 * MINUTES_PER_DAY;
     const MINUTES_PER_MONTH: i64 = 30 * MINUTES_PER_DAY;
-    const ROUNDING_BIAS_MINUTES: i64 = 3;
+    const MINUTES_PER_YEAR: i64 = 365 * MINUTES_PER_DAY;
 
     let windows_minutes = windows_minutes.max(0);
 
-    if windows_minutes <= MINUTES_PER_DAY.saturating_add(ROUNDING_BIAS_MINUTES) {
-        let adjusted = windows_minutes.saturating_add(ROUNDING_BIAS_MINUTES);
-        let hours = std::cmp::max(1, adjusted / MINUTES_PER_HOUR);
-        format!("{hours}h")
-    } else if windows_minutes <= MINUTES_PER_WEEK.saturating_add(ROUNDING_BIAS_MINUTES) {
-        "weekly".to_string()
-    } else if windows_minutes <= MINUTES_PER_MONTH.saturating_add(ROUNDING_BIAS_MINUTES) {
-        "monthly".to_string()
+    if is_approximate_window(windows_minutes, MINUTES_PER_5_HOURS) {
+        Some("5h".to_string())
+    } else if is_approximate_window(windows_minutes, MINUTES_PER_DAY) {
+        Some("daily".to_string())
+    } else if is_approximate_window(windows_minutes, MINUTES_PER_WEEK) {
+        Some("weekly".to_string())
+    } else if is_approximate_window(windows_minutes, MINUTES_PER_MONTH) {
+        Some("monthly".to_string())
+    } else if is_approximate_window(windows_minutes, MINUTES_PER_YEAR) {
+        Some("annual".to_string())
     } else {
-        "annual".to_string()
+        None
     }
+}
+
+pub(crate) fn fallback_limit_label(is_secondary: bool) -> &'static str {
+    if is_secondary {
+        SECONDARY_LIMIT_FALLBACK_LABEL
+    } else {
+        PRIMARY_LIMIT_FALLBACK_LABEL
+    }
+}
+
+fn is_approximate_window(minutes: i64, expected_minutes: i64) -> bool {
+    let minutes = minutes as f64;
+    let expected_minutes = expected_minutes as f64;
+    minutes >= expected_minutes * 0.95 && minutes <= expected_minutes * 1.05
 }
 
 #[derive(Default)]
@@ -127,8 +151,31 @@ pub(super) fn is_app_server_cyber_policy_error(info: &AppServerCodexErrorInfo) -
     matches!(info, AppServerCodexErrorInfo::CyberPolicy)
 }
 
+#[derive(Clone, Copy)]
+enum RateLimitSnapshotSource {
+    AccountUsage,
+    RollingUpdate,
+}
+
+fn has_usable_workspace_credits(credits: &CreditsSnapshot) -> bool {
+    credits.unlimited || credits.has_credits
+}
+
 impl ChatWidget {
     pub(crate) fn on_rate_limit_snapshot(&mut self, snapshot: Option<RateLimitSnapshot>) {
+        self.on_rate_limit_snapshot_from(snapshot, RateLimitSnapshotSource::AccountUsage);
+    }
+
+    pub(crate) fn on_rolling_rate_limit_snapshot(&mut self, snapshot: RateLimitSnapshot) {
+        // Rolling app-server notifications are sparse. Preserve metadata learned from the full read.
+        self.on_rate_limit_snapshot_from(Some(snapshot), RateLimitSnapshotSource::RollingUpdate);
+    }
+
+    fn on_rate_limit_snapshot_from(
+        &mut self,
+        snapshot: Option<RateLimitSnapshot>,
+        source: RateLimitSnapshotSource,
+    ) {
         if let Some(mut snapshot) = snapshot {
             let limit_id = snapshot
                 .limit_id
@@ -138,7 +185,9 @@ impl ChatWidget {
                 .limit_name
                 .clone()
                 .unwrap_or_else(|| limit_id.clone());
-            if snapshot.credits.is_none() {
+            if matches!(source, RateLimitSnapshotSource::RollingUpdate)
+                && snapshot.credits.is_none()
+            {
                 snapshot.credits = self
                     .rate_limit_snapshots_by_limit_id
                     .get(&limit_id)
@@ -149,16 +198,59 @@ impl ChatWidget {
                         balance: credits.balance.clone(),
                     });
             }
-
+            let preserved_individual_limit =
+                if matches!(source, RateLimitSnapshotSource::RollingUpdate)
+                    && snapshot.individual_limit.is_none()
+                {
+                    self.rate_limit_snapshots_by_limit_id
+                        .get(&limit_id)
+                        .and_then(|display| display.individual_limit.clone())
+                } else {
+                    None
+                };
             self.plan_type = snapshot.plan_type.or(self.plan_type);
 
             let is_codex_limit = limit_id.eq_ignore_ascii_case("codex");
             if is_codex_limit
-                && let Some(rate_limit_reached_type) = snapshot.rate_limit_reached_type
+                && (matches!(source, RateLimitSnapshotSource::AccountUsage)
+                    || snapshot.spend_control_reached.is_some())
             {
-                self.codex_rate_limit_reached_type = Some(rate_limit_reached_type);
+                self.codex_spend_control_reached = snapshot.spend_control_reached;
             }
-            let warnings = if is_codex_limit {
+            if (is_codex_limit && matches!(source, RateLimitSnapshotSource::AccountUsage))
+                || snapshot.rate_limit_reached_type.is_some()
+            {
+                self.codex_rate_limit_reached_type = snapshot.rate_limit_reached_type;
+            }
+            let workspace_limit_reached = self.codex_spend_control_reached == Some(true)
+                || matches!(
+                    self.codex_rate_limit_reached_type,
+                    Some(
+                        RateLimitReachedType::WorkspaceOwnerCreditsDepleted
+                            | RateLimitReachedType::WorkspaceMemberCreditsDepleted
+                            | RateLimitReachedType::WorkspaceOwnerUsageLimitReached
+                            | RateLimitReachedType::WorkspaceMemberUsageLimitReached
+                    )
+                );
+            let has_workspace_credits = !workspace_limit_reached
+                && snapshot
+                    .credits
+                    .as_ref()
+                    .is_some_and(has_usable_workspace_credits);
+            if is_codex_limit && has_workspace_credits {
+                match self.rate_limit_switch_prompt {
+                    RateLimitSwitchPromptState::Pending => {
+                        self.rate_limit_switch_prompt = RateLimitSwitchPromptState::Idle;
+                    }
+                    RateLimitSwitchPromptState::Shown => {
+                        self.bottom_pane
+                            .dismiss_view_by_id(RATE_LIMIT_SWITCH_PROMPT_VIEW_ID);
+                    }
+                    RateLimitSwitchPromptState::Idle => {}
+                }
+            }
+            let should_warn_about_rate_limit_usage = is_codex_limit && !has_workspace_credits;
+            let warnings = if should_warn_about_rate_limit_usage {
                 self.rate_limit_warnings.take_warnings(
                     snapshot
                         .secondary
@@ -193,12 +285,6 @@ impl ChatWidget {
                         .map(|w| f64::from(w.used_percent) >= RATE_LIMIT_SWITCH_PROMPT_THRESHOLD)
                         .unwrap_or(false));
 
-            let has_workspace_credits = snapshot
-                .credits
-                .as_ref()
-                .map(|credits| credits.has_credits)
-                .unwrap_or(false);
-
             if high_usage
                 && !has_workspace_credits
                 && !self.rate_limit_switch_prompt_hidden()
@@ -211,8 +297,11 @@ impl ChatWidget {
                 self.rate_limit_switch_prompt = RateLimitSwitchPromptState::Pending;
             }
 
-            let display =
+            let mut display =
                 rate_limit_snapshot_display_for_limit(&snapshot, limit_label, Local::now());
+            if display.individual_limit.is_none() {
+                display.individual_limit = preserved_individual_limit;
+            }
             self.rate_limit_snapshots_by_limit_id
                 .insert(limit_id, display);
 
@@ -225,6 +314,7 @@ impl ChatWidget {
         } else {
             self.rate_limit_snapshots_by_limit_id.clear();
             self.codex_rate_limit_reached_type = None;
+            self.codex_spend_control_reached = None;
         }
         self.refresh_status_line();
     }
@@ -286,16 +376,19 @@ impl ChatWidget {
                 /*approval_policy*/ None,
                 /*approvals_reviewer*/ None,
                 /*permission_profile*/ None,
+                /*active_permission_profile*/ None,
                 /*windows_sandbox_level*/ None,
                 Some(switch_model_for_events.clone()),
-                Some(Some(default_effort)),
+                Some(Some(default_effort.clone())),
                 /*summary*/ None,
                 /*service_tier*/ None,
                 /*collaboration_mode*/ None,
                 /*personality*/ None,
             )));
             tx.send(AppEvent::UpdateModel(switch_model_for_events.clone()));
-            tx.send(AppEvent::UpdateReasoningEffort(Some(default_effort)));
+            tx.send(AppEvent::UpdateReasoningEffort(Some(
+                default_effort.clone(),
+            )));
         })];
 
         let keep_actions: Vec<SelectionAction> = Vec::new();
@@ -342,6 +435,7 @@ impl ChatWidget {
         ];
 
         self.bottom_pane.show_selection_view(SelectionViewParams {
+            view_id: Some(RATE_LIMIT_SWITCH_PROMPT_VIEW_ID),
             title: Some("Approaching rate limits".to_string()),
             subtitle: Some(format!("Switch to {switch_model} for lower credit usage?")),
             footer_hint: Some(standard_popup_hint_line()),
@@ -374,14 +468,14 @@ impl ChatWidget {
         let items = vec![
             SelectionItem {
                 name: "Yes".to_string(),
-                display_shortcut: Some(key_hint::plain(KeyCode::Char('y'))),
+                display_shortcut: Some(key_hint::plain(KeyCode::Char('y')).into()),
                 actions: send_actions,
                 dismiss_on_select: true,
                 ..Default::default()
             },
             SelectionItem {
                 name: "No".to_string(),
-                display_shortcut: Some(key_hint::plain(KeyCode::Char('n'))),
+                display_shortcut: Some(key_hint::plain(KeyCode::Char('n')).into()),
                 is_default: true,
                 dismiss_on_select: true,
                 ..Default::default()

@@ -48,6 +48,14 @@ impl InputQueueState {
     pub(super) fn has_queued_follow_up_messages(&self) -> bool {
         !self.rejected_steers_queue.is_empty() || !self.queued_user_messages.is_empty()
     }
+    pub(super) fn can_admit_to_server_queue(&self) -> bool {
+        self.rejected_steers_queue.is_empty()
+            && self.pending_steers.is_empty()
+            && self
+                .queued_user_messages
+                .iter()
+                .all(QueuedUserMessage::is_server_managed)
+    }
 
     pub(super) fn clear(&mut self) {
         self.queued_user_messages.clear();

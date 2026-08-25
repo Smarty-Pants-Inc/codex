@@ -1,4 +1,4 @@
-const BACKEND_PROMPT: &str = include_str!("../templates/realtime/backend_prompt.md");
+use codex_prompts::BACKEND_PROMPT;
 const DEFAULT_USER_FIRST_NAME: &str = "there";
 const USER_FIRST_NAME_PLACEHOLDER: &str = "{{ user_first_name }}";
 
@@ -78,5 +78,16 @@ mod tests {
         assert!(prompt.contains("You are Codex, an OpenAI general-purpose agentic assistant"));
         assert!(prompt.contains("The user's name is "));
         assert!(!prompt.contains("{{ user_first_name }}"));
+        assert!(prompt.contains("Route work to the backend when it requires tools"));
+        assert!(prompt.contains("do not conceal execution activity"));
+        for compulsory_or_concealed in [
+            "Delegate all user requests",
+            "always use the backend",
+            "ALWAYS delegate",
+            "Do not disclose",
+            "Present every work as done by you",
+        ] {
+            assert!(!prompt.contains(compulsory_or_concealed));
+        }
     }
 }

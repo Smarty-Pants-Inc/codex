@@ -1,7 +1,12 @@
 use super::*;
 use crate::session::tests::make_session_configuration_for_tests;
+use codex_history::ResponseItemEnvelope;
+use codex_protocol::ResponseItemId;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::CreditsSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
+use codex_protocol::protocol::SpendControlLimitSnapshot;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -48,6 +53,8 @@ async fn set_rate_limits_defaults_limit_id_to_codex_when_missing() {
         }),
         secondary: None,
         credits: None,
+        individual_limit: None,
+        spend_control_reached: None,
         plan_type: None,
         rate_limit_reached_type: None,
     });
@@ -59,6 +66,70 @@ async fn set_rate_limits_defaults_limit_id_to_codex_when_missing() {
             .and_then(|v| v.limit_id.clone()),
         Some("codex".to_string())
     );
+}
+
+#[tokio::test]
+async fn replace_history_clears_auto_compact_window_prefill() {
+    let session_configuration = make_session_configuration_for_tests().await;
+    let mut state = SessionState::new(session_configuration);
+
+    state.set_auto_compact_window_estimated_prefill(/*tokens*/ 100);
+    state.replace_history(Vec::new(), /*reference_context_item*/ None);
+
+    assert_eq!(
+        state.auto_compact_window_snapshot(),
+        AutoCompactWindowSnapshot {
+            prefill_input_tokens: None,
+        }
+    );
+}
+#[tokio::test]
+async fn replacing_history_prunes_stale_direct_user_provenance() {
+    let session_configuration = make_session_configuration_for_tests().await;
+    let mut state = SessionState::new(session_configuration);
+    let stale = ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", "stale")),
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "stale direct user input".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let current = ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", "current")),
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "current direct user input".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let mut stale_lookalike = stale.clone();
+    if let ResponseItem::Message { content, .. } = &mut stale_lookalike {
+        *content = vec![ContentItem::InputText {
+            text: "provider-authored replacement".to_string(),
+        }];
+    }
+
+    state.replace_annotated_history(
+        vec![
+            ResponseItemEnvelope::new(stale.clone()),
+            ResponseItemEnvelope::new(current.clone()),
+        ],
+        /*reference_context_item*/ None,
+    );
+    state.record_direct_user_response_items(vec![stale, current.clone()]);
+    state.replace_annotated_history(
+        vec![
+            ResponseItemEnvelope::new(stale_lookalike),
+            ResponseItemEnvelope::new(current.clone()),
+        ],
+        /*reference_context_item*/ None,
+    );
+
+    assert_eq!(state.direct_user_response_items, vec![current.clone()]);
+    assert_eq!(state.direct_user_response_items(), vec![current]);
 }
 
 #[tokio::test]
@@ -76,6 +147,8 @@ async fn set_rate_limits_defaults_to_codex_when_limit_id_missing_after_other_buc
         }),
         secondary: None,
         credits: None,
+        individual_limit: None,
+        spend_control_reached: None,
         plan_type: None,
         rate_limit_reached_type: None,
     });
@@ -89,6 +162,8 @@ async fn set_rate_limits_defaults_to_codex_when_limit_id_missing_after_other_buc
         }),
         secondary: None,
         credits: None,
+        individual_limit: None,
+        spend_control_reached: None,
         plan_type: None,
         rate_limit_reached_type: None,
     });
@@ -103,7 +178,7 @@ async fn set_rate_limits_defaults_to_codex_when_limit_id_missing_after_other_buc
 }
 
 #[tokio::test]
-async fn set_rate_limits_carries_credits_and_plan_type_from_codex_to_codex_other() {
+async fn set_rate_limits_carries_account_metadata_from_codex_to_codex_other() {
     let session_configuration = make_session_configuration_for_tests().await;
     let mut state = SessionState::new(session_configuration);
 
@@ -121,6 +196,13 @@ async fn set_rate_limits_carries_credits_and_plan_type_from_codex_to_codex_other
             unlimited: false,
             balance: Some("50".to_string()),
         }),
+        individual_limit: Some(SpendControlLimitSnapshot {
+            limit: "25000".to_string(),
+            used: "8000".to_string(),
+            remaining_percent: 68,
+            resets_at: 300,
+        }),
+        spend_control_reached: Some(true),
         plan_type: Some(codex_protocol::account::PlanType::Plus),
         rate_limit_reached_type: None,
     });
@@ -135,6 +217,8 @@ async fn set_rate_limits_carries_credits_and_plan_type_from_codex_to_codex_other
         }),
         secondary: None,
         credits: None,
+        individual_limit: None,
+        spend_control_reached: None,
         plan_type: None,
         rate_limit_reached_type: None,
     });
@@ -155,8 +239,35 @@ async fn set_rate_limits_carries_credits_and_plan_type_from_codex_to_codex_other
                 unlimited: false,
                 balance: Some("50".to_string()),
             }),
+            individual_limit: Some(SpendControlLimitSnapshot {
+                limit: "25000".to_string(),
+                used: "8000".to_string(),
+                remaining_percent: 68,
+                resets_at: 300,
+            }),
+            spend_control_reached: Some(true),
             plan_type: Some(codex_protocol::account::PlanType::Plus),
             rate_limit_reached_type: None,
         })
+    );
+
+    state.set_rate_limits(RateLimitSnapshot {
+        limit_id: Some("codex_other".to_string()),
+        limit_name: None,
+        primary: None,
+        secondary: None,
+        credits: None,
+        individual_limit: None,
+        spend_control_reached: Some(false),
+        plan_type: None,
+        rate_limit_reached_type: None,
+    });
+
+    assert_eq!(
+        state
+            .latest_rate_limits
+            .as_ref()
+            .and_then(|snapshot| snapshot.spend_control_reached),
+        Some(false)
     );
 }

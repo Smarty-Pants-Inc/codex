@@ -1,6 +1,8 @@
 //! Runtime settings state and model/collaboration coordination for `ChatWidget`.
 
 use super::*;
+use crate::app_event::AppEvent;
+use crate::chatwidget::rate_limits::RATE_LIMIT_SWITCH_PROMPT_VIEW_ID;
 
 impl ChatWidget {
     /// Set the approval policy in the widget's config copy.
@@ -17,28 +19,51 @@ impl ChatWidget {
         }
     }
 
-    /// Set the permission profile in the widget's config copy.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    pub(crate) fn set_permission_profile(
+    pub(crate) fn set_permission_profile_from_session_snapshot(
         &mut self,
-        profile: PermissionProfile,
+        snapshot: PermissionProfileSnapshot,
     ) -> ConstraintResult<()> {
-        self.config.permissions.set_permission_profile(profile)?;
+        self.config
+            .permissions
+            .set_permission_profile_from_session_snapshot(snapshot)?;
         self.refresh_status_surfaces();
         Ok(())
+    }
+
+    pub(crate) fn set_permission_profile_with_active_profile(
+        &mut self,
+        profile: PermissionProfile,
+        active_permission_profile: Option<ActivePermissionProfile>,
+    ) -> ConstraintResult<()> {
+        self.config
+            .permissions
+            .set_permission_profile_from_session_snapshot(
+                PermissionProfileSnapshot::from_session_snapshot(
+                    profile,
+                    active_permission_profile,
+                ),
+            )?;
+        self.refresh_status_surfaces();
+        Ok(())
+    }
+
+    pub(crate) fn set_permission_network(
+        &mut self,
+        network: Option<crate::legacy_core::config::NetworkProxySpec>,
+    ) {
+        self.config.permissions.network = network;
     }
 
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     pub(crate) fn set_windows_sandbox_mode(&mut self, mode: Option<WindowsSandboxModeToml>) {
         self.config.permissions.windows_sandbox_mode = mode;
         #[cfg(target_os = "windows")]
-        self.bottom_pane.set_windows_degraded_sandbox_active(
-            crate::legacy_core::windows_sandbox::ELEVATED_SANDBOX_NUX_ENABLED
-                && matches!(
-                    WindowsSandboxLevel::from_config(&self.config),
-                    WindowsSandboxLevel::RestrictedToken
-                ),
-        );
+        self.bottom_pane
+            .set_windows_degraded_sandbox_active(matches!(
+                crate::windows_sandbox::level_from_config(&self.config),
+                WindowsSandboxLevel::RestrictedToken
+            ));
     }
 
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -51,19 +76,8 @@ impl ChatWidget {
             );
         }
         let enabled = self.config.features.enabled(feature);
-        if feature == Feature::RealtimeConversation {
-            let realtime_conversation_enabled = self.realtime_conversation_enabled();
-            self.bottom_pane
-                .set_realtime_conversation_enabled(realtime_conversation_enabled);
-            self.bottom_pane
-                .set_audio_device_selection_enabled(self.realtime_audio_device_selection_enabled());
-            if !realtime_conversation_enabled && self.realtime_conversation.is_live() {
-                self.request_realtime_conversation_close(Some(
-                    "Realtime voice mode was closed because the feature was disabled.".to_string(),
-                ));
-            }
-        }
         if feature == Feature::FastMode {
+            self.refresh_effective_service_tier();
             self.sync_service_tier_commands();
         }
         if feature == Feature::Personality {
@@ -94,13 +108,11 @@ impl ChatWidget {
             feature,
             Feature::WindowsSandbox | Feature::WindowsSandboxElevated
         ) {
-            self.bottom_pane.set_windows_degraded_sandbox_active(
-                crate::legacy_core::windows_sandbox::ELEVATED_SANDBOX_NUX_ENABLED
-                    && matches!(
-                        WindowsSandboxLevel::from_config(&self.config),
-                        WindowsSandboxLevel::RestrictedToken
-                    ),
-            );
+            self.bottom_pane
+                .set_windows_degraded_sandbox_active(matches!(
+                    crate::windows_sandbox::level_from_config(&self.config),
+                    WindowsSandboxLevel::RestrictedToken
+                ));
         }
         enabled
     }
@@ -108,10 +120,6 @@ impl ChatWidget {
     pub(crate) fn set_approvals_reviewer(&mut self, policy: ApprovalsReviewer) {
         self.config.approvals_reviewer = policy;
         self.refresh_status_surfaces();
-    }
-
-    pub(crate) fn set_full_access_warning_acknowledged(&mut self, acknowledged: bool) {
-        self.config.notices.hide_full_access_warning = Some(acknowledged);
     }
 
     pub(crate) fn set_world_writable_warning_acknowledged(&mut self, acknowledged: bool) {
@@ -132,7 +140,7 @@ impl ChatWidget {
     /// so the footer reflects it without waiting for the next mode switch.
     /// Passing `None` resets to the Plan-mode preset default.
     pub(crate) fn set_plan_mode_reasoning_effort(&mut self, effort: Option<ReasoningEffortConfig>) {
-        self.config.plan_mode_reasoning_effort = effort;
+        self.config.plan_mode_reasoning_effort = effort.clone();
         if self.collaboration_modes_enabled()
             && let Some(mask) = self.active_collaboration_mask.as_mut()
             && mask.mode == Some(ModeKind::Plan)
@@ -155,7 +163,7 @@ impl ChatWidget {
     pub(crate) fn set_reasoning_effort(&mut self, effort: Option<ReasoningEffortConfig>) {
         self.current_collaboration_mode = self.current_collaboration_mode.with_updates(
             /*model*/ None,
-            Some(effort),
+            Some(effort.clone()),
             /*developer_instructions*/ None,
         );
         if self.collaboration_modes_enabled()
@@ -195,28 +203,51 @@ impl ChatWidget {
         self.has_chatgpt_account
     }
 
+    pub(crate) fn has_codex_backend_auth(&self) -> bool {
+        self.has_codex_backend_auth
+    }
+
     pub(crate) fn update_account_state(
         &mut self,
         status_account_display: Option<StatusAccountDisplay>,
         plan_type: Option<PlanType>,
         has_chatgpt_account: bool,
+        has_codex_backend_auth: bool,
     ) {
+        // Account-update notifications are the identity boundary. The visible account fields can
+        // be identical across two accounts, so always invalidate account-scoped requests and data.
+        self.invalidate_connector_scope();
+        self.clear_pending_token_activity_refreshes();
+        self.clear_pending_rate_limit_reset_requests();
+        self.codex_rate_limit_reached_type = None;
+        self.codex_spend_control_reached = None;
+        self.rate_limit_warnings = RateLimitWarningState::default();
+        self.rate_limit_switch_prompt = RateLimitSwitchPromptState::Idle;
+        self.bottom_pane
+            .dismiss_view_by_id(RATE_LIMIT_SWITCH_PROMPT_VIEW_ID);
+        let had_refreshing_status_outputs = !self.refreshing_status_outputs.is_empty();
+        let now = Local::now();
+        for (_, handle) in self.refreshing_status_outputs.drain(..) {
+            handle.finish_rate_limit_refresh(&[], now);
+        }
+        if had_refreshing_status_outputs {
+            self.request_redraw();
+        }
+        self.status_line_workspace_headline = None;
+        self.status_line_workspace_headline_pending_request_id = None;
+        self.status_line_workspace_headline_last_requested_at = None;
+        self.status_line_workspace_messages_disabled = false;
+        self.clear_thread_usage_state();
         self.status_account_display = status_account_display;
         self.plan_type = plan_type;
         self.has_chatgpt_account = has_chatgpt_account;
+        self.has_codex_backend_auth = has_codex_backend_auth;
         self.bottom_pane
             .set_connectors_enabled(self.connectors_enabled());
-    }
-
-    pub(crate) fn set_realtime_audio_device(
-        &mut self,
-        kind: RealtimeAudioDeviceKind,
-        name: Option<String>,
-    ) {
-        match kind {
-            RealtimeAudioDeviceKind::Microphone => self.config.realtime_audio.microphone = name,
-            RealtimeAudioDeviceKind::Speaker => self.config.realtime_audio.speaker = name,
-        }
+        self.refresh_connector_mentions(/*force_refresh*/ false);
+        self.bottom_pane
+            .set_token_activity_command_enabled(has_codex_backend_auth);
+        self.refresh_status_surfaces();
     }
 
     /// Set the syntax theme override in the widget's config copy.
@@ -236,6 +267,7 @@ impl ChatWidget {
         {
             mask.model = Some(model.to_string());
         }
+        self.refresh_effective_service_tier();
         self.refresh_model_dependent_surfaces();
     }
 
@@ -247,28 +279,6 @@ impl ChatWidget {
             .as_ref()
             .and_then(|mask| mask.model.as_deref())
             .unwrap_or_else(|| self.current_collaboration_mode.model())
-    }
-
-    pub(crate) fn realtime_conversation_is_live(&self) -> bool {
-        self.realtime_conversation.is_live()
-    }
-
-    pub(super) fn current_realtime_audio_device_name(
-        &self,
-        kind: RealtimeAudioDeviceKind,
-    ) -> Option<String> {
-        match kind {
-            RealtimeAudioDeviceKind::Microphone => self.config.realtime_audio.microphone.clone(),
-            RealtimeAudioDeviceKind::Speaker => self.config.realtime_audio.speaker.clone(),
-        }
-    }
-
-    pub(super) fn current_realtime_audio_selection_label(
-        &self,
-        kind: RealtimeAudioDeviceKind,
-    ) -> String {
-        self.current_realtime_audio_device_name(kind)
-            .unwrap_or_else(|| "System default".to_string())
     }
 
     pub(super) fn sync_personality_command_enabled(&mut self) {
@@ -335,13 +345,30 @@ impl ChatWidget {
         )
     }
 
-    #[allow(dead_code)] // Used in tests
     pub(crate) fn current_collaboration_mode(&self) -> &CollaborationMode {
         &self.current_collaboration_mode
     }
 
     pub(crate) fn current_reasoning_effort(&self) -> Option<ReasoningEffortConfig> {
         self.effective_reasoning_effort()
+    }
+
+    pub(crate) fn on_thread_settings_updated(
+        &mut self,
+        notification: ThreadSettingsUpdatedNotification,
+    ) {
+        let Ok(thread_id) = ThreadId::from_string(&notification.thread_id) else {
+            tracing::warn!(
+                thread_id = notification.thread_id,
+                "ignoring app-server ThreadSettingsUpdated with invalid thread_id"
+            );
+            return;
+        };
+        if self.thread_id != Some(thread_id) {
+            return;
+        }
+
+        self.apply_thread_settings(notification.thread_settings);
     }
 
     #[cfg(test)]
@@ -355,48 +382,6 @@ impl ChatWidget {
 
     pub(super) fn collaboration_modes_enabled(&self) -> bool {
         true
-    }
-
-    /// Returns the dismissal scope that applies to the currently visible draft.
-    fn plan_mode_nudge_scope(&self) -> PlanModeNudgeScope {
-        self.thread_id
-            .map_or(PlanModeNudgeScope::NewThread, PlanModeNudgeScope::Thread)
-    }
-
-    /// Returns whether the current draft should replace the normal footer with the Plan-mode nudge.
-    ///
-    /// `ChatWidget` owns this policy because it can combine lexical draft matching with mode
-    /// availability, interaction state, and thread-scoped dismissal. `ChatComposer` only renders
-    /// the resulting visibility bit. Keeping slash and shell drafts out here avoids advertising a
-    /// mode switch while the user is intentionally composing another local command.
-    pub(super) fn should_show_plan_mode_nudge(&self) -> bool {
-        let text = self.bottom_pane.composer_text();
-        let trimmed = text.trim_start();
-        self.collaboration_modes_enabled()
-            && collaboration_modes::plan_mask(self.model_catalog.as_ref()).is_some()
-            && self.active_mode_kind() != ModeKind::Plan
-            && self.bottom_pane.composer_input_enabled()
-            && !self.bottom_pane.is_task_running()
-            && self.bottom_pane.no_modal_or_popup_active()
-            && !trimmed.starts_with('/')
-            && !trimmed.starts_with('!')
-            && contains_plan_keyword(&text)
-            && !self
-                .dismissed_plan_mode_nudge_scopes
-                .contains(&self.plan_mode_nudge_scope())
-    }
-
-    /// Synchronizes the footer presentation with the current Plan-mode nudge policy.
-    pub(super) fn refresh_plan_mode_nudge(&mut self) {
-        self.bottom_pane
-            .set_plan_mode_nudge_visible(self.should_show_plan_mode_nudge());
-    }
-
-    /// Hides the nudge for the current thread scope until the user changes conversation context.
-    pub(super) fn dismiss_plan_mode_nudge(&mut self) {
-        self.dismissed_plan_mode_nudge_scopes
-            .insert(self.plan_mode_nudge_scope());
-        self.refresh_plan_mode_nudge();
     }
 
     pub(super) fn initial_collaboration_mask(
@@ -425,11 +410,11 @@ impl ChatWidget {
         let current_effort = self.current_collaboration_mode.reasoning_effort();
         self.active_collaboration_mask
             .as_ref()
-            .and_then(|mask| mask.reasoning_effort)
+            .and_then(|mask| mask.reasoning_effort.clone())
             .unwrap_or(current_effort)
     }
 
-    pub(super) fn effective_collaboration_mode(&self) -> CollaborationMode {
+    pub(crate) fn effective_collaboration_mode(&self) -> CollaborationMode {
         if !self.collaboration_modes_enabled() {
             return self.current_collaboration_mode.clone();
         }
@@ -446,6 +431,9 @@ impl ChatWidget {
         self.sync_image_paste_enabled();
         self.sync_service_tier_commands();
         self.refresh_terminal_title();
+        let effort = self.effective_reasoning_effort();
+        self.bottom_pane
+            .set_active_reasoning_effort(effort.as_ref());
     }
 
     /// Refresh every UI surface that depends on the effective model, reasoning
@@ -459,6 +447,98 @@ impl ChatWidget {
     pub(super) fn refresh_model_dependent_surfaces(&mut self) {
         self.refresh_model_display();
         self.refresh_status_line();
+    }
+
+    fn apply_thread_settings(&mut self, mut settings: ThreadSettings) {
+        let cwd_changed = self.config.cwd != settings.cwd;
+        self.apply_thread_settings_cwd(settings.cwd.clone());
+        self.config.model_provider_id = settings.model_provider.clone();
+        self.set_service_tier(settings.service_tier.clone());
+        self.set_approval_policy(settings.approval_policy);
+        self.set_approvals_reviewer(settings.approvals_reviewer.to_core());
+        self.config.personality = settings.personality;
+
+        let permission_profile = PermissionProfile::from_legacy_sandbox_policy_for_cwd(
+            &settings.sandbox_policy.to_core(),
+            settings.cwd.as_path(),
+        );
+        let permission_snapshot = PermissionProfileSnapshot::from_session_snapshot(
+            permission_profile,
+            settings.active_permission_profile.take().map(Into::into),
+        );
+        if let Err(err) = self
+            .config
+            .permissions
+            .set_permission_profile_from_session_snapshot(permission_snapshot.clone())
+        {
+            tracing::warn!(%err, "failed to sync permissions from ThreadSettingsUpdated");
+            if let Err(replace_err) = self
+                .config
+                .permissions
+                .replace_permission_profile_from_session_snapshot(permission_snapshot)
+            {
+                tracing::error!(
+                    %replace_err,
+                    "failed to replace permissions from ThreadSettingsUpdated after constraint fallback"
+                );
+            }
+        }
+
+        settings.collaboration_mode.settings.model = settings.model;
+        settings.collaboration_mode.settings.reasoning_effort = settings.effort;
+        self.set_effective_collaboration_mode(settings.collaboration_mode);
+        self.refresh_effective_service_tier();
+        self.refresh_status_surfaces();
+        self.sync_service_tier_commands();
+        self.sync_personality_command_enabled();
+        if cwd_changed {
+            self.invalidate_connector_scope();
+            self.refresh_skills_for_current_cwd(/*force_reload*/ true);
+            self.refresh_connector_mentions(/*force_refresh*/ false);
+        }
+        self.refresh_plugin_mentions();
+        self.request_redraw();
+    }
+
+    fn apply_thread_settings_cwd(&mut self, cwd: AbsolutePathBuf) {
+        let previous_cwd = std::mem::replace(&mut self.config.cwd, cwd.clone());
+        self.current_cwd = Some(cwd.to_path_buf());
+        self.status_line_project_root_name_cache = None;
+
+        if !self.config.workspace_roots.contains(&previous_cwd) {
+            return;
+        }
+
+        let previous_roots = std::mem::take(&mut self.config.workspace_roots);
+        self.config.workspace_roots.push(cwd);
+        for root in previous_roots {
+            if root != previous_cwd && !self.config.workspace_roots.contains(&root) {
+                self.config.workspace_roots.push(root);
+            }
+        }
+        self.config
+            .permissions
+            .set_workspace_roots(self.config.workspace_roots.clone());
+    }
+
+    pub(super) fn set_effective_collaboration_mode(&mut self, mode: CollaborationMode) {
+        let mode_kind = mode.mode;
+        let settings = mode.settings;
+        if mode_kind == ModeKind::Default {
+            self.current_collaboration_mode = CollaborationMode {
+                mode: ModeKind::Default,
+                settings: settings.clone(),
+            };
+        }
+        self.active_collaboration_mask = Some(CollaborationModeMask {
+            name: mode_kind.display_name().to_string(),
+            mode: Some(mode_kind),
+            model: Some(settings.model.clone()),
+            reasoning_effort: Some(settings.reasoning_effort.clone()),
+            developer_instructions: Some(settings.developer_instructions),
+        });
+        self.update_collaboration_mode_indicator();
+        self.refresh_model_dependent_surfaces();
     }
 
     pub(super) fn model_display_name(&self) -> &str {
@@ -487,7 +567,7 @@ impl ChatWidget {
         }
         match self.active_mode_kind() {
             ModeKind::Plan => Some(CollaborationModeIndicator::Plan),
-            ModeKind::Default | ModeKind::PairProgramming | ModeKind::Execute => None,
+            ModeKind::Default => None,
         }
     }
 
@@ -554,8 +634,13 @@ impl ChatWidget {
             self.model_catalog.as_ref(),
             self.active_collaboration_mask.as_ref(),
         ) {
-            self.set_collaboration_mask(next_mask);
+            self.set_collaboration_mask_from_user_action(next_mask);
         }
+    }
+
+    pub(crate) fn set_collaboration_mask_from_user_action(&mut self, mask: CollaborationModeMask) {
+        self.set_collaboration_mask(mask);
+        self.submit_collaboration_mode_settings_update();
     }
 
     /// Update the active collaboration mask.
@@ -570,17 +655,12 @@ impl ChatWidget {
         let previous_model = self.current_model().to_string();
         let previous_effort = self.effective_reasoning_effort();
         if mask.mode == Some(ModeKind::Plan)
-            && let Some(effort) = self.config.plan_mode_reasoning_effort
+            && let Some(effort) = self.config.plan_mode_reasoning_effort.clone()
         {
             mask.reasoning_effort = Some(Some(effort));
         }
-        if mask.mode == Some(ModeKind::Plan) {
-            self.dismissed_plan_mode_nudge_scopes
-                .insert(self.plan_mode_nudge_scope());
-        }
         self.active_collaboration_mask = Some(mask);
         self.update_collaboration_mode_indicator();
-        self.refresh_plan_mode_nudge();
         self.refresh_model_dependent_surfaces();
         let next_mode = self.active_mode_kind();
         let next_model = self.current_model();
@@ -590,13 +670,9 @@ impl ChatWidget {
         {
             let mut message = format!("Model changed to {next_model}");
             if !next_model.starts_with("codex-auto-") {
-                let reasoning_label = match next_effort {
-                    Some(ReasoningEffortConfig::Minimal) => "minimal",
-                    Some(ReasoningEffortConfig::Low) => "low",
-                    Some(ReasoningEffortConfig::Medium) => "medium",
-                    Some(ReasoningEffortConfig::High) => "high",
-                    Some(ReasoningEffortConfig::XHigh) => "xhigh",
+                let reasoning_label = match next_effort.as_ref() {
                     None | Some(ReasoningEffortConfig::None) => "default",
+                    Some(effort) => effort.as_str(),
                 };
                 message.push(' ');
                 message.push_str(reasoning_label);
@@ -607,5 +683,28 @@ impl ChatWidget {
             self.add_info_message(message, /*hint*/ None);
         }
         self.request_redraw();
+    }
+
+    fn submit_collaboration_mode_settings_update(&self) {
+        let Some(thread_id) = self.thread_id else {
+            return;
+        };
+        self.app_event_tx.send(AppEvent::SubmitThreadOp {
+            thread_id,
+            op: AppCommand::override_turn_context(
+                /*cwd*/ None,
+                /*approval_policy*/ None,
+                /*approvals_reviewer*/ None,
+                /*permission_profile*/ None,
+                /*active_permission_profile*/ None,
+                /*windows_sandbox_level*/ None,
+                /*model*/ None,
+                /*effort*/ None,
+                /*summary*/ None,
+                /*service_tier*/ None,
+                Some(self.effective_collaboration_mode()),
+                /*personality*/ None,
+            ),
+        });
     }
 }

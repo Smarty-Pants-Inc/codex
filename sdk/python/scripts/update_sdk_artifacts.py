@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from __future__ import annotations
 
 import argparse
 import importlib
@@ -8,9 +7,9 @@ import json
 import platform
 import re
 import shutil
-import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
 import types
 import typing
@@ -18,8 +17,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Sequence, get_args, get_origin
 
+_SDK_PYTHON_ROOT = str(Path(__file__).resolve().parents[1])
+if _SDK_PYTHON_ROOT not in sys.path:
+    sys.path.insert(0, _SDK_PYTHON_ROOT)
+
+from release_version import normalize_codex_version  # noqa: E402
+
 SDK_DISTRIBUTION_NAME = "openai-codex"
 RUNTIME_DISTRIBUTION_NAME = "openai-codex-cli-bin"
+RUNTIME_PACKAGE_ROOT = Path("src") / "codex_cli_bin"
+CODEX_PACKAGE_METADATA = "codex-package.json"
 
 
 def repo_root() -> Path:
@@ -52,16 +59,12 @@ def runtime_binary_name() -> str:
     return "codex.exe" if _is_windows() else "codex"
 
 
-def staged_runtime_bin_path(root: Path) -> Path:
-    return root / "src" / "codex_cli_bin" / "bin" / runtime_binary_name()
+def runtime_code_mode_host_name() -> str:
+    return "codex-code-mode-host.exe" if _is_windows() else "codex-code-mode-host"
 
 
-def staged_runtime_resource_path(root: Path, resource: Path) -> Path:
-    """Stage runtime helper binaries beside the main bundled Codex binary."""
-    # Runtime wheels include the whole bin/ directory, so helper executables
-    # should be staged beside the main Codex binary instead of changing the
-    # package template for each platform.
-    return root / "src" / "codex_cli_bin" / "bin" / resource.name
+def staged_runtime_package_root(root: Path) -> Path:
+    return root / RUNTIME_PACKAGE_ROOT
 
 
 def run(cmd: list[str], cwd: Path) -> None:
@@ -131,22 +134,6 @@ def pinned_runtime_codex_path() -> Path:
     if not codex_path.exists():
         raise RuntimeError(f"Pinned Codex runtime binary not found at {codex_path}.")
     return codex_path
-
-
-def normalize_codex_version(version: str) -> str:
-    normalized = version.strip()
-    if normalized.startswith("rust-v"):
-        normalized = normalized.removeprefix("rust-v")
-    elif normalized.startswith("v"):
-        normalized = normalized.removeprefix("v")
-
-    normalized = re.sub(r"-alpha\.?([0-9]+)$", r"a\1", normalized)
-    normalized = re.sub(r"-beta\.?([0-9]+)$", r"b\1", normalized)
-    normalized = re.sub(r"-rc\.?([0-9]+)$", r"rc\1", normalized)
-
-    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*(?:(?:a|b|rc)[0-9]+)?", normalized):
-        raise RuntimeError(f"Could not normalize Codex version {version!r} to a PEP 440 version")
-    return normalized
 
 
 def _copy_package_tree(src: Path, dst: Path) -> None:
@@ -223,25 +210,8 @@ def _rewrite_project_name(pyproject_text: str, name: str) -> str:
     return updated
 
 
-def _rewrite_sdk_runtime_dependency(pyproject_text: str, runtime_version: str) -> str:
-    match = re.search(r"^dependencies = \[(.*?)\]$", pyproject_text, flags=re.MULTILINE)
-    if match is None:
-        raise RuntimeError("Could not find dependencies array in sdk/python/pyproject.toml")
-
-    raw_items = [item.strip() for item in match.group(1).split(",") if item.strip()]
-    raw_items = [
-        item
-        for item in raw_items
-        if RUNTIME_DISTRIBUTION_NAME.removeprefix("openai-") not in item
-        and RUNTIME_DISTRIBUTION_NAME not in item
-    ]
-    raw_items.append(f'"{RUNTIME_DISTRIBUTION_NAME}=={runtime_version}"')
-    replacement = "dependencies = [\n  " + ",\n  ".join(raw_items) + ",\n]"
-    return pyproject_text[: match.start()] + replacement + pyproject_text[match.end() :]
-
-
-def stage_python_sdk_package(staging_dir: Path, codex_version: str) -> Path:
-    package_version = normalize_codex_version(codex_version)
+def stage_python_sdk_package(staging_dir: Path, sdk_version: str) -> Path:
+    package_version = normalize_codex_version(sdk_version)
     _copy_package_tree(sdk_root(), staging_dir)
     sdk_bin_dir = staging_dir / "src" / "openai_codex" / "bin"
     if sdk_bin_dir.exists():
@@ -251,7 +221,6 @@ def stage_python_sdk_package(staging_dir: Path, codex_version: str) -> Path:
     pyproject_text = pyproject_path.read_text()
     pyproject_text = _rewrite_project_name(pyproject_text, SDK_DISTRIBUTION_NAME)
     pyproject_text = _rewrite_project_version(pyproject_text, package_version)
-    pyproject_text = _rewrite_sdk_runtime_dependency(pyproject_text, package_version)
     pyproject_path.write_text(pyproject_text)
     return staging_dir
 
@@ -259,9 +228,8 @@ def stage_python_sdk_package(staging_dir: Path, codex_version: str) -> Path:
 def stage_python_runtime_package(
     staging_dir: Path,
     codex_version: str,
-    binary_path: Path,
+    package_archive: Path,
     platform_tag: str | None = None,
-    resource_binaries: Sequence[Path] = (),
 ) -> Path:
     package_version = normalize_codex_version(codex_version)
     _copy_package_tree(python_runtime_root(), staging_dir)
@@ -274,22 +242,40 @@ def stage_python_runtime_package(
         pyproject_text = _rewrite_runtime_platform_tag(pyproject_text, platform_tag)
     pyproject_path.write_text(pyproject_text)
 
-    out_bin = staged_runtime_bin_path(staging_dir)
-    out_bin.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(binary_path, out_bin)
-    if not _is_windows():
-        out_bin.chmod(out_bin.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    for resource_binary in resource_binaries:
-        # Some release targets need helper executables beside the main binary
-        # (for example Linux bwrap or Windows sandbox helpers). Keep this
-        # generic so release workflows own the platform-specific list.
-        out_resource = staged_runtime_resource_path(staging_dir, resource_binary)
-        shutil.copy2(resource_binary, out_resource)
-        if not _is_windows():
-            out_resource.chmod(
-                out_resource.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
-            )
+    _extract_codex_package_archive(package_archive, staged_runtime_package_root(staging_dir))
     return staging_dir
+
+
+def _extract_codex_package_archive(package_archive: Path, runtime_package_root: Path) -> None:
+    if not package_archive.name.endswith(".tar.gz"):
+        raise RuntimeError(f"Expected a .tar.gz Codex package archive: {package_archive}")
+
+    runtime_package_root.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(package_archive, "r:gz") as archive:
+        try:
+            archive.extractall(runtime_package_root, filter="data")
+        except TypeError:
+            archive.extractall(runtime_package_root)
+
+    _validate_codex_package_layout(runtime_package_root, package_archive)
+
+
+def _validate_codex_package_layout(package_dir: Path, package_archive: Path) -> None:
+    missing_entries = []
+    if not (package_dir / CODEX_PACKAGE_METADATA).is_file():
+        missing_entries.append(CODEX_PACKAGE_METADATA)
+    for entry in ("bin", "codex-resources", "codex-path"):
+        if not (package_dir / entry).is_dir():
+            missing_entries.append(entry)
+    package_binary = package_dir / "bin" / runtime_binary_name()
+    if not package_binary.is_file():
+        missing_entries.append(str(Path("bin") / runtime_binary_name()))
+    code_mode_host = package_dir / "bin" / runtime_code_mode_host_name()
+    if not code_mode_host.is_file():
+        missing_entries.append(str(Path("bin") / runtime_code_mode_host_name()))
+    if missing_entries:
+        missing = ", ".join(missing_entries)
+        raise RuntimeError(f"Missing Codex package layout entries in {package_archive}: {missing}")
 
 
 def _flatten_string_enum_one_of(definition: dict[str, Any]) -> bool:
@@ -514,6 +500,33 @@ def _annotate_schema(value: Any, base: str | None = None) -> None:
         _annotate_schema(child, base)
 
 
+def _make_chatgpt_account_email_nullable(schema: dict[str, Any]) -> None:
+    definitions = schema.get("definitions")
+    if not isinstance(definitions, dict):
+        raise RuntimeError("Schema bundle is missing definitions")
+
+    account = definitions.get("Account")
+    if not isinstance(account, dict):
+        raise RuntimeError("Schema bundle is missing the Account definition")
+
+    for variant in account.get("oneOf", []):
+        if not isinstance(variant, dict):
+            continue
+        properties = variant.get("properties")
+        if not isinstance(properties, dict):
+            continue
+        account_type = properties.get("type")
+        if not isinstance(account_type, dict) or account_type.get("enum") != ["chatgpt"]:
+            continue
+        email = properties.get("email")
+        if not isinstance(email, dict):
+            raise RuntimeError("ChatGPT account schema is missing email")
+        email["type"] = ["string", "null"]
+        return
+
+    raise RuntimeError("Schema bundle is missing the ChatGPT account variant")
+
+
 def generate_schema_from_pinned_runtime(schema_dir: Path) -> Path:
     """Generate app-server schemas by invoking the installed pinned runtime binary."""
     codex_path = pinned_runtime_codex_path()
@@ -536,6 +549,7 @@ def generate_schema_from_pinned_runtime(schema_dir: Path) -> Path:
 def _normalized_schema_bundle_text(schema_dir: Path) -> str:
     """Normalize the schema bundle before feeding it to the Python type generator."""
     schema = json.loads(schema_bundle_path(schema_dir).read_text())
+    _make_chatgpt_account_email_nullable(schema)
     definitions = schema.get("definitions", {})
     if isinstance(definitions, dict):
         for definition in definitions.values():
@@ -591,7 +605,127 @@ def generate_v2_all(schema_dir: Path) -> None:
             ],
             cwd=sdk_root(),
         )
+    _require_nullable_chatgpt_account_email(out_path)
+    _preserve_reasoning_effort_enum(out_path)
+    _preserve_thread_source_enum(out_path)
+    _preserve_plan_type_enum(out_path)
     _normalize_generated_timestamps(out_path)
+
+
+def _require_nullable_chatgpt_account_email(out_path: Path) -> None:
+    """Preserve required-but-nullable email semantics in the generated SDK model."""
+    source = out_path.read_text()
+    class_start = source.find("class ChatgptAccount(BaseModel):")
+    if class_start == -1:
+        raise RuntimeError("Generated SDK is missing ChatgptAccount")
+    class_end = source.find("\n\nclass ", class_start)
+    if class_end == -1:
+        class_end = len(source)
+
+    class_source = source[class_start:class_end]
+    nullable_with_default = "    email: str | None = None"
+    if class_source.count(nullable_with_default) != 1:
+        raise RuntimeError(
+            "Generated ChatgptAccount email did not have the expected nullable shape"
+        )
+    class_source = class_source.replace(
+        nullable_with_default,
+        "    email: str | None",
+        1,
+    )
+    out_path.write_text(source[:class_start] + class_source + source[class_end:])
+
+
+def _preserve_reasoning_effort_enum(out_path: Path) -> None:
+    """Keep the public effort constants while accepting future wire values."""
+    source = out_path.read_text()
+    class_start = source.find("class ReasoningEffort(RootModel[str]):")
+    if class_start == -1:
+        raise RuntimeError("Generated SDK is missing the open ReasoningEffort model")
+    class_end = source.find("\n\nclass ", class_start)
+    if class_end == -1:
+        class_end = len(source)
+
+    class_source = source[class_start:class_end]
+    if "min_length=1" not in class_source:
+        raise RuntimeError("Generated ReasoningEffort did not preserve the non-empty constraint")
+    open_enum = """class ReasoningEffort(str, Enum):
+    none = "none"
+    minimal = "minimal"
+    low = "low"
+    medium = "medium"
+    high = "high"
+    xhigh = "xhigh"
+    max = "max"
+    ultra = "ultra"
+
+    @classmethod
+    def _missing_(cls, value: object) -> ReasoningEffort | None:
+        if not isinstance(value, str) or not value:
+            return None
+        member = str.__new__(cls, value)
+        member._name_ = value
+        member._value_ = value
+        return member
+"""
+    out_path.write_text(source[:class_start] + open_enum + source[class_end:])
+
+
+def _preserve_thread_source_enum(out_path: Path) -> None:
+    """Keep the public thread-source constants while accepting future wire values."""
+    source = out_path.read_text()
+    class_start = source.find("class ThreadSource(RootModel[str]):")
+    if class_start == -1:
+        raise RuntimeError("Generated SDK is missing the open ThreadSource model")
+    class_end = source.find("\n\nclass ", class_start)
+    if class_end == -1:
+        class_end = len(source)
+
+    open_enum = """class ThreadSource(str, Enum):
+    user = "user"
+    subagent = "subagent"
+    memory_consolidation = "memory_consolidation"
+
+    @classmethod
+    def _missing_(cls, value: object) -> ThreadSource | None:
+        if not isinstance(value, str):
+            return None
+        member = str.__new__(cls, value)
+        member._name_ = value
+        member._value_ = value
+        return member
+"""
+    out_path.write_text(source[:class_start] + open_enum + source[class_end:])
+
+
+def _preserve_plan_type_enum(out_path: Path) -> None:
+    """Keep the public plan constants while accepting values from newer runtimes."""
+    source = out_path.read_text()
+    class_start = source.find("class PlanType(Enum):")
+    if class_start == -1:
+        raise RuntimeError("Generated SDK is missing PlanType")
+    class_end = source.find("\n\nclass ", class_start)
+    if class_end == -1:
+        class_end = len(source)
+
+    class_source = source[class_start:class_end]
+    class_source = class_source.replace(
+        "class PlanType(Enum):",
+        "class PlanType(str, Enum):",
+        1,
+    ).rstrip()
+    class_source += """
+
+    @classmethod
+    def _missing_(cls, value: object) -> PlanType | None:
+        if not isinstance(value, str) or not value:
+            return None
+        member = str.__new__(cls, value)
+        member._name_ = value
+        member._value_ = value
+        return member
+"""
+    out_path.write_text(source[:class_start] + class_source + source[class_end:])
 
 
 def _notification_specs(schema_dir: Path) -> list[tuple[str, str]]:
@@ -752,7 +886,7 @@ class PublicFieldSpec:
 class CliOps:
     generate_types: Callable[[], None]
     stage_python_sdk_package: Callable[[Path, str], Path]
-    stage_python_runtime_package: Callable[[Path, str, Path, str | None, Sequence[Path]], Path]
+    stage_python_runtime_package: Callable[[Path, str, Path, str | None], Path]
     current_sdk_version: Callable[[], str]
 
 
@@ -868,7 +1002,41 @@ def _approval_mode_model_arg_lines(*, indent: str = "            ") -> list[str]
 
 
 def _model_arg_lines(fields: list[PublicFieldSpec], *, indent: str = "            ") -> list[str]:
-    return [f"{indent}{field.wire_name}={field.py_name}," for field in fields]
+    lines: list[str] = []
+    for field in fields:
+        arg = field.py_name
+        if field.wire_name == "sandbox":
+            arg = "_sandbox_mode(sandbox)"
+        elif field.wire_name == "sandbox_policy":
+            arg = "_sandbox_policy(sandbox)"
+        lines.append(f"{indent}{field.wire_name}={arg},")
+    return lines
+
+
+def _replace_public_sandbox_field(
+    fields: list[PublicFieldSpec], *, wire_name: str
+) -> list[PublicFieldSpec]:
+    """Expose stable wire sandbox settings through one public enum parameter."""
+    public_fields: list[PublicFieldSpec] = []
+    replaced = False
+    for field in fields:
+        if field.wire_name != wire_name:
+            public_fields.append(field)
+            continue
+        if replaced:
+            raise RuntimeError(f"Found more than one generated sandbox field named {wire_name}")
+        public_fields.append(
+            PublicFieldSpec(
+                wire_name=wire_name,
+                py_name="sandbox",
+                annotation="Sandbox | None",
+                required=False,
+            )
+        )
+        replaced = True
+    if not replaced:
+        raise RuntimeError(f"Could not find generated sandbox field named {wire_name}")
+    return public_fields
 
 
 def _replace_generated_block(source: str, block_name: str, body: str) -> str:
@@ -895,6 +1063,7 @@ def _render_codex_block(
         *_approval_mode_start_signature_lines(),
         *_kw_signature_lines(thread_start_fields),
         "    ) -> Thread:",
+        '        """Create a new Codex conversation thread."""',
         _approval_mode_assignment_line("_approval_mode_settings"),
         "        params = ThreadStartParams(",
         *_approval_mode_model_arg_lines(),
@@ -908,6 +1077,7 @@ def _render_codex_block(
         "        *,",
         *_kw_signature_lines(thread_list_fields),
         "    ) -> ThreadListResponse:",
+        '        """List saved conversation threads."""',
         "        params = ThreadListParams(",
         *_model_arg_lines(thread_list_fields),
         "        )",
@@ -920,6 +1090,7 @@ def _render_codex_block(
         *_approval_mode_override_signature_lines(),
         *_kw_signature_lines(resume_fields),
         "    ) -> Thread:",
+        '        """Resume an existing conversation thread by ID."""',
         _approval_mode_assignment_line("_approval_mode_override_settings"),
         "        params = ThreadResumeParams(",
         "            thread_id=thread_id,",
@@ -936,6 +1107,7 @@ def _render_codex_block(
         *_approval_mode_override_signature_lines(),
         *_kw_signature_lines(fork_fields),
         "    ) -> Thread:",
+        '        """Create a new thread from an existing thread."""',
         _approval_mode_assignment_line("_approval_mode_override_settings"),
         "        params = ThreadForkParams(",
         "            thread_id=thread_id,",
@@ -946,9 +1118,11 @@ def _render_codex_block(
         "        return Thread(self._client, forked.thread.id)",
         "",
         "    def thread_archive(self, thread_id: str) -> ThreadArchiveResponse:",
+        '        """Archive a stored conversation thread."""',
         "        return self._client.thread_archive(thread_id)",
         "",
         "    def thread_unarchive(self, thread_id: str) -> Thread:",
+        '        """Restore an archived conversation thread."""',
         "        unarchived = self._client.thread_unarchive(thread_id)",
         "        return Thread(self._client, unarchived.thread.id)",
     ]
@@ -968,6 +1142,7 @@ def _render_async_codex_block(
         *_approval_mode_start_signature_lines(),
         *_kw_signature_lines(thread_start_fields),
         "    ) -> AsyncThread:",
+        '        """Create a new Codex conversation thread."""',
         "        await self._ensure_initialized()",
         _approval_mode_assignment_line("_approval_mode_settings"),
         "        params = ThreadStartParams(",
@@ -982,6 +1157,7 @@ def _render_async_codex_block(
         "        *,",
         *_kw_signature_lines(thread_list_fields),
         "    ) -> ThreadListResponse:",
+        '        """List saved conversation threads."""',
         "        await self._ensure_initialized()",
         "        params = ThreadListParams(",
         *_model_arg_lines(thread_list_fields),
@@ -995,6 +1171,7 @@ def _render_async_codex_block(
         *_approval_mode_override_signature_lines(),
         *_kw_signature_lines(resume_fields),
         "    ) -> AsyncThread:",
+        '        """Resume an existing conversation thread by ID."""',
         "        await self._ensure_initialized()",
         _approval_mode_assignment_line("_approval_mode_override_settings"),
         "        params = ThreadResumeParams(",
@@ -1012,6 +1189,7 @@ def _render_async_codex_block(
         *_approval_mode_override_signature_lines(),
         *_kw_signature_lines(fork_fields),
         "    ) -> AsyncThread:",
+        '        """Create a new thread from an existing thread."""',
         "        await self._ensure_initialized()",
         _approval_mode_assignment_line("_approval_mode_override_settings"),
         "        params = ThreadForkParams(",
@@ -1023,10 +1201,12 @@ def _render_async_codex_block(
         "        return AsyncThread(self, forked.thread.id)",
         "",
         "    async def thread_archive(self, thread_id: str) -> ThreadArchiveResponse:",
+        '        """Archive a stored conversation thread."""',
         "        await self._ensure_initialized()",
         "        return await self._client.thread_archive(thread_id)",
         "",
         "    async def thread_unarchive(self, thread_id: str) -> AsyncThread:",
+        '        """Restore an archived conversation thread."""',
         "        await self._ensure_initialized()",
         "        unarchived = await self._client.thread_unarchive(thread_id)",
         "        return AsyncThread(self, unarchived.thread.id)",
@@ -1040,12 +1220,13 @@ def _render_thread_block(
     lines = [
         "    def turn(",
         "        self,",
-        "        input: Input,",
+        "        input: RunInput,",
         "        *,",
         *_approval_mode_override_signature_lines(),
         *_kw_signature_lines(turn_fields),
         "    ) -> TurnHandle:",
-        "        wire_input = _to_wire_input(input)",
+        '        """Start a turn and return a handle for streaming or control."""',
+        "        wire_input = _to_wire_input(_normalize_run_input(input))",
         _approval_mode_assignment_line("_approval_mode_override_settings"),
         "        params = TurnStartParams(",
         "            thread_id=self.id,",
@@ -1065,13 +1246,14 @@ def _render_async_thread_block(
     lines = [
         "    async def turn(",
         "        self,",
-        "        input: Input,",
+        "        input: RunInput,",
         "        *,",
         *_approval_mode_override_signature_lines(),
         *_kw_signature_lines(turn_fields),
         "    ) -> AsyncTurnHandle:",
+        '        """Start a turn and return a handle for streaming or control."""',
         "        await self._codex._ensure_initialized()",
-        "        wire_input = _to_wire_input(input)",
+        "        wire_input = _to_wire_input(_normalize_run_input(input))",
         _approval_mode_assignment_line("_approval_mode_override_settings"),
         "        params = TurnStartParams(",
         "            thread_id=self.id,",
@@ -1106,6 +1288,7 @@ def generate_public_api_flat_methods() -> None:
         "ThreadStartParams",
         exclude=approval_fields,
     )
+    thread_start_fields = _replace_public_sandbox_field(thread_start_fields, wire_name="sandbox")
     thread_list_fields = _load_public_fields(
         "openai_codex.generated.v2_all",
         "ThreadListParams",
@@ -1115,16 +1298,21 @@ def generate_public_api_flat_methods() -> None:
         "ThreadResumeParams",
         exclude={"thread_id", *approval_fields},
     )
+    thread_resume_fields = _replace_public_sandbox_field(thread_resume_fields, wire_name="sandbox")
     thread_fork_fields = _load_public_fields(
         "openai_codex.generated.v2_all",
         "ThreadForkParams",
-        exclude={"thread_id", *approval_fields},
+        exclude={"thread_id", "last_turn_id", *approval_fields},
     )
+    thread_fork_fields = _replace_public_sandbox_field(thread_fork_fields, wire_name="sandbox")
     turn_start_fields = _load_public_fields(
         "openai_codex.generated.v2_all",
         "TurnStartParams",
-        exclude={"thread_id", "input", *approval_fields},
+        # Keep the wire model current without exposing this app-server field
+        # through the ergonomic Python API yet.
+        exclude={"thread_id", "input", "client_user_message_id", *approval_fields},
     )
+    turn_start_fields = _replace_public_sandbox_field(turn_start_fields, wire_name="sandbox_policy")
 
     source = public_api_path.read_text()
     source = _replace_generated_block(
@@ -1184,7 +1372,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     stage_sdk_parser = subparsers.add_parser(
         "stage-sdk",
-        help="Stage a releasable SDK package pinned to a runtime version",
+        help="Stage a releasable SDK package while preserving its reviewed runtime pin",
     )
     stage_sdk_parser.add_argument(
         "staging_dir",
@@ -1192,20 +1380,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output directory for the staged SDK package",
     )
     stage_sdk_parser.add_argument(
-        "--codex-version",
-        help=(
-            "Codex release version to write into the staged SDK package and exact "
-            f"{RUNTIME_DISTRIBUTION_NAME} dependency. Accepts PEP 440 versions "
-            "or release tags such as rust-v0.116.0-alpha.1."
-        ),
-    )
-    stage_sdk_parser.add_argument(
-        "--runtime-version",
-        help=argparse.SUPPRESS,
-    )
-    stage_sdk_parser.add_argument(
         "--sdk-version",
-        help=argparse.SUPPRESS,
+        required=True,
+        help=(
+            "Python SDK release version to write into the staged package. "
+            "Accepts PEP 440 versions such as 0.144.4."
+        ),
     )
 
     stage_runtime_parser = subparsers.add_parser(
@@ -1218,34 +1398,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="Output directory for the staged runtime package",
     )
     stage_runtime_parser.add_argument(
-        "runtime_binary",
+        "package_archive",
         type=Path,
-        help="Path to the codex binary to package for this platform",
+        help="Path to a Codex package .tar.gz archive for this platform.",
     )
     stage_runtime_parser.add_argument(
         "--codex-version",
+        required=True,
         help=(
             "Codex release version to write into the staged runtime package. "
-            "Accepts PEP 440 versions or release tags such as rust-v0.116.0-alpha.1."
+            "Accepts PEP 440 versions or release tags such as "
+            "rust-v0.116.0-alpha.1.2."
         ),
-    )
-    stage_runtime_parser.add_argument(
-        "--runtime-version",
-        help=argparse.SUPPRESS,
     )
     stage_runtime_parser.add_argument(
         "--platform-tag",
         help=(
             "Optional wheel platform tag override, for example "
-            "macosx_11_0_arm64 or musllinux_1_1_x86_64."
+            "macosx_11_0_arm64 or manylinux_2_17_x86_64."
         ),
-    )
-    stage_runtime_parser.add_argument(
-        "--resource-binary",
-        action="append",
-        default=[],
-        type=Path,
-        help="Additional executable to package beside the codex runtime binary.",
     )
     return parser
 
@@ -1263,43 +1434,21 @@ def default_cli_ops() -> CliOps:
     )
 
 
-def _resolve_codex_version(args: argparse.Namespace) -> str:
-    versions = [
-        value
-        for value in (
-            getattr(args, "codex_version", None),
-            getattr(args, "runtime_version", None),
-            getattr(args, "sdk_version", None),
-        )
-        if value is not None
-    ]
-    if not versions:
-        raise RuntimeError("Pass --codex-version to stage Python release artifacts")
-
-    normalized_versions = [normalize_codex_version(version) for version in versions]
-    if len(set(normalized_versions)) != 1:
-        raise RuntimeError("SDK and runtime package versions must match; pass one --codex-version")
-    return normalized_versions[0]
-
-
 def run_command(args: argparse.Namespace, ops: CliOps) -> None:
     if args.command == "generate-types":
         ops.generate_types()
     elif args.command == "stage-sdk":
-        codex_version = _resolve_codex_version(args)
         ops.generate_types()
         ops.stage_python_sdk_package(
             args.staging_dir,
-            codex_version,
+            normalize_codex_version(args.sdk_version),
         )
     elif args.command == "stage-runtime":
-        codex_version = _resolve_codex_version(args)
         ops.stage_python_runtime_package(
             args.staging_dir,
-            codex_version,
-            args.runtime_binary.resolve(),
+            normalize_codex_version(args.codex_version),
+            args.package_archive.resolve(),
             args.platform_tag,
-            tuple(path.resolve() for path in args.resource_binary),
         )
 
 

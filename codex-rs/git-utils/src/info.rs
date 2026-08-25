@@ -1,21 +1,18 @@
 use std::collections::BTreeMap;
 use std::collections::HashSet;
-use std::ffi::OsStr;
 use std::path::Path;
 use std::path::PathBuf;
 
-use codex_file_system::ExecutorFileSystem;
-use codex_utils_absolute_path::AbsolutePathBuf;
 use futures::future::join_all;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::process::Command;
 use tokio::time::Duration as TokioDuration;
-use tokio::time::timeout;
 use ts_rs::TS;
 
 use crate::GitSha;
+use crate::git_process::run_git_command_with_timeout_output;
 
 /// Return `true` if the project folder specified by the `Config` is inside a
 /// Git repository.
@@ -40,6 +37,7 @@ pub fn get_git_repo_root(base_dir: &Path) -> Option<PathBuf> {
 
 /// Timeout for git commands to prevent freezing on large repositories
 const GIT_COMMAND_TIMEOUT: TokioDuration = TokioDuration::from_secs(5);
+const DISABLED_HOOKS_PATH: &str = if cfg!(windows) { "NUL" } else { "/dev/null" };
 
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, TS)]
 pub struct GitInfo {
@@ -260,15 +258,6 @@ fn trim_git_suffix(value: &str) -> &str {
     value.strip_suffix(".git").unwrap_or(value)
 }
 
-pub async fn get_has_changes(cwd: &Path) -> Option<bool> {
-    let output = run_git_command_with_timeout(&["status", "--porcelain"], cwd).await?;
-    if !output.status.success() {
-        return None;
-    }
-
-    Some(!output.stdout.is_empty())
-}
-
 fn parse_git_remote_urls(stdout: &str) -> Option<BTreeMap<String, String>> {
     let mut remotes = BTreeMap::new();
     for line in stdout.lines() {
@@ -372,18 +361,63 @@ pub async fn git_diff_to_remote(cwd: &Path) -> Option<GitDiffToRemote> {
 
 /// Run a git command with a timeout to prevent blocking on large repositories
 async fn run_git_command_with_timeout(args: &[&str], cwd: &Path) -> Option<std::process::Output> {
-    let mut command = Command::new("git");
+    // These callers only inspect repository metadata. Worktree workflows probe
+    // once and pass their override directly to the lower-level runner.
+    run_git_command_with_timeout_from(
+        Path::new("git"),
+        args,
+        cwd,
+        crate::FsmonitorOverride::Disabled,
+    )
+    .await
+}
+
+struct LocalFsmonitorProbeRunner<'a> {
+    git: &'a Path,
+    cwd: &'a Path,
+}
+
+impl crate::FsmonitorProbeRunner for LocalFsmonitorProbeRunner<'_> {
+    async fn run_probe(&mut self, args: &[&str]) -> Option<Vec<u8>> {
+        // Both probes are fast, bounded metadata queries that do not inspect the
+        // worktree or index, so do not reduce the requested command's timeout.
+        let mut command = Command::new(self.git);
+        command
+            .args(["-c", crate::SAFE_BARE_REPOSITORY_CONFIG])
+            .args(args)
+            .current_dir(self.cwd);
+        match run_git_command_with_timeout_output(&mut command, GIT_COMMAND_TIMEOUT).await {
+            Some(output) if output.status.success() => Some(output.stdout),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) async fn detect_local_fsmonitor_override(
+    git: &Path,
+    cwd: &Path,
+) -> crate::FsmonitorOverride {
+    let mut runner = LocalFsmonitorProbeRunner { git, cwd };
+    crate::detect_fsmonitor_override(&mut runner).await
+}
+
+pub(crate) async fn run_git_command_with_timeout_from(
+    git: &Path,
+    args: &[&str],
+    cwd: &Path,
+    fsmonitor: crate::FsmonitorOverride,
+) -> Option<std::process::Output> {
+    let mut command = Command::new(git);
     command
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(["-c", crate::SAFE_BARE_REPOSITORY_CONFIG])
+        // Keep internal Git commands independent of repository-selected hooks
+        // and fsmonitor helpers while preserving built-in fsmonitor acceleration.
+        .args(["-c", &format!("core.hooksPath={DISABLED_HOOKS_PATH}")])
+        .args(["-c", fsmonitor.git_config_arg()])
         .args(args)
-        .current_dir(cwd)
-        .kill_on_drop(true);
-    let result = timeout(GIT_COMMAND_TIMEOUT, command.output()).await;
-
-    match result {
-        Ok(Ok(output)) => Some(output),
-        _ => None, // Timeout or error
-    }
+        .current_dir(cwd);
+    run_git_command_with_timeout_output(&mut command, GIT_COMMAND_TIMEOUT).await
 }
 
 async fn get_git_remotes(cwd: &Path) -> Option<Vec<String>> {
@@ -663,9 +697,15 @@ async fn find_closest_sha(cwd: &Path, branches: &[String], remotes: &[String]) -
 }
 
 async fn diff_against_sha(cwd: &Path, sha: &GitSha) -> Option<String> {
-    let output =
-        run_git_command_with_timeout(&["diff", "--no-textconv", "--no-ext-diff", &sha.0], cwd)
-            .await?;
+    let git = Path::new("git");
+    let fsmonitor = detect_local_fsmonitor_override(git, cwd).await;
+    let output = run_git_command_with_timeout_from(
+        git,
+        &["diff", "--no-textconv", "--no-ext-diff", &sha.0],
+        cwd,
+        fsmonitor,
+    )
+    .await?;
     // 0 is success and no diff.
     // 1 is success but there is a diff.
     let exit_ok = output.status.code().is_some_and(|c| c == 0 || c == 1);
@@ -674,8 +714,13 @@ async fn diff_against_sha(cwd: &Path, sha: &GitSha) -> Option<String> {
     }
     let mut diff = String::from_utf8(output.stdout).ok()?;
 
-    if let Some(untracked_output) =
-        run_git_command_with_timeout(&["ls-files", "--others", "--exclude-standard"], cwd).await
+    if let Some(untracked_output) = run_git_command_with_timeout_from(
+        git,
+        &["ls-files", "--others", "--exclude-standard"],
+        cwd,
+        fsmonitor,
+    )
+    .await
         && untracked_output.status.success()
     {
         let untracked: Vec<String> = String::from_utf8(untracked_output.stdout)
@@ -701,7 +746,7 @@ async fn diff_against_sha(cwd: &Path, sha: &GitSha) -> Option<String> {
                     null_device,
                     &file_owned,
                 ];
-                run_git_command_with_timeout(&args_vec, cwd).await
+                run_git_command_with_timeout_from(git, &args_vec, cwd, fsmonitor).await
             });
             let results = join_all(futures_iter).await;
             for extra in results.into_iter().flatten() {
@@ -717,50 +762,12 @@ async fn diff_against_sha(cwd: &Path, sha: &GitSha) -> Option<String> {
     Some(diff)
 }
 
-/// Resolve the path that should be used for trust checks. Similar to
-/// `[get_git_repo_root]`, but resolves to the root of the main
-/// repository. Handles worktrees via filesystem inspection without invoking
-/// the `git` executable.
-pub async fn resolve_root_git_project_for_trust(
-    fs: &dyn ExecutorFileSystem,
-    cwd: &AbsolutePathBuf,
-) -> Option<AbsolutePathBuf> {
-    let base = match fs.get_metadata(cwd, /*sandbox*/ None).await {
-        Ok(metadata) if metadata.is_directory => cwd.clone(),
-        _ => cwd.parent()?,
-    };
-    let (repo_root, dot_git) = find_ancestor_git_entry_with_fs(fs, &base).await?;
-    if fs
-        .get_metadata(&dot_git, /*sandbox*/ None)
-        .await
-        .ok()?
-        .is_directory
-    {
-        return Some(repo_root);
-    }
-
-    let git_dir_s = fs.read_file_text(&dot_git, /*sandbox*/ None).await.ok()?;
-    let git_dir_rel = git_dir_s.trim().strip_prefix("gitdir:")?.trim();
-    if git_dir_rel.is_empty() {
-        return None;
-    }
-
-    let git_dir_path = AbsolutePathBuf::resolve_path_against_base(git_dir_rel, repo_root.as_path());
-    let worktrees_dir = git_dir_path.parent()?;
-    if worktrees_dir.as_path().file_name() != Some(OsStr::new("worktrees")) {
-        return None;
-    }
-
-    let common_dir = worktrees_dir.parent()?;
-    common_dir.parent()
-}
-
 fn find_ancestor_git_entry(base_dir: &Path) -> Option<(PathBuf, PathBuf)> {
     let mut dir = base_dir.to_path_buf();
 
     loop {
         let dot_git = dir.join(".git");
-        if dot_git.exists() {
+        if dot_git.exists() && (!dot_git.is_dir() || dot_git.join("HEAD").exists()) {
             return Some((dir, dot_git));
         }
 
@@ -774,24 +781,14 @@ fn find_ancestor_git_entry(base_dir: &Path) -> Option<(PathBuf, PathBuf)> {
     None
 }
 
-async fn find_ancestor_git_entry_with_fs(
-    fs: &dyn ExecutorFileSystem,
-    base_dir: &AbsolutePathBuf,
-) -> Option<(AbsolutePathBuf, AbsolutePathBuf)> {
-    for dir in base_dir.ancestors() {
-        let dot_git = dir.join(".git");
-        if fs.get_metadata(&dot_git, /*sandbox*/ None).await.is_ok() {
-            return Some((dir, dot_git));
-        }
-    }
-    None
-}
-
 /// Returns a list of local git branches.
 /// Includes the default branch at the beginning of the list, if it exists.
 pub async fn local_git_branches(cwd: &Path) -> Vec<String> {
-    let mut branches: Vec<String> = if let Some(out) =
-        run_git_command_with_timeout(&["branch", "--format=%(refname:short)"], cwd).await
+    let mut branches: Vec<String> = if let Some(out) = run_git_command_with_timeout(
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+        cwd,
+    )
+    .await
         && out.status.success()
     {
         String::from_utf8_lossy(&out.stdout)
@@ -831,6 +828,61 @@ pub async fn current_branch_name(cwd: &Path) -> Option<String> {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+    use std::process::Stdio;
+
+    #[tokio::test]
+    async fn git_metadata_commands_do_not_inherit_stdin() {
+        const CHILD_ENV: &str = "CODEX_GIT_UTILS_STDIN_CHILD";
+
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let temp_dir = tempfile::tempdir().expect("create temp dir");
+            let status = Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(temp_dir.path())
+                .stdin(Stdio::null())
+                .status()
+                .await
+                .expect("initialize test repository");
+            assert!(status.success(), "initialize test repository");
+
+            let git = Path::new("git");
+            let mut runner = LocalFsmonitorProbeRunner {
+                git,
+                cwd: temp_dir.path(),
+            };
+            assert!(
+                crate::FsmonitorProbeRunner::run_probe(&mut runner, &["cat-file", "--batch"])
+                    .await
+                    .is_some()
+            );
+            assert!(
+                run_git_command_with_timeout_from(
+                    git,
+                    &["cat-file", "--batch"],
+                    temp_dir.path(),
+                    crate::FsmonitorOverride::Disabled,
+                )
+                .await
+                .is_some()
+            );
+            return;
+        }
+
+        let mut child =
+            Command::new(std::env::current_exe().expect("find current test executable"))
+                .args(["git_metadata_commands_do_not_inherit_stdin", "--nocapture"])
+                .env(CHILD_ENV, "1")
+                .stdin(Stdio::piped())
+                .spawn()
+                .expect("spawn child test process");
+        let stdin = child.stdin.take().expect("hold child stdin open");
+        let status = child.wait().await.expect("wait for child test process");
+        drop(stdin);
+
+        assert!(status.success(), "child test process failed: {status}");
+    }
 
     #[test]
     fn canonicalize_git_remote_url_normalizes_github_variants() {
@@ -867,5 +919,188 @@ mod tests {
         for remote in ["", "file:///tmp/repo", "github.com/openai", "/tmp/repo"] {
             assert_eq!(canonicalize_git_remote_url(remote), None);
         }
+    }
+
+    #[tokio::test]
+    async fn local_git_branches_excludes_detached_head_entry() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let repo = temp_dir.path();
+        let envs = vec![
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ];
+        let run_git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .envs(envs.clone())
+                .args(args)
+                .current_dir(repo)
+                .status()
+                .expect("run Git command");
+            assert_eq!(status.code(), Some(0), "Git command failed: {args:?}");
+        };
+
+        run_git(&["init", "-q", "--initial-branch=main"]);
+        run_git(&[
+            "-c",
+            "user.name=Codex Tests",
+            "-c",
+            "user.email=codex-tests@example.com",
+            "commit",
+            "--allow-empty",
+            "-q",
+            "-m",
+            "initial",
+        ]);
+        run_git(&["branch", "feature/local"]);
+        run_git(&["checkout", "--detach", "-q"]);
+
+        assert_eq!(
+            local_git_branches(repo).await,
+            vec!["main".to_string(), "feature/local".to_string()]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fsmonitor_override_rejects_configured_helper() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let git = temp_dir.path().join("git");
+        let log = temp_dir.path().join("git.log");
+        std::fs::write(
+            &git,
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"-c\" ] && [ \"$2\" = \"safe.bareRepository=explicit\" ]; then shift 2; fi\n\
+             printf '%s\\n' \"$*\" >>\"$0.log\"\n\
+             case \"$1\" in\n\
+             config) printf '/tmp/fsmonitor-helper\\000' ;;\n\
+             *) printf 'worktree output\\n' ;;\n\
+             esac\n",
+        )
+        .expect("write fake Git");
+        let mut permissions = std::fs::metadata(&git)
+            .expect("read fake Git metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&git, permissions).expect("mark fake Git executable");
+
+        // The config response mirrors:
+        // git -c core.fsmonitor=/tmp/fsmonitor-helper \
+        //   config --null --get core.fsmonitor
+        let fsmonitor = detect_local_fsmonitor_override(&git, temp_dir.path()).await;
+        let output = run_git_command_with_timeout_from(
+            &git,
+            &["status", "--porcelain"],
+            temp_dir.path(),
+            fsmonitor,
+        )
+        .await
+        .expect("run fake Git");
+
+        assert_eq!(
+            (output.status.code(), output.stdout),
+            (Some(0), b"worktree output\n".to_vec())
+        );
+        let disabled_hooks = format!("core.hooksPath={DISABLED_HOOKS_PATH}");
+        assert_eq!(
+            std::fs::read_to_string(log)
+                .expect("read fake Git log")
+                .lines()
+                .map(str::to_string)
+                .collect::<Vec<_>>(),
+            vec![
+                "config --null --get core.fsmonitor".to_string(),
+                "config --null --type=bool --fixed-value --get core.fsmonitor /tmp/fsmonitor-helper"
+                    .to_string(),
+                format!("-c {disabled_hooks} -c core.fsmonitor=false status --porcelain"),
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn fsmonitor_override_uses_effective_layered_config_value() {
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let repo = temp_dir.path().join("repo");
+        std::fs::create_dir(&repo).expect("create repository directory");
+        let init_status = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .expect("initialize test repository");
+        assert_eq!(init_status.code(), Some(0), "initialize test repository");
+
+        let git = temp_dir.path().join("git");
+        let global_config = temp_dir.path().join("git.global");
+        let log = temp_dir.path().join("git.log");
+        std::fs::write(
+            &git,
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"-c\" ] && [ \"$2\" = \"safe.bareRepository=explicit\" ]; then shift 2; fi\n\
+             printf '%s\\n' \"$*\" >>\"$0.log\"\n\
+             case \"$1\" in\n\
+             config)\n\
+               GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=\"$0.global\" exec git \"$@\"\n\
+               ;;\n\
+             version) printf 'feature: fsmonitor--daemon\\n' ;;\n\
+             *) printf 'worktree output\\n' ;;\n\
+             esac\n",
+        )
+        .expect("write layered-config Git");
+        let mut permissions = std::fs::metadata(&git)
+            .expect("read layered-config Git metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&git, permissions).expect("mark layered-config Git executable");
+
+        let global_status = std::process::Command::new("git")
+            .args([
+                "config",
+                "--file",
+                global_config.to_str().expect("global config path"),
+                "core.fsmonitor",
+                "/tmp/fsmonitor-helper",
+            ])
+            .status()
+            .expect("write global fsmonitor helper");
+        assert_eq!(
+            global_status.code(),
+            Some(0),
+            "write global fsmonitor helper"
+        );
+        let local_status = std::process::Command::new("git")
+            .args(["config", "core.fsmonitor", "true"])
+            .current_dir(&repo)
+            .status()
+            .expect("write local built-in fsmonitor config");
+        assert_eq!(
+            local_status.code(),
+            Some(0),
+            "write local built-in fsmonitor config"
+        );
+
+        let fsmonitor = detect_local_fsmonitor_override(&git, repo.as_path()).await;
+        let output = run_git_command_with_timeout_from(
+            &git,
+            &["status", "--porcelain"],
+            repo.as_path(),
+            fsmonitor,
+        )
+        .await
+        .expect("run Git with layered config");
+        assert_eq!(
+            (output.status.code(), output.stdout),
+            (Some(0), b"worktree output\n".to_vec())
+        );
+
+        let actual = std::fs::read_to_string(log).expect("read layered-config Git log");
+        let disabled_hooks = format!("core.hooksPath={DISABLED_HOOKS_PATH}");
+        assert_eq!(
+            actual.lines().map(str::to_string).collect::<Vec<_>>(),
+            vec![
+                "config --null --get core.fsmonitor".to_string(),
+                "version --build-options".to_string(),
+                format!("-c {disabled_hooks} -c core.fsmonitor=true status --porcelain"),
+            ]
+        );
     }
 }
