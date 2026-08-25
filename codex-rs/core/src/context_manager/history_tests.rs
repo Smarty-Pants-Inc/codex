@@ -1006,6 +1006,55 @@ fn for_prompt_strips_media_when_model_does_not_support_it() {
 }
 
 #[test]
+fn for_prompt_omits_empty_user_boundaries_without_mutating_raw_history() {
+    let prior_user = user_input_text_msg("prior turn");
+    let prior_assistant = assistant_msg("prior reply");
+    let empty_user_boundary = ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", "media-only")),
+        role: "user".to_string(),
+        content: Vec::new(),
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let developer_notice = ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "image content omitted because it could not be processed".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let mut history = create_history_with_items(vec![
+        prior_user.clone(),
+        prior_assistant.clone(),
+        empty_user_boundary.clone(),
+        developer_notice.clone(),
+    ]);
+
+    assert_eq!(
+        raw_items(&history),
+        vec![
+            prior_user.clone(),
+            prior_assistant.clone(),
+            empty_user_boundary,
+            developer_notice.clone(),
+        ]
+    );
+    assert_eq!(
+        history.clone().for_prompt(&default_input_modalities()),
+        vec![
+            prior_user.clone(),
+            prior_assistant.clone(),
+            developer_notice
+        ]
+    );
+
+    history.drop_last_n_user_turns(/*num_turns*/ 1);
+    assert_eq!(raw_items(&history), vec![prior_user, prior_assistant]);
+}
+
+#[test]
 fn for_prompt_preserves_image_generation_calls_when_images_are_supported() {
     let history = create_history_with_items(vec![
         ResponseItem::ImageGenerationCall {

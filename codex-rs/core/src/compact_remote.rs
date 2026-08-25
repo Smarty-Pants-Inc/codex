@@ -270,7 +270,7 @@ async fn run_remote_compact_task_inner_impl(
     let (new_history, world_state_baseline) = process_compacted_history_with_direct_user_items(
         sess.as_ref(),
         new_history,
-        &direct_user_items,
+        direct_user_items.as_deref(),
         &initial_context_injection,
     )
     .await;
@@ -336,10 +336,32 @@ pub(crate) async fn process_compacted_history(
     )
 }
 
+fn trusted_direct_user_items_for_compaction_request(
+    prompt_input: &[ResponseItem],
+    direct_user_items: Option<&[ResponseItem]>,
+) -> Option<Vec<ResponseItem>> {
+    let direct_user_items = direct_user_items?;
+
+    Some(
+        prompt_input
+            .iter()
+            .filter(|item| {
+                let (Some(item_id), Some(turn_id)) = (item.id(), item.turn_id()) else {
+                    return false;
+                };
+                item.is_user_message()
+                    && direct_user_items.iter().any(|direct_item| {
+                        direct_item.id() == Some(item_id) && direct_item.turn_id() == Some(turn_id)
+                    })
+            })
+            .cloned()
+            .collect(),
+    )
+}
 async fn process_compacted_history_with_direct_user_items(
     sess: &Session,
     compacted_history: Vec<ResponseItem>,
-    direct_user_items: &[ResponseItem],
+    direct_user_items: Option<&[ResponseItem]>,
     initial_context_injection: &InitialContextInjection,
 ) -> (Vec<ResponseItem>, Option<Arc<WorldState>>) {
     let compacted_history =
@@ -360,8 +382,12 @@ async fn process_compacted_history_with_direct_user_items(
 }
 fn filter_legacy_compacted_history_user_items(
     compacted_history: Vec<ResponseItem>,
-    direct_user_items: &[ResponseItem],
+    direct_user_items: Option<&[ResponseItem]>,
 ) -> Vec<ResponseItem> {
+    let Some(direct_user_items) = direct_user_items else {
+        return compacted_history;
+    };
+
     compacted_history
         .into_iter()
         .filter(|item| {

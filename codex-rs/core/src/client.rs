@@ -961,7 +961,7 @@ impl ModelClient {
         Ok(request)
     }
 
-    fn prepare_response_items_for_request(&self, input: &mut [ResponseItem]) {
+    pub(crate) fn prepare_response_items_for_request(&self, input: &mut [ResponseItem]) {
         for item in input {
             if item.id().is_some_and(|id| !id.is_prefixed()) {
                 item.set_id(/*new_id*/ None);

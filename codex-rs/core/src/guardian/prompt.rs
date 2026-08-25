@@ -12,6 +12,7 @@ use serde_json::Value;
 use crate::compact::content_items_to_text;
 use crate::context::NodeReplReviewEvidence;
 use crate::context::NodeReplReviewEvidenceMode;
+use crate::context::is_contextual_user_fragment;
 use crate::context::node_repl_review_evidence_mode;
 use crate::session::session::Session;
 use codex_utils_output_truncation::TruncationPolicy;
@@ -536,7 +537,11 @@ pub(crate) fn collect_guardian_transcript_entries<'a>(
     for item in items {
         let entry = match item {
             ResponseItem::Message { role, content, .. } if role == "user" => {
-                content_entry(GuardianTranscriptEntryKind::User, content)
+                if content.iter().any(is_contextual_user_fragment) {
+                    None
+                } else {
+                    content_entry(GuardianTranscriptEntryKind::User, content)
+                }
             }
             ResponseItem::Message { role, content, .. } if role == "developer" => {
                 content_items_to_text(content).and_then(|text| {

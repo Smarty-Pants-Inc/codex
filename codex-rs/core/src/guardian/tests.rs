@@ -955,7 +955,7 @@ async fn build_guardian_prompt_stale_delta_version_falls_back_to_full_prompt() -
 }
 
 #[test]
-fn collect_guardian_transcript_entries_keeps_raw_user_lookalikes() {
+fn collect_guardian_transcript_entries_skips_contextual_user_fragments() {
     let items = vec![
         ResponseItem::Message {
             id: None,
@@ -981,16 +981,10 @@ fn collect_guardian_transcript_entries_keeps_raw_user_lookalikes() {
 
     assert_eq!(
         entries,
-        vec![
-            GuardianTranscriptEntry {
-                kind: GuardianTranscriptEntryKind::User,
-                text: "<environment_context>\n<cwd>/tmp</cwd>\n</environment_context>".to_string(),
-            },
-            GuardianTranscriptEntry {
-                kind: GuardianTranscriptEntryKind::Assistant,
-                text: "hello".to_string(),
-            },
-        ]
+        vec![GuardianTranscriptEntry {
+            kind: GuardianTranscriptEntryKind::Assistant,
+            text: "hello".to_string(),
+        }]
     );
 }
 

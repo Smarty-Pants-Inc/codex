@@ -1,8 +1,11 @@
 use super::*;
 use codex_history::CodexHarnessMetadata;
+use codex_protocol::ResponseItemId;
 use codex_protocol::items::HookPromptFragment;
 use codex_protocol::items::build_hook_prompt_message;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 
 #[test]
 fn rewritten_output_preserves_harness_metadata() {
@@ -99,8 +102,151 @@ fn legacy_compacted_history_keeps_only_proven_direct_user_ids() {
             spoofed_direct_user,
             assistant.clone(),
         ],
-        std::slice::from_ref(&direct_user),
+        Some(std::slice::from_ref(&direct_user)),
     );
 
     assert_eq!(filtered, vec![direct_user, assistant]);
+}
+
+#[test]
+fn legacy_compacted_history_preserves_user_items_without_provenance() {
+    let user = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "legacy direct user message".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let compacted_history = vec![user];
+
+    assert_eq!(
+        filter_legacy_compacted_history_user_items(compacted_history.clone(), None),
+        compacted_history
+    );
+}
+
+#[test]
+fn legacy_compacted_history_rejects_user_items_when_provenance_is_available_but_empty() {
+    let provider_user = ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "provider-authored user message".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let durable_direct_user = ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", "direct")),
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "removed during prompt normalization".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            turn_id: Some("turn-1".to_string()),
+            ..Default::default()
+        }),
+    };
+    let assistant = ResponseItem::Message {
+        id: None,
+        role: "assistant".to_string(),
+        content: vec![ContentItem::OutputText {
+            text: "assistant".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    };
+    let direct_user_items = trusted_direct_user_items_for_compaction_request(
+        &[],
+        Some(std::slice::from_ref(&durable_direct_user)),
+    )
+    .expect("direct-user provenance should be available");
+
+    assert!(direct_user_items.is_empty());
+    assert_eq!(
+        filter_legacy_compacted_history_user_items(
+            vec![provider_user, assistant.clone()],
+            Some(&direct_user_items),
+        ),
+        vec![assistant]
+    );
+}
+
+#[test]
+fn compaction_provenance_uses_normalized_prompt_content_for_matching() {
+    let metadata = Some(InternalChatMessageMetadataPassthrough {
+        turn_id: Some("turn-1".to_string()),
+        content_item_kinds: Some(vec![
+            ContentItemKind("user.text".to_string()),
+            ContentItemKind("user.audio".to_string()),
+        ]),
+        ..Default::default()
+    });
+    let durable_direct_user = ResponseItem::Message {
+        id: Some(ResponseItemId::with_suffix("msg", "direct")),
+        role: "user".to_string(),
+        content: vec![
+            ContentItem::InputText {
+                text: "describe this".to_string(),
+            },
+            ContentItem::InputAudio {
+                audio_url: "data:audio/wav;base64,YXVkaW8=".to_string(),
+            },
+        ],
+        phase: None,
+        internal_chat_message_metadata_passthrough: metadata.clone(),
+    };
+    let normalized_prompt_user = ResponseItem::Message {
+        id: durable_direct_user.id().cloned(),
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "describe this".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: metadata,
+    };
+
+    assert_eq!(
+        trusted_direct_user_items_for_compaction_request(
+            std::slice::from_ref(&normalized_prompt_user),
+            Some(std::slice::from_ref(&durable_direct_user)),
+        ),
+        Some(vec![normalized_prompt_user])
+    );
+}
+
+#[test]
+fn legacy_compaction_matches_the_request_prepared_legacy_id_representation() {
+    let mut prompt_user = ResponseItem::Message {
+        id: Some(ResponseItemId::from_server("legacy-id".to_string())),
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "legacy direct user message".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(InternalChatMessageMetadataPassthrough {
+            turn_id: Some("turn-1".to_string()),
+            ..Default::default()
+        }),
+    };
+    let durable_direct_user = prompt_user.clone();
+    let selected = trusted_direct_user_items_for_compaction_request(
+        std::slice::from_ref(&prompt_user),
+        Some(std::slice::from_ref(&durable_direct_user)),
+    )
+    .expect("direct-user provenance should be available");
+    prompt_user.set_id(None);
+    let mut prepared_direct_user = selected[0].clone();
+    prepared_direct_user.set_id(None);
+
+    assert_eq!(
+        filter_legacy_compacted_history_user_items(
+            vec![prompt_user.clone()],
+            Some(std::slice::from_ref(&prepared_direct_user)),
+        ),
+        vec![prompt_user]
+    );
 }

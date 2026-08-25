@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use super::trim_function_call_history_to_fit_context_window;
+use super::trusted_direct_user_items_for_compaction_request;
 use crate::Prompt;
 use crate::client::CompactConversationRequestSettings;
 use crate::compact::CompactionAnalyticsDetails;
@@ -17,7 +18,7 @@ use tracing::info;
 
 pub(super) struct RemoteCompactAttempt {
     pub(super) new_history: Vec<ResponseItem>,
-    pub(super) direct_user_items: Vec<ResponseItem>,
+    pub(super) direct_user_items: Option<Vec<ResponseItem>>,
     pub(super) trace_input_history: Option<Vec<ResponseItem>>,
 }
 
@@ -30,7 +31,10 @@ pub(super) async fn run_remote_compact_attempt(
     analytics_details: &mut CompactionAnalyticsDetails,
 ) -> CodexResult<RemoteCompactAttempt> {
     let turn_context = &step_context.turn;
+    let has_durable_rollout_provenance = sess.live_thread().is_some();
     let direct_user_items = sess.direct_user_response_items_from_rollout().await?;
+    let direct_user_items = (has_durable_rollout_provenance || !direct_user_items.is_empty())
+        .then_some(direct_user_items);
     let mut history = sess.clone_history().await;
     let base_instructions = sess.get_base_instructions().await;
     let (rewritten_outputs, estimated_deleted_tokens) =
@@ -61,6 +65,14 @@ pub(super) async fn run_remote_compact_attempt(
         .is_enabled()
         .then(|| history.raw_items().cloned().collect());
     let prompt_input = history.for_prompt(&turn_context.model_info.input_modalities);
+    let model_client = &sess.services.model_client;
+    let mut direct_user_items = trusted_direct_user_items_for_compaction_request(
+        &prompt_input,
+        direct_user_items.as_deref(),
+    );
+    if let Some(direct_user_items) = &mut direct_user_items {
+        model_client.prepare_response_items_for_request(direct_user_items);
+    }
     let tool_router = &step_context.tool_router;
     let prompt = Prompt {
         input: prompt_input,
@@ -76,9 +88,7 @@ pub(super) async fn run_remote_compact_attempt(
             CodexResponsesRequestKind::Compaction(compaction_metadata),
         )
         .await;
-    let new_history = sess
-        .services
-        .model_client
+    let new_history = model_client
         .compact_conversation_history(
             &prompt,
             &turn_context.model_info,
