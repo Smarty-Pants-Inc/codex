@@ -22,6 +22,10 @@ requestAttestation: boolean,
  */
 mcpServerOpenaiFormElicitation?: boolean,
 /**
+ * Opt into interactive continuation of an active goal when the thread becomes idle.
+ */
+goalAutoContinue?: boolean,
+/**
  * Exact notification method names that should be suppressed for this
  * connection (for example `thread/started`).
  */

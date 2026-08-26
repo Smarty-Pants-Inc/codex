@@ -213,8 +213,9 @@ struct ListAgentsResult {
 struct ListedAgentResult {
     agent_name: String,
     agent_status: serde_json::Value,
-    model: String,
-    multi_agent_version: Option<MultiAgentVersion>,
+    capability: crate::tools::spec_plan::MultiAgentCapability,
+    effective_model: String,
+    multi_agent_version: MultiAgentVersion,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1080,8 +1081,9 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
     struct SpawnAgentResult {
         task_name: String,
         nickname: Option<String>,
-        model: String,
-        multi_agent_version: Option<MultiAgentVersion>,
+        capability: crate::tools::spec_plan::MultiAgentCapability,
+        effective_model: Option<String>,
+        multi_agent_version: MultiAgentVersion,
     }
 
     let (mut session, mut turn) = make_session_and_context().await;
@@ -1125,18 +1127,23 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
         .resolve_agent_reference(session.thread_id, &turn.session_source, "test_process")
         .await
         .expect("relative path should resolve");
-    let child_snapshot = manager
+    let child_thread = manager
         .get_thread(child_thread_id)
         .await
-        .expect("child thread should exist")
-        .config_snapshot()
-        .await;
-    assert!(!spawn_result.model.is_empty());
+        .expect("child thread should exist");
+    let child_snapshot = child_thread.config_snapshot().await;
+    let child_turn = child_thread.session.new_default_turn().await;
+    assert_eq!(
+        spawn_result.capability,
+        crate::tools::spec_plan::effective_agent_capability(child_turn.as_ref())
+    );
+    if let Some(effective_model) = spawn_result.effective_model.as_deref() {
+        assert_eq!(effective_model, child_turn.model_info().slug);
+    }
     assert_eq!(
         spawn_result.multi_agent_version,
-        Some(MultiAgentVersion::V2)
+        child_turn.multi_agent_version
     );
-    assert_eq!(spawn_result.model, child_snapshot.model);
     assert_eq!(
         child_snapshot.session_source.get_agent_path().as_deref(),
         Some("/root/test_process")
@@ -1542,8 +1549,13 @@ async fn multi_agent_v2_list_agents_returns_completed_status() {
         .iter()
         .find(|agent| agent.agent_name == "/root/worker")
         .expect("worker agent should be listed");
-    assert!(!worker.model.is_empty());
-    assert_eq!(worker.multi_agent_version, Some(MultiAgentVersion::V2));
+    assert!(!worker.effective_model.is_empty());
+    assert_eq!(
+        worker.capability,
+        crate::tools::spec_plan::effective_agent_capability(child_turn.as_ref())
+    );
+    assert_eq!(worker.effective_model, child_turn.model_info().slug);
+    assert_eq!(worker.multi_agent_version, child_turn.multi_agent_version);
     assert_eq!(worker.agent_status, json!({"completed": "done"}));
     assert_eq!(success, Some(true));
 }

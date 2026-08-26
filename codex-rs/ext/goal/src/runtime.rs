@@ -45,6 +45,14 @@ pub(crate) enum ActiveGoalStopReason {
     UsageLimit,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum GoalContinuationOutcome {
+    Started { turn_id: String },
+    DeferredForUserInput,
+    DisabledForHost,
+    Rejected { reason: String },
+    Failed { error: String },
+}
 struct GoalRuntimeInner {
     thread_id: ThreadId,
     state_dbs: Arc<codex_state::StateRuntime>,
@@ -89,6 +97,10 @@ impl std::fmt::Debug for GoalRuntimeHandle {
 }
 
 impl GoalRuntimeHandle {
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "goal runtime construction keeps its existing dependency seams explicit"
+    )]
     pub(crate) fn new(
         thread_id: ThreadId,
         state_dbs: Arc<codex_state::StateRuntime>,
@@ -375,14 +387,14 @@ impl GoalRuntimeHandle {
         Ok(())
     }
 
-    pub(crate) async fn continue_if_idle(&self) -> Result<(), String> {
+    pub(crate) async fn continue_if_idle(&self) -> Result<GoalContinuationOutcome, String> {
         if self.inner.auto_continue_capability != GoalAutoContinueCapability::Interactive {
-            return Ok(());
+            return Ok(GoalContinuationOutcome::DisabledForHost);
         }
 
         if !self.tools_visible() {
             self.inner.accounting_state.clear_active_goal();
-            return Ok(());
+            return Ok(GoalContinuationOutcome::DisabledForHost);
         }
         // Hold this through the read/start window so external set/clear cannot
         // change the goal after we read it but before the continuation launches.
@@ -396,16 +408,20 @@ impl GoalRuntimeHandle {
             .await
             .map_err(|err| err.to_string())?
         {
-            return Ok(());
+            return Ok(GoalContinuationOutcome::DeferredForUserInput);
         }
 
         let Some(thread_manager) = self.inner.thread_manager.upgrade() else {
             tracing::debug!("skipping goal continuation because thread manager is unavailable");
-            return Ok(());
+            return Ok(GoalContinuationOutcome::Rejected {
+                reason: "thread manager is unavailable".to_string(),
+            });
         };
         let Ok(thread) = thread_manager.get_thread(self.inner.thread_id).await else {
             tracing::debug!("skipping goal continuation because live thread is unavailable");
-            return Ok(());
+            return Ok(GoalContinuationOutcome::Rejected {
+                reason: "live thread is unavailable".to_string(),
+            });
         };
 
         let Some(goal) = self
@@ -417,11 +433,15 @@ impl GoalRuntimeHandle {
             .map_err(|err| err.to_string())?
         else {
             self.inner.accounting_state.clear_active_goal();
-            return Ok(());
+            return Ok(GoalContinuationOutcome::Rejected {
+                reason: "active goal is no longer present".to_string(),
+            });
         };
         if goal.status != codex_state::ThreadGoalStatus::Active {
             self.inner.accounting_state.clear_active_goal();
-            return Ok(());
+            return Ok(GoalContinuationOutcome::Rejected {
+                reason: format!("goal status is {:?}", goal.status),
+            });
         }
         let input = continuation_developer_input(&protocol_goal_from_state(goal));
         let request = TurnInputRequest::developer_input(input)
@@ -440,18 +460,23 @@ impl GoalRuntimeHandle {
                 .await
                 .map_err(|error| error.to_string()),
         }?;
-        match submission {
-            StartIfIdleSubmission::Started { .. } => {}
+        let outcome = match submission {
+            StartIfIdleSubmission::Started { turn_id } => {
+                GoalContinuationOutcome::Started { turn_id }
+            }
             StartIfIdleSubmission::NotSubmitted {
                 reason: NotSubmittedReason::PendingTriggerTurn,
-            } => return Ok(()),
+            } => return Ok(GoalContinuationOutcome::DeferredForUserInput),
             StartIfIdleSubmission::NotSubmitted { reason } => {
                 tracing::debug!(
                     ?reason,
                     "skipping goal continuation because automatic idle work was rejected"
                 );
+                GoalContinuationOutcome::Rejected {
+                    reason: format!("{reason:?}"),
+                }
             }
-        }
+        };
 
         let current_turn_is_goal_active = self
             .inner
@@ -465,7 +490,7 @@ impl GoalRuntimeHandle {
         if !current_turn_is_goal_active {
             self.inner.accounting_state.clear_active_goal();
         }
-        Ok(())
+        Ok(outcome)
     }
 
     pub(crate) async fn inject_active_turn_steering(&self, item: ResponseItem) {

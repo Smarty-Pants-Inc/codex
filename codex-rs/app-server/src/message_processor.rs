@@ -180,6 +180,7 @@ pub(crate) struct InitializedConnectionSessionState {
     pub(crate) client_version: String,
     pub(crate) request_attestation: bool,
     pub(crate) client_mcp_extensions: ClientMcpExtensions,
+    pub(crate) goal_auto_continue_capability: GoalAutoContinueCapability,
 }
 
 impl Default for ConnectionSessionState {
@@ -238,6 +239,14 @@ impl ConnectionSessionState {
             .map(|session| session.client_mcp_extensions.clone())
             .unwrap_or_default()
     }
+
+    pub(crate) fn goal_auto_continue_capability(&self) -> GoalAutoContinueCapability {
+        self.initialized
+            .get()
+            .map_or(GoalAutoContinueCapability::Disabled, |session| {
+                session.goal_auto_continue_capability
+            })
+    }
     pub(crate) fn initialize(&self, session: InitializedConnectionSessionState) -> Result<(), ()> {
         self.initialized.set(session).map_err(|_| ())
     }
@@ -259,7 +268,6 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) installation_id: String,
     pub(crate) code_mode_session_provider: Option<Arc<dyn CodeModeSessionProvider>>,
     pub(crate) rpc_transport: AppServerRpcTransport,
-    pub(crate) goal_auto_continue_enabled: bool,
     pub(crate) remote_control_handle: Option<RemoteControlHandle>,
     pub(crate) plugin_startup_tasks: crate::PluginStartupTasks,
 }
@@ -284,7 +292,6 @@ impl MessageProcessor {
             installation_id,
             code_mode_session_provider,
             rpc_transport,
-            goal_auto_continue_enabled,
             remote_control_handle,
             plugin_startup_tasks,
         } = args;
@@ -310,11 +317,6 @@ impl MessageProcessor {
                 restriction_product,
             ),
         );
-        let goal_auto_continue_capability = if goal_auto_continue_enabled {
-            GoalAutoContinueCapability::Interactive
-        } else {
-            GoalAutoContinueCapability::Disabled
-        };
         let goal_service = Arc::new(GoalService::new());
         let extension_event_sink =
             app_server_extension_event_sink(outgoing.clone(), thread_state_manager.clone());
@@ -343,7 +345,7 @@ impl MessageProcessor {
                         analytics_events_client: analytics_events_client.clone(),
                         thread_manager: thread_manager.clone(),
                         goal_service: Arc::clone(&goal_service),
-                        goal_auto_continue_capability,
+                        goal_auto_continue_capability: GoalAutoContinueCapability::Disabled,
                         environment_manager: Arc::clone(&environment_manager_for_extensions),
                         executor_skill_provider: Arc::clone(&executor_skill_provider),
                         git_attribution_base_url: config.chatgpt_base_url.clone(),
@@ -978,6 +980,7 @@ impl MessageProcessor {
         let app_server_client_name = session.app_server_client_name().map(str::to_string);
         let client_version = session.client_version().map(str::to_string);
         let client_mcp_extensions = session.client_mcp_extensions();
+        let goal_auto_continue_capability = session.goal_auto_continue_capability();
         let request_id = ConnectionRequestId {
             connection_id,
             request_id: codex_request.id().clone(),
@@ -1140,6 +1143,7 @@ impl MessageProcessor {
                         app_server_client_name.clone(),
                         client_version.clone(),
                         client_mcp_extensions.clone(),
+                        goal_auto_continue_capability,
                         request_context,
                     )
                     .await
@@ -1163,6 +1167,7 @@ impl MessageProcessor {
                         app_server_client_name.clone(),
                         client_version.clone(),
                         client_mcp_extensions.clone(),
+                        goal_auto_continue_capability,
                     )
                     .await
             }
@@ -1174,6 +1179,7 @@ impl MessageProcessor {
                         app_server_client_name.clone(),
                         client_version.clone(),
                         client_mcp_extensions.clone(),
+                        goal_auto_continue_capability,
                     )
                     .await
             }

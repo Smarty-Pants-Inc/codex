@@ -57,11 +57,6 @@ struct AppServerArgs {
     #[arg(long = "disable-plugin-startup-tasks-for-tests", hide = true)]
     disable_plugin_startup_tasks_for_tests: bool,
 
-    /// Hidden debug-only test hook for explicit interactive goal continuation.
-    #[cfg(debug_assertions)]
-    #[arg(long = "enable-goal-auto-continue-for-tests", hide = true)]
-    enable_goal_auto_continue_for_tests: bool,
-
     /// Enable remote control for this app-server process without changing persistence.
     #[arg(long = "remote-control", hide = true)]
     remote_control: bool,
@@ -79,8 +74,6 @@ fn main() -> anyhow::Result<()> {
             strict_config,
             #[cfg(debug_assertions)]
             disable_plugin_startup_tasks_for_tests,
-            #[cfg(debug_assertions)]
-            enable_goal_auto_continue_for_tests,
             remote_control,
         } = AppServerArgs::parse();
         let loader_overrides = if disable_managed_config_from_debug_env() {
@@ -99,10 +92,6 @@ fn main() -> anyhow::Result<()> {
         #[cfg(debug_assertions)]
         if disable_plugin_startup_tasks_for_tests {
             runtime_options.plugin_startup_tasks = PluginStartupTasks::Skip;
-        }
-        #[cfg(debug_assertions)]
-        if enable_goal_auto_continue_for_tests {
-            runtime_options.goal_auto_continue_enabled = true;
         }
         runtime_options.remote_control_startup_mode =
             match (remote_control, remote_control_disabled) {

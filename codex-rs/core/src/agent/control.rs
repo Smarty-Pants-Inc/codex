@@ -9,6 +9,7 @@ use crate::agent::role::resolve_role_config;
 use crate::agent::status::is_final;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
+use crate::codex_thread::CodexThread;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::config::Config;
 use crate::config::RolloutBudgetConfig;
@@ -111,14 +112,29 @@ pub(crate) struct LiveAgent {
     pub(crate) thread_id: ThreadId,
     pub(crate) metadata: AgentMetadata,
     pub(crate) status: AgentStatus,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentRuntimeInfo {
+    pub(crate) capability: crate::tools::spec_plan::MultiAgentCapability,
+    pub(crate) effective_model: String,
     pub(crate) multi_agent_version: MultiAgentVersion,
+}
+
+async fn runtime_info_for_thread(thread: &CodexThread) -> AgentRuntimeInfo {
+    let turn = thread.session.new_default_turn().await;
+    AgentRuntimeInfo {
+        capability: crate::tools::spec_plan::effective_agent_capability(turn.as_ref()),
+        effective_model: turn.model_info().slug.clone(),
+        multi_agent_version: turn.multi_agent_version,
+    }
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ListedAgent {
     pub(crate) agent_name: String,
     pub(crate) agent_status: AgentStatus,
-    pub(crate) model: String,
-    pub(crate) multi_agent_version: Option<MultiAgentVersion>,
+    pub(crate) capability: crate::tools::spec_plan::MultiAgentCapability,
+    pub(crate) effective_model: String,
+    pub(crate) multi_agent_version: MultiAgentVersion,
 }
 
 /// Control-plane handle for multi-agent operations.
@@ -488,6 +504,15 @@ impl AgentControl {
         Some(thread.config_snapshot().await)
     }
 
+    pub(crate) async fn get_agent_runtime_info(
+        &self,
+        agent_id: ThreadId,
+    ) -> CodexResult<AgentRuntimeInfo> {
+        let state = self.upgrade()?;
+        let thread = state.get_thread(agent_id).await?;
+        Ok(runtime_info_for_thread(thread.as_ref()).await)
+    }
+
     pub(crate) async fn resolve_agent_reference(
         &self,
         _current_thread_id: ThreadId,
@@ -579,12 +604,13 @@ impl AgentControl {
             && let Some(root_thread_id) = self.state.agent_id_for_path(&root_path)
             && let Ok(root_thread) = state.get_thread(root_thread_id).await
         {
-            let snapshot = root_thread.config_snapshot().await;
+            let runtime = runtime_info_for_thread(root_thread.as_ref()).await;
             agents.push(ListedAgent {
                 agent_name: root_path.to_string(),
                 agent_status: root_thread.agent_status().await,
-                model: snapshot.model,
-                multi_agent_version: root_thread.multi_agent_version(),
+                capability: runtime.capability,
+                effective_model: runtime.effective_model,
+                multi_agent_version: runtime.multi_agent_version,
             });
         }
 
@@ -602,17 +628,18 @@ impl AgentControl {
             let Ok(thread) = state.get_thread(thread_id).await else {
                 continue;
             };
-            let snapshot = thread.config_snapshot().await;
             let agent_name = metadata
                 .agent_path
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| thread_id.to_string());
+            let runtime = runtime_info_for_thread(thread.as_ref()).await;
             agents.push(ListedAgent {
                 agent_name,
                 agent_status: thread.agent_status().await,
-                model: snapshot.model,
-                multi_agent_version: thread.multi_agent_version(),
+                capability: runtime.capability,
+                effective_model: runtime.effective_model,
+                multi_agent_version: runtime.multi_agent_version,
             });
         }
 

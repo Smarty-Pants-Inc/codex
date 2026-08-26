@@ -192,6 +192,7 @@ async fn mcp_server_tool_call_forwards_only_server_extensions() -> Result<()> {
             request_attestation: false,
             mcp_server_openai_form_elicitation: true,
             opt_out_notification_methods: None,
+            goal_auto_continue: false,
             extensions: Some(HashMap::from([
                 ("io.modelcontextprotocol/ui".to_string(), app_ui.clone()),
                 (
@@ -287,6 +288,7 @@ async fn model_mcp_tool_call_uses_session_client_extensions() -> Result<()> {
             request_attestation: false,
             mcp_server_openai_form_elicitation: true,
             opt_out_notification_methods: None,
+            goal_auto_continue: false,
             extensions: Some(std::collections::HashMap::from([(
                 "io.modelcontextprotocol/ui".to_string(),
                 app_ui.clone(),

@@ -334,6 +334,7 @@ pub(crate) struct ResumeThreadWithHistoryOptions {
     pub(crate) inherited_environments: Option<TurnEnvironmentSnapshot>,
     pub(crate) inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
     pub(crate) client_mcp_extensions: Option<ClientMcpExtensions>,
+    pub(crate) thread_extension_init: ExtensionDataInit,
 }
 
 /// Shared, `Arc`-owned state for [`ThreadManager`]. This `Arc` is required to have a single
@@ -1081,6 +1082,28 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
+        self.resume_thread_with_history_with_extension_init(
+            config,
+            initial_history,
+            auth_manager,
+            parent_trace,
+            client_mcp_extensions,
+            ExtensionDataInit::default(),
+        )
+        .await
+    }
+
+    /// Resumes a thread while seeding host-owned extension data for the new runtime.
+    #[instrument(level = "trace", skip_all)]
+    pub async fn resume_thread_with_history_with_extension_init(
+        &self,
+        config: Config,
+        initial_history: InitialHistory,
+        auth_manager: Arc<AuthManager>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+        thread_extension_init: ExtensionDataInit,
+    ) -> CodexResult<NewThread> {
         let agent_control = self.agent_control_for_config(&config);
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
@@ -1098,6 +1121,7 @@ impl ThreadManager {
             session_source: Some(session_source),
             thread_source,
             parent_trace,
+            thread_extension_init,
             client_mcp_extensions,
             ..StartThreadOptions::new(config)
         };
@@ -1291,6 +1315,35 @@ impl ThreadManager {
     where
         S: Into<ForkSnapshot>,
     {
+        self.fork_thread_from_history_with_extension_init(
+            snapshot,
+            config,
+            history,
+            thread_source,
+            parent_trace,
+            client_mcp_extensions,
+            reserved_thread_id,
+            ExtensionDataInit::default(),
+        )
+        .await
+    }
+
+    /// Fork an existing thread while seeding host-owned extension data for the new runtime.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fork_thread_from_history_with_extension_init<S>(
+        &self,
+        snapshot: S,
+        config: Config,
+        history: InitialHistory,
+        thread_source: Option<ThreadSource>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+        reserved_thread_id: Option<ThreadId>,
+        thread_extension_init: ExtensionDataInit,
+    ) -> CodexResult<NewThread>
+    where
+        S: Into<ForkSnapshot>,
+    {
         self.fork_thread_with_initial_history(
             config,
             ForkHistory {
@@ -1302,6 +1355,7 @@ impl ThreadManager {
             parent_trace,
             client_mcp_extensions,
             reserved_thread_id,
+            thread_extension_init,
         )
         .await
     }
@@ -1315,6 +1369,30 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
         reserved_thread_id: Option<ThreadId>,
+    ) -> CodexResult<NewThread> {
+        self.fork_prepared_thread_with_extension_init(
+            config,
+            prepared,
+            thread_source,
+            parent_trace,
+            client_mcp_extensions,
+            reserved_thread_id,
+            ExtensionDataInit::default(),
+        )
+        .await
+    }
+
+    /// Fork prepared history while seeding host-owned extension data for the new runtime.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fork_prepared_thread_with_extension_init(
+        &self,
+        config: Config,
+        prepared: PreparedFork,
+        thread_source: Option<ThreadSource>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+        reserved_thread_id: Option<ThreadId>,
+        thread_extension_init: ExtensionDataInit,
     ) -> CodexResult<NewThread> {
         let source_is_non_root = prepared
             .model_context
@@ -1349,12 +1427,17 @@ impl ThreadManager {
                 parent_trace,
                 client_mcp_extensions,
                 reserved_thread_id,
+                thread_extension_init,
             )
             .await;
         drop(prepared);
         result
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "fork setup keeps the existing thread-manager inputs explicit"
+    )]
     async fn fork_thread_with_initial_history(
         &self,
         config: Config,
@@ -1363,6 +1446,7 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
         reserved_thread_id: Option<ThreadId>,
+        thread_extension_init: ExtensionDataInit,
     ) -> CodexResult<NewThread> {
         let ForkHistory {
             snapshot,
@@ -1395,6 +1479,7 @@ impl ThreadManager {
             thread_source,
             parent_trace,
             client_mcp_extensions,
+            thread_extension_init,
             reserved_thread_id,
             ..StartThreadOptions::new(config)
         };
@@ -1781,6 +1866,7 @@ impl ThreadManagerState {
             inherited_environments,
             inherited_exec_policy,
             client_mcp_extensions,
+            thread_extension_init,
         } = options;
         let client_mcp_extensions = match client_mcp_extensions {
             Some(client_mcp_extensions) => client_mcp_extensions,
@@ -1798,6 +1884,7 @@ impl ThreadManagerState {
             thread_source,
             environments,
             client_mcp_extensions,
+            thread_extension_init,
             ..StartThreadOptions::new(config)
         };
         let mut request =

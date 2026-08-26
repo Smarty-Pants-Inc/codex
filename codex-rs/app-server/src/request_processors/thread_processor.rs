@@ -17,6 +17,7 @@ use codex_app_server_protocol::ThreadSectionMoveParams;
 use codex_app_server_protocol::ThreadSectionMoveResponse;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ThreadIdleCause;
+use codex_goal_extension::GoalAutoContinueCapability;
 use codex_protocol::SanitizedGitUrl;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::error::CodexErrorDetails;
@@ -30,6 +31,11 @@ const CODEX_TUI_CLIENT_NAME: &str = "codex-tui";
 const THREAD_ROLLBACK_DEPRECATION_SUMMARY: &str =
     "thread/rollback is deprecated and will be removed soon";
 const PAGINATED_FULL_HISTORY_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; use `excludeTurns: true`, then page with `thread/turns/list` and `thread/items/list`.";
+fn goal_extension_init(capability: GoalAutoContinueCapability) -> ExtensionDataInit {
+    let mut init = ExtensionDataInit::new();
+    init.insert(capability);
+    init
+}
 const PAGINATED_THREAD_READ_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; omit `includeTurns` or set it to `false`, then page with `thread/turns/list` and `thread/items/list`.";
 
 async fn stage_pending_project_metadata(
@@ -502,6 +508,10 @@ impl ThreadRequestProcessor {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "thread start keeps connection capability inputs explicit"
+    )]
     pub(crate) async fn thread_start(
         &self,
         request_id: ConnectionRequestId,
@@ -509,6 +519,7 @@ impl ThreadRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
+        goal_auto_continue_capability: GoalAutoContinueCapability,
         request_context: RequestContext,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         self.thread_start_inner(
@@ -517,6 +528,7 @@ impl ThreadRequestProcessor {
             app_server_client_name,
             app_server_client_version,
             client_mcp_extensions,
+            goal_auto_continue_capability,
             request_context,
         )
         .await
@@ -540,6 +552,7 @@ impl ThreadRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
+        goal_auto_continue_capability: GoalAutoContinueCapability,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         self.thread_resume_inner(
             request_id,
@@ -547,6 +560,7 @@ impl ThreadRequestProcessor {
             app_server_client_name,
             app_server_client_version,
             client_mcp_extensions,
+            goal_auto_continue_capability,
         )
         .await
         .map(|()| None)
@@ -559,6 +573,7 @@ impl ThreadRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
+        goal_auto_continue_capability: GoalAutoContinueCapability,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         self.thread_fork_inner(
             request_id,
@@ -566,6 +581,7 @@ impl ThreadRequestProcessor {
             app_server_client_name,
             app_server_client_version,
             client_mcp_extensions,
+            goal_auto_continue_capability,
         )
         .await
         .map(|()| None)
@@ -1104,6 +1120,10 @@ impl ThreadRequestProcessor {
         .await
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "thread start keeps connection capability inputs explicit"
+    )]
     async fn thread_start_inner(
         &self,
         request_id: ConnectionRequestId,
@@ -1111,6 +1131,7 @@ impl ThreadRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
+        goal_auto_continue_capability: GoalAutoContinueCapability,
         request_context: RequestContext,
     ) -> Result<(), JSONRPCErrorError> {
         let ThreadStartParams {
@@ -1211,6 +1232,7 @@ impl ThreadRequestProcessor {
         let error_request_id = request_id.clone();
         let thread_start_task = async move {
             if let Err(error) = Self::thread_start_task(
+                goal_auto_continue_capability,
                 listener_task_context,
                 thread_store,
                 config_manager,
@@ -1290,6 +1312,7 @@ impl ThreadRequestProcessor {
 
     #[allow(clippy::too_many_arguments)]
     async fn thread_start_task(
+        goal_auto_continue_capability: GoalAutoContinueCapability,
         listener_task_context: ListenerTaskContext,
         thread_store: Arc<dyn ThreadStore>,
         config_manager: ConfigManager,
@@ -1421,6 +1444,7 @@ impl ThreadRequestProcessor {
                 .then_some(ThreadHistoryMode::Paginated)
         });
         let mut thread_extension_init = ExtensionDataInit::new();
+        thread_extension_init.insert(goal_auto_continue_capability);
         if !selected_capability_roots.is_empty() {
             thread_extension_init.insert(selected_capability_roots);
         }
@@ -3556,6 +3580,7 @@ impl ThreadRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
+        goal_auto_continue_capability: GoalAutoContinueCapability,
     ) -> Result<(), JSONRPCErrorError> {
         if let Ok(thread_id) = ThreadId::from_string(&params.thread_id)
             && self
@@ -3794,12 +3819,13 @@ impl ThreadRequestProcessor {
 
         match self
             .thread_manager
-            .resume_thread_with_history(
+            .resume_thread_with_history_with_extension_init(
                 config,
                 thread_history,
                 self.auth_manager.clone(),
                 self.request_trace_context(&request_id).await,
                 client_mcp_extensions,
+                goal_extension_init(goal_auto_continue_capability),
             )
             .await
         {
@@ -4663,6 +4689,7 @@ impl ThreadRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
+        goal_auto_continue_capability: GoalAutoContinueCapability,
     ) -> Result<(), JSONRPCErrorError> {
         let ThreadForkParams {
             thread_id,
@@ -4945,18 +4972,19 @@ impl ThreadRequestProcessor {
 
         let new_thread = if let Some(prepared_fork) = prepared_fork {
             self.thread_manager
-                .fork_prepared_thread(
+                .fork_prepared_thread_with_extension_init(
                     config,
                     prepared_fork,
                     thread_source,
                     parent_trace,
                     client_mcp_extensions,
                     reserved_thread_id,
+                    goal_extension_init(goal_auto_continue_capability),
                 )
                 .await
         } else {
             self.thread_manager
-                .fork_thread_from_history(
+                .fork_thread_from_history_with_extension_init(
                     ForkSnapshot::Interrupted,
                     config,
                     InitialHistory::Resumed(ResumedHistory {
@@ -4968,6 +4996,7 @@ impl ThreadRequestProcessor {
                     parent_trace,
                     client_mcp_extensions,
                     reserved_thread_id,
+                    goal_extension_init(goal_auto_continue_capability),
                 )
                 .await
         };

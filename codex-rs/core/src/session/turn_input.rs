@@ -440,7 +440,7 @@ async fn start_if_idle(
     }
     let can_start_root_turn = start.parent_turn_id.is_none() && start.root_turn_id.is_none();
     let is_automatic_idle_work = kind.is_automatic_idle_work();
-    if session.input_queue.has_trigger_turn_mailbox_items().await {
+    if kind != TurnStartKind::User && session.input_queue.has_trigger_turn_mailbox_items().await {
         return Ok(TurnInputSubmission::NotSubmitted {
             reason: NotSubmittedReason::PendingTriggerTurn,
         });
@@ -500,7 +500,7 @@ async fn start_if_idle(
         reserved_turn_state
     };
 
-    if session.input_queue.has_trigger_turn_mailbox_items().await {
+    if kind != TurnStartKind::User && session.input_queue.has_trigger_turn_mailbox_items().await {
         session.clear_reserved_idle_turn(&turn_state).await;
         session.maybe_start_turn_for_pending_work().await;
         return Ok(TurnInputSubmission::NotSubmitted {

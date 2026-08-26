@@ -557,6 +557,7 @@ impl AgentControl {
                 inherited_environments,
                 inherited_exec_policy,
                 client_mcp_extensions,
+                thread_extension_init: ExtensionDataInit::default(),
             })
             .await
         {
@@ -793,7 +794,6 @@ impl AgentControl {
             thread_id: new_thread.thread_id,
             metadata: agent_metadata,
             status: self.get_status(new_thread.thread_id).await,
-            multi_agent_version,
         })
     }
 
@@ -1232,6 +1232,7 @@ impl AgentControl {
                 inherited_environments,
                 inherited_exec_policy,
                 client_mcp_extensions: None,
+                thread_extension_init: ExtensionDataInit::default(),
             })
             .await?;
         let mut agent_metadata = agent_metadata;

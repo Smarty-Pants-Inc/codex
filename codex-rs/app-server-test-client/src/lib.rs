@@ -1760,6 +1760,7 @@ impl CodexClient {
                             .collect(),
                     ),
                     mcp_server_openai_form_elicitation: false,
+                    goal_auto_continue: false,
                     extensions: None,
                 }),
             },

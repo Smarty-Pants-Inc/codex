@@ -91,6 +91,8 @@ use codex_tools::collect_request_plugin_install_entries;
 use codex_tools::default_namespace_description;
 use codex_tools::request_user_input_available_modes;
 use futures::future::BoxFuture;
+use serde::Deserialize;
+use serde::Serialize;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -589,6 +591,54 @@ fn namespace_tools_enabled(turn_context: &TurnContext) -> bool {
     turn_context.provider.capabilities().namespace_tools
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum MultiAgentCapability {
+    Collaborative,
+    Leaf,
+}
+
+impl MultiAgentCapability {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Collaborative => "collaborative",
+            Self::Leaf => "leaf",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AgentTreePosition {
+    Root,
+    Child,
+}
+
+fn multi_agent_v2_collab_tools_enabled(
+    position: AgentTreePosition,
+    model_multi_agent_version: Option<MultiAgentVersion>,
+) -> bool {
+    matches!(position, AgentTreePosition::Root)
+        || model_multi_agent_version == Some(MultiAgentVersion::V2)
+}
+
+pub(crate) fn effective_agent_capability(turn_context: &TurnContext) -> MultiAgentCapability {
+    if collab_tools_enabled(turn_context) {
+        MultiAgentCapability::Collaborative
+    } else {
+        MultiAgentCapability::Leaf
+    }
+}
+
+pub(crate) fn effective_v2_child_capability(
+    model_multi_agent_version: Option<MultiAgentVersion>,
+) -> MultiAgentCapability {
+    if multi_agent_v2_collab_tools_enabled(AgentTreePosition::Child, model_multi_agent_version) {
+        MultiAgentCapability::Collaborative
+    } else {
+        MultiAgentCapability::Leaf
+    }
+}
+
 fn multi_agent_v2_enabled(turn_context: &TurnContext) -> bool {
     turn_context.multi_agent_version == MultiAgentVersion::V2
 }
@@ -601,8 +651,15 @@ fn collab_tools_enabled(turn_context: &TurnContext) -> bool {
             turn_context.config.agent_max_depth,
         ),
         MultiAgentVersion::V2 => {
-            turn_context.session_source.get_agent_path().is_none()
-                || turn_context.model_info().multi_agent_version == Some(MultiAgentVersion::V2)
+            let position = if turn_context.session_source.get_agent_path().is_none() {
+                AgentTreePosition::Root
+            } else {
+                AgentTreePosition::Child
+            };
+            multi_agent_v2_collab_tools_enabled(
+                position,
+                turn_context.model_info().multi_agent_version,
+            )
         }
     }
 }

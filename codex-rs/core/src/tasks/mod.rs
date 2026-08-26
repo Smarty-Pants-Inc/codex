@@ -53,6 +53,7 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::WarningEvent;
+use codex_protocol::turn_input::IdleTurnAdmission;
 use codex_thread_store::PersistContext;
 
 use codex_features::Feature;
@@ -556,13 +557,34 @@ impl Session {
             return;
         }
 
+        let idle_turn_admission = self
+            .services
+            .thread_extension_data
+            .get::<Arc<dyn IdleTurnAdmission>>();
         let reserved_turn_state = {
             let mut active_turn = self.active_turn.lock().await;
             if active_turn.is_some() {
                 return;
             }
-            let active_turn = active_turn.insert(ActiveTurn::default());
-            Arc::clone(&active_turn.turn_state)
+            let mut reserved_turn_state = None;
+            let mut reserve = || {
+                let active_turn = active_turn.insert(ActiveTurn::default());
+                reserved_turn_state = Some(Arc::clone(&active_turn.turn_state));
+            };
+            let admitted = match idle_turn_admission.as_ref() {
+                Some(admission) => admission.as_ref().as_ref().reserve_if_allowed(&mut reserve),
+                None => {
+                    reserve();
+                    true
+                }
+            };
+            if !admitted {
+                return;
+            }
+            let Some(reserved_turn_state) = reserved_turn_state else {
+                return;
+            };
+            reserved_turn_state
         };
 
         let (input, mut start_options) =

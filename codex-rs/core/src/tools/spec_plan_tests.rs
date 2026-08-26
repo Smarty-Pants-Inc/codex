@@ -2585,10 +2585,10 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         assert!(!spawn_agent_properties.contains_key(property));
     }
     let spawn_agent_description = spawn_agent.description.as_str();
-    assert!(!spawn_agent_description.contains("max_concurrent_threads_per_session"));
     assert!(spawn_agent_description.contains(
-        "Note that passing `fork_turns=\"none\"` will not pass any surrounding context to the spawned subagent"
+        "The new agent receives the declared assignment, selected history, workspace, sandbox, permissions, and relevant context. Its canonical task name is returned. `fork_turns=\"none\"` passes no surrounding turn history; `fork_turns=\"all\"` passes the available surrounding history."
     ));
+    assert!(!spawn_agent_description.contains("same tools as the parent"));
 
     let direct_model_only = probe(|turn| {
         set_features(
