@@ -973,6 +973,7 @@ impl From<CoreTurnItem> for ThreadItem {
                     transparent_background: None,
                     failure: None,
                     saved_path: image.saved_path,
+                    imagegen_request_id: None,
                 })
             }
             CoreTurnItem::EnteredReviewMode(review) => ThreadItem::EnteredReviewMode {
@@ -1091,6 +1092,10 @@ pub enum CollabAgentTool {
     ResumeAgent,
     Wait,
     CloseAgent,
+    SendMessage,
+    FollowupTask,
+    InterruptAgent,
+    ListAgents,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -1183,6 +1188,7 @@ pub enum CollabAgentToolCallStatus {
     InProgress,
     Completed,
     Failed,
+    Interrupted,
 }
 
 impl From<CoreCollabAgentTool> for CollabAgentTool {
@@ -1193,6 +1199,10 @@ impl From<CoreCollabAgentTool> for CollabAgentTool {
             CoreCollabAgentTool::ResumeAgent => Self::ResumeAgent,
             CoreCollabAgentTool::Wait => Self::Wait,
             CoreCollabAgentTool::CloseAgent => Self::CloseAgent,
+            CoreCollabAgentTool::SendMessage => Self::SendMessage,
+            CoreCollabAgentTool::FollowupTask => Self::FollowupTask,
+            CoreCollabAgentTool::InterruptAgent => Self::InterruptAgent,
+            CoreCollabAgentTool::ListAgents => Self::ListAgents,
         }
     }
 }
@@ -1203,6 +1213,7 @@ impl From<CoreCollabAgentToolCallStatus> for CollabAgentToolCallStatus {
             CoreCollabAgentToolCallStatus::InProgress => Self::InProgress,
             CoreCollabAgentToolCallStatus::Completed => Self::Completed,
             CoreCollabAgentToolCallStatus::Failed => Self::Failed,
+            CoreCollabAgentToolCallStatus::Interrupted => Self::Interrupted,
         }
     }
 }

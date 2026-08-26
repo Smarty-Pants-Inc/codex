@@ -3,6 +3,7 @@ use crate::codex_thread::GuardianAuthorizationVersion;
 use crate::codex_thread::GuardianRootMessage;
 use crate::codex_thread::GuardianRootSnapshot;
 use crate::compact::is_summary_message;
+use crate::context::GuardianReviewEvidence;
 use crate::context::is_contextual_user_fragment;
 use crate::event_mapping::parse_turn_item;
 use crate::guardian::guardian_truncate_text;
@@ -42,11 +43,16 @@ impl AgentControl {
         }
 
         let root_history = root_thread.session.clone_history().await;
+        let root_evidence = root_thread
+            .session
+            .services
+            .thread_extension_data
+            .get::<GuardianReviewEvidence>();
         let mut messages = root_history
             .raw_items()
             .filter(|item| !is_contextual_root_user_item(item))
-            .filter_map(|item| match parse_turn_item(item) {
-                Some(TurnItem::UserMessage(message)) => {
+            .filter_map(|item| match (parse_turn_item(item), item) {
+                (Some(TurnItem::UserMessage(message)), _) => {
                     let message = message.message();
                     (!is_summary_message(&message)
                         && !message.trim_start().starts_with("<user_action>"))
@@ -56,7 +62,7 @@ impl AgentControl {
                         )
                     })
                 }
-                Some(TurnItem::AgentMessage(message))
+                (Some(TurnItem::AgentMessage(message)), _)
                     if matches!(message.phase, None | Some(MessagePhase::FinalAnswer)) =>
                 {
                     let text = message
@@ -70,13 +76,20 @@ impl AgentControl {
                         guardian_truncate_text(&text, MAX_ROOT_MESSAGE_TOKENS).0,
                     ))
                 }
+                (_, ResponseItem::FunctionCall { call_id, .. }) => root_evidence
+                    .as_ref()
+                    .and_then(|evidence| evidence.user_input_for_call(call_id))
+                    .map(GuardianRootMessage::UserInput),
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let authorization_version = GuardianAuthorizationVersion::from_history(
-            root_history.conversation_history_snapshot().as_ref(),
-        );
+
         messages.drain(..messages.len().saturating_sub(MAX_ROOT_MESSAGES));
+        let history = root_history.conversation_history_snapshot();
+        let authorization_version = root_evidence.as_ref().map_or_else(
+            || GuardianAuthorizationVersion::from_history(history.as_ref()),
+            |evidence| evidence.authorization_version(history.as_ref()),
+        );
         Some(GuardianRootSnapshot {
             authorization_version,
             messages,

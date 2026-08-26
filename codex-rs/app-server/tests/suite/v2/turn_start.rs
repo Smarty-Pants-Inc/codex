@@ -357,6 +357,7 @@ async fn turn_start_steers_active_turn_and_returns_active_turn_id() -> Result<()
                     text: "start".to_string(),
                     text_elements: Vec::new(),
                 }],
+                turn_trigger: Some("user".to_string()),
                 ..Default::default()
             },
         })
@@ -377,6 +378,7 @@ async fn turn_start_steers_active_turn_and_returns_active_turn_id() -> Result<()
                     text: "steer".to_string(),
                     text_elements: Vec::new(),
                 }],
+                turn_trigger: Some("goal".to_string()),
                 ..Default::default()
             },
         })
@@ -391,6 +393,18 @@ async fn turn_start_steers_active_turn_and_returns_active_turn_id() -> Result<()
         mcp.read_stream_until_notification_message("turn/completed"),
     )
     .await??;
+
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        let body: Value = serde_json::from_slice(&request)?;
+        let turn_metadata: Value = serde_json::from_str(
+            body["client_metadata"]["x-codex-turn-metadata"]
+                .as_str()
+                .context("expected x-codex-turn-metadata")?,
+        )?;
+        assert_eq!(turn_metadata["turn_trigger"].as_str(), Some("user"));
+    }
     Ok(())
 }
 
@@ -709,7 +723,7 @@ async fn turn_start_sends_service_tier_id_to_model_request() -> Result<()> {
         responses::ev_assistant_message("msg-1", "Done"),
         responses::ev_completed("resp-1"),
     ]);
-    let response_mock = responses::mount_sse_once(&server, body).await;
+    let response_mock = responses::mount_sse_once(&server, body.clone()).await;
 
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
@@ -736,7 +750,7 @@ async fn turn_start_sends_service_tier_id_to_model_request() -> Result<()> {
         .request(|request_id| ClientRequest::TurnStart {
             request_id,
             params: TurnStartParams {
-                thread_id: thread.id,
+                thread_id: thread.id.clone(),
                 service_tier: Some(Some(service_tier_id.clone())),
                 input: vec![V2UserInput::Text {
                     text: "Hello".to_string(),
@@ -756,6 +770,31 @@ async fn turn_start_sends_service_tier_id_to_model_request() -> Result<()> {
         response_mock.single_request().body_json()["service_tier"],
         json!(service_tier_id)
     );
+
+    for (service_tier_for_turn, expected_service_tier) in [
+        (Some("default".to_string()), None),
+        (None, Some(json!(service_tier_id))),
+    ] {
+        let response_mock = responses::mount_sse_once(&server, body.clone()).await;
+        mcp.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: thread.id.clone(),
+            service_tier_for_turn,
+            input: vec![V2UserInput::Text {
+                text: "Hello again".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+        assert_eq!(
+            response_mock
+                .single_request()
+                .body_json()
+                .get("service_tier")
+                .cloned(),
+            expected_service_tier
+        );
+    }
 
     Ok(())
 }
@@ -2742,6 +2781,7 @@ async fn turn_start_explicit_local_environment_updates_legacy_cwd_between_turns(
                     text: "first turn".to_string(),
                     text_elements: Vec::new(),
                 }],
+                turn_trigger: None,
                 responsesapi_client_metadata: None,
                 additional_context: None,
                 cwd: Some(first_cwd.clone()),
@@ -2759,10 +2799,12 @@ async fn turn_start_explicit_local_environment_updates_legacy_cwd_between_turns(
                 effort: Some(ReasoningEffort::Medium),
                 summary: Some(ReasoningSummary::Auto),
                 service_tier: None,
+                service_tier_for_turn: None,
                 personality: None,
                 output_schema: None,
                 collaboration_mode: None,
                 multi_agent_mode: None,
+                cyber_access_program: None,
             },
         })
         .await?;
@@ -2790,6 +2832,7 @@ async fn turn_start_explicit_local_environment_updates_legacy_cwd_between_turns(
                     text: "second turn".to_string(),
                     text_elements: Vec::new(),
                 }],
+                turn_trigger: None,
                 responsesapi_client_metadata: None,
                 additional_context: None,
                 cwd: None,
@@ -2802,10 +2845,12 @@ async fn turn_start_explicit_local_environment_updates_legacy_cwd_between_turns(
                 effort: Some(ReasoningEffort::Medium),
                 summary: Some(ReasoningSummary::Auto),
                 service_tier: None,
+                service_tier_for_turn: None,
                 personality: None,
                 output_schema: None,
                 collaboration_mode: None,
                 multi_agent_mode: None,
+                cyber_access_program: None,
             },
         })
         .await?;
@@ -4079,6 +4124,10 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected(
             json!({"server": "unknown-server", "tool": "unknown-tool"}),
         ),
         ("thread/compact/start", json!({})),
+        (
+            "turn/settings/update",
+            json!({"turnId": "any-child-turn", "model": "gpt-5.4"}),
+        ),
         ("thread/rollback", json!({"numTurns": 1})),
         ("thread/revert", json!({"beforeTurnId": "any-child-turn"})),
         (

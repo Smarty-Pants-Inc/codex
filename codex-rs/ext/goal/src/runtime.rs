@@ -8,6 +8,7 @@ use codex_core::StartIfIdleSubmission;
 
 use codex_core::ThreadManager;
 use codex_core::TurnInputRequest;
+use codex_core::TurnStartOptions;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ThreadGoal;
@@ -424,6 +425,10 @@ impl GoalRuntimeHandle {
         }
         let input = continuation_developer_input(&protocol_goal_from_state(goal));
         let request = TurnInputRequest::developer_input(input)
+            .on_start(TurnStartOptions {
+                turn_trigger: Some("goal".to_string()),
+                ..Default::default()
+            })
             .with_idle_turn_source(IdleTurnSource::GoalContinuation);
         let submission = match &self.inner.queue_service {
             Some(queue_service) => queue_service

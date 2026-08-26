@@ -198,6 +198,7 @@ async fn root_turn_suspension_preserves_unfinished_turn_history() {
                 thread_settings: Default::default(),
                 trace: None,
                 idle_turn_source: IdleTurnSource::GoalContinuation,
+                cyber_access_program: None,
             })
             .await
             .expect("recover the unfinished turn"),

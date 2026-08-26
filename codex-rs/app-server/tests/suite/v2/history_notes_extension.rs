@@ -170,6 +170,31 @@ async fn app_server_uses_configured_notes_backend_for_context_window_hints(
                 "app-server should expose {namespace}.{tool_name} to the model"
             );
         }
+        // Reserved tools must retain Bridge-compatible constraints in the model request.
+        for (namespace, tool_name, property, expected) in [
+            (
+                "history",
+                "list_items",
+                "limit",
+                json!({"type": "integer", "minimum": 1}),
+            ),
+            (
+                "notes",
+                "search_contents",
+                "query",
+                json!({"type": "string"}),
+            ),
+        ] {
+            let tool = request
+                .tool_by_name(namespace, tool_name)
+                .expect("history/notes tool should be exposed");
+            let mut schema = tool["parameters"]["properties"][property].clone();
+            schema
+                .as_object_mut()
+                .expect("parameter schema")
+                .remove("description");
+            assert_eq!(schema, expected, "{namespace}.{tool_name}.{property}");
+        }
     }
     assert!(request.tool_by_name("notes", "thread_hint").is_none());
 
@@ -261,7 +286,11 @@ async fn history_notes_and_async_message_emit_control_tool_analytics() -> Result
             "send_user_message_async",
             json!({"message": "PRIVATE_MESSAGE"}),
         ),
-        ("notes", "list_files_by_prefix", json!({"max_results": 101})),
+        (
+            "notes",
+            "list_files_by_prefix",
+            json!(["PRIVATE_INVALID_ARGUMENTS"]),
+        ),
         (
             "functions",
             "send_user_message_async",
@@ -391,6 +420,10 @@ async fn history_notes_and_async_message_emit_control_tool_analytics() -> Result
     assert_eq!(
         response_mock.requests()[10].function_call_output_text("call-9"),
         Some(r#"{"accepted":true}"#.to_string())
+    );
+    assert_eq!(
+        response_mock.requests()[11].function_call_output_text("call-10"),
+        Some("History tool arguments must be a JSON object".to_string())
     );
 
     Ok(())
