@@ -726,7 +726,7 @@ impl GuardianV2Extension {
                 "The Codex agent has requested the following action:\n".to_owned(),
                 ">>> APPROVAL REQUEST START\n".to_owned(),
                 "Planned action JSON:\n".to_owned(),
-                format!("{}\n", escape_guardian_evidence(planned_action)),
+                format!("{}\n", escape_guardian_evidence(&planned_action)),
                 ">>> APPROVAL REQUEST END\n".to_owned(),
             ]);
             let mut classification_finished_at = None;

@@ -456,7 +456,7 @@ async fn preconnected_sampler_reuses_authenticated_websocket_for_classifications
         Some(thread_id),
         idle_server.single_handshake().header("thread-id")
     );
-    assert_eq!(requests[0].body_json()["input"][2]["role"], "user");
+    assert_eq!(requests[0].body_json()["input"][2]["role"], "developer");
     assert_eq!(
         requests[0].body_json()["input"][2]["content"],
         json!([
@@ -537,7 +537,7 @@ async fn sampler_reuses_parent_compaction_only_for_matching_model_hashes() -> Re
             assert_eq!(input[2], serde_json::to_value(&parent_compaction)?);
             assert_eq!(input[3]["role"], "developer");
             assert_eq!(input[3]["content"][1]["text"], "trusted review");
-            assert_eq!(input[4]["role"], "user");
+            assert_eq!(input[4]["role"], "developer");
 
             let mut switched_request = sample_request("turn-2");
             switched_request.parent_compaction = Some(parent_compaction);
@@ -550,12 +550,12 @@ async fn sampler_reuses_parent_compaction_only_for_matching_model_hashes() -> Re
                 )
                 .await
                 .body_json();
-            assert_eq!(switched_request["input"][2]["role"], "user");
+            assert_eq!(switched_request["input"][2]["role"], "developer");
         } else {
             assert_eq!(input.len(), 4);
             assert_eq!(input[2]["role"], "developer");
             assert_eq!(input[2]["content"][1]["text"], "trusted review");
-            assert_eq!(input[3]["role"], "user");
+            assert_eq!(input[3]["role"], "developer");
         }
     }
 

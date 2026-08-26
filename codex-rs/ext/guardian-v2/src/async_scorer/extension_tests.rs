@@ -217,7 +217,7 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum RecordedMetric {
     Histogram(String, i64, Vec<(String, String)>),
     Counter(String, i64, Vec<(String, String)>),
@@ -1335,17 +1335,21 @@ max_recent_non_user_entries = 8
         Some(ReviewDecision::Approved)
     );
 
-    let samples = initial_metrics.0.lock().unwrap();
-    let classification_duration_ms = match &samples[8] {
-        RecordedMetric::Histogram(name, duration_ms, _)
-            if name == CLASSIFICATION_DURATION_METRIC =>
-        {
-            *duration_ms
-        }
-        sample => panic!("expected classification duration metric, got {sample:?}"),
-    };
+    let (token_samples, samples): (Vec<_>, Vec<_>) = initial_metrics
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .cloned()
+        .partition(|sample| {
+            matches!(
+                sample,
+                RecordedMetric::Histogram(name, _, _)
+                    if name == CLASSIFICATION_TOKEN_USAGE_METRIC
+            )
+        });
     assert_eq!(
-        *samples,
+        token_samples,
         [
             ("total", 150),
             ("input", 120),
@@ -1363,7 +1367,22 @@ max_recent_non_user_entries = 8
                 vec![("token_type".to_owned(), token_type.to_owned())],
             )
         })
-        .chain([
+        .collect::<Vec<_>>()
+    );
+    let classification_duration_ms = samples
+        .iter()
+        .find_map(|sample| match sample {
+            RecordedMetric::Histogram(name, duration_ms, _)
+                if name == CLASSIFICATION_DURATION_METRIC =>
+            {
+                Some(*duration_ms)
+            }
+            _ => None,
+        })
+        .expect("expected classification duration metric");
+    assert_eq!(
+        samples,
+        [
             RecordedMetric::Counter(
                 CLASSIFICATION_METRIC.to_owned(),
                 1,
@@ -1382,7 +1401,8 @@ max_recent_non_user_entries = 8
                     ("disposition".to_owned(), "truncated".to_owned()),
                 ],
             ),
-        ])
+        ]
+        .into_iter()
         .chain(
             [
                 ("original", original_action_bytes),

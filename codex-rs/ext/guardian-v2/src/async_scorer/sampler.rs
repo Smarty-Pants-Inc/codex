@@ -465,7 +465,7 @@ impl LunaSampler {
         }
         input.push(ResponseItem::Message {
             id: None,
-            role: "user".to_owned(),
+            role: "developer".to_owned(),
             content: std::iter::once(ContentItem::InputText {
                 text: UNTRUSTED_GUARDIAN_EVIDENCE_NOTICE.to_owned(),
             })
