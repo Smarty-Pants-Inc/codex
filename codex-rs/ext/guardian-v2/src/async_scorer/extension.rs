@@ -29,6 +29,7 @@ use codex_extension_api::ToolName;
 use codex_extension_api::ToolPayload;
 use codex_extension_api::ToolStartInput;
 use codex_features::Feature;
+use codex_history::RolloutItem;
 use codex_login::AgentIdentityAuthPolicy;
 use codex_login::AuthManager;
 use codex_model_provider::create_model_provider;
@@ -341,6 +342,7 @@ impl ThreadLifecycleContributor<Config> for GuardianV2Extension {
                     .thread_store
                     .get::<ThreadOriginator>()
                     .map(|originator| originator.0.clone()),
+                free_guardian: input.config.free_guardian_enabled(),
                 service_tier: input.config.service_tier.clone(),
                 luna_compaction_hash,
                 metrics: input.extension_metrics.clone(),
@@ -455,6 +457,8 @@ impl GuardianV2Extension {
     fn record_fail_closed_score(thread_store: &ExtensionData, sampled_at: SystemTime) {
         let score = SecurityRiskScore {
             scores: BTreeMap::from([("action_risk".to_owned(), 1.0)]),
+            call_id: None,
+            action: None,
             sampled_at: Some(sampled_at.into()),
         };
         thread_store.insert_if(score.clone(), |previous| {
@@ -776,6 +780,10 @@ impl GuardianV2Extension {
                 };
                 let score = SecurityRiskScore {
                     scores: BTreeMap::from([("action_risk".to_owned(), action_risk)]),
+                    call_id: Some(call_id.clone()),
+                    action: Some(
+                        serde_json::from_str(&planned_action).map_err(|error| error.to_string())?,
+                    ),
                     sampled_at: Some(sampled_at.into()),
                 };
                 let accepted =
@@ -802,6 +810,20 @@ impl GuardianV2Extension {
                     .latest_scored_tool_call
                     .fetch_max(tool_call_index, Ordering::Release);
                 classification_finished_at = Some(Instant::now());
+                if guardian_config.persist_scores
+                    && !config.ephemeral
+                    && let Err(error) = thread
+                        .append_rollout_items(&[RolloutItem::SecurityRiskScore(score)])
+                        .await
+                {
+                    tracing::warn!(
+                        %thread_id,
+                        %turn_id,
+                        %call_id,
+                        %error,
+                        "failed to persist Guardian V2 classification result"
+                    );
+                }
                 Ok("success")
             }
             .await;

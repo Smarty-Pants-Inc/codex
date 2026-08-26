@@ -22,6 +22,7 @@ use codex_extension_api::ToolName;
 use codex_extension_api::ToolPayload;
 use codex_extension_api::ToolStartInput;
 use codex_features::Feature;
+use codex_history::RolloutItem;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_login::ExternalAuth;
@@ -150,7 +151,7 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
         .get::<GuardianV2ScoreProgress>()
         .expect("Guardian v2 should initialize");
     let turn_store = ExtensionData::new("turn-1");
-    let tool_name = ToolName::plain("read_file");
+    let tool_name = ToolName::namespaced("mcp__node_repl__", "js");
     let payload = ToolPayload::Function {
         arguments: r#"{"path":"README.md"}"#.to_owned(),
     };
@@ -183,7 +184,7 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
                 .fast_approval_decision(
                     &session_store,
                     thread_store,
-                    "review action",
+                    r#"{"tool":"mcp_tool_call","server":"node_repl"}"#,
                     /*extension_metrics*/ None,
                 )
                 .await,
@@ -266,6 +267,8 @@ fn fail_closed_score_preserves_classification_order() {
     let newest_sampled_at = newer_sampled_at + Duration::from_secs(1);
     let newer_score = SecurityRiskScore {
         scores: BTreeMap::from([("action_risk".to_owned(), 0.25)]),
+        call_id: None,
+        action: None,
         sampled_at: Some(newer_sampled_at.into()),
     };
     thread_store.insert(newer_score.clone());
@@ -279,6 +282,8 @@ fn fail_closed_score_preserves_classification_order() {
     GuardianV2Extension::record_fail_closed_score(&thread_store, newest_sampled_at);
     let fail_closed_score = SecurityRiskScore {
         scores: BTreeMap::from([("action_risk".to_owned(), 1.0)]),
+        call_id: None,
+        action: None,
         sampled_at: Some(newest_sampled_at.into()),
     };
     assert!(!thread_store.insert_if(newer_score.clone(), |previous| {
@@ -419,6 +424,8 @@ async fn computer_use_only_scores_cannot_approve_other_actions() -> Result<()> {
     thread_store.insert(config);
     thread_store.insert(SecurityRiskScore {
         scores: BTreeMap::from([("action_risk".to_owned(), 0.25)]),
+        call_id: None,
+        action: None,
         sampled_at: None,
     });
     let progress = thread_store
@@ -681,9 +688,30 @@ async fn sample_configured_conversation_history(
     guardian_config: &str,
     model_defaults: Option<GuardianV2ModelConfig>,
 ) -> Result<(serde_json::Value, TestCodex, ExtensionRegistry<Config>)> {
+    sample_configured_conversation_history_with_source(
+        conversation_history,
+        arguments,
+        guardian_policy,
+        guardian_config,
+        model_defaults,
+        ToolCallSource::Direct,
+    )
+    .await
+}
+
+async fn sample_configured_conversation_history_with_source(
+    conversation_history: Vec<ResponseItem>,
+    arguments: &str,
+    guardian_policy: Option<&str>,
+    guardian_config: &str,
+    model_defaults: Option<GuardianV2ModelConfig>,
+    source: ToolCallSource,
+) -> Result<(serde_json::Value, TestCodex, ExtensionRegistry<Config>)> {
     let thread_server = responses::start_mock_server().await;
     let guardian_policy = guardian_policy.map(str::to_owned);
-    let guardian_config = guardian_config.to_owned();
+    let guardian_config = format!(
+        "{guardian_config}\n[features.guardianv2.review_scope]\ncomputer_use_only = false\n"
+    );
     let has_model_defaults = model_defaults.is_some();
     let builder = test_codex()
         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
@@ -700,10 +728,8 @@ async fn sample_configured_conversation_history(
         .with_model("gpt-5.5")
         .with_config(move |config| config.guardian_policy_config = guardian_policy)
         .with_pre_build_hook(move |home| {
-            if !guardian_config.is_empty() {
-                std::fs::write(home.join("config.toml"), guardian_config)
-                    .expect("Guardian v2 configuration should be written");
-            }
+            std::fs::write(home.join("config.toml"), guardian_config)
+                .expect("Guardian v2 configuration should be written");
         });
     let mut builder = if let Some(model_defaults) = model_defaults {
         builder.with_model_info_override("gpt-5.5", move |model| {
@@ -796,7 +822,7 @@ async fn sample_configured_conversation_history(
             tool_name: &tool_name,
             payload: &tool_payload,
             conversation_history: Arc::new(conversation_history),
-            source: ToolCallSource::Direct,
+            source,
         })
         .await;
 
@@ -844,6 +870,8 @@ impl GuardianFailureFixture {
         let thread_store = self.test.codex.thread_extension_data();
         thread_store.insert(SecurityRiskScore {
             scores: BTreeMap::from([("action_risk".to_owned(), 0.25)]),
+            call_id: None,
+            action: None,
             sampled_at: None,
         });
         let turn_store = ExtensionData::new("turn-1");
@@ -1203,6 +1231,8 @@ max_recent_non_user_entries = 8
     assert_eq!(thread_store.get::<StrictReviewReason>(), None);
     thread_store.insert(SecurityRiskScore {
         scores: BTreeMap::from([("action_risk".to_owned(), 0.65)]),
+        call_id: None,
+        action: None,
         sampled_at: None,
     });
     assert_eq!(
@@ -1224,6 +1254,8 @@ max_recent_non_user_entries = 8
     );
     thread_store.insert(SecurityRiskScore {
         scores: BTreeMap::from([("action_risk".to_owned(), 0.55)]),
+        call_id: None,
+        action: None,
         sampled_at: None,
     });
     assert_eq!(
@@ -1395,7 +1427,7 @@ max_recent_non_user_entries = 8
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn contributor_includes_configured_transcript_images() -> Result<()> {
+async fn contributor_includes_transcript_images_by_default() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let history = vec![
@@ -1434,9 +1466,6 @@ async fn contributor_includes_configured_transcript_images() -> Result<()> {
     let configuration = r#"
 [features.guardianv2]
 enabled = true
-
-[features.guardianv2.transcript]
-include_images = true
 "#;
     let (request, _test, _registry) = sample_configured_conversation_history(
         history,
@@ -1571,14 +1600,23 @@ async fn contributor_uses_model_defaults_and_preserves_local_overrides() -> Resu
         (2, false, 384, true)
     );
     assert!(thread_store.get::<NodeReplReviewEvidence>().is_some());
-    tokio::time::timeout(Duration::from_secs(5), async {
-        while thread_store.get::<SecurityRiskScore>().is_none() {
+    let score = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(score) = thread_store.get::<SecurityRiskScore>() {
+                return score;
+            }
             tokio::task::yield_now().await;
         }
     })
     .await?;
+    assert_eq!(
+        score.action,
+        Some(serde_json::from_str::<serde_json::Value>(action)?)
+    );
     thread_store.insert(SecurityRiskScore {
         scores: BTreeMap::from([("action_risk".to_owned(), 0.65)]),
+        call_id: None,
+        action: None,
         sampled_at: None,
     });
     assert_eq!(
@@ -1737,10 +1775,23 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
         score.as_ref(),
         &SecurityRiskScore {
             scores: BTreeMap::from([("action_risk".to_string(), 1.0)]),
+            call_id: Some("call-1".to_owned()),
+            action: Some(json!({"path": "README.md", "tool": "read_file"})),
             sampled_at: score.sampled_at,
         }
     );
     assert!(score.sampled_at.is_some());
+    test.codex.ensure_rollout_materialized().await;
+    assert!(
+        !test
+            .codex
+            .load_history(/*include_archived*/ false)
+            .await?
+            .items
+            .into_iter()
+            .any(|item| matches!(item, RolloutItem::SecurityRiskScore(_))),
+        "risk scores should not be persisted unless explicitly enabled"
+    );
     assert_eq!(
         registry
             .fast_approval_decision(
@@ -1754,6 +1805,8 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
     );
     thread_store.insert(SecurityRiskScore {
         scores: BTreeMap::from([("action_risk".to_string(), 0.5)]),
+        call_id: None,
+        action: None,
         sampled_at: None,
     });
     assert_eq!(
@@ -1770,6 +1823,8 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
 
     thread_store.insert(SecurityRiskScore {
         scores: BTreeMap::from([("action_risk".to_string(), 0.49)]),
+        call_id: None,
+        action: None,
         sampled_at: None,
     });
     assert_eq!(
@@ -1787,6 +1842,8 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
     let disabled_thread_store = ExtensionData::new("disabled-thread");
     disabled_thread_store.insert(SecurityRiskScore {
         scores: BTreeMap::from([("action_risk".to_string(), 0.25)]),
+        call_id: None,
+        action: None,
         sampled_at: None,
     });
     assert_eq!(
@@ -1799,6 +1856,57 @@ async fn contributor_samples_tool_calls_with_the_existing_luna_pool() -> Result<
             )
             .await,
         None
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn contributor_persists_nested_code_mode_action_with_score() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let (_request, test, _registry) = sample_configured_conversation_history_with_source(
+        Vec::new(),
+        r#"{"path":"README.md"}"#,
+        Some(TEST_GUARDIAN_POLICY),
+        "[features.guardianv2]\nenabled = true\npersist_scores = true\n",
+        /*model_defaults*/ None,
+        ToolCallSource::CodeMode {
+            cell_id: "cell-1".to_owned(),
+            runtime_tool_call_id: "nested-1".to_owned(),
+        },
+    )
+    .await?;
+    test.codex.ensure_rollout_materialized().await;
+
+    let score = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(score) = test
+                .codex
+                .load_history(/*include_archived*/ false)
+                .await?
+                .items
+                .into_iter()
+                .find_map(|item| match item {
+                    RolloutItem::SecurityRiskScore(score) => Some(score),
+                    _ => None,
+                })
+            {
+                return Ok::<_, anyhow::Error>(score);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+
+    assert_eq!(
+        score,
+        SecurityRiskScore {
+            scores: BTreeMap::from([("action_risk".to_owned(), 1.0)]),
+            call_id: Some("call-1".to_owned()),
+            action: Some(json!({"path": "README.md", "tool": "read_file"})),
+            sampled_at: score.sampled_at,
+        }
     );
 
     Ok(())
@@ -1874,6 +1982,8 @@ async fn contributor_skips_models_requiring_managed_guardian_review() -> Result<
     thread_store.insert(model_info);
     thread_store.insert(SecurityRiskScore {
         scores: BTreeMap::from([("action_risk".to_owned(), 0.25)]),
+        call_id: None,
+        action: None,
         sampled_at: None,
     });
     assert_eq!(
@@ -1881,7 +1991,7 @@ async fn contributor_skips_models_requiring_managed_guardian_review() -> Result<
             .fast_approval_decision(
                 &session_store,
                 thread_store,
-                "review action",
+                r#"{"tool":"mcp_tool_call","server":"node_repl"}"#,
                 /*extension_metrics*/ None,
             )
             .await,
@@ -1889,7 +1999,7 @@ async fn contributor_skips_models_requiring_managed_guardian_review() -> Result<
     );
 
     let turn_store = ExtensionData::new("turn-1");
-    let tool_name = ToolName::plain("read_file");
+    let tool_name = ToolName::namespaced("mcp__node_repl__", "js");
     let payload = ToolPayload::Function {
         arguments: json!({ "path": "protected.md" }).to_string(),
     };
@@ -1954,6 +2064,8 @@ async fn contributor_counts_failed_thread_lookups_toward_score_lag() -> Result<(
     .await?;
     thread_store.insert(SecurityRiskScore {
         scores: BTreeMap::from([("action_risk".to_owned(), 0.25)]),
+        call_id: None,
+        action: None,
         sampled_at: None,
     });
     assert_eq!(
@@ -2274,7 +2386,7 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
         .with_pre_build_hook(|home| {
             std::fs::write(
                 home.join("config.toml"),
-                "[features.guardianv2]\nenabled = true\nmax_parent_compaction_tokens = 256\n",
+                "[features.guardianv2]\nenabled = true\nmax_parent_compaction_tokens = 256\n\n[features.guardianv2.review_scope]\ncomputer_use_only = false\n",
             )
             .expect("Guardian v2 parent compaction configuration should be written");
         })
@@ -2444,6 +2556,8 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
         fail_closed_score.as_ref(),
         &SecurityRiskScore {
             scores: BTreeMap::from([("action_risk".to_owned(), 1.0)]),
+            call_id: None,
+            action: None,
             sampled_at: fail_closed_score.sampled_at,
         }
     );

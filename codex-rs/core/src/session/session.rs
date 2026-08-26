@@ -31,7 +31,6 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelections;
-use codex_protocol::security_risk::SecurityRiskScore;
 use codex_skills::SkillError;
 use std::sync::OnceLock;
 use tokio::sync::Semaphore;
@@ -147,6 +146,7 @@ impl SessionConfiguration {
     pub(super) fn inferred_environment_config(&self) -> EnvironmentConfig {
         EnvironmentConfig {
             allow_login_shell: self.allow_login_shell,
+            workspace_roots: Vec::new(),
             permission_profile: self.permission_profile_state.snapshot(),
             shell_environment_policy: self.shell_environment_policy.clone(),
             windows_sandbox_level: self.windows_sandbox_level,
@@ -170,6 +170,21 @@ impl SessionConfiguration {
         let workspace_roots = ThreadEnvironments::primary_workspace_roots_for(environments);
         self.permission_profile()
             .materialize_project_roots_with_workspace_roots(&workspace_roots)
+    }
+
+    fn effective_permission_profile(
+        &self,
+        environments: &[TurnEnvironmentSelection],
+    ) -> PermissionProfile {
+        ThreadEnvironments::primary_config_for(environments)
+            .map(|config| {
+                config
+                    .permission_profile
+                    .permission_profile()
+                    .clone()
+                    .materialize_project_roots_with_path_uris(&config.workspace_roots)
+            })
+            .unwrap_or_else(|| self.materialized_permission_profile(environments))
     }
 
     pub(super) fn active_permission_profile(&self) -> Option<ActivePermissionProfile> {
@@ -232,10 +247,7 @@ impl SessionConfiguration {
             service_tier: self.step_settings.service_tier.clone(),
             approval_policy: self.step_settings.approval_policy.value(),
             approvals_reviewer: self.step_settings.approvals_reviewer,
-            permission_profile: permission_profile
-                .permission_profile()
-                .clone()
-                .materialize_project_roots_with_workspace_roots(&workspace_roots),
+            permission_profile: self.effective_permission_profile(&environment_selections),
             active_permission_profile: permission_profile.active_permission_profile(),
             environments: TurnEnvironmentSelections::new(
                 self.legacy_fallback_cwd.clone(),
@@ -319,13 +331,7 @@ impl SessionConfiguration {
         &self,
         environments: &[TurnEnvironmentSelection],
     ) -> StepSettingsConstraints<'_> {
-        let permission_profile = ThreadEnvironments::primary_config_for(environments)
-            .map(|config| config.permission_profile.permission_profile())
-            .unwrap_or_else(|| self.permission_profile_state.permission_profile())
-            .clone()
-            .materialize_project_roots_with_workspace_roots(
-                &ThreadEnvironments::primary_workspace_roots_for(environments),
-            );
+        let permission_profile = self.effective_permission_profile(environments);
         StepSettingsConstraints {
             requirements: self
                 .original_config_do_not_use
@@ -756,18 +762,6 @@ impl Session {
             config.current_time_reminder.as_ref(),
             external_time_provider,
         )?;
-        if thread_extension_init.get::<SecurityRiskScore>().is_none()
-            && let Some(score) = initial_history
-                .get_rollout_items()
-                .iter()
-                .rev()
-                .find_map(|item| match item {
-                    RolloutItem::SecurityRiskScore(score) => Some(score),
-                    _ => None,
-                })
-        {
-            thread_extension_init.insert(score.clone());
-        }
         let selected_capability_roots =
             match thread_extension_init.get::<Vec<SelectedCapabilityRoot>>() {
                 Some(roots) => roots.as_ref().clone(),
@@ -1400,6 +1394,7 @@ impl Session {
                     attestation_provider,
                     config.http_client_factory(),
                 )
+                .with_free_guardian_enabled(config.free_guardian_enabled())
                 .with_prompt_cache_key_override(
                     crate::guardian::prompt_cache_key_override_for_review_session(
                         &session_configuration.session_source,

@@ -1834,6 +1834,7 @@ pub enum CodexErrorInfo {
     ContextWindowExceeded,
     SessionBudgetExceeded,
     UsageLimitExceeded,
+    RateLimitExceeded,
     ServerOverloaded,
     CyberPolicy,
     MisalignmentPolicyViolation,
@@ -1873,6 +1874,7 @@ impl CodexErrorInfo {
             Self::ContextWindowExceeded
             | Self::SessionBudgetExceeded
             | Self::UsageLimitExceeded
+            | Self::RateLimitExceeded
             | Self::ServerOverloaded
             | Self::CyberPolicy
             | Self::MisalignmentPolicyViolation

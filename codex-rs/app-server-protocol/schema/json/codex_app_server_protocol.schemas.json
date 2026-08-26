@@ -8017,6 +8017,7 @@
               "contextWindowExceeded",
               "sessionBudgetExceeded",
               "usageLimitExceeded",
+              "rateLimitExceeded",
               "serverOverloaded",
               "cyberPolicy",
               "misalignmentPolicyViolation",

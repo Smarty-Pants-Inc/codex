@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
@@ -8,6 +9,7 @@ use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_fake_rollout;
+use app_test_support::rollout_path;
 use axum::Json;
 use axum::Router;
 use axum::extract::State;
@@ -536,10 +538,11 @@ async fn guardian_v2_routes_scoped_tool_approvals(
             ("approvals_reviewer = \"user\"", ApprovalsReviewer::User)
         }
     };
-    let guardian_scope_config = if matches!(scope, GuardianToolScope::ComputerUseOnly { .. }) {
-        "\n\n[features.guardianv2]\nenabled = true\n\n[features.guardianv2.review_scope]\ncomputer_use_only = true"
-    } else {
-        ""
+    let guardian_scope_config = match scope {
+        GuardianToolScope::AllTools => {
+            "\n\n[features.guardianv2]\nenabled = true\n\n[features.guardianv2.review_scope]\ncomputer_use_only = false"
+        }
+        GuardianToolScope::ComputerUseOnly { .. } => "\n\n[features.guardianv2]\nenabled = true",
     };
     let mut mock_config = MockResponsesConfig::new(&responses_url)
         .with_model(MODEL)
@@ -550,9 +553,6 @@ async fn guardian_v2_routes_scoped_tool_approvals(
             "[mcp_servers.{server_name}]\nurl = \"{mcp_server_url}/mcp\"\ndefault_tools_approval_mode = \"prompt\"\n\n[analytics]\nenabled = true\n\n[otel]\nmetrics_exporter = {{ otlp-http = {{ endpoint = \"{responses_url}/metrics\", protocol = \"json\" }} }}{guardian_scope_config}"
         ))
         .enable_feature(Feature::GuardianApproval);
-    if matches!(scope, GuardianToolScope::AllTools) {
-        mock_config = mock_config.enable_feature(Feature::GuardianV2);
-    }
     if lifecycle.has_user_input() || lifecycle.has_root_user_input() {
         mock_config = mock_config.enable_feature(Feature::DefaultModeRequestUserInput);
     }
@@ -573,14 +573,34 @@ async fn guardian_v2_routes_scoped_tool_approvals(
         | ThreadLifecycle::RootUserRestriction
         | ThreadLifecycle::RootUserInputRestriction
         | ThreadLifecycle::RootUserInputHookBlocked => None,
-        ThreadLifecycle::Resume | ThreadLifecycle::Fork => Some(create_fake_rollout(
-            codex_home.path(),
-            "2025-01-05T12-00-00",
-            "2025-01-05T12:00:00Z",
-            USER_CONTEXT,
-            Some("mock_provider"),
-            /*git_info*/ None,
-        )?),
+        ThreadLifecycle::Resume | ThreadLifecycle::Fork => {
+            let thread_id = create_fake_rollout(
+                codex_home.path(),
+                "2025-01-05T12-00-00",
+                "2025-01-05T12:00:00Z",
+                USER_CONTEXT,
+                Some("mock_provider"),
+                /*git_info*/ None,
+            )?;
+            let mut rollout = std::fs::OpenOptions::new().append(true).open(rollout_path(
+                codex_home.path(),
+                "2025-01-05T12-00-00",
+                &thread_id,
+            ))?;
+            writeln!(
+                rollout,
+                "{}",
+                json!({
+                    "timestamp": "2025-01-05T12:00:00Z",
+                    "type": "security_risk_score",
+                    "payload": {
+                        "scores": { "action_risk": 0.0 },
+                        "sampled_at": "2025-01-05T12:00:00Z",
+                    },
+                })
+            )?;
+            Some(thread_id)
+        }
     };
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -1145,7 +1165,7 @@ async fn guardian_v2_required_model_bypasses_scoring_and_runs_full_reviews() -> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resumed_thread_starts_without_guardian_score() -> Result<()> {
+async fn resumed_thread_ignores_persisted_guardian_score() -> Result<()> {
     skip_if_no_network!(Ok(()));
     guardian_v2_routes_tool_approvals(
         GuardianRisk::Low,
@@ -1158,7 +1178,7 @@ async fn resumed_thread_starts_without_guardian_score() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn forked_thread_starts_without_guardian_score() -> Result<()> {
+async fn forked_thread_ignores_persisted_guardian_score() -> Result<()> {
     skip_if_no_network!(Ok(()));
     guardian_v2_routes_tool_approvals(
         GuardianRisk::Low,

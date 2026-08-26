@@ -2022,6 +2022,7 @@ async fn owner_network_policy_follows_the_selected_remote_command() -> Result<()
             proxy_config.set_allowed_domains(vec![allowed_domain.to_string()]);
             let owner_config = EnvironmentConfig {
                 allow_login_shell: test.config.permissions.allow_login_shell,
+                workspace_roots: remote.workspace_roots.clone(),
                 permission_profile: PermissionProfileSnapshot::legacy(if restricted {
                     PermissionProfile::workspace_write()
                 } else {
@@ -2044,6 +2045,7 @@ async fn owner_network_policy_follows_the_selected_remote_command() -> Result<()
             };
             let mut primary = local(test.cwd.path().abs());
             primary.config = EnvironmentConfigState::Ready(EnvironmentConfig {
+                workspace_roots: primary.workspace_roots.clone(),
                 permission_profile: PermissionProfileSnapshot::legacy(PermissionProfile::Disabled),
                 network_policy: None,
                 ..owner_config.clone()

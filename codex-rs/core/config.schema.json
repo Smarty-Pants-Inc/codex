@@ -1414,6 +1414,10 @@
         "enabled": {
           "type": "boolean"
         },
+        "free_guardian": {
+          "description": "Route Guardian review and classification through the unmetered Codex endpoints.",
+          "type": "boolean"
+        },
         "max_action_tokens": {
           "format": "uint",
           "maximum": 100000.0,
@@ -1436,6 +1440,10 @@
           "format": "uint",
           "minimum": 0.0,
           "type": "integer"
+        },
+        "persist_scores": {
+          "description": "Persist reviewed actions and risk scores to rollout files for debugging.",
+          "type": "boolean"
         },
         "reasoning_effort": {
           "$ref": "#/definitions/ReasoningEffort"
