@@ -121,6 +121,64 @@ async fn reserved_thread_id_is_used_without_changing_normal_id_generation() {
     assert_eq!(generated.thread_id, generated_ids[2]);
 }
 
+#[tokio::test]
+async fn thread_spawn_cold_resume_requires_loaded_parent_control() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let parent_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+    let resume_error = manager
+        .resume_thread_with_history(
+            config,
+            InitialHistory::Resumed(ResumedHistory {
+                conversation_id: child_thread_id,
+                history: Arc::new(vec![RolloutItem::SessionMeta(SessionMetaLine {
+                    meta: SessionMeta {
+                        session_id: child_thread_id.into(),
+                        id: child_thread_id,
+                        source: SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                            parent_thread_id,
+                            depth: 1,
+                            agent_path: None,
+                            agent_nickname: None,
+                            agent_role: None,
+                        }),
+                        history_mode: ThreadHistoryMode::Paginated,
+                        ..SessionMeta::default()
+                    },
+                    git: None,
+                })]),
+                rollout_path: None,
+            }),
+            auth_manager,
+            /*parent_trace*/ None,
+            ClientMcpExtensions::default(),
+        )
+        .await
+        .err()
+        .expect("cold child resume must fail without its parent");
+
+    assert!(matches!(
+        resume_error.details(),
+        codex_protocol::error::CodexErrorDetails::InvalidRequest(message)
+            if message == &format!(
+                "cannot resume child thread: parent {parent_thread_id} is not loaded; resume the parent first"
+            )
+    ));
+}
+
 /// One custom ID factory supplies identifiers for roots, actual child agents, and forks.
 #[tokio::test]
 async fn thread_id_generator_applies_to_roots_children_and_forks() {

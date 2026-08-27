@@ -43,7 +43,7 @@ pub fn create_create_goal_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: CREATE_GOAL_TOOL_NAME.to_string(),
         description: format!(
-            r#"Create a goal only when explicitly requested by the user or system/developer instructions; do not infer goals from ordinary tasks.
+            r#"Create a goal only after the current direct user explicitly approves goal mode and the full objective; do not infer goals from ordinary tasks or planning.
 Set token_budget only when an explicit token budget is requested. Fails if an unfinished goal exists; use {UPDATE_GOAL_TOOL_NAME} only for status."#
         ),
         strict: false,
@@ -89,4 +89,38 @@ When marking a budgeted goal achieved with status `complete`, report the final t
         ),
         output_schema: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn native_goal_tools_keep_one_current_work_surface_and_require_owner_approval() {
+        let ToolSpec::Function(get_goal) = create_get_goal_tool() else {
+            panic!("get_goal must be a native function tool");
+        };
+        let ToolSpec::Function(create_goal) = create_create_goal_tool() else {
+            panic!("create_goal must be a native function tool");
+        };
+        let ToolSpec::Function(update_goal) = create_update_goal_tool() else {
+            panic!("update_goal must be a native function tool");
+        };
+
+        assert_eq!(get_goal.name, GET_GOAL_TOOL_NAME);
+        assert_eq!(create_goal.name, CREATE_GOAL_TOOL_NAME);
+        assert_eq!(update_goal.name, UPDATE_GOAL_TOOL_NAME);
+        assert!(
+            create_goal.description.contains(
+                "current direct user explicitly approves goal mode and the full objective"
+            )
+        );
+        assert!(
+            create_goal
+                .description
+                .contains("ordinary tasks or planning")
+        );
+        assert!(!create_goal.description.contains("system/developer"));
+    }
 }

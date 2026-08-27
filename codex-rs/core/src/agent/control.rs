@@ -456,7 +456,7 @@ impl AgentControl {
             .ok_or_else(|| CodexErr::ThreadNotFound(agent_id))
     }
 
-    async fn acquire_spawn_admission(&self) -> CodexResult<RwLockReadGuard<'_, bool>> {
+    pub(crate) async fn acquire_spawn_admission(&self) -> CodexResult<RwLockReadGuard<'_, bool>> {
         let admission = self.spawn_admission_sealed.read().await;
         if *admission {
             return Err(CodexErr::UnsupportedOperation(

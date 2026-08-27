@@ -608,9 +608,16 @@ impl ThreadRequestProcessor {
         self.outgoing.send_response(request_id, response).await;
         self.outgoing
             .send_server_notification(ServerNotification::ThreadReverted(
-                ThreadRevertedNotification { thread_id },
+                ThreadRevertedNotification {
+                    thread_id: thread_id.to_string(),
+                },
             ))
             .await;
+        if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
+            thread
+                .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
+                .await;
+        }
         Ok(None)
     }
 
@@ -2098,7 +2105,7 @@ impl ThreadRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         goal_auto_continue_capability: GoalAutoContinueCapability,
-    ) -> Result<(ThreadRevertResponse, String), JSONRPCErrorError> {
+    ) -> Result<(ThreadRevertResponse, ThreadId), JSONRPCErrorError> {
         let _thread_list_state_permit = self.acquire_thread_list_state_permit().await?;
         let ThreadRevertParams {
             thread_id,
@@ -2205,7 +2212,7 @@ impl ThreadRequestProcessor {
             )
             .await?;
         revert_result?;
-        Ok((response, thread_id.to_string()))
+        Ok((response, thread_id))
     }
 
     async fn reload_paginated_thread(

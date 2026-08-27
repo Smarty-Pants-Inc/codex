@@ -233,6 +233,7 @@ where
                 .map_or(self.auto_continue_capability, |capability| *capability);
             let auto_continue_capability =
                 auto_continue_capability_for(input.session_source, host_capability);
+            input.thread_store.insert(auto_continue_capability);
             input.thread_store.insert(config);
             let accounting_state = input
                 .thread_store

@@ -15,6 +15,7 @@ use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
+use codex_app_server_protocol::ThreadGoalSetResponse;
 use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItemsListParams;
 use codex_app_server_protocol::ThreadItemsListResponse;
@@ -30,6 +31,7 @@ use codex_app_server_protocol::ThreadTurnsListResponse;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
+use codex_app_server_protocol::TurnStartedNotification;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_protocol::config_types::CollaborationMode;
@@ -42,6 +44,7 @@ use codex_rollout::RolloutLine;
 use codex_rollout::read_session_meta_line;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
+use serde_json::json;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
@@ -378,7 +381,8 @@ async fn thread_revert_replaces_paginated_history_before_turn() -> Result<()> {
 }
 
 #[tokio::test]
-async fn thread_revert_interrupts_active_turn_and_keeps_thread_loaded() -> Result<()> {
+async fn thread_revert_interrupts_active_turn_keeps_thread_loaded_and_continues_goal() -> Result<()>
+{
     let home = TempDir::new()?;
     let server = create_mock_responses_server_sequence(vec![
         create_final_assistant_message_sse_response("first")?,
@@ -387,11 +391,18 @@ async fn thread_revert_interrupts_active_turn_and_keeps_thread_loaded() -> Resul
     ])
     .await;
     MockResponsesConfig::new(&server.uri()).write(home.path())?;
+    let config_path = home.path().join("config.toml");
+    let config = std::fs::read_to_string(&config_path)?;
+    std::fs::write(
+        &config_path,
+        config.replace("personality = true\n", "personality = true\ngoals = true\n"),
+    )?;
     let mut mcp = TestAppServer::builder()
         .with_codex_home(home.path())
-        .build()
+        .without_managed_config()
+        .with_goal_auto_continue()
+        .build_initialized()
         .await?;
-    initialize_experimental(&mut mcp).await?;
 
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {
@@ -409,6 +420,10 @@ async fn thread_revert_interrupts_active_turn_and_keeps_thread_loaded() -> Resul
             ..Default::default()
         })
         .await?;
+    let first_started: TurnStartedNotification =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_notification("turn/started")).await??;
+    assert_eq!(first_started.thread_id, thread.id);
+    assert_eq!(first_started.turn.id, first_turn.turn.id);
 
     let TurnStartResponse { turn: active_turn } = mcp
         .request(|request_id| ClientRequest::TurnStart {
@@ -432,9 +447,31 @@ async fn thread_revert_interrupts_active_turn_and_keeps_thread_loaded() -> Resul
             },
         })
         .await?;
+    let active_started: TurnStartedNotification =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_notification("turn/started")).await??;
+    assert_eq!(active_started.thread_id, thread.id);
+    assert_eq!(active_started.turn.id, active_turn.id);
     timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_stream_until_request_message(),
+    )
+    .await??;
+
+    let goal_request_id = mcp
+        .send_raw_request(
+            "thread/goal/set",
+            Some(json!({
+                "threadId": thread.id,
+                "objective": "continue after the active turn is reverted",
+                "status": "active",
+            })),
+        )
+        .await?;
+    let _: ThreadGoalSetResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(goal_request_id)).await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("thread/goal/updated"),
     )
     .await??;
 
@@ -451,6 +488,12 @@ async fn thread_revert_interrupts_active_turn_and_keeps_thread_loaded() -> Resul
             },
         })
         .await?;
+    let reverted: ThreadRevertedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("thread/reverted"),
+    )
+    .await??;
+    assert_eq!(reverted.thread_id, thread.id);
     let completed: TurnCompletedNotification = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_notification("turn/completed"),
@@ -458,6 +501,38 @@ async fn thread_revert_interrupts_active_turn_and_keeps_thread_loaded() -> Resul
     .await??;
     assert_eq!(completed.thread_id, thread.id);
     assert_eq!(completed.turn.status, TurnStatus::Interrupted);
+    let continued: TurnStartedNotification =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_notification("turn/started")).await??;
+    assert_eq!(continued.thread_id, thread.id);
+    assert_eq!(continued.turn.status, TurnStatus::InProgress);
+
+    let complete_goal_request_id = mcp
+        .send_raw_request(
+            "thread/goal/set",
+            Some(json!({
+                "threadId": thread.id,
+                "status": "complete",
+            })),
+        )
+        .await?;
+    let _: ThreadGoalSetResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_response(complete_goal_request_id),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("thread/goal/updated"),
+    )
+    .await??;
+    let continued_completion: TurnCompletedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("turn/completed"),
+    )
+    .await??;
+    assert_eq!(continued_completion.thread_id, thread.id);
+    assert_eq!(continued_completion.turn.id, continued.turn.id);
+    assert_eq!(continued_completion.turn.status, TurnStatus::Completed);
     assert!(reverted_thread.turns.is_empty());
     assert!(items_backwards_cursor.is_some());
     assert_eq!(
@@ -471,26 +546,6 @@ async fn thread_revert_interrupts_active_turn_and_keeps_thread_loaded() -> Resul
         vec![first_turn.turn.id]
     );
 
-    let resumed: ThreadResumeResponse = mcp
-        .request(|request_id| ClientRequest::ThreadResume {
-            request_id,
-            params: ThreadResumeParams {
-                thread_id: thread.id.clone(),
-                ..Default::default()
-            },
-        })
-        .await?;
-    assert_eq!(resumed.approval_policy, AskForApproval::Never);
-
-    mcp.start_turn_and_wait_for_completion(TurnStartParams {
-        thread_id: thread.id,
-        input: vec![UserInput::Text {
-            text: "third".to_string(),
-            text_elements: Vec::new(),
-        }],
-        ..Default::default()
-    })
-    .await?;
     Ok(())
 }
 

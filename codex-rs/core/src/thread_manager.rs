@@ -1104,10 +1104,30 @@ impl ThreadManager {
         client_mcp_extensions: ClientMcpExtensions,
         thread_extension_init: ExtensionDataInit,
     ) -> CodexResult<NewThread> {
-        let agent_control = self.agent_control_for_config(&config);
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
+        let agent_control = match &session_source {
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id, ..
+            }) => {
+                let parent = self.get_thread(*parent_thread_id).await.map_err(|_| {
+                    CodexErr::InvalidRequest(format!(
+                        "cannot resume child thread: parent {parent_thread_id} is not loaded; resume the parent first"
+                    ))
+                })?;
+                parent.session.services.agent_control.clone()
+            }
+            _ => self.agent_control_for_config(&config),
+        };
+        let _spawn_admission = if matches!(
+            session_source,
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+        ) {
+            Some(agent_control.acquire_spawn_admission().await?)
+        } else {
+            None
+        };
         if let InitialHistory::Resumed(resumed) = &initial_history
             && initial_history.get_multi_agent_version() == Some(MultiAgentVersion::V2)
             && !session_source.is_non_root_agent()
@@ -1128,7 +1148,7 @@ impl ThreadManager {
         Box::pin(self.state.spawn_thread(ThreadSpawnRequest::new(
             options,
             auth_manager,
-            agent_control,
+            agent_control.clone(),
         )))
         .await
     }
