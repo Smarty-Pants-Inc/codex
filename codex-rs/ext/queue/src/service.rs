@@ -42,6 +42,11 @@ use tokio::sync::OwnedMutexGuard;
 use tokio::sync::broadcast::error::TryRecvError;
 use uuid::Uuid;
 
+/// Marks a resumed runtime whose persisted queue must remain pending until the
+/// host finishes restoring higher-priority automatic work.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SuppressQueueResumeWake;
+
 /// One user message waiting to start on its thread.
 #[derive(Clone, Debug, PartialEq)]
 pub struct QueuedItem {
@@ -270,11 +275,22 @@ impl QueuedItemService {
                 }
             }
             if !newly_loaded_threads.is_empty() {
-                let created_threads = thread_ids
+                let mut created_threads = Vec::new();
+                for thread_id in thread_ids
                     .iter()
                     .copied()
                     .filter(|thread_id| newly_loaded_threads.contains(thread_id))
-                    .collect::<Vec<_>>();
+                {
+                    let wake_suppressed = manager.get_thread(thread_id).await.is_ok_and(|thread| {
+                        thread
+                            .thread_extension_data()
+                            .get::<SuppressQueueResumeWake>()
+                            .is_some()
+                    });
+                    if !wake_suppressed {
+                        created_threads.push(thread_id);
+                    }
+                }
                 match service
                     .queue
                     .changes_since(/*revision*/ 0, &created_threads)
@@ -298,6 +314,9 @@ impl QueuedItemService {
                     continue;
                 }
                 service.emit_changed(thread_id);
+                if service.resume_wake_suppressed(thread_id).await {
+                    continue;
+                }
                 if dispatches
                     .get(&thread_id)
                     .is_some_and(|dispatch| !dispatch.is_finished())
@@ -311,6 +330,9 @@ impl QueuedItemService {
                             let Some(service) = service.upgrade() else {
                                 return;
                             };
+                            if service.resume_wake_suppressed(thread_id).await {
+                                return;
+                            }
                             let Some(manager) = service.thread_manager.upgrade() else {
                                 return;
                             };
@@ -332,7 +354,7 @@ impl QueuedItemService {
                                 .await
                             {
                                 Ok(items) if items.is_empty() => return,
-                                Ok(_) => service.wake_if_loaded(thread_id).await,
+                                Ok(_) => service.watcher_wake_if_loaded(thread_id).await,
                                 Err(error) => {
                                     tracing::warn!(%thread_id, %error, "failed to check queued user input");
                                 }
@@ -659,6 +681,24 @@ impl QueuedItemService {
         wake_loaded_thread(self.thread_manager.clone(), thread_id).await;
     }
 
+    async fn watcher_wake_if_loaded(&self, thread_id: ThreadId) {
+        if !self.resume_wake_suppressed(thread_id).await {
+            self.wake_if_loaded(thread_id).await;
+        }
+    }
+
+    async fn resume_wake_suppressed(&self, thread_id: ThreadId) -> bool {
+        let Some(manager) = self.thread_manager.upgrade() else {
+            return false;
+        };
+        manager.get_thread(thread_id).await.is_ok_and(|thread| {
+            thread
+                .thread_extension_data()
+                .get::<SuppressQueueResumeWake>()
+                .is_some()
+        })
+    }
+
     fn emit_changed(&self, thread_id: ThreadId) {
         self.event_sink.emit(Event {
             id: Uuid::now_v7().to_string(),
@@ -741,17 +781,26 @@ where
         Box::pin(async move {
             if let Ok(thread_id) = ThreadId::from_string(input.thread_store.level_id()) {
                 self.install_idle_admission(input.thread_store, thread_id);
-                self.resumed_threads
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(thread_id);
+                if input
+                    .thread_store
+                    .get::<SuppressQueueResumeWake>()
+                    .is_none()
+                {
+                    self.resumed_threads
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(thread_id);
+                }
             }
         })
     }
 
     fn on_thread_idle<'a>(&'a self, input: ThreadIdleInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
-            if input.cause == ThreadIdleCause::Interrupted {
+            if matches!(
+                input.cause,
+                ThreadIdleCause::Interrupted | ThreadIdleCause::Restored
+            ) {
                 return;
             }
             let Ok(thread_id) = ThreadId::from_string(input.thread_store.level_id()) else {

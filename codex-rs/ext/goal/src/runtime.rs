@@ -396,6 +396,21 @@ impl GoalRuntimeHandle {
     }
 
     pub(crate) async fn continue_if_idle(&self) -> Result<GoalContinuationOutcome, String> {
+        self.continue_if_idle_with_queue_priority(/*respect_queued_input*/ true)
+            .await
+    }
+
+    pub(crate) async fn continue_after_restore_if_idle(
+        &self,
+    ) -> Result<GoalContinuationOutcome, String> {
+        self.continue_if_idle_with_queue_priority(/*respect_queued_input*/ false)
+            .await
+    }
+
+    async fn continue_if_idle_with_queue_priority(
+        &self,
+        respect_queued_input: bool,
+    ) -> Result<GoalContinuationOutcome, String> {
         if !self.inner.auto_continue_capability.load(Ordering::Relaxed) {
             return Ok(GoalContinuationOutcome::DisabledForHost);
         }
@@ -457,12 +472,12 @@ impl GoalRuntimeHandle {
                 ..Default::default()
             })
             .with_idle_turn_source(IdleTurnSource::GoalContinuation);
-        let submission = match &self.inner.queue_service {
-            Some(queue_service) => queue_service
+        let submission = match (&self.inner.queue_service, respect_queued_input) {
+            (Some(queue_service), true) => queue_service
                 .start_queued_or_automatic(thread.as_ref(), request)
                 .await
                 .map_err(|error| error.to_string()),
-            None => thread
+            (None, _) | (Some(_), false) => thread
                 .start_turn_if_idle(request)
                 .await
                 .map_err(|error| error.to_string()),

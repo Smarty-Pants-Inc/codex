@@ -93,6 +93,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use tokio::sync::OwnedRwLockReadGuard;
+use tokio::sync::OwnedRwLockWriteGuard;
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use tracing::instrument;
@@ -158,6 +160,12 @@ pub struct NewThread {
     pub thread_id: ThreadId,
     pub thread: Arc<CodexThread>,
     pub session_configured: SessionConfiguredEvent,
+}
+
+/// Keeps a loaded thread from entering a Core-owned shutdown path while a
+/// dependent operation uses its runtime authority.
+pub struct ThreadResidencyLease {
+    _guard: OwnedRwLockReadGuard<()>,
 }
 
 // TODO(ccunningham): Add an explicit non-interrupting live-turn snapshot once
@@ -342,6 +350,7 @@ pub(crate) struct ResumeThreadWithHistoryOptions {
 /// function to require an `Arc<&Self>`.
 pub(crate) struct ThreadManagerState {
     threads: Arc<RwLock<HashMap<ThreadId, Arc<CodexThread>>>>,
+    thread_lifecycle_locks: std::sync::Mutex<HashMap<ThreadId, std::sync::Weak<RwLock<()>>>>,
     thread_created_tx: broadcast::Sender<ThreadId>,
     thread_id_generator: ThreadIdGenerator,
     auth_manager: Arc<AuthManager>,
@@ -470,6 +479,7 @@ impl ThreadManager {
         Self {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
+                thread_lifecycle_locks: std::sync::Mutex::new(HashMap::new()),
                 thread_created_tx,
                 thread_id_generator: default_thread_id_generator(),
                 models_manager,
@@ -616,6 +626,7 @@ impl ThreadManager {
         Self {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
+                thread_lifecycle_locks: std::sync::Mutex::new(HashMap::new()),
                 thread_created_tx,
                 thread_id_generator: default_thread_id_generator(),
                 models_manager: create_model_provider(provider, Some(auth_manager.clone()))
@@ -971,6 +982,16 @@ impl ThreadManager {
             .initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
+        if matches!(&options.initial_history, InitialHistory::Resumed(_))
+            && matches!(
+                resumed_session_source,
+                SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+            )
+        {
+            return Err(CodexErr::InvalidRequest(
+                "resuming a thread-spawn child requires resume_thread_with_history".to_string(),
+            ));
+        }
         options.session_source = Some(
             options
                 .session_source
@@ -1104,30 +1125,90 @@ impl ThreadManager {
         client_mcp_extensions: ClientMcpExtensions,
         thread_extension_init: ExtensionDataInit,
     ) -> CodexResult<NewThread> {
+        if let InitialHistory::Resumed(resumed) = &initial_history
+            && let Ok(thread) = self.get_thread(resumed.conversation_id).await
+            && thread.is_running()
+        {
+            if let Some(requested_rollout_path) = resumed.rollout_path.as_deref()
+                && thread.rollout_path().as_deref() != Some(requested_rollout_path)
+            {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "thread {} is already running with a different rollout path",
+                    resumed.conversation_id
+                )));
+            }
+            return Ok(NewThread {
+                thread_id: resumed.conversation_id,
+                session_configured: thread.session_configured(),
+                thread,
+            });
+        }
+
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
-        let agent_control = match &session_source {
-            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id, ..
-            }) => {
-                let parent = self.get_thread(*parent_thread_id).await.map_err(|_| {
-                    CodexErr::InvalidRequest(format!(
-                        "cannot resume child thread: parent {parent_thread_id} is not loaded; resume the parent first"
-                    ))
-                })?;
-                parent.session.services.agent_control.clone()
+        if let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id, ..
+        }) = &session_source
+        {
+            let parent = self.get_thread(*parent_thread_id).await.map_err(|_| {
+                CodexErr::InvalidRequest(format!(
+                    "cannot resume child thread: parent {parent_thread_id} is not loaded; resume the parent first"
+                ))
+            })?;
+            let agent_control = parent.session.services.agent_control.clone();
+            let resumed = match &initial_history {
+                InitialHistory::Resumed(resumed) => resumed,
+                InitialHistory::New | InitialHistory::Forked(_) | InitialHistory::Cleared => {
+                    return Err(CodexErr::InvalidRequest(
+                        "thread-spawn child resume requires recorded history".to_string(),
+                    ));
+                }
+            };
+            if let Some(requested_rollout_path) = resumed.rollout_path.as_deref() {
+                let stored_thread = self
+                    .state
+                    .read_stored_thread(ReadThreadParams {
+                        thread_id: resumed.conversation_id,
+                        include_archived: true,
+                        include_history: false,
+                    })
+                    .await?;
+                if stored_thread.rollout_path.as_deref() != Some(requested_rollout_path) {
+                    return Err(CodexErr::InvalidRequest(format!(
+                        "requested rollout path does not match stored path for thread {}",
+                        resumed.conversation_id
+                    )));
+                }
             }
-            _ => self.agent_control_for_config(&config),
-        };
-        let _spawn_admission = if matches!(
-            session_source,
-            SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
-        ) {
-            Some(agent_control.acquire_spawn_admission().await?)
-        } else {
-            None
-        };
+            let thread_id =
+                if initial_history.get_multi_agent_version() == Some(MultiAgentVersion::V2) {
+                    Box::pin(agent_control.ensure_v2_agent_loaded_with_extension_init(
+                        config,
+                        resumed.conversation_id,
+                        Some(parent),
+                        thread_extension_init,
+                    ))
+                    .await?;
+                    resumed.conversation_id
+                } else {
+                    Box::pin(agent_control.resume_agent_from_rollout_with_extension_init(
+                        config,
+                        resumed.conversation_id,
+                        session_source,
+                        thread_extension_init,
+                    ))
+                    .await?
+                };
+            let thread = self.get_thread(thread_id).await?;
+            return Ok(NewThread {
+                thread_id,
+                session_configured: thread.session_configured(),
+                thread,
+            });
+        }
+
+        let agent_control = self.agent_control_for_config(&config);
         if let InitialHistory::Resumed(resumed) = &initial_history
             && initial_history.get_multi_agent_version() == Some(MultiAgentVersion::V2)
             && !session_source.is_non_root_agent()
@@ -1148,7 +1229,7 @@ impl ThreadManager {
         Box::pin(self.state.spawn_thread(ThreadSpawnRequest::new(
             options,
             auth_manager,
-            agent_control.clone(),
+            agent_control,
         )))
         .await
     }
@@ -1195,10 +1276,26 @@ impl ThreadManager {
         Box::pin(self.state.spawn_thread(request)).await
     }
 
+    /// Prevents Core-owned shutdown paths from closing `thread_id` until this
+    /// lease is dropped.
+    pub async fn acquire_thread_residency_lease(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadResidencyLease {
+        ThreadResidencyLease {
+            _guard: self
+                .state
+                .thread_lifecycle_lock(thread_id)
+                .read_owned()
+                .await,
+        }
+    }
+
     /// Removes the thread from the manager's internal map, though the thread is stored
     /// as `Arc<CodexThread>`, it is possible that other references to it exist elsewhere.
     /// Returns the thread if the thread was found and removed.
     pub async fn remove_thread(&self, thread_id: &ThreadId) -> Option<Arc<CodexThread>> {
+        let _shutdown_lease = self.state.acquire_thread_shutdown_lease(*thread_id).await;
         self.state.threads.write().await.remove(thread_id)
     }
 
@@ -1211,6 +1308,7 @@ impl ThreadManager {
         thread_id: &ThreadId,
         expected: &Arc<CodexThread>,
     ) -> Option<Arc<CodexThread>> {
+        let _shutdown_lease = self.state.acquire_thread_shutdown_lease(*thread_id).await;
         let mut threads = self.state.threads.write().await;
         if threads
             .get(thread_id)
@@ -1547,6 +1645,34 @@ impl ThreadManager {
 impl ThreadManagerState {
     pub(crate) fn agent_graph_store(&self) -> Option<Arc<dyn AgentGraphStore>> {
         self.agent_graph_store.clone()
+    }
+
+    fn thread_lifecycle_lock(&self, thread_id: ThreadId) -> Arc<RwLock<()>> {
+        let mut locks = self
+            .thread_lifecycle_locks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        locks.retain(|_, lock| lock.strong_count() != 0);
+        if let Some(lock) = locks.get(&thread_id).and_then(std::sync::Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(RwLock::new(()));
+        locks.insert(thread_id, Arc::downgrade(&lock));
+        lock
+    }
+
+    pub(crate) async fn acquire_thread_shutdown_lease(
+        &self,
+        thread_id: ThreadId,
+    ) -> OwnedRwLockWriteGuard<()> {
+        self.thread_lifecycle_lock(thread_id).write_owned().await
+    }
+
+    pub(crate) fn try_acquire_thread_shutdown_lease(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<OwnedRwLockWriteGuard<()>> {
+        self.thread_lifecycle_lock(thread_id).try_write_owned().ok()
     }
 
     pub(crate) async fn list_thread_ids(&self) -> Vec<ThreadId> {

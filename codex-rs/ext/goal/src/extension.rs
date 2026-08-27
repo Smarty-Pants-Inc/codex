@@ -140,6 +140,11 @@ mod tests {
             session_store: &ExtensionData::new("session"),
             thread_store: &ExtensionData::new("thread"),
         }));
+        assert!(goal_continuation_is_allowed(&ThreadIdleInput {
+            cause: ThreadIdleCause::Restored,
+            session_store: &ExtensionData::new("session"),
+            thread_store: &ExtensionData::new("thread"),
+        }));
         assert!(!goal_continuation_is_allowed(&ThreadIdleInput {
             cause: ThreadIdleCause::Interrupted,
             session_store: &ExtensionData::new("session"),
@@ -289,7 +294,12 @@ where
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
                 return;
             };
-            let outcome = match runtime.continue_if_idle().await {
+            let result = if input.cause == ThreadIdleCause::Restored {
+                runtime.continue_after_restore_if_idle().await
+            } else {
+                runtime.continue_if_idle().await
+            };
+            let outcome = match result {
                 Ok(outcome) => outcome,
                 Err(error) => GoalContinuationOutcome::Failed { error },
             };

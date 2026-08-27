@@ -22,7 +22,10 @@ use codex_protocol::SanitizedGitUrl;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::mcp::ClientMcpExtensions;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_queue_extension::SuppressQueueResumeWake;
 use codex_thread_store::PersistContext;
 
 pub(super) const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
@@ -34,6 +37,12 @@ const PAGINATED_FULL_HISTORY_DEPRECATION_SUMMARY: &str = "Full-history hydration
 fn goal_extension_init(capability: GoalAutoContinueCapability) -> ExtensionDataInit {
     let mut init = ExtensionDataInit::new();
     init.insert(capability);
+    init
+}
+
+fn restored_thread_extension_init(capability: GoalAutoContinueCapability) -> ExtensionDataInit {
+    let mut init = goal_extension_init(capability);
+    init.insert(SuppressQueueResumeWake);
     init
 }
 const PAGINATED_THREAD_READ_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; omit `includeTurns` or set it to `false`, then page with `thread/turns/list` and `thread/items/list`.";
@@ -96,6 +105,49 @@ struct ThreadRevertRuntimeSnapshot {
     settings: CodexThreadSettingsOverrides,
     client_mcp_extensions: ClientMcpExtensions,
     goal_auto_continue_capability: GoalAutoContinueCapability,
+}
+
+struct PendingThreadUnloadReservation {
+    pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
+    thread_id: ThreadId,
+    released: bool,
+}
+
+impl PendingThreadUnloadReservation {
+    async fn reserve(
+        pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
+        thread_id: ThreadId,
+    ) -> Option<Self> {
+        let inserted = pending_thread_unloads.lock().await.insert(thread_id);
+        inserted.then_some(Self {
+            pending_thread_unloads,
+            thread_id,
+            released: false,
+        })
+    }
+
+    async fn release(mut self) {
+        self.pending_thread_unloads
+            .lock()
+            .await
+            .remove(&self.thread_id);
+        self.released = true;
+    }
+}
+
+impl Drop for PendingThreadUnloadReservation {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        let pending_thread_unloads = Arc::clone(&self.pending_thread_unloads);
+        let thread_id = self.thread_id;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                pending_thread_unloads.lock().await.remove(&thread_id);
+            });
+        }
+    }
 }
 
 fn collect_resume_override_mismatches(
@@ -614,6 +666,12 @@ impl ThreadRequestProcessor {
             ))
             .await;
         if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
+            thread
+                .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Restored)
+                .await;
+            thread
+                .thread_extension_data()
+                .remove::<SuppressQueueResumeWake>();
             thread
                 .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
                 .await;
@@ -2119,100 +2177,169 @@ impl ThreadRequestProcessor {
                 "thread/revert only supports paginated threads",
             ));
         }
-        let runtime_snapshot = ThreadRevertRuntimeSnapshot {
-            config: thread.config().await.as_ref().clone(),
-            settings: thread.restorable_thread_settings().await,
-            client_mcp_extensions: thread.client_mcp_extensions(),
-            goal_auto_continue_capability,
-        };
-
-        // Subscribe before shutdown so a pending idle unload either rejects this request or can
-        // no longer race the replacement runtime. The same listener then drains Core's shutdown
-        // events before we replace it.
-        if matches!(
-            self.ensure_conversation_listener(
-                thread_id,
-                request_id.connection_id,
-                /*raw_events_enabled*/ false,
+        let (_parent_residency_lease, parent_unload_reservation) = if let SessionSource::SubAgent(
+            SubAgentSource::ThreadSpawn {
+                parent_thread_id, ..
+            },
+        ) =
+            &config_snapshot.session_source
+        {
+            let reservation = PendingThreadUnloadReservation::reserve(
+                Arc::clone(&self.pending_thread_unloads),
+                *parent_thread_id,
             )
-            .await?,
-            EnsureConversationListenerResult::ConnectionClosed
-        ) {
-            return Err(internal_error(format!(
-                "connection closed before thread {thread_id} could be reverted"
-            )));
-        }
-        let thread_state = self.thread_state_manager.thread_state(thread_id).await;
-        let shutdown_drain_rx = thread_state.lock().await.register_shutdown_drain_waiter();
-
-        match wait_for_thread_shutdown(&thread).await {
-            ThreadShutdownResult::Complete => {}
-            ThreadShutdownResult::SubmitFailed => {
-                thread_state.lock().await.take_shutdown_drain_waiter();
-                return Err(internal_error(format!(
-                    "failed to shut down thread {thread_id} before revert"
-                )));
-            }
-            ThreadShutdownResult::TimedOut => {
-                thread_state.lock().await.take_shutdown_drain_waiter();
-                return Err(internal_error(format!(
-                    "timed out shutting down thread {thread_id} before revert"
-                )));
-            }
-        }
-        let drain_result = tokio::time::timeout(Duration::from_secs(10), shutdown_drain_rx)
             .await
-            .map_err(|_| {
-                internal_error(format!(
-                    "timed out waiting for thread {thread_id} listener to drain shutdown events"
+            .ok_or_else(|| {
+                invalid_request(format!(
+                    "cannot revert child thread: parent {parent_thread_id} is closing; retry after the parent is resumed"
                 ))
-            })
-            .and_then(|result| {
-                result.map_err(|_| {
+            })?;
+            let residency_lease = self
+                .thread_manager
+                .acquire_thread_residency_lease(*parent_thread_id)
+                .await;
+            if self
+                .thread_manager
+                .get_thread(*parent_thread_id)
+                .await
+                .is_err()
+            {
+                reservation.release().await;
+                return Err(invalid_request(format!(
+                    "cannot revert child thread: parent {parent_thread_id} is not loaded; resume the parent first"
+                )));
+            }
+            (Some(residency_lease), Some(reservation))
+        } else {
+            (None, None)
+        };
+        let result = async {
+            let runtime_snapshot = ThreadRevertRuntimeSnapshot {
+                config: thread.config().await.as_ref().clone(),
+                settings: thread.restorable_thread_settings().await,
+                client_mcp_extensions: thread.client_mcp_extensions(),
+                goal_auto_continue_capability,
+            };
+
+            // Subscribe before shutdown so a pending idle unload either rejects this request or can
+            // no longer race the replacement runtime. The same listener then drains Core's shutdown
+            // events before we replace it.
+            if matches!(
+                self.ensure_conversation_listener(
+                    thread_id,
+                    request_id.connection_id,
+                    /*raw_events_enabled*/ false,
+                )
+                .await?,
+                EnsureConversationListenerResult::ConnectionClosed
+            ) {
+                return Err(internal_error(format!(
+                    "connection closed before thread {thread_id} could be reverted"
+                )));
+            }
+            let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+            let shutdown_drain_rx = thread_state.lock().await.register_shutdown_drain_waiter();
+
+            match wait_for_thread_shutdown(&thread).await {
+                ThreadShutdownResult::Complete => {}
+                ThreadShutdownResult::SubmitFailed => {
+                    thread_state.lock().await.take_shutdown_drain_waiter();
+                    return Err(internal_error(format!(
+                        "failed to shut down thread {thread_id} before revert"
+                    )));
+                }
+                ThreadShutdownResult::TimedOut => {
+                    thread_state.lock().await.take_shutdown_drain_waiter();
+                    return Err(internal_error(format!(
+                        "timed out shutting down thread {thread_id} before revert"
+                    )));
+                }
+            }
+            let drain_result = tokio::time::timeout(Duration::from_secs(10), shutdown_drain_rx)
+                .await
+                .map_err(|_| {
                     internal_error(format!(
-                        "thread {thread_id} listener stopped before draining shutdown events"
+                        "timed out waiting for thread {thread_id} listener to drain shutdown events"
                     ))
                 })
-            });
-        if let Err(err) = drain_result {
-            thread_state.lock().await.take_shutdown_drain_waiter();
-            return Err(err);
-        }
-        if self
-            .thread_manager
-            .remove_thread(&thread_id)
-            .await
-            .is_none()
-        {
-            return Err(internal_error(format!(
-                "thread {thread_id} disappeared before revert"
-            )));
-        }
-        // Keep thread state and subscriptions across the internal reload. Full teardown would
-        // force clients to call thread/resume after a successful revert.
-        self.outgoing
-            .cancel_requests_for_thread(thread_id, /*error*/ None)
-            .await;
+                .and_then(|result| {
+                    result.map_err(|_| {
+                        internal_error(format!(
+                            "thread {thread_id} listener stopped before draining shutdown events"
+                        ))
+                    })
+                });
+            if let Err(err) = drain_result {
+                thread_state.lock().await.take_shutdown_drain_waiter();
+                return Err(err);
+            }
+            if self
+                .thread_manager
+                .remove_thread(&thread_id)
+                .await
+                .is_none()
+            {
+                return Err(internal_error(format!(
+                    "thread {thread_id} disappeared before revert"
+                )));
+            }
+            // Keep thread state and subscriptions across the internal reload. Full teardown would
+            // force clients to call thread/resume after a successful revert.
+            self.outgoing
+                .cancel_requests_for_thread(thread_id, /*error*/ None)
+                .await;
 
-        let revert_result = self
-            .thread_store
-            .revert_thread(codex_thread_store::RevertThreadParams {
-                thread_id,
-                before_turn_id,
-            })
-            .await
-            .map_err(|err| thread_store_mutation_error("revert", err));
-        let response = self
-            .reload_paginated_thread(
-                request_id,
-                thread_id,
-                runtime_snapshot,
-                app_server_client_name,
-                app_server_client_version,
-            )
-            .await?;
-        revert_result?;
-        Ok((response, thread_id))
+            let revert_result = self
+                .thread_store
+                .revert_thread(codex_thread_store::RevertThreadParams {
+                    thread_id,
+                    before_turn_id,
+                })
+                .await
+                .map_err(|err| thread_store_mutation_error("revert", err));
+            let response = self
+                .reload_paginated_thread(
+                    request_id,
+                    thread_id,
+                    runtime_snapshot,
+                    app_server_client_name,
+                    app_server_client_version,
+                )
+                .await;
+            match response {
+                Ok(response) => {
+                    if let Err(err) = revert_result {
+                        if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
+                            thread
+                                .thread_extension_data()
+                                .remove::<SuppressQueueResumeWake>();
+                            thread
+                                .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
+                                .await;
+                        }
+                        Err(err)
+                    } else {
+                        Ok((response, thread_id))
+                    }
+                }
+                Err(err) => {
+                    if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
+                        thread
+                            .thread_extension_data()
+                            .remove::<SuppressQueueResumeWake>();
+                        thread
+                            .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
+                            .await;
+                    }
+                    Err(err)
+                }
+            }
+        }
+        .await;
+        if let Some(reservation) = parent_unload_reservation {
+            reservation.release().await;
+        }
+        result
     }
 
     async fn reload_paginated_thread(
@@ -2254,7 +2381,7 @@ impl ThreadRequestProcessor {
                 self.auth_manager.clone(),
                 self.request_trace_context(request_id).await,
                 client_mcp_extensions,
-                goal_extension_init(goal_auto_continue_capability),
+                restored_thread_extension_init(goal_auto_continue_capability),
             )
             .await
             .map_err(|err| internal_error(format!("error reloading thread after revert: {err}")))?;

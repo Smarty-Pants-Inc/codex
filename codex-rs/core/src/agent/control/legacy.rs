@@ -7,6 +7,7 @@ impl AgentControl {
     /// persisted spawn-edge state.
     pub(crate) async fn shutdown_live_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
         let state = self.upgrade()?;
+        let _shutdown_lease = state.acquire_thread_shutdown_lease(agent_id).await;
         let result = if let Ok(thread) = state.get_thread(agent_id).await {
             thread
                 .session

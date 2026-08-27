@@ -12,6 +12,7 @@ use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
@@ -19,6 +20,13 @@ use codex_app_server_protocol::ThreadGoalSetResponse;
 use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItemsListParams;
 use codex_app_server_protocol::ThreadItemsListResponse;
+use codex_app_server_protocol::ThreadQueueAddParams;
+use codex_app_server_protocol::ThreadQueueAddResponse;
+use codex_app_server_protocol::ThreadQueueChangedNotification;
+use codex_app_server_protocol::ThreadQueueDeleteParams;
+use codex_app_server_protocol::ThreadQueueDeleteResponse;
+use codex_app_server_protocol::ThreadQueueListParams;
+use codex_app_server_protocol::ThreadQueueListResponse;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadRevertParams;
@@ -387,6 +395,7 @@ async fn thread_revert_interrupts_active_turn_keeps_thread_loaded_and_continues_
     let server = create_mock_responses_server_sequence(vec![
         create_final_assistant_message_sse_response("first")?,
         create_request_user_input_sse_response("call_blocked")?,
+        create_request_user_input_sse_response("call_restored")?,
         create_final_assistant_message_sse_response("third")?,
     ])
     .await;
@@ -475,6 +484,26 @@ async fn thread_revert_interrupts_active_turn_keeps_thread_loaded_and_continues_
     )
     .await??;
 
+    let queued: ThreadQueueAddResponse = mcp
+        .request(|request_id| ClientRequest::ThreadQueueAdd {
+            request_id,
+            params: ThreadQueueAddParams {
+                thread_id: thread.id.clone(),
+                input: vec![UserInput::Text {
+                    text: "queued after restore".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                client_user_message_id: "queued-after-restore".to_string(),
+            },
+        })
+        .await?;
+    let queued_change: ThreadQueueChangedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("thread/queue/changed"),
+    )
+    .await??;
+    assert_eq!(queued_change.thread_id, thread.id);
+
     let ThreadRevertResponse {
         thread: reverted_thread,
         turns_backwards_cursor,
@@ -506,6 +535,63 @@ async fn thread_revert_interrupts_active_turn_keeps_thread_loaded_and_continues_
     assert_eq!(continued.thread_id, thread.id);
     assert_eq!(continued.turn.status, TurnStatus::InProgress);
 
+    let queued_after_restore: ThreadQueueListResponse = mcp
+        .request(|request_id| ClientRequest::ThreadQueueList {
+            request_id,
+            params: ThreadQueueListParams {
+                thread_id: thread.id.clone(),
+                cursor: None,
+                limit: None,
+            },
+        })
+        .await?;
+    assert_eq!(
+        queued_after_restore.data,
+        vec![queued.queued_submission.clone()]
+    );
+    let continued_request = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_request_message(),
+    )
+    .await??;
+    let ServerRequest::ToolRequestUserInput {
+        request_id: continued_request_id,
+        params: continued_request_params,
+    } = continued_request
+    else {
+        anyhow::bail!("restored goal turn did not request user input");
+    };
+    assert_eq!(continued_request_params.thread_id, thread.id);
+    assert_eq!(continued_request_params.turn_id, continued.turn.id);
+    assert_eq!(continued_request_params.item_id, "call_restored");
+    let requests = server.received_requests().await.expect("response requests");
+    let restored_input = requests
+        .iter()
+        .rev()
+        .find(|request| request.url.path().ends_with("/responses"))
+        .expect("restored goal model request")
+        .body_json::<Value>()?["input"]
+        .to_string();
+    assert!(restored_input.contains("continue after the active turn is reverted"));
+    assert!(!restored_input.contains("queued after restore"));
+
+    let deleted: ThreadQueueDeleteResponse = mcp
+        .request(|request_id| ClientRequest::ThreadQueueDelete {
+            request_id,
+            params: ThreadQueueDeleteParams {
+                thread_id: thread.id.clone(),
+                queued_submission_id: queued.queued_submission.id,
+            },
+        })
+        .await?;
+    assert!(deleted.deleted);
+    let deleted_change: ThreadQueueChangedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("thread/queue/changed"),
+    )
+    .await??;
+    assert_eq!(deleted_change.thread_id, thread.id);
+
     let complete_goal_request_id = mcp
         .send_raw_request(
             "thread/goal/set",
@@ -525,6 +611,15 @@ async fn thread_revert_interrupts_active_turn_keeps_thread_loaded_and_continues_
         mcp.read_stream_until_notification_message("thread/goal/updated"),
     )
     .await??;
+    mcp.send_response(
+        continued_request_id,
+        json!({
+            "answers": {
+                "confirm_path": { "answers": ["yes"] }
+            }
+        }),
+    )
+    .await?;
     let continued_completion: TurnCompletedNotification = timeout(
         DEFAULT_READ_TIMEOUT,
         mcp.read_notification("turn/completed"),
