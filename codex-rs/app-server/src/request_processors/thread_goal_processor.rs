@@ -2,6 +2,7 @@ use super::thread_input::DIRECT_INPUT_TO_MULTI_AGENT_V2_SUBAGENT_ERROR;
 use super::thread_input::can_accept_direct_input;
 use super::thread_input::ensure_direct_input_allowed;
 use super::*;
+use codex_goal_extension::GoalAutoContinueCapability;
 use codex_goal_extension::GoalObjectiveUpdate;
 use codex_goal_extension::GoalService;
 use codex_goal_extension::GoalServiceError;
@@ -108,6 +109,25 @@ impl ThreadGoalRequestProcessor {
         {
             warn!("failed to restore inherited goal runtime for {thread_id}: {err}");
         }
+    }
+    pub(crate) async fn update_auto_continue_capability(
+        &self,
+        thread: &CodexThread,
+        host_capability: GoalAutoContinueCapability,
+    ) {
+        let capability = if thread
+            .config_snapshot()
+            .await
+            .session_source
+            .is_non_root_agent()
+        {
+            GoalAutoContinueCapability::Disabled
+        } else {
+            host_capability
+        };
+        thread.thread_extension_data().insert(capability);
+        self.goal_service
+            .set_thread_auto_continue_capability(thread.session_configured().thread_id, capability);
     }
 
     pub(crate) async fn flush_goal_progress_for_fork(

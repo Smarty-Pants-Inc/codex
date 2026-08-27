@@ -76,10 +76,15 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         .properties
         .as_ref()
         .expect("spawn_agent should use object params");
-    assert!(description.contains("Spawns an agent to work on the specified task."));
-    assert!(
-        description.contains("receives the tools and delegation capabilities granted by the host")
-    );
+    assert!(description.contains(SPAWN_AGENT_TOOL_DESCRIPTION_V2));
+    assert!(description.contains(
+        "- `collaborative`: receives collaboration tools, may message allowed running agents, and may spawn subagents within host limits;"
+    ));
+    assert!(description.contains(
+        "- `leaf`: receives no collaboration tools and returns its result to its parent."
+    ));
+    assert!(!description.contains("Spawns an agent to work on the specified task."));
+    assert!(!description.contains("same tools as the parent"));
     assert!(!description.contains("send you and other running agents messages"));
     assert!(!description.contains("max_concurrent_threads_per_session"));
     assert!(description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
@@ -88,10 +93,10 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
             .contains("Available model overrides (optional; inherited parent model is preferred):")
     );
     assert!(description.contains(
-        "- `visible-model`: visible description Reasoning efforts: medium (default). Service tiers: priority."
+        "- `visible-model` [collaborative]: visible description Reasoning efforts: medium (default). Service tiers: priority."
     ));
     assert!(description.contains(
-        "- `legacy-model`: legacy description Reasoning efforts: medium (default). Service tiers: priority."
+        "- `legacy-model` [leaf]: legacy description Reasoning efforts: medium (default). Service tiers: priority."
     ));
     assert!(!description.contains("hidden-model"));
     assert!(!description.contains("disabled-model"));
@@ -130,7 +135,13 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     );
     assert_eq!(
         output_schema.expect("spawn_agent output schema")["required"],
-        json!(["task_name", "nickname", "model", "multi_agent_version"])
+        json!([
+            "task_name",
+            "nickname",
+            "capability",
+            "effective_model",
+            "multi_agent_version"
+        ])
     );
 }
 
@@ -239,7 +250,7 @@ fn spawn_agent_tool_caps_reasoning_effort_value_length() {
     assert_eq!(
         spawn_agent_models_description(&[model], MultiAgentVersion::V2),
         format!(
-            "Available model overrides (optional; inherited parent model is preferred):\n- `visible-model`: visible description Reasoning efforts: {} (default). Service tiers: priority.",
+            "Available model overrides (optional; inherited parent model is preferred):\n- `visible-model` [collaborative]: visible description Reasoning efforts: {} (default). Service tiers: priority.",
             "é".repeat(MAX_REASONING_EFFORT_CHARS_IN_SPAWN_AGENT_DESCRIPTION)
         )
     );
@@ -260,6 +271,7 @@ fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
     let ToolSpec::Function(ResponsesApiTool {
         description,
         parameters,
+        output_schema,
         ..
     }) = tool
     else {
@@ -276,6 +288,17 @@ fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
     assert!(!properties.contains_key("service_tier"));
     assert!(!description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
     assert!(description.contains("Available model overrides"));
+    let output_schema = output_schema.expect("spawn_agent output schema");
+    assert_eq!(
+        output_schema["required"],
+        json!(["task_name", "capability", "multi_agent_version"])
+    );
+    assert!(
+        !output_schema["properties"]
+            .as_object()
+            .unwrap()
+            .contains_key("effective_model")
+    );
 }
 
 #[test]
@@ -462,7 +485,13 @@ fn list_agents_tool_includes_path_prefix_and_agent_fields() {
     );
     assert_eq!(
         output_schema.expect("list_agents output schema")["properties"]["agents"]["items"]["required"],
-        json!(["agent_name", "agent_status", "model", "multi_agent_version"])
+        json!([
+            "agent_name",
+            "agent_status",
+            "capability",
+            "effective_model",
+            "multi_agent_version"
+        ])
     );
 }
 

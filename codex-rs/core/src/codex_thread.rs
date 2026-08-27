@@ -6,6 +6,7 @@ use crate::session::SessionIo;
 use crate::session::SessionSettingsUpdate;
 use crate::session::new_submission_id;
 use crate::session::session::Session;
+use crate::session::step_settings::StepSettingsUpdate;
 use crate::session::validate_live_response_items;
 use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
@@ -55,6 +56,7 @@ use codex_protocol::turn_input::SuspendTurnOutcome;
 use codex_protocol::turn_input::TurnInputMode;
 use codex_protocol::turn_input::TurnInputRequest;
 use codex_protocol::turn_input::TurnInputSubmission;
+use codex_protocol::turn_input::TurnStartOptions;
 use codex_thread_store::PersistContext;
 use codex_thread_store::StoredThread;
 use codex_thread_store::StoredThreadHistory;
@@ -156,6 +158,8 @@ pub enum GuardianRootMessage {
     User(String),
     /// Root assistant final output that provides untrusted conversational context.
     Assistant(String),
+    /// Bounded, already role-labeled genuine user answers and their assistant questions.
+    UserInput(String),
 }
 
 impl GuardianRootMessage {
@@ -164,6 +168,7 @@ impl GuardianRootMessage {
         let (role, text) = match self {
             Self::User(text) => ("user", text),
             Self::Assistant(text) => ("assistant", text),
+            Self::UserInput(fragment) => return fragment,
         };
         text.lines()
             .map(|line| format!("{role}: {line}\n"))
@@ -171,13 +176,15 @@ impl GuardianRootMessage {
     }
 }
 
-/// Authorization state that changes on history rewrites or genuine user messages.
+/// Authorization state that changes on history rewrites or genuine user input.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GuardianAuthorizationVersion {
     /// Conversation-history rewrite generation.
     pub history_version: u64,
     /// Number of genuine user messages in the conversation snapshot.
     pub user_message_count: usize,
+    /// Number of successful, host-produced answers to genuine user-input requests.
+    pub user_input_response_count: usize,
 }
 
 impl GuardianAuthorizationVersion {
@@ -189,6 +196,7 @@ impl GuardianAuthorizationVersion {
                 .items()
                 .filter(|item| item.is_user_message())
                 .count(),
+            user_input_response_count: 0,
         }
     }
 }
@@ -334,8 +342,8 @@ impl CodexThread {
     /// Submits turn input without requiring the caller to inspect thread state.
     ///
     /// The result describes whether Core started a turn, steered an active
-    /// turn, or declined it without recording or enqueueing the input. Only
-    /// user input is accepted.
+    /// turn, or declined it without recording or enqueueing the input.
+    /// User input and named standalone function-call outputs are accepted.
     pub async fn start_or_steer_turn(
         &self,
         request: TurnInputRequest,
@@ -386,10 +394,21 @@ impl CodexThread {
             thread_settings,
             trace,
             idle_turn_source,
+            cyber_access_program,
         } = request;
+        let start_options = TurnStartOptions {
+            cyber_access_program,
+            ..Default::default()
+        };
         match self
             .io
-            .submit_recover_turn(thread_settings, idle_turn_source, trace, turn_id)
+            .submit_recover_turn(
+                thread_settings,
+                start_options,
+                idle_turn_source,
+                trace,
+                turn_id,
+            )
             .await?
         {
             TurnInputSubmission::Started { turn_id } => {
@@ -521,7 +540,7 @@ impl CodexThread {
         &self,
         overrides: CodexThreadSettingsOverrides,
     ) -> ConstraintResult<ThreadConfigSnapshot> {
-        let updates = self.thread_settings_update(overrides).await;
+        let updates = Self::thread_settings_update(overrides);
         self.session.preview_settings(&updates).await
     }
 
@@ -533,14 +552,11 @@ impl CodexThread {
         &self,
         settings: CodexThreadSettingsOverrides,
     ) -> ConstraintResult<()> {
-        let updates = self.thread_settings_update(settings).await;
-        self.session.update_settings(updates).await
+        let updates = Self::thread_settings_update(settings);
+        self.session.update_settings(updates).await.map(|_| ())
     }
 
-    async fn thread_settings_update(
-        &self,
-        overrides: CodexThreadSettingsOverrides,
-    ) -> SessionSettingsUpdate {
+    fn thread_settings_update(overrides: CodexThreadSettingsOverrides) -> SessionSettingsUpdate {
         let CodexThreadSettingsOverrides {
             environments,
             profile_workspace_roots,
@@ -557,28 +573,23 @@ impl CodexThread {
             collaboration_mode,
             personality,
         } = overrides;
-        let collaboration_mode = if let Some(collaboration_mode) = collaboration_mode {
-            collaboration_mode
-        } else {
-            self.session
-                .collaboration_mode()
-                .await
-                .with_updates(model, effort, /*developer_instructions*/ None)
-        };
-
         SessionSettingsUpdate {
+            step_settings: StepSettingsUpdate {
+                model,
+                effort,
+                collaboration_mode,
+                reasoning_summary: summary,
+                service_tier,
+                personality,
+                approval_policy,
+                approvals_reviewer,
+            },
             environments,
             profile_workspace_roots,
-            approval_policy,
-            approvals_reviewer,
             sandbox_policy,
             permission_profile,
             active_permission_profile,
             windows_sandbox_level,
-            collaboration_mode: Some(collaboration_mode),
-            reasoning_summary: summary,
-            service_tier,
-            personality,
             ..Default::default()
         }
     }

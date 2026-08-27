@@ -584,6 +584,21 @@ async fn interrupted_turns_pause_queued_messages_but_failed_turns_drain_them() -
     Ok(())
 }
 
+#[tokio::test]
+async fn restored_threads_leave_queued_messages_pending() -> anyhow::Result<()> {
+    let (queue, _home) = test_queue().await?;
+    let service = QueuedItemService::new(queue, Weak::new(), Arc::new(NoopExtensionEventSink));
+    let thread_id = ThreadId::new();
+    let queued = service
+        .enqueue(thread_id, user_input("wait for an actual turn boundary"))
+        .await?;
+
+    emit_idle_with_cause(&service, thread_id, ThreadIdleCause::Restored).await;
+
+    assert_eq!(vec![queued], service.list(thread_id).await?);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn registered_queue_lifecycle_starts_messages_in_fifo_order() -> anyhow::Result<()> {
     let server = start_mock_server().await;

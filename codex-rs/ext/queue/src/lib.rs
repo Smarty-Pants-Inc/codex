@@ -10,6 +10,7 @@ pub use service::QueueEnqueueIntent;
 pub use service::QueueServiceError;
 pub use service::QueuedItem;
 pub use service::QueuedItemService;
+pub use service::SuppressQueueResumeWake;
 
 /// Registers the caller-owned queue before lower-priority idle contributors.
 pub fn install<C>(registry: &mut ExtensionRegistryBuilder<C>, service: Arc<QueuedItemService>)

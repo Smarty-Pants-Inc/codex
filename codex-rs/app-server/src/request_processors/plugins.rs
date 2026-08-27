@@ -28,6 +28,7 @@ use codex_core_plugins::remote_bundle::RemotePluginBundleInstallError;
 use codex_mcp::McpOAuthLoginSupport;
 use codex_mcp::McpRuntimeContext;
 use codex_mcp::oauth_login_support;
+use codex_mcp::resolve_oauth_callback;
 use codex_mcp::should_retry_without_scopes;
 use codex_plugin::PluginId;
 use codex_plugin::PluginTelemetryMetadata;
@@ -37,6 +38,7 @@ use codex_rmcp_client::OAuthDiscoveryTimeout;
 use codex_rmcp_client::StreamableHttpRedirectMode;
 use codex_rmcp_client::perform_oauth_login_silent;
 
+mod local;
 mod search;
 
 fn plugin_redirect_mode(plugin_root: &Path) -> StreamableHttpRedirectMode {
@@ -556,7 +558,7 @@ impl PluginRequestProcessor {
         let include_local = marketplace_kinds.contains(&PluginListMarketplaceKind::Local);
         let include_vertical = marketplace_kinds.contains(&PluginListMarketplaceKind::Vertical);
 
-        let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
+        let config = self.load_catalog_config(&roots).await?;
         let empty_response = || PluginListResponse {
             marketplaces: Vec::new(),
             marketplace_load_errors: Vec::new(),
@@ -814,7 +816,7 @@ impl PluginRequestProcessor {
             marketplaces: Vec::new(),
             marketplace_load_errors: Vec::new(),
         };
-        let config = self.load_latest_config(/*fallback_cwd*/ None).await?;
+        let config = self.load_catalog_config(&roots).await?;
         if !config.features.enabled(Feature::Plugins) {
             return Ok(empty_response());
         }
@@ -1943,12 +1945,25 @@ impl PluginRequestProcessor {
             let store_mode = config.mcp_oauth_credentials_store_mode;
             let keyring_backend_kind = config.auth_keyring_backend_kind();
             let callback_port = server.oauth_callback_port(config.mcp_oauth_callback_port);
-            let callback_url = config.mcp_oauth_callback_url.clone();
+            let callback_url = match resolve_oauth_callback(
+                &server,
+                &oauth_config.url,
+                config.mcp_oauth_callback_url.as_deref(),
+            ) {
+                Ok(callback_url) => callback_url,
+                Err(error) => {
+                    warn!(
+                        "failed to resolve MCP OAuth callback for plugin install {name}: {error}"
+                    );
+                    continue;
+                }
+            };
             let outgoing = Arc::clone(&self.outgoing);
             let notification_name = name.clone();
             let oauth_credential_name = server.oauth_credential_name(&name).into_owned();
             let thread_manager = Arc::clone(&self.thread_manager);
             let http_client = Arc::clone(&http_client);
+            let global_callback_url = config.mcp_oauth_callback_url.clone();
 
             tokio::spawn(async move {
                 let oauth_client_id = server.oauth_client_id();
@@ -1965,6 +1980,7 @@ impl PluginRequestProcessor {
                     server.oauth_resource.as_deref(),
                     callback_port,
                     callback_url.as_deref(),
+                    global_callback_url.as_deref(),
                     Arc::clone(&http_client),
                     redirect_mode,
                 )
@@ -1985,6 +2001,7 @@ impl PluginRequestProcessor {
                             server.oauth_resource.as_deref(),
                             callback_port,
                             callback_url.as_deref(),
+                            global_callback_url.as_deref(),
                             http_client,
                             redirect_mode,
                         )

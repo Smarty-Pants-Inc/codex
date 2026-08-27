@@ -124,6 +124,12 @@ impl V2Residency {
             let Some(candidate_thread_id) = self.pop_lru_candidate(protected_thread_id) else {
                 return false;
             };
+            let Some(_shutdown_lease) =
+                manager.try_acquire_thread_shutdown_lease(candidate_thread_id)
+            else {
+                self.touch(candidate_thread_id);
+                continue;
+            };
             let Some(candidate_thread) = manager
                 .get_thread(candidate_thread_id)
                 .await

@@ -405,6 +405,7 @@ pub(super) async fn ensure_listener_task_running(
                     {
                         let mut pending_thread_unloads = pending_thread_unloads.lock().await;
                         if pending_thread_unloads.contains(&conversation_id) {
+                            unloading_state.note_thread_activity_observed();
                             continue;
                         }
                         if !unloading_state.should_unload_now() {

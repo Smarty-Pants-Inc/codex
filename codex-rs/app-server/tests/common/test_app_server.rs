@@ -164,11 +164,11 @@ pub struct TestAppServer {
     _attribution_settings_server: Option<MockServer>,
     _owned_install_dir: Option<TempDir>,
     _owned_codex_home: Option<TempDir>,
+    goal_auto_continue: bool,
 }
 
 pub const DEFAULT_CLIENT_NAME: &str = "codex-app-server-tests";
 pub const DISABLE_PLUGIN_STARTUP_TASKS_ARG: &str = "--disable-plugin-startup-tasks-for-tests";
-pub const ENABLE_GOAL_AUTO_CONTINUE_FOR_TESTS_ARG: &str = "--enable-goal-auto-continue-for-tests";
 const DISABLE_MANAGED_CONFIG_ENV_VAR: &str = "CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG";
 #[cfg(windows)]
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(25);
@@ -186,6 +186,7 @@ impl TestAppServer {
             env_overrides: Vec::new(),
             args: vec![DISABLE_PLUGIN_STARTUP_TASKS_ARG.to_string()],
             exec_server_delay: None,
+            goal_auto_continue: false,
         }
     }
 
@@ -311,6 +312,7 @@ impl TestAppServer {
             _attribution_settings_server: None,
             _owned_install_dir: None,
             _owned_codex_home: None,
+            goal_auto_continue: false,
         })
     }
 
@@ -347,8 +349,11 @@ impl TestAppServer {
     pub async fn initialize_with_capabilities(
         &mut self,
         client_info: ClientInfo,
-        capabilities: Option<InitializeCapabilities>,
+        mut capabilities: Option<InitializeCapabilities>,
     ) -> anyhow::Result<JSONRPCMessage> {
+        if self.goal_auto_continue {
+            capabilities.get_or_insert_default().goal_auto_continue = true;
+        }
         self.initialize_with_params(InitializeParams {
             client_info,
             capabilities,
@@ -1559,7 +1564,7 @@ impl TestAppServer {
         tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, self.read_response(request_id)).await?
     }
 
-    async fn send_request(
+    pub async fn send_request(
         &mut self,
         method: &str,
         params: Option<serde_json::Value>,
@@ -1844,6 +1849,7 @@ pub struct TestAppServerBuilder {
     env_overrides: Vec<(String, Option<String>)>,
     args: Vec<String>,
     exec_server_delay: Option<Duration>,
+    goal_auto_continue: bool,
 }
 
 enum TestAppServerEnvironment {
@@ -1886,8 +1892,7 @@ impl TestAppServerBuilder {
 
     /// Enables interactive goal auto-continuation for focused tests.
     pub fn with_goal_auto_continue(mut self) -> Self {
-        self.args
-            .push(ENABLE_GOAL_AUTO_CONTINUE_FOR_TESTS_ARG.to_string());
+        self.goal_auto_continue = true;
         self
     }
 
@@ -1953,6 +1958,7 @@ impl TestAppServerBuilder {
             mut env_overrides,
             args,
             exec_server_delay,
+            goal_auto_continue,
         } = self;
         let (codex_home, owned_codex_home) = match codex_home {
             Some(codex_home) => (codex_home, None),
@@ -2123,6 +2129,7 @@ impl TestAppServerBuilder {
         app_server._owned_codex_home = owned_codex_home;
         app_server._delayed_exec_server = delayed_exec_server;
         app_server._attribution_settings_server = attribution_settings_server;
+        app_server.goal_auto_continue = goal_auto_continue;
         Ok(app_server)
     }
 }

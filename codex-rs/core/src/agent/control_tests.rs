@@ -119,9 +119,11 @@ fn captured_op_matches(actual: &(ThreadId, Op), expected: &(ThreadId, Op)) -> bo
         (
             Op::InterAgentCommunication {
                 communication: actual,
+                ..
             },
             Op::InterAgentCommunication {
                 communication: expected,
+                ..
             },
         ) => actual == expected,
         _ => false,
@@ -533,8 +535,7 @@ async fn send_input_errors_when_manager_dropped() {
                 text: "hello".to_string(),
                 text_elements: Vec::new(),
             }],
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            Default::default(),
         )
         .await
         .expect_err("send_input should fail without a manager");
@@ -565,22 +566,34 @@ async fn on_event_updates_status_from_task_started() {
 
 #[tokio::test]
 async fn on_event_updates_status_from_task_complete() {
-    let status = agent_status_from_event(&EventMsg::TurnComplete(TurnCompleteEvent {
-        turn_id: "turn-1".to_string(),
-        started_at: None,
-        last_agent_message: Some("done".to_string()),
-        error: None,
-        completed_at: None,
-        duration_ms: None,
-        time_to_first_token_ms: None,
-    }));
-    let expected = AgentStatus::Completed(Some("done".to_string()));
-    assert_eq!(status, Some(expected));
+    for (error, expected) in [
+        (None, AgentStatus::Completed(Some("done".to_string()))),
+        (
+            Some(ErrorEvent {
+                misalignment: None,
+                message: "denied".to_string(),
+                codex_error_info: None,
+            }),
+            AgentStatus::Errored("denied".to_string()),
+        ),
+    ] {
+        let status = agent_status_from_event(&EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn-1".to_string(),
+            started_at: None,
+            last_agent_message: Some("done".to_string()),
+            error,
+            completed_at: None,
+            duration_ms: None,
+            time_to_first_token_ms: None,
+        }));
+        assert_eq!(status, Some(expected));
+    }
 }
 
 #[tokio::test]
 async fn on_event_updates_status_from_error() {
     let status = agent_status_from_event(&EventMsg::Error(ErrorEvent {
+        misalignment: None,
         message: "boom".to_string(),
         codex_error_info: None,
     }));
@@ -649,8 +662,7 @@ async fn send_input_errors_when_thread_missing() {
                 text: "hello".to_string(),
                 text_elements: Vec::new(),
             }],
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            Default::default(),
         )
         .await
         .expect_err("send_input should fail for missing thread");
@@ -723,8 +735,7 @@ async fn send_input_records_developer_message() {
                 text: "hello from tests".to_string(),
                 text_elements: Vec::new(),
             }],
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            Default::default(),
         )
         .await
         .expect("send_input should succeed");
@@ -751,8 +762,7 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
             thread_id,
             communication.clone(),
             AgentCommunicationContext::new(AgentCommunicationKind::Message, ThreadId::new()),
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            Default::default(),
         )
         .await
         .expect("send_inter_agent_communication should succeed");
@@ -762,6 +772,7 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
         thread_id,
         Op::InterAgentCommunication {
             communication: communication.clone(),
+            start_options: Default::default(),
         },
     );
     let captured = harness
@@ -839,6 +850,9 @@ async fn spawn_v2_reload_test_child(
 }
 
 async fn check_v2_agent_reload(route: V2ReloadRoute) {
+    #[derive(Debug)]
+    struct V2ReloadMarker;
+
     let (home, mut config) = test_config().await;
     let _ = config.features.enable(Feature::MultiAgentV2);
     let _ = config.features.enable(Feature::Sqlite);
@@ -975,9 +989,15 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
                 .input_queue
                 .drain_mailbox_input_items()
                 .await;
-            harness
-                .manager
-                .ensure_multi_agent_v2_child_loaded(spawned_agent.thread_id)
+            let mut thread_extension_init = ExtensionDataInit::new();
+            thread_extension_init.insert(V2ReloadMarker);
+            control
+                .ensure_v2_agent_loaded_with_extension_init(
+                    harness.config.clone(),
+                    spawned_agent.thread_id,
+                    Some(Arc::clone(&parent_thread)),
+                    thread_extension_init,
+                )
                 .await
                 .expect("known child should reload through its parent");
             assert!(harness.manager.get_thread(parent_thread_id).await.is_err());
@@ -989,6 +1009,12 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
         .await
         .expect("reloaded child thread should exist");
     if matches!(route, V2ReloadRoute::NestedParent) {
+        assert!(
+            reloaded_child
+                .thread_extension_data()
+                .get::<V2ReloadMarker>()
+                .is_some()
+        );
         let reloaded_turn = reloaded_child.session.new_default_turn().await;
         assert_eq!(
             (
@@ -1042,14 +1068,16 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
             spawned_agent.thread_id,
             communication.clone(),
             AgentCommunicationContext::new(AgentCommunicationKind::Message, ThreadId::new()),
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            Default::default(),
         )
         .await
         .expect("send_inter_agent_communication should succeed after reload");
     let expected = (
         spawned_agent.thread_id,
-        Op::InterAgentCommunication { communication },
+        Op::InterAgentCommunication {
+            communication,
+            start_options: Default::default(),
+        },
     );
     let captured = harness
         .manager
@@ -3095,6 +3123,114 @@ async fn resume_agent_releases_slot_after_resume_failure() {
         .expect("shutdown resumed thread");
 }
 
+#[test]
+fn registered_child_resume_reuses_slot_and_preserves_extension_init() {
+    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+
+    let handle = std::thread::Builder::new()
+        .name("registered_child_resume_reuses_slot_and_preserves_extension_init".to_string())
+        .stack_size(TEST_STACK_SIZE_BYTES)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build test runtime");
+            runtime.block_on(Box::pin(
+                registered_child_resume_reuses_slot_and_preserves_extension_init_fixture(),
+            ));
+        })
+        .expect("spawn large-stack test thread");
+    handle.join().expect("registered resume test thread");
+}
+
+async fn registered_child_resume_reuses_slot_and_preserves_extension_init_fixture() {
+    #[derive(Debug)]
+    struct ResumeMarker;
+
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    let worker_path = AgentPath::root().join("worker").expect("worker path");
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: Some(worker_path),
+        agent_nickname: None,
+        agent_role: Some("worker".to_string()),
+    });
+    let child_thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("hello child"),
+            Some(session_source.clone()),
+        )
+        .await
+        .expect("child spawn should succeed");
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child should be loaded");
+    child_thread.ensure_rollout_materialized().await;
+    child_thread
+        .flush_rollout()
+        .await
+        .expect("flush child rollout");
+    child_thread
+        .shutdown_and_wait()
+        .await
+        .expect("shut down child runtime without releasing its registered slot");
+    assert!(
+        harness
+            .manager
+            .remove_thread(&child_thread_id)
+            .await
+            .is_some()
+    );
+    assert!(
+        harness
+            .control
+            .state
+            .agent_metadata_for_thread(child_thread_id)
+            .is_some()
+    );
+
+    let mut thread_extension_init = ExtensionDataInit::new();
+    thread_extension_init.insert(ResumeMarker);
+    let resumed_thread_id = harness
+        .control
+        .resume_agent_from_rollout_with_extension_init(
+            harness.config.clone(),
+            child_thread_id,
+            session_source,
+            thread_extension_init,
+        )
+        .await
+        .expect("registered child resume should reuse its slot and path");
+    assert_eq!(resumed_thread_id, child_thread_id);
+    let resumed_thread = harness
+        .manager
+        .get_thread(resumed_thread_id)
+        .await
+        .expect("resumed child should be loaded");
+    assert!(
+        resumed_thread
+            .thread_extension_data()
+            .get::<ResumeMarker>()
+            .is_some()
+    );
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(resumed_thread_id)
+        .await
+        .expect("resumed child shutdown should submit");
+    parent_thread
+        .shutdown_and_wait()
+        .await
+        .expect("parent shutdown should succeed");
+}
+
 #[tokio::test]
 async fn spawn_child_completion_notifies_parent_history() {
     let harness = AgentControlHarness::new().await;
@@ -3212,7 +3348,7 @@ async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
                 thread_id == worker_thread_id
                     && matches!(
                         op,
-                        Op::InterAgentCommunication { communication }
+                        Op::InterAgentCommunication { communication, .. }
                             if communication.author == tester_path
                                 && communication.recipient == worker_path
                                 && communication.content == "done"
@@ -3299,6 +3435,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
                 expected_message.clone(),
                 /*trigger_turn*/ false,
             ),
+            start_options: Default::default(),
         },
     );
 

@@ -7,6 +7,7 @@ use crate::protocol::NonSteerableTurnKind;
 use crate::protocol::ThreadSettingsOverrides;
 use crate::protocol::W3cTraceContext;
 use crate::user_input::UserInput;
+use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
@@ -21,6 +22,8 @@ use std::sync::Arc;
 pub trait IdleTurnAdmission: std::fmt::Debug + Send + Sync {
     fn reserve_if_allowed(&self, reserve: &mut dyn FnMut()) -> bool;
 }
+
+use ts_rs::TS;
 
 /// Result of stopping an unfinished root turn so another worker can recover it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,6 +86,8 @@ pub struct RecoverTurnRequest {
     pub thread_settings: ThreadSettingsOverrides,
     pub trace: Option<W3cTraceContext>,
     pub idle_turn_source: IdleTurnSource,
+    /// Program recorded in the interrupted turn's persisted context.
+    pub cyber_access_program: Option<CyberAccessProgram>,
 }
 
 impl TurnInputRequest {
@@ -181,6 +186,17 @@ pub enum TurnInputMode {
     Steer { expected_turn_id: String },
 }
 
+/// Requested cyber treatment for a ChatGPT-authenticated Codex turn.
+/// Authorization and model-tier restrictions remain server-owned.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum CyberAccessProgram {
+    Standard,
+    DaybreakBlue,
+    DaybreakRed,
+}
+
 /// Options for the new-turn branch of a submission.
 ///
 /// Core only records these options when input starts a turn. When input steers,
@@ -189,13 +205,21 @@ pub enum TurnInputMode {
 /// child input, Core also compares root lineage to detect ambiguity.
 #[derive(Clone, Debug, Default)]
 pub struct TurnStartOptions {
+    /// Source classification for the caller that starts a new turn.
+    /// Ignored when the submitted input steers an active turn.
+    pub turn_trigger: Option<String>,
     /// Structured-output schema for a new turn. When steering, Core rejects
     /// the input if the active turn uses a different schema.
     pub final_output_json_schema: Option<Value>,
+    /// Service tier for a new turn, without changing the thread's preference.
+    pub service_tier: Option<String>,
     /// Parent turn lineage recorded if this request starts a new turn.
     pub parent_turn_id: Option<String>,
     /// Causal root turn lineage recorded if this request starts a new turn.
     pub root_turn_id: Option<String>,
+    /// Explicit cyber treatment for this turn. Omission preserves the backend's
+    /// automatic behavior.
+    pub cyber_access_program: Option<CyberAccessProgram>,
 }
 
 /// What Core did with input submitted through `start_or_steer_turn`.

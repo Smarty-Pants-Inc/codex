@@ -13,6 +13,7 @@ use codex_protocol::protocol::ThreadGoalUpdatedEvent;
 use codex_protocol::protocol::validate_thread_goal_objective;
 use codex_rollout::RolloutItem;
 
+use crate::extension::GoalAutoContinueCapability;
 use crate::runtime::GoalRuntimeHandle;
 use crate::runtime::PreviousGoalSnapshot;
 use crate::tool::fill_empty_thread_preview_if_possible;
@@ -108,6 +109,16 @@ impl GoalService {
             .restore_after_resume()
             .await
             .map_err(GoalServiceError::Internal)
+    }
+    /// Updates the host capability used by an already-loaded thread for idle goal continuation.
+    pub fn set_thread_auto_continue_capability(
+        &self,
+        thread_id: ThreadId,
+        capability: GoalAutoContinueCapability,
+    ) {
+        if let Some(runtime) = self.runtime_for_thread(thread_id) {
+            runtime.set_auto_continue_capability(capability);
+        }
     }
 
     /// Flushes any in-flight goal accounting before a fork copies the source goal snapshot.

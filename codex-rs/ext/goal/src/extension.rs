@@ -43,6 +43,7 @@ use crate::api::GoalService;
 use crate::events::GoalEventEmitter;
 use crate::metrics::GoalMetrics;
 use crate::runtime::ActiveGoalStopReason;
+use crate::runtime::GoalContinuationOutcome;
 use crate::runtime::GoalRuntimeConfig;
 use crate::runtime::GoalRuntimeHandle;
 use crate::spec::UPDATE_GOAL_TOOL_NAME;
@@ -72,6 +73,20 @@ fn auto_continue_capability_for(
         GoalAutoContinueCapability::Disabled
     } else {
         host_capability
+    }
+}
+
+fn continuation_outcome_warning(outcome: &GoalContinuationOutcome) -> Option<String> {
+    match outcome {
+        GoalContinuationOutcome::Rejected { reason } => {
+            Some(format!("Goal continuation rejected: {reason}"))
+        }
+        GoalContinuationOutcome::Failed { error } => {
+            Some(format!("Goal continuation failed: {error}"))
+        }
+        GoalContinuationOutcome::Started { .. }
+        | GoalContinuationOutcome::DeferredForUserInput
+        | GoalContinuationOutcome::DisabledForHost => None,
     }
 }
 
@@ -125,11 +140,36 @@ mod tests {
             session_store: &ExtensionData::new("session"),
             thread_store: &ExtensionData::new("thread"),
         }));
+        assert!(goal_continuation_is_allowed(&ThreadIdleInput {
+            cause: ThreadIdleCause::Restored,
+            session_store: &ExtensionData::new("session"),
+            thread_store: &ExtensionData::new("thread"),
+        }));
         assert!(!goal_continuation_is_allowed(&ThreadIdleInput {
             cause: ThreadIdleCause::Interrupted,
             session_store: &ExtensionData::new("session"),
             thread_store: &ExtensionData::new("thread"),
         }));
+    }
+
+    #[test]
+    fn continuation_outcomes_surface_rejections_and_failures() {
+        assert_eq!(
+            continuation_outcome_warning(&GoalContinuationOutcome::Rejected {
+                reason: "pending trigger".to_string(),
+            }),
+            Some("Goal continuation rejected: pending trigger".to_string())
+        );
+        assert_eq!(
+            continuation_outcome_warning(&GoalContinuationOutcome::Failed {
+                error: "storage unavailable".to_string(),
+            }),
+            Some("Goal continuation failed: storage unavailable".to_string())
+        );
+        assert_eq!(
+            continuation_outcome_warning(&GoalContinuationOutcome::DeferredForUserInput),
+            None
+        );
     }
 }
 
@@ -192,8 +232,13 @@ where
                     input.session_source,
                     SessionSource::SubAgent(SubAgentSource::Review)
                 );
+            let host_capability = input
+                .thread_store
+                .get::<GoalAutoContinueCapability>()
+                .map_or(self.auto_continue_capability, |capability| *capability);
             let auto_continue_capability =
-                auto_continue_capability_for(input.session_source, self.auto_continue_capability);
+                auto_continue_capability_for(input.session_source, host_capability);
+            input.thread_store.insert(auto_continue_capability);
             input.thread_store.insert(config);
             let accounting_state = input
                 .thread_store
@@ -228,6 +273,9 @@ where
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
                 return;
             };
+            if let Some(capability) = input.thread_store.get::<GoalAutoContinueCapability>() {
+                runtime.set_auto_continue_capability(*capability);
+            }
 
             if let Err(err) = runtime.restore_after_resume().await {
                 tracing::warn!(
@@ -246,13 +294,17 @@ where
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
                 return;
             };
-            let result = runtime.continue_if_idle().await;
-            if let Err(err) = result {
-                tracing::warn!(
-                    "failed to continue active goal for idle thread {}: {err}",
-                    runtime.thread_id()
-                );
-                runtime.emit_warning(format!("Could not continue the active goal: {err}"));
+            let result = if input.cause == ThreadIdleCause::Restored {
+                runtime.continue_after_restore_if_idle().await
+            } else {
+                runtime.continue_if_idle().await
+            };
+            let outcome = match result {
+                Ok(outcome) => outcome,
+                Err(error) => GoalContinuationOutcome::Failed { error },
+            };
+            if let Some(message) = continuation_outcome_warning(&outcome) {
+                runtime.emit_warning(message);
             }
         })
     }
@@ -543,7 +595,9 @@ where
         &self,
         _session_store: &ExtensionData,
         thread_store: &ExtensionData,
-    ) -> Vec<Arc<dyn codex_extension_api::ToolExecutor<codex_extension_api::ToolCall>>> {
+    ) -> Vec<
+        Arc<dyn for<'call> codex_extension_api::ToolExecutor<codex_extension_api::ToolCall<'call>>>,
+    > {
         let Some(runtime) = goal_runtime_handle(thread_store) else {
             return Vec::new();
         };
