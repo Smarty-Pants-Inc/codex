@@ -42,6 +42,8 @@ pub use thread_lifecycle::ThreadReadyInput;
 pub use thread_lifecycle::ThreadResumeInput;
 pub use thread_lifecycle::ThreadStartInput;
 pub use thread_lifecycle::ThreadStopInput;
+pub use tool_lifecycle::McpToolContext;
+pub use tool_lifecycle::McpToolSource;
 pub use tool_lifecycle::ToolCallOutcome;
 pub use tool_lifecycle::ToolFinishInput;
 pub use tool_lifecycle::ToolLifecycleFuture;
@@ -239,7 +241,7 @@ pub trait TurnInputContributor: Send + Sync {
     /// capability is bound to the effective model for that turn.
     fn contribute<'a>(
         &'a self,
-        input: TurnInputContext,
+        input: TurnInputContext<'a>,
         extension_metrics: Option<Arc<dyn ExtensionMetrics>>,
         session_store: &'a ExtensionData,
         thread_store: &'a ExtensionData,
@@ -315,7 +317,7 @@ pub trait ToolContributor: Send + Sync {
         &self,
         session_store: &ExtensionData,
         thread_store: &ExtensionData,
-    ) -> Vec<Arc<dyn ToolExecutor<ToolCall>>>;
+    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>>;
 
     /// Returns native tools bound to one sampling step.
     fn tools_for_step(
@@ -323,7 +325,7 @@ pub trait ToolContributor: Send + Sync {
         session_store: &ExtensionData,
         thread_store: &ExtensionData,
         _step_store: &ExtensionData,
-    ) -> Vec<Arc<dyn ToolExecutor<ToolCall>>> {
+    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
         self.tools(session_store, thread_store)
     }
 }

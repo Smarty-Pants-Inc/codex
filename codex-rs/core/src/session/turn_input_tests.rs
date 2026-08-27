@@ -301,19 +301,21 @@ async fn direct_user_replaces_taskless_reservation_and_stale_auto_start_fails() 
     let reserved_turn_state = Arc::clone(&reserved_turn.turn_state);
     *session.active_turn.lock().await = Some(reserved_turn);
 
-    let mut direct_input = vec![UserInput::Text {
+    let direct_content = vec![UserInput::Text {
         text: "direct user input".to_string(),
         text_elements: Vec::new(),
     }];
+    let mut direct_input = SubmittedTurnInput::UserInput {
+        content: direct_content.clone(),
+        client_id: None,
+    };
     assert!(matches!(
         session
             .steer_input(
                 &mut direct_input,
-                /*is_user_input*/ true,
                 BTreeMap::new(),
                 /*expected_turn_id*/ None,
                 /*required_final_output_json_schema*/ None,
-                /*client_user_message_id*/ None,
                 /*responsesapi_client_metadata*/ None,
                 /*incoming_root_turn_id*/ None,
                 NoActiveTurnBehavior::Reject,
@@ -330,7 +332,7 @@ async fn direct_user_replaces_taskless_reservation_and_stale_auto_start_fails() 
         .start_task(
             Arc::clone(&direct_turn_context),
             vec![TurnInput::UserInput {
-                content: direct_input,
+                content: direct_content,
                 client_id: None,
             }],
             NeverEndingTask {
@@ -842,6 +844,7 @@ async fn admission_revalidates_constraints_before_committing(kind: TurnStartKind
     assert_eq!(
         errors,
         vec![ErrorEvent {
+            misalignment: None,
             message: expected_message,
             codex_error_info: Some(CodexErrorInfo::BadRequest),
         }]
@@ -1077,6 +1080,42 @@ async fn steer_only_enforces_expected_turn_id() {
             },
         },
         submission
+    );
+
+    let output: ResponseItem = serde_json::from_value(serde_json::json!({
+        "type": "function_call_output",
+        "name": "send_message_to_thread",
+        "output": "delegated work",
+    }))
+    .expect("valid standalone output");
+
+    let submission = handle(
+        &session,
+        TurnInputRequest::new(SubmittedTurnInput::ResponseItem(output)),
+        TurnInputMode::StartOrSteer,
+        "test-submission".to_string(),
+    )
+    .await
+    .expect("standalone output should steer the active turn");
+
+    assert_eq!(
+        submission,
+        TurnInputSubmission::Steered {
+            turn_id: turn_context.sub_id.clone()
+        }
+    );
+    let turn_state = session
+        .input_queue
+        .turn_state_for_sub_id(&session.active_turn, &turn_context.sub_id)
+        .await
+        .expect("active turn state");
+    assert_eq!(
+        session
+            .input_queue
+            .subscribe_activity(Some(turn_state.as_ref()))
+            .await
+            .1,
+        Some(crate::session::input_queue::InputQueueActivity::Steer)
     );
 }
 

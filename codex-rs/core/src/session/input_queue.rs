@@ -27,6 +27,7 @@ pub enum TurnInput {
     DeveloperInput {
         content: Vec<UserInput>,
     },
+    FunctionCallOutput(ResponseItem),
     // Preserve the existing serialized format while carrying injection API metadata
     // through the in-memory queue.
     ResponseItem(#[serde(with = "turn_input_response_item")] ResponseItemEnvelope),
@@ -107,7 +108,7 @@ impl InputQueue {
     ) {
         let activity_rx = self.activity_tx.subscribe();
         let has_pending_steer = if let Some(turn_state) = turn_state {
-            turn_state.lock().await.pending_input.has_steer_input()
+            turn_state.lock().await.pending_input.has_pending_input()
         } else {
             false
         };
@@ -372,11 +373,13 @@ impl InputQueue {
 }
 
 impl TurnInputQueue {
-    fn has_steer_input(&self) -> bool {
+    fn has_pending_input(&self) -> bool {
         self.items.iter().any(|input| {
             matches!(
                 input,
-                TurnInput::UserInput { .. } | TurnInput::DeveloperInput { .. }
+                TurnInput::UserInput { .. }
+                    | TurnInput::DeveloperInput { .. }
+                    | TurnInput::FunctionCallOutput(_)
             )
         })
     }
@@ -498,6 +501,17 @@ mod tests {
     async fn input_queue_reports_already_pending_steer() {
         let input_queue = InputQueue::new();
         let turn_state = Mutex::new(TurnState::default());
+        let passive_output = serde_json::from_value(serde_json::json!({
+            "ResponseItem": {"type": "function_call_output", "name": "notify", "output": "passive"}
+        }))
+        .unwrap();
+        input_queue
+            .extend_pending_input_for_turn_state(&turn_state, vec![passive_output])
+            .await;
+        assert_eq!(
+            input_queue.subscribe_activity(Some(&turn_state)).await.1,
+            None
+        );
         input_queue
             .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
                 &turn_state,

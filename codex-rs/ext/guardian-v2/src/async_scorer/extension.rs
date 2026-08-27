@@ -20,6 +20,8 @@ use codex_extension_api::ExtensionMetrics;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ExtensionWarning;
 use codex_extension_api::ResponseItem;
+use codex_extension_api::SkillInvocationContributor;
+use codex_extension_api::SkillInvocationInput;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadOriginator;
 use codex_extension_api::ThreadStartInput;
@@ -51,6 +53,9 @@ use super::sampler::LunaSamplerError;
 use super::sampler::LunaSamplingRequest;
 use super::sampler::MODEL;
 use super::truncation::ClassificationTruncations;
+use super::trusted_skills::TrustedSkillInvocations;
+use super::trusted_skills::TrustedSkillRoots;
+use super::trusted_tools::trusted_tool_context;
 
 struct GuardianAction {
     tool_name: ToolName,
@@ -324,7 +329,7 @@ impl ThreadLifecycleContributor<Config> for GuardianV2Extension {
             } else {
                 None
             };
-            let sampler = LunaSampler::connect(LunaSamplerConfig {
+            let sampler_config = LunaSamplerConfig {
                 provider: create_model_provider(
                     input.config.model_provider.clone(),
                     Some(Arc::clone(&self.auth_manager)),
@@ -346,32 +351,56 @@ impl ThreadLifecycleContributor<Config> for GuardianV2Extension {
                 service_tier: input.config.service_tier.clone(),
                 luna_compaction_hash,
                 metrics: input.extension_metrics.clone(),
-            })
-            .await;
+            };
 
-            match sampler {
-                Ok(sampler) => {
-                    if guardian_config.transcript.include_images {
-                        input
-                            .thread_store
-                            .get_or_init(NodeReplReviewEvidence::default)
-                            .enable_image_capture();
-                    }
-                    input.thread_store.insert(sampler);
-                    input.thread_store.insert(guardian_config);
-                    input.thread_store.insert(GuardianV2ScoreProgress {
-                        metrics: input.extension_metrics.clone(),
-                        ..Default::default()
-                    });
-                    input.thread_store.insert(GuardianReviewEvidence::default());
-                    input.thread_store.insert(GuardianV2Enabled);
-                }
-                Err(error) => self.event_sink.emit_warning(ExtensionWarning {
-                    thread_id,
-                    turn_id: None,
-                    message: format!("Guardian V2 Luna initialization failed: {error}"),
-                }),
+            if guardian_config.transcript.include_images {
+                input
+                    .thread_store
+                    .get_or_init(NodeReplReviewEvidence::default)
+                    .enable_image_capture();
             }
+            input.thread_store.remove::<LunaSampler>();
+            let sampler = input
+                .thread_store
+                .get_or_init(|| LunaSampler::new(sampler_config));
+            input.thread_store.insert(guardian_config);
+            input.thread_store.insert(GuardianV2ScoreProgress {
+                metrics: input.extension_metrics.clone(),
+                ..Default::default()
+            });
+            input.thread_store.insert(GuardianReviewEvidence::default());
+            input
+                .thread_store
+                .insert(TrustedSkillRoots::from_config(input.config));
+            input.thread_store.insert(GuardianV2Enabled);
+
+            tokio::spawn(async move {
+                sampler.prewarm().await;
+            });
+        })
+    }
+}
+
+impl SkillInvocationContributor for GuardianV2Extension {
+    fn requires_host_skill_discovery(&self) -> bool {
+        false
+    }
+
+    fn on_skill_invocation<'a>(
+        &'a self,
+        input: SkillInvocationInput<'a>,
+    ) -> ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            let Some(roots) = input.thread_store.get::<TrustedSkillRoots>() else {
+                return;
+            };
+            let Some(skill_path) = roots.trusted_skill_path(input.skill_resource) else {
+                return;
+            };
+            input
+                .turn_store
+                .get_or_init(TrustedSkillInvocations::default)
+                .record(skill_path);
         })
     }
 }
@@ -529,12 +558,15 @@ impl GuardianV2Extension {
             }
         };
         let parent_model = input.thread_store.get::<ModelInfo>();
-        if parent_model.as_ref().is_some_and(|model| {
-            config
-                .config_layer_stack
-                .requirements()
-                .auto_review_required_for_model(&model.slug)
-        }) {
+        // Computer-use-only scores cannot approve other tools for required models.
+        if guardian_config.review_scope != GuardianV2ReviewScope::ComputerUseOnly
+            && parent_model.as_ref().is_some_and(|model| {
+                config
+                    .config_layer_stack
+                    .requirements()
+                    .auto_review_required_for_model(&model.slug)
+            })
+        {
             input.thread_store.remove::<SecurityRiskScore>();
             return;
         }
@@ -610,6 +642,12 @@ impl GuardianV2Extension {
             return;
         }
         let call_id = input.call_id.to_owned();
+        let mcp_tool = input.mcp_tool.cloned();
+        let trusted_skill_paths = input
+            .turn_store
+            .get::<TrustedSkillInvocations>()
+            .map(|skills| skills.snapshot())
+            .unwrap_or_default();
         let action = GuardianAction {
             tool_name: input.tool_name.clone(),
             payload: input.payload.clone(),
@@ -638,6 +676,12 @@ impl GuardianV2Extension {
 
         tokio::spawn(async move {
             let mut truncations = ClassificationTruncations::default();
+            let trusted_tool_context = match mcp_tool.as_ref() {
+                Some(tool) => {
+                    trusted_tool_context(tool.tool_info(), tool.source(), &manager, &config).await
+                }
+                None => None,
+            };
             let root_snapshot = thread.guardian_root_snapshot().await;
             let root_authorization_version = root_snapshot
                 .as_ref()
@@ -760,6 +804,8 @@ impl GuardianV2Extension {
                     .sample(LunaSamplingRequest {
                         instructions,
                         trusted_review_evidence,
+                        trusted_tool_context,
+                        trusted_skill_paths,
                         input: classification_input,
                         images,
                         parent_compaction,
@@ -900,6 +946,7 @@ pub fn install(
     });
     registry.thread_lifecycle_contributor(extension.clone());
     registry.approval_review_contributor(extension.clone());
+    registry.skill_invocation_contributor(extension.clone());
     registry.tool_lifecycle_contributor(extension);
 }
 
