@@ -1153,6 +1153,10 @@ impl AgentControl {
         Ok(resumed_thread_id)
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "spawn admission must serialize agent restoration"
+    )]
     async fn resume_single_agent_from_rollout(
         &self,
         config: Config,
@@ -1194,6 +1198,7 @@ impl AgentControl {
             )
             .await;
         let agent_max_threads = config.effective_agent_max_threads(multi_agent_version);
+        let _spawn_admission = self.acquire_spawn_admission().await?;
         let mut reservation = self.state.reserve_spawn_slot(agent_max_threads)?;
         let (session_source, agent_metadata) = match session_source {
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {

@@ -64,7 +64,7 @@ struct GoalRuntimeInner {
     accounting_state: Arc<GoalAccountingState>,
     enabled: AtomicBool,
     tools_available_for_thread: bool,
-    auto_continue_capability: GoalAutoContinueCapability,
+    auto_continue_capability: AtomicBool,
     goal_state_lock: Semaphore,
 }
 
@@ -123,7 +123,9 @@ impl GoalRuntimeHandle {
                 accounting_state,
                 enabled: AtomicBool::new(config.enabled),
                 tools_available_for_thread: config.tools_available_for_thread,
-                auto_continue_capability: config.auto_continue_capability,
+                auto_continue_capability: AtomicBool::new(
+                    config.auto_continue_capability == GoalAutoContinueCapability::Interactive,
+                ),
                 goal_state_lock: Semaphore::new(/*permits*/ 1),
             }),
         }
@@ -131,6 +133,12 @@ impl GoalRuntimeHandle {
 
     pub(crate) fn set_enabled(&self, enabled: bool) {
         self.inner.enabled.store(enabled, Ordering::Relaxed);
+    }
+    pub(crate) fn set_auto_continue_capability(&self, capability: GoalAutoContinueCapability) {
+        self.inner.auto_continue_capability.store(
+            capability == GoalAutoContinueCapability::Interactive,
+            Ordering::Relaxed,
+        );
     }
 
     pub(crate) fn is_enabled(&self) -> bool {
@@ -388,10 +396,9 @@ impl GoalRuntimeHandle {
     }
 
     pub(crate) async fn continue_if_idle(&self) -> Result<GoalContinuationOutcome, String> {
-        if self.inner.auto_continue_capability != GoalAutoContinueCapability::Interactive {
+        if !self.inner.auto_continue_capability.load(Ordering::Relaxed) {
             return Ok(GoalContinuationOutcome::DisabledForHost);
         }
-
         if !self.tools_visible() {
             self.inner.accounting_state.clear_active_goal();
             return Ok(GoalContinuationOutcome::DisabledForHost);

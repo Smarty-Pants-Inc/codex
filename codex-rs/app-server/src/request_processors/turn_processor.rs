@@ -1,5 +1,7 @@
 use super::thread_input::ensure_direct_input_allowed;
 use super::*;
+use crate::image_url::REMOTE_IMAGE_URL_ERROR;
+use crate::image_url::is_remote_image_url;
 use codex_agent_extension::AgentInvocation;
 use codex_agent_extension::AgentRun;
 use codex_agent_extension::AgentRunner;
@@ -10,10 +12,8 @@ use codex_protocol::protocol::AdditionalContextEntry as CoreAdditionalContextEnt
 use codex_protocol::protocol::AdditionalContextKind as CoreAdditionalContextKind;
 use codex_protocol::protocol::TurnSettingsUpdate;
 use codex_protocol::protocol::TurnSettingsUpdateOutcome;
+use codex_queue_extension::QueueEnqueueIntent;
 use codex_skills::system_cache_root_dir;
-
-use crate::image_url::REMOTE_IMAGE_URL_ERROR;
-use crate::image_url::is_remote_image_url;
 
 pub(super) fn validate_user_input_image_urls(
     input: &[V2UserInput],
@@ -167,6 +167,7 @@ impl TurnRequestProcessor {
         params: TurnStartParams,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
+        direct_input_intent: Option<QueueEnqueueIntent>,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         validate_user_input_image_urls(&params.input)?;
         self.turn_start_inner(
@@ -174,6 +175,7 @@ impl TurnRequestProcessor {
             params,
             app_server_client_name,
             app_server_client_version,
+            direct_input_intent,
         )
         .await
         .map(|response| Some(response.into()))
@@ -500,6 +502,7 @@ impl TurnRequestProcessor {
         params: TurnStartParams,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
+        _direct_input_intent: Option<QueueEnqueueIntent>,
     ) -> Result<TurnStartResponse, JSONRPCErrorError> {
         let (thread_id, thread) =
             self.load_thread(&params.thread_id)

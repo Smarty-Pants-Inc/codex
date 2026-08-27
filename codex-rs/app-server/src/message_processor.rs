@@ -912,8 +912,11 @@ impl MessageProcessor {
             &codex_request,
         );
 
-        let enqueue_intent = match &codex_request {
+        let direct_input_intent = match &codex_request {
             ClientRequest::ThreadQueueAdd { params, .. } => self
+                .thread_queue_processor
+                .register_enqueue_intent(&params.thread_id),
+            ClientRequest::TurnStart { params, .. } => self
                 .thread_queue_processor
                 .register_enqueue_intent(&params.thread_id),
             _ => None,
@@ -944,7 +947,7 @@ impl MessageProcessor {
                         request_context,
                         session,
                         event_stream_ready,
-                        enqueue_intent,
+                        direct_input_intent,
                     )
                     .await;
                 if let Err(error) = result {
@@ -974,7 +977,7 @@ impl MessageProcessor {
         request_context: RequestContext,
         session: Arc<ConnectionSessionState>,
         event_stream_ready: Option<McpEventStreamReady>,
-        enqueue_intent: Option<QueueEnqueueIntent>,
+        direct_input_intent: Option<QueueEnqueueIntent>,
     ) -> Result<(), JSONRPCErrorError> {
         let connection_id = connection_request_id.connection_id;
         let app_server_client_name = session.app_server_client_name().map(str::to_string);
@@ -1223,7 +1226,7 @@ impl MessageProcessor {
             }
             ClientRequest::ThreadQueueAdd { params, .. } => self
                 .thread_queue_processor
-                .add(params, enqueue_intent)
+                .add(params, direct_input_intent)
                 .await
                 .map(|response| Some(response.into())),
             ClientRequest::ThreadQueueList { params, .. } => self
@@ -1315,6 +1318,7 @@ impl MessageProcessor {
                         params,
                         app_server_client_name.clone(),
                         client_version.clone(),
+                        goal_auto_continue_capability,
                     )
                     .await
             }
@@ -1469,6 +1473,7 @@ impl MessageProcessor {
                         params,
                         app_server_client_name.clone(),
                         client_version.clone(),
+                        direct_input_intent,
                     )
                     .await
             }

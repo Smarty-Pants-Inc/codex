@@ -267,6 +267,9 @@ where
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
                 return;
             };
+            if let Some(capability) = input.thread_store.get::<GoalAutoContinueCapability>() {
+                runtime.set_auto_continue_capability(*capability);
+            }
 
             if let Err(err) = runtime.restore_after_resume().await {
                 tracing::warn!(

@@ -95,6 +95,7 @@ struct ThreadRevertRuntimeSnapshot {
     config: Config,
     settings: CodexThreadSettingsOverrides,
     client_mcp_extensions: ClientMcpExtensions,
+    goal_auto_continue_capability: GoalAutoContinueCapability,
 }
 
 fn collect_resume_override_mismatches(
@@ -593,6 +594,7 @@ impl ThreadRequestProcessor {
         params: ThreadRevertParams,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
+        goal_auto_continue_capability: GoalAutoContinueCapability,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         let (response, thread_id) = self
             .thread_revert_response(
@@ -600,6 +602,7 @@ impl ThreadRequestProcessor {
                 params,
                 app_server_client_name,
                 app_server_client_version,
+                goal_auto_continue_capability,
             )
             .await?;
         self.outgoing.send_response(request_id, response).await;
@@ -2094,6 +2097,7 @@ impl ThreadRequestProcessor {
         params: ThreadRevertParams,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
+        goal_auto_continue_capability: GoalAutoContinueCapability,
     ) -> Result<(ThreadRevertResponse, String), JSONRPCErrorError> {
         let _thread_list_state_permit = self.acquire_thread_list_state_permit().await?;
         let ThreadRevertParams {
@@ -2112,6 +2116,7 @@ impl ThreadRequestProcessor {
             config: thread.config().await.as_ref().clone(),
             settings: thread.restorable_thread_settings().await,
             client_mcp_extensions: thread.client_mcp_extensions(),
+            goal_auto_continue_capability,
         };
 
         // Subscribe before shutdown so a pending idle unload either rejects this request or can
@@ -2215,6 +2220,7 @@ impl ThreadRequestProcessor {
             config,
             settings,
             client_mcp_extensions,
+            goal_auto_continue_capability,
         } = runtime_snapshot;
         let thread_id_string = thread_id.to_string();
         let stored_thread = self
@@ -2235,12 +2241,13 @@ impl ThreadRequestProcessor {
             ..
         } = self
             .thread_manager
-            .resume_thread_with_history(
+            .resume_thread_with_history_with_extension_init(
                 config,
                 thread_history,
                 self.auth_manager.clone(),
                 self.request_trace_context(request_id).await,
                 client_mcp_extensions,
+                goal_extension_init(goal_auto_continue_capability),
             )
             .await
             .map_err(|err| internal_error(format!("error reloading thread after revert: {err}")))?;
@@ -3625,6 +3632,7 @@ impl ThreadRequestProcessor {
                 &params,
                 app_server_client_name.clone(),
                 app_server_client_version.clone(),
+                goal_auto_continue_capability,
                 /*cold_resume_history*/ None,
             )
             .await
@@ -3736,6 +3744,7 @@ impl ThreadRequestProcessor {
                     &attach_params,
                     app_server_client_name,
                     app_server_client_version,
+                    goal_auto_continue_capability,
                     cold_resume_history,
                 )
                 .await?
@@ -4095,6 +4104,7 @@ impl ThreadRequestProcessor {
         params: &ThreadResumeParams,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
+        goal_auto_continue_capability: GoalAutoContinueCapability,
         cold_resume_history: Option<&[RolloutItem]>,
     ) -> Result<RunningThreadResumeResult, JSONRPCErrorError> {
         let running_thread = if params.history.is_some() {
@@ -4157,6 +4167,12 @@ impl ThreadRequestProcessor {
                 )));
             }
             let config_snapshot = existing_thread.config_snapshot().await;
+            self.thread_goal_processor
+                .update_auto_continue_capability(
+                    existing_thread.as_ref(),
+                    goal_auto_continue_capability,
+                )
+                .await;
             let mismatch_details = collect_resume_override_mismatches(params, &config_snapshot);
             if !mismatch_details.is_empty() {
                 let has_subscribers = !self
