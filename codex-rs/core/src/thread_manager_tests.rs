@@ -187,6 +187,37 @@ async fn thread_spawn_resume_requires_registered_route_and_loaded_parent_control
         codex_protocol::error::CodexErrorDetails::InvalidRequest(message)
             if message == "resuming a thread-spawn child requires resume_thread_with_history"
     ));
+    let legacy_history_with_child_override = InitialHistory::Resumed(ResumedHistory {
+        conversation_id: ThreadId::new(),
+        history: Arc::new(vec![RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                source: SessionSource::Exec,
+                ..SessionMeta::default()
+            },
+            git: None,
+        })]),
+        rollout_path: None,
+    });
+    let inverse_source_error = manager
+        .start_thread(StartThreadOptions {
+            initial_history: legacy_history_with_child_override,
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            ..StartThreadOptions::new(config.clone())
+        })
+        .await
+        .err()
+        .expect("explicit child source must not disguise legacy resumed history");
+    assert!(matches!(
+        inverse_source_error.details(),
+        codex_protocol::error::CodexErrorDetails::InvalidRequest(message)
+            if message == "resuming a thread-spawn child requires resume_thread_with_history"
+    ));
 
     let resume_error = manager
         .resume_thread_with_history(

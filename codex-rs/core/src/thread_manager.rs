@@ -983,10 +983,13 @@ impl ThreadManager {
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
         if matches!(&options.initial_history, InitialHistory::Resumed(_))
-            && matches!(
+            && (matches!(
                 resumed_session_source,
                 SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
-            )
+            ) || matches!(
+                options.session_source.as_ref(),
+                Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. }))
+            ))
         {
             return Err(CodexErr::InvalidRequest(
                 "resuming a thread-spawn child requires resume_thread_with_history".to_string(),
