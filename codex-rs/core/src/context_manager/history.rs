@@ -3,6 +3,7 @@
 
 use crate::context::ContextualUserFragment;
 use crate::context::ModelSwitchInstructions;
+use crate::context::is_contextual_user_message;
 use crate::context::world_state::PersistentModeState;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSnapshot;
@@ -114,13 +115,7 @@ impl ConversationHistorySnapshot for SharedConversationHistory {
             self.items
                 .iter()
                 .map(|envelope| &envelope.item)
-                .filter(|item| {
-                    !matches!(
-                        item,
-                        ResponseItem::Message { role, content, .. }
-                            if role == "user" && is_contextual_user_message_content(content)
-                    )
-                }),
+                .filter(|item| !is_contextual_user_message(item)),
         )
     }
 }
@@ -246,8 +241,7 @@ impl ContextManager {
                 truncate_function_output_payload(output, policy, estimate_audio_token_count);
             }
             if let Some(review_history) = &mut self.review_history
-                && !matches!(item, ResponseItem::Message { role, content, .. }
-                if role == "user" && is_contextual_user_message_content(content))
+                && !is_contextual_user_message(item)
             {
                 review_history.record(&processed.item);
             }
@@ -358,10 +352,12 @@ impl ContextManager {
     pub(crate) fn replace_annotated(&mut self, items: Vec<ResponseItemEnvelope>) {
         self.user_message_revision = self.user_message_revision.saturating_add(1);
         if let Some(review_history) = &mut self.review_history {
-            review_history.reset(items.iter().map(|item| &item.item).filter(|item| {
-                !matches!(item, ResponseItem::Message { role, content, .. }
-                    if role == "user" && is_contextual_user_message_content(content))
-            }));
+            review_history.reset(
+                items
+                    .iter()
+                    .map(|item| &item.item)
+                    .filter(|item| !is_contextual_user_message(item)),
+            );
         }
         self.items = Arc::new(items);
         self.history_version = self.history_version.saturating_add(1);
@@ -372,10 +368,10 @@ impl ContextManager {
     pub(crate) fn replace_compacted(&mut self, items: Vec<ResponseItemEnvelope>) {
         if self.review_history.is_none() {
             let mut retained = TranscriptHistory::new(self.history_version.saturating_add(1));
-            for item in self.raw_items().filter(|item| {
-                !matches!(item, ResponseItem::Message { role, content, .. }
-                    if role == "user" && is_contextual_user_message_content(content))
-            }) {
+            for item in self
+                .raw_items()
+                .filter(|item| !is_contextual_user_message(item))
+            {
                 retained.record(item);
             }
             self.review_history = Some(retained);
@@ -587,9 +583,7 @@ impl ContextManager {
                     }
                     cut_idx -= 1;
                 }
-                ResponseItem::Message { role, content, .. }
-                    if role == "user" && is_contextual_user_message_content(content) =>
-                {
+                item if is_contextual_user_message(item) => {
                     cut_idx -= 1;
                 }
                 _ => break,

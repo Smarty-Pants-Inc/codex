@@ -996,14 +996,14 @@ async fn resume_includes_initial_messages_and_sends_prior_items() {
         .iter()
         .position(|(role, text)| role == "developer" && text.contains("<permissions instructions>"))
         .expect("permissions message");
-    let pos_user_instructions = messages
+    let pos_agents_instructions = messages
         .iter()
         .position(|(role, text)| {
-            role == "user"
+            role == "developer"
                 && text.contains("be nice")
                 && text.starts_with("# AGENTS.md instructions")
         })
-        .expect("user instructions");
+        .expect("AGENTS instructions");
     let pos_environment = messages
         .iter()
         .position(|(role, text)| role == "user" && text.contains("<environment_context>"))
@@ -1014,9 +1014,9 @@ async fn resume_includes_initial_messages_and_sends_prior_items() {
         .expect("new user message");
 
     assert!(pos_prior_user < pos_prior_assistant);
-    assert!(pos_prior_assistant < pos_permissions);
-    assert!(pos_permissions < pos_user_instructions);
-    assert!(pos_user_instructions < pos_environment);
+    assert!(pos_prior_assistant < pos_agents_instructions);
+    assert!(pos_agents_instructions < pos_permissions);
+    assert!(pos_permissions < pos_environment);
     assert!(pos_environment < pos_new_user);
 }
 
@@ -1883,21 +1883,22 @@ async fn includes_user_instructions_message_in_request() {
         "expected permissions message to mention sandbox_mode, got {developer_texts:?}"
     );
 
-    assert_message_role(&request_body["input"][1], "user");
-    let user_context_texts = message_input_texts(&request_body["input"][1]);
     assert!(
-        user_context_texts
+        developer_texts
             .iter()
             .any(|text| text.starts_with("# AGENTS.md instructions")),
-        "expected AGENTS text in contextual user message, got {user_context_texts:?}"
+        "expected AGENTS text in contextual developer message, got {developer_texts:?}"
     );
-    let ui_text = user_context_texts
+    let ui_text = developer_texts
         .iter()
         .copied()
         .find(|text| text.contains("<INSTRUCTIONS>"))
         .expect("invalid message content");
     assert!(ui_text.contains("<INSTRUCTIONS>"));
     assert!(ui_text.contains("be nice"));
+
+    assert_message_role(&request_body["input"][1], "user");
+    let user_context_texts = message_input_texts(&request_body["input"][1]);
     assert!(
         user_context_texts
             .iter()
@@ -2960,21 +2961,22 @@ async fn includes_developer_instructions_message_in_request() {
         "expected developer instructions in a developer message, got {developer_texts:?}"
     );
 
-    assert_message_role(&request_body["input"][1], "user");
-    let user_context_texts = message_input_texts(&request_body["input"][1]);
     assert!(
-        user_context_texts
+        developer_texts
             .iter()
             .any(|text| text.starts_with("# AGENTS.md instructions")),
-        "expected AGENTS text in contextual user message, got {user_context_texts:?}"
+        "expected AGENTS text in contextual developer message, got {developer_texts:?}"
     );
-    let ui_text = user_context_texts
+    let ui_text = developer_texts
         .iter()
         .copied()
         .find(|text| text.contains("<INSTRUCTIONS>"))
         .expect("invalid message content");
     assert!(ui_text.contains("<INSTRUCTIONS>"));
     assert!(ui_text.contains("be nice"));
+
+    assert_message_role(&request_body["input"][1], "user");
+    let user_context_texts = message_input_texts(&request_body["input"][1]);
     assert!(
         user_context_texts
             .iter()

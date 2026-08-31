@@ -77,7 +77,7 @@ async fn agents_instructions(mut builder: TestCodexBuilder) -> Result<String> {
 
     let request = resp_mock.single_request();
     request
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .find(|text| text.starts_with("# AGENTS.md instructions"))
         .ok_or_else(|| anyhow::anyhow!("instructions message not found"))
@@ -121,7 +121,7 @@ fn remove_agents_md_world_state_section(rollout_path: &Path) -> Result<()> {
 
 fn instruction_fragments(request: &responses::ResponsesRequest) -> Vec<String> {
     request
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .filter(|text| text.starts_with("# AGENTS.md instructions"))
         .collect()
@@ -408,7 +408,7 @@ async fn symlinked_cwd_uses_logical_parent_for_agents_discovery() -> Result<()> 
     test.submit_turn("hello").await?;
     let instructions = resp_mock
         .single_request()
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .find(|text| text.starts_with("# AGENTS.md instructions"))
         .expect("instructions message");
@@ -458,7 +458,7 @@ async fn selected_environment_sources_match_model_visible_instructions() -> Resu
     test.submit_turn("hello").await?;
     let instructions = resp_mock
         .single_request()
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .find(|text| text.starts_with("# AGENTS.md instructions"))
         .expect("instructions message");
@@ -504,7 +504,7 @@ async fn untrusted_project_excludes_project_instructions() -> Result<()> {
     test.submit_turn("hello").await?;
     let instructions = resp_mock
         .single_request()
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .find(|text| text.starts_with("# AGENTS.md instructions"))
         .expect("global instructions message");

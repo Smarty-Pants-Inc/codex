@@ -821,6 +821,50 @@ async fn migration_drops_trailing_context_when_rollback_arrives_before_next_turn
 }
 
 #[tokio::test]
+async fn migration_drops_promoted_developer_context_before_rolled_back_turn() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            rollout_response_item(input_response_message("user", "keep question")),
+            rollout_response_item(input_response_message(
+                "developer",
+                "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nremove this context too\n</INSTRUCTIONS>",
+            )),
+            rollout_response_item(input_response_message(
+                "developer",
+                "<codex_internal_context source=\"extension\">\nremove this context too\n</codex_internal_context>",
+            )),
+            rollout_response_item(input_response_message("user", "remove question")),
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                num_turns: 1,
+            })),
+            user_message("replacement question"),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+
+    store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate promoted developer rollback context");
+
+    assert_eq!(
+        read_rollout(&path)
+            .into_iter()
+            .filter_map(|line| match line.item {
+                RolloutItem::ResponseItem(response) => Some(response.into_item()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![input_response_message("user", "keep question")]
+    );
+}
+
+#[tokio::test]
 async fn migration_coalesces_response_first_user_message_rollback_boundary() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();

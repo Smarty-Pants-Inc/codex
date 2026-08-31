@@ -621,6 +621,7 @@ pub(crate) async fn apply_bespoke_event_handling(
             tokio::spawn(async move {
                 on_file_change_request_approval_response(
                     item_id,
+                    event.turn_id,
                     pending_request_id,
                     rx,
                     conversation,
@@ -1894,8 +1895,9 @@ async fn on_request_permissions_response(
     outgoing.track_effective_permissions_approval_response(pending_request_id, response.clone());
 
     if let Err(err) = conversation
-        .submit(Op::RequestPermissionsResponse {
+        .submit(Op::RequestPermissionsResponseForTurn {
             id: call_id,
+            turn_id,
             response,
         })
         .await
@@ -1990,6 +1992,7 @@ fn map_file_change_approval_decision(decision: FileChangeApprovalDecision) -> Re
 #[allow(clippy::too_many_arguments)]
 async fn on_file_change_request_approval_response(
     item_id: String,
+    turn_id: String,
     pending_request_id: RequestId,
     receiver: oneshot::Receiver<ClientRequestResult>,
     codex: Arc<CodexThread>,
@@ -2019,8 +2022,9 @@ async fn on_file_change_request_approval_response(
     };
 
     if let Err(err) = codex
-        .submit(Op::PatchApproval {
+        .submit(Op::PatchApprovalForTurn {
             id: item_id,
+            turn_id,
             decision,
         })
         .await

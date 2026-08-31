@@ -264,7 +264,7 @@ async fn run_codex_tool_session_inner(
                     }
                     EventMsg::ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent {
                         call_id,
-                        turn_id: _,
+                        turn_id,
                         started_at_ms: _,
                         reason,
                         grant_root,
@@ -272,6 +272,7 @@ async fn run_codex_tool_session_inner(
                     }) => {
                         handle_patch_approval_request(
                             call_id,
+                            turn_id,
                             reason,
                             grant_root,
                             changes,

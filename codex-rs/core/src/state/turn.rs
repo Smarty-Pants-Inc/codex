@@ -88,7 +88,7 @@ pub(crate) struct RunningTask {
 /// Mutable state for a single turn.
 #[derive(Default)]
 pub(crate) struct TurnState {
-    pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
+    pending_approvals: HashMap<String, PendingApproval>,
     pending_request_permissions: HashMap<String, PendingRequestPermissions>,
     pending_user_input: HashMap<String, oneshot::Sender<RequestUserInputResponse>>,
     pending_elicitations: HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>,
@@ -106,7 +106,15 @@ pub(crate) struct TurnState {
     pub(crate) last_known_step_context: Option<Arc<StepContext>>,
 }
 
+struct PendingApproval {
+    turn_id: String,
+    legacy_response_allowed: bool,
+    tx: oneshot::Sender<ReviewDecision>,
+}
+
 pub(crate) struct PendingRequestPermissions {
+    pub(crate) turn_id: String,
+    pub(crate) legacy_response_allowed: bool,
     pub(crate) tx_response: oneshot::Sender<RequestPermissionsResponse>,
     pub(crate) requested_permissions: RequestPermissionProfile,
     pub(crate) environment: TurnEnvironmentSelection,
@@ -116,16 +124,41 @@ impl TurnState {
     pub(crate) fn insert_pending_approval(
         &mut self,
         key: String,
+        turn_id: String,
+        legacy_response_allowed: bool,
         tx: oneshot::Sender<ReviewDecision>,
     ) -> Option<oneshot::Sender<ReviewDecision>> {
-        self.pending_approvals.insert(key, tx)
+        self.pending_approvals
+            .insert(
+                key,
+                PendingApproval {
+                    turn_id,
+                    legacy_response_allowed,
+                    tx,
+                },
+            )
+            .map(|pending| pending.tx)
     }
 
     pub(crate) fn remove_pending_approval(
         &mut self,
         key: &str,
-    ) -> Option<oneshot::Sender<ReviewDecision>> {
-        self.pending_approvals.remove(key)
+        turn_id: Option<&str>,
+    ) -> Option<(String, oneshot::Sender<ReviewDecision>)> {
+        if self
+            .pending_approvals
+            .get(key)
+            .is_some_and(|pending| match turn_id {
+                Some(turn_id) => pending.turn_id == turn_id,
+                None => pending.legacy_response_allowed,
+            })
+        {
+            self.pending_approvals
+                .remove(key)
+                .map(|pending| (pending.turn_id, pending.tx))
+        } else {
+            None
+        }
     }
 
     pub(crate) fn clear_pending_waiters(&mut self) {
@@ -149,8 +182,20 @@ impl TurnState {
     pub(crate) fn remove_pending_request_permissions(
         &mut self,
         key: &str,
+        turn_id: Option<&str>,
     ) -> Option<PendingRequestPermissions> {
-        self.pending_request_permissions.remove(key)
+        if self
+            .pending_request_permissions
+            .get(key)
+            .is_some_and(|pending| match turn_id {
+                Some(turn_id) => pending.turn_id == turn_id,
+                None => pending.legacy_response_allowed,
+            })
+        {
+            self.pending_request_permissions.remove(key)
+        } else {
+            None
+        }
     }
 
     pub(crate) fn insert_pending_user_input(

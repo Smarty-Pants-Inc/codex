@@ -17,8 +17,8 @@ use serde_json::Value;
 use crate::context::GuardianReviewEvidence;
 use crate::context::NodeReplReviewEvidence;
 use crate::context::NodeReplReviewEvidenceMode;
+use crate::context::is_contextual_user_message;
 use crate::context::node_repl_review_evidence_mode;
-use crate::event_mapping::is_contextual_user_message_content;
 use crate::session::session::Session;
 use codex_utils_output_truncation::TruncationPolicy;
 use codex_utils_output_truncation::approx_bytes_for_tokens;
@@ -527,13 +527,11 @@ struct FilteredGuardianHistory<'a>(&'a dyn SectionHistory);
 
 impl SectionHistory for FilteredGuardianHistory<'_> {
     fn items(&self) -> Box<dyn Iterator<Item = &ResponseItem> + Send + '_> {
-        Box::new(self.0.items().filter(|item| {
-            !matches!(
-                item,
-                ResponseItem::Message { role, content, .. }
-                    if role == "user" && is_contextual_user_message_content(content)
-            )
-        }))
+        Box::new(
+            self.0
+                .items()
+                .filter(|item| !is_contextual_user_message(item)),
+        )
     }
 }
 

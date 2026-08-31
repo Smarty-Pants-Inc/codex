@@ -13,6 +13,11 @@ impl ContextualUserFragment for UserInstructions {
     }
 
     fn role(&self) -> &'static str {
+        "developer"
+    }
+
+    fn semantic_role(&self) -> &'static str {
+        // Preserve the legacy user-channel identity used by persisted AGENTS.md state.
         "user"
     }
 

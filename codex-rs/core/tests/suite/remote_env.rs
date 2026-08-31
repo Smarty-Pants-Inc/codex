@@ -2621,7 +2621,7 @@ async fn deferred_executor_loads_agents_md_when_environment_becomes_ready() -> R
 
 fn agents_md_occurrences(request: &ResponsesRequest, contents: &str) -> usize {
     request
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .iter()
         .filter(|text| text.contains(contents))
         .count()

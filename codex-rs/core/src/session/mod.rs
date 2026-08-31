@@ -265,6 +265,11 @@ use self::turn::realtime_text_for_event;
 use self::turn_context::TurnContext;
 #[cfg(test)]
 mod rollout_reconstruction_tests;
+#[derive(Eq, Hash, PartialEq)]
+enum InteractiveResponseId {
+    Approval(String),
+    RequestPermissions(String),
+}
 
 /// Notes from the previous real user turn.
 ///
@@ -2546,6 +2551,29 @@ impl Session {
             .await;
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn checks and turn state updates must remain atomic"
+    )]
+    async fn register_pending_approval(
+        &self,
+        approval_id: String,
+        turn_id: String,
+        tx: oneshot::Sender<ReviewDecision>,
+    ) -> Option<oneshot::Sender<ReviewDecision>> {
+        let mut active = self.active_turn.lock().await;
+        let Some(active_turn) = active.as_mut() else {
+            return None;
+        };
+        let mut turn_state = active_turn.turn_state.lock().await;
+        let legacy_response_allowed = self
+            .seen_interactive_response_ids
+            .lock()
+            .expect("seen interactive response IDs lock")
+            .insert(InteractiveResponseId::Approval(approval_id.clone()));
+        turn_state.insert_pending_approval(approval_id, turn_id, legacy_response_allowed, tx)
+    }
+
     /// Emit an exec approval request event and await the user's decision.
     ///
     /// The request is keyed by `call_id` + `approval_id` so matching responses
@@ -2557,10 +2585,6 @@ impl Session {
     /// be used to derive the available decisions via
     /// [ExecApprovalRequestEvent::default_available_decisions].
     #[allow(clippy::too_many_arguments)]
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "active turn checks and turn state updates must remain atomic"
-    )]
     pub async fn request_command_approval(
         &self,
         turn_context: &TurnContext,
@@ -2583,16 +2607,13 @@ impl Session {
         let effective_approval_id = approval_id.clone().unwrap_or_else(|| call_id.clone());
         // Add the tx_approve callback to the map before sending the request.
         let (tx_approve, rx_approve) = oneshot::channel();
-        let prev_entry = {
-            let mut active = self.active_turn.lock().await;
-            match active.as_mut() {
-                Some(at) => {
-                    let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_approval(effective_approval_id.clone(), tx_approve)
-                }
-                None => None,
-            }
-        };
+        let prev_entry = self
+            .register_pending_approval(
+                effective_approval_id.clone(),
+                turn_context.sub_id.clone(),
+                tx_approve,
+            )
+            .await;
         if prev_entry.is_some() {
             warn!("Overwriting existing pending approval for call_id: {effective_approval_id}");
         }
@@ -2650,10 +2671,6 @@ impl Session {
         rx_approve.await.unwrap_or(ReviewDecision::Abort)
     }
 
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "active turn checks and turn state updates must remain atomic"
-    )]
     pub async fn request_patch_approval(
         &self,
         turn_context: &TurnContext,
@@ -2666,16 +2683,9 @@ impl Session {
         // Add the tx_approve callback to the map before sending the request.
         let (tx_approve, rx_approve) = oneshot::channel();
         let approval_id = call_id.clone();
-        let prev_entry = {
-            let mut active = self.active_turn.lock().await;
-            match active.as_mut() {
-                Some(at) => {
-                    let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_approval(approval_id.clone(), tx_approve)
-                }
-                None => None,
-            }
-        };
+        let prev_entry = self
+            .register_pending_approval(approval_id.clone(), turn_context.sub_id.clone(), tx_approve)
+            .await;
         if prev_entry.is_some() {
             warn!("Overwriting existing pending approval for call_id: {approval_id}");
         }
@@ -2830,9 +2840,16 @@ impl Session {
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
+                    let legacy_response_allowed = self
+                        .seen_interactive_response_ids
+                        .lock()
+                        .expect("seen interactive response IDs lock")
+                        .insert(InteractiveResponseId::RequestPermissions(call_id.clone()));
                     ts.insert_pending_request_permissions(
                         call_id.clone(),
                         PendingRequestPermissions {
+                            turn_id: turn_context.sub_id.clone(),
+                            legacy_response_allowed,
                             tx_response,
                             requested_permissions: requested_permissions.clone(),
                             environment: environment.clone(),
@@ -2862,7 +2879,10 @@ impl Session {
                 let mut active = self.active_turn.lock().await;
                 if let Some(at) = active.as_mut() {
                     let mut ts = at.turn_state.lock().await;
-                    let _ = ts.remove_pending_request_permissions(&call_id);
+                    let _ = ts.remove_pending_request_permissions(
+                        &call_id,
+                        Some(&turn_context.sub_id),
+                    );
                 }
                 None
             }
@@ -2941,21 +2961,31 @@ impl Session {
         }
     }
 
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "active turn checks and turn state updates must remain atomic"
-    )]
     pub async fn notify_request_permissions_response(
         &self,
         call_id: &str,
         response: RequestPermissionsResponse,
-    ) {
+    ) -> bool {
+        self.notify_request_permissions_response_for_turn(call_id, /*turn_id*/ None, response)
+            .await
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn checks and turn state updates must remain atomic"
+    )]
+    pub(crate) async fn notify_request_permissions_response_for_turn(
+        &self,
+        call_id: &str,
+        turn_id: Option<&str>,
+        response: RequestPermissionsResponse,
+    ) -> bool {
         let (entry, originating_turn_state) = {
             let mut active = self.active_turn.lock().await;
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    let entry = ts.remove_pending_request_permissions(call_id);
+                    let entry = ts.remove_pending_request_permissions(call_id, turn_id);
                     let originating_turn_state = entry.as_ref().map(|_| Arc::clone(&at.turn_state));
                     (entry, originating_turn_state)
                 }
@@ -2991,9 +3021,11 @@ impl Session {
                 )
                 .await;
                 entry.tx_response.send(response).ok();
+                true
             }
             None => {
-                warn!("No pending request_permissions found for call_id: {call_id}");
+                warn!("No matching pending request_permissions found for call_id: {call_id}");
+                false
             }
         }
     }
@@ -3121,29 +3153,50 @@ impl Session {
         }
     }
 
+    pub async fn notify_approval(&self, approval_id: &str, decision: ReviewDecision) -> bool {
+        self.notify_approval_for_turn(approval_id, /*turn_id*/ None, decision)
+            .await
+    }
+
+    pub(crate) async fn notify_approval_for_turn(
+        &self,
+        approval_id: &str,
+        turn_id: Option<&str>,
+        decision: ReviewDecision,
+    ) -> bool {
+        let Some((_matched_turn_id, tx_approve)) = self
+            .take_pending_approval_for_turn(approval_id, turn_id)
+            .await
+        else {
+            return false;
+        };
+        tx_approve.send(decision).ok();
+        true
+    }
+
     #[expect(
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
     )]
-    pub async fn notify_approval(&self, approval_id: &str, decision: ReviewDecision) {
+    pub(crate) async fn take_pending_approval_for_turn(
+        &self,
+        approval_id: &str,
+        turn_id: Option<&str>,
+    ) -> Option<(String, oneshot::Sender<ReviewDecision>)> {
         let entry = {
             let mut active = self.active_turn.lock().await;
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.remove_pending_approval(approval_id)
+                    ts.remove_pending_approval(approval_id, turn_id)
                 }
                 None => None,
             }
         };
-        match entry {
-            Some(tx_approve) => {
-                tx_approve.send(decision).ok();
-            }
-            None => {
-                warn!("No pending approval found for call_id: {approval_id}");
-            }
+        if entry.is_none() {
+            warn!("No matching pending approval found for call_id: {approval_id}");
         }
+        entry
     }
 
     pub(crate) fn response_item_create_time() -> serde_json::Number {

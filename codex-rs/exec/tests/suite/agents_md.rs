@@ -22,12 +22,14 @@ async fn exec_includes_workspace_agents_md_in_request() -> anyhow::Result<()> {
         .assert()
         .success();
 
-    let user_messages = response_mock.single_request().message_input_texts("user");
+    let developer_messages = response_mock
+        .single_request()
+        .message_input_texts("developer");
     assert!(
-        user_messages
+        developer_messages
             .iter()
             .any(|text| text.contains("workspace instructions")),
-        "request should include workspace AGENTS.md instructions: {user_messages:?}"
+        "request should include workspace AGENTS.md instructions: {developer_messages:?}"
     );
 
     Ok(())
@@ -56,18 +58,20 @@ async fn exec_prefers_workspace_agents_override_md() -> anyhow::Result<()> {
         .assert()
         .success();
 
-    let user_messages = response_mock.single_request().message_input_texts("user");
+    let developer_messages = response_mock
+        .single_request()
+        .message_input_texts("developer");
     assert!(
-        user_messages
+        developer_messages
             .iter()
             .any(|text| text.contains("override instructions")),
-        "request should include AGENTS.override.md instructions: {user_messages:?}"
+        "request should include AGENTS.override.md instructions: {developer_messages:?}"
     );
     assert!(
-        user_messages
+        developer_messages
             .iter()
             .all(|text| !text.contains("base instructions")),
-        "request should exclude shadowed AGENTS.md instructions: {user_messages:?}"
+        "request should exclude shadowed AGENTS.md instructions: {developer_messages:?}"
     );
 
     Ok(())

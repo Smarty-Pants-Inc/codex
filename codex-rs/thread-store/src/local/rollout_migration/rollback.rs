@@ -86,6 +86,8 @@ fn is_known_contextual_developer_message_content(content: &[ContentItem]) -> boo
         };
         let text = text.trim_start();
         [
+            "# AGENTS.md instructions",
+            "<codex_internal_context",
             "<permissions instructions>",
             "<model_switch>",
             "<managed_developer_instructions>",

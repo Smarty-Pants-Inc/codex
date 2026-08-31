@@ -64,6 +64,41 @@ pub(crate) fn is_user_authorization_message(item: &ResponseItem) -> bool {
             })
 }
 
+/// Identifies synthetic contextual messages across the user-to-developer migration.
+///
+/// Harness-owned content kinds distinguish migrated developer context from ordinary
+/// developer messages. Text matching remains only for legacy user-role history.
+pub(crate) fn is_contextual_user_message(item: &ResponseItem) -> bool {
+    let ResponseItem::Message {
+        role,
+        content,
+        internal_chat_message_metadata_passthrough,
+        ..
+    } = item
+    else {
+        return false;
+    };
+    if !matches!(role.as_str(), "user" | "developer") {
+        return false;
+    }
+
+    internal_chat_message_metadata_passthrough
+        .as_ref()
+        .and_then(|metadata| metadata.content_item_kinds.as_ref())
+        .is_some_and(|kinds| {
+            !kinds.is_empty()
+                && kinds.len() == content.len()
+                && kinds.iter().all(|kind| {
+                    kind.0 == "agents_md.instructions" || kind.0.ends_with(".internal_context")
+                })
+        })
+        || (role == "user" && is_contextual_user_message_content(content))
+}
+
+fn is_contextual_user_message_content(content: &[ContentItem]) -> bool {
+    content.iter().any(is_contextual_user_fragment)
+}
+
 fn is_standard_contextual_user_text(text: &str) -> bool {
     CONTEXTUAL_USER_FRAGMENT_MATCHERS
         .iter()

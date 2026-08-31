@@ -6613,6 +6613,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        seen_interactive_response_ids: std::sync::Mutex::new(HashSet::new()),
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
@@ -7087,6 +7088,376 @@ async fn notify_request_permissions_response_ignores_unmatched_call_id() {
             .granted_turn_permissions(codex_exec_server::LOCAL_ENVIRONMENT_ID)
             .await,
         None
+    );
+}
+
+#[tokio::test]
+async fn exec_approval_response_is_bound_to_requesting_turn() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let session = Arc::new(session);
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    assert!(
+        session
+            .register_pending_approval("shared-approval".into(), "new-turn".into(), tx)
+            .await
+            .is_none()
+    );
+
+    handlers::exec_approval(
+        &session,
+        "shared-approval".into(),
+        Some("old-turn".into()),
+        codex_protocol::protocol::ReviewDecision::Abort,
+    )
+    .await;
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    handlers::exec_approval(
+        &session,
+        "shared-approval".into(),
+        Some("new-turn".into()),
+        codex_protocol::protocol::ReviewDecision::Abort,
+    )
+    .await;
+    assert_eq!(
+        rx.await.expect("matching exec approval response"),
+        codex_protocol::protocol::ReviewDecision::Abort
+    );
+}
+
+#[tokio::test]
+async fn patch_approval_response_is_bound_to_requesting_turn() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let session = Arc::new(session);
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    assert!(
+        session
+            .register_pending_approval("shared-approval".into(), "new-turn".into(), tx)
+            .await
+            .is_none()
+    );
+
+    handlers::patch_approval(
+        &session,
+        "shared-approval".into(),
+        Some("old-turn".into()),
+        codex_protocol::protocol::ReviewDecision::Abort,
+    )
+    .await;
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    handlers::patch_approval(
+        &session,
+        "shared-approval".into(),
+        Some("new-turn".into()),
+        codex_protocol::protocol::ReviewDecision::Abort,
+    )
+    .await;
+    assert_eq!(
+        rx.await.expect("matching patch approval response"),
+        codex_protocol::protocol::ReviewDecision::Abort
+    );
+}
+
+#[tokio::test]
+async fn execpolicy_amendment_is_persisted_before_approval_waiter_is_woken() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let session = Arc::new(session);
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    assert!(
+        session
+            .register_pending_approval("policy-approval".into(), "policy-turn".into(), tx)
+            .await
+            .is_none()
+    );
+
+    let codex_home = session.codex_home().await;
+    std::fs::create_dir_all(codex_home.as_path()).expect("recreate test Codex home");
+    let policy_path = crate::exec_policy::default_policy_path(codex_home.as_path());
+    let amendment = codex_protocol::approvals::ExecPolicyAmendment::new(vec![
+        "echo".to_string(),
+        "approval-order".to_string(),
+    ]);
+    let handler_session = Arc::clone(&session);
+    let mut handler = Box::pin(async move {
+        handlers::exec_approval(
+            &handler_session,
+            "policy-approval".into(),
+            Some("policy-turn".into()),
+            codex_protocol::protocol::ReviewDecision::ApprovedExecpolicyAmendment {
+                proposed_execpolicy_amendment: amendment,
+            },
+        )
+        .await;
+    });
+
+    let state_guard = session.state.lock().await;
+    assert!(futures::poll!(handler.as_mut()).is_pending());
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+    drop(state_guard);
+
+    let handler = tokio::spawn(handler);
+    assert!(matches!(
+        rx.await.expect("policy approval response"),
+        codex_protocol::protocol::ReviewDecision::ApprovedExecpolicyAmendment { .. }
+    ));
+    assert_eq!(
+        session
+            .services
+            .exec_policy
+            .current()
+            .get_allowed_prefixes(),
+        vec![vec!["echo".to_string(), "approval-order".to_string(),]]
+    );
+    assert_eq!(
+        std::fs::read_to_string(policy_path).expect("policy file should have been created"),
+        r#"prefix_rule(pattern=["echo", "approval-order"], decision="allow")
+"#
+    );
+    handler.await.expect("approval handler should finish");
+}
+
+enum LegacyApprovalKind {
+    Exec,
+    Patch,
+}
+
+async fn assert_legacy_abort_preserves_originating_turn_before_replacement(
+    approval_kind: LegacyApprovalKind,
+) {
+    let (mut session, original_turn) = make_session_and_context().await;
+    let original_turn = Arc::new(original_turn);
+    let lifecycle_entered = Arc::new(Notify::new());
+    let lifecycle_release = Arc::new(Notify::new());
+    let original_turn_id = original_turn.sub_id.clone();
+    let recorder = Arc::new(BlockingTurnAbortLifecycle {
+        expected_turn_id: original_turn_id.clone(),
+        entered: Arc::clone(&lifecycle_entered),
+        release: Arc::clone(&lifecycle_release),
+        blocked_once: std::sync::atomic::AtomicBool::new(false),
+    });
+    let mut builder = codex_extension_api::ExtensionRegistryBuilder::<crate::config::Config>::new();
+    builder.turn_lifecycle_contributor(recorder);
+    session.services.extensions = Arc::new(builder.build());
+
+    let session = Arc::new(session);
+    session
+        .spawn_task(
+            Arc::clone(&original_turn),
+            Vec::new(),
+            NeverEndingTask {
+                kind: TaskKind::Regular,
+                listen_to_cancellation_token: true,
+            },
+        )
+        .await;
+    let replacement_turn = session.new_default_turn().await;
+    let (tx, mut rx) = tokio::sync::oneshot::channel();
+    assert!(
+        session
+            .register_pending_approval("legacy-abort".into(), original_turn_id, tx)
+            .await
+            .is_none()
+    );
+
+    let handler_session = Arc::clone(&session);
+    let handler = tokio::spawn(async move {
+        match approval_kind {
+            LegacyApprovalKind::Exec => {
+                handlers::exec_approval(
+                    &handler_session,
+                    "legacy-abort".into(),
+                    None,
+                    codex_protocol::protocol::ReviewDecision::Abort,
+                )
+                .await;
+            }
+            LegacyApprovalKind::Patch => {
+                handlers::patch_approval(
+                    &handler_session,
+                    "legacy-abort".into(),
+                    None,
+                    codex_protocol::protocol::ReviewDecision::Abort,
+                )
+                .await;
+            }
+        }
+    });
+
+    timeout(Duration::from_secs(2), lifecycle_entered.notified())
+        .await
+        .expect("originating turn should emit its abort lifecycle");
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    session
+        .spawn_task(
+            Arc::clone(&replacement_turn),
+            Vec::new(),
+            NeverEndingTask {
+                kind: TaskKind::Regular,
+                listen_to_cancellation_token: true,
+            },
+        )
+        .await;
+    lifecycle_release.notify_one();
+    handler.await.expect("approval handler should finish");
+    assert_eq!(
+        rx.await.expect("legacy abort approval response"),
+        codex_protocol::protocol::ReviewDecision::Abort
+    );
+    assert!(
+        session
+            .turn_context_for_sub_id(&replacement_turn.sub_id)
+            .await
+            .is_some(),
+        "replacement turn must remain active"
+    );
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
+}
+
+#[tokio::test]
+async fn legacy_exec_abort_preserves_originating_turn_before_replacement() {
+    assert_legacy_abort_preserves_originating_turn_before_replacement(LegacyApprovalKind::Exec)
+        .await;
+}
+
+#[tokio::test]
+async fn legacy_patch_abort_preserves_originating_turn_before_replacement() {
+    assert_legacy_abort_preserves_originating_turn_before_replacement(LegacyApprovalKind::Patch)
+        .await;
+}
+
+#[tokio::test]
+async fn request_permissions_response_is_bound_to_requesting_turn() {
+    let (session, turn_context) = make_session_and_context().await;
+    let session = Arc::new(session);
+    let active_turn = ActiveTurn::default();
+    let turn_state = Arc::clone(&active_turn.turn_state);
+    *session.active_turn.lock().await = Some(active_turn);
+    let (tx_response, mut rx_response) = tokio::sync::oneshot::channel();
+    turn_state.lock().await.insert_pending_request_permissions(
+        "shared-permissions".into(),
+        PendingRequestPermissions {
+            turn_id: "new-turn".into(),
+            legacy_response_allowed: true,
+            tx_response,
+            requested_permissions: RequestPermissionProfile::default(),
+            environment: turn_context
+                .environments
+                .primary()
+                .expect("primary environment")
+                .selection(),
+        },
+    );
+    let response = codex_protocol::request_permissions::RequestPermissionsResponse {
+        permissions: RequestPermissionProfile::default(),
+        scope: PermissionGrantScope::Turn,
+        strict_auto_review: false,
+    };
+
+    assert!(
+        !session
+            .notify_request_permissions_response_for_turn(
+                "shared-permissions",
+                Some("old-turn"),
+                response.clone(),
+            )
+            .await
+    );
+    assert!(matches!(
+        rx_response.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    assert!(
+        session
+            .notify_request_permissions_response_for_turn(
+                "shared-permissions",
+                Some("new-turn"),
+                response.clone(),
+            )
+            .await
+    );
+    assert_eq!(
+        rx_response.await.expect("matching permissions response"),
+        response
+    );
+}
+
+#[tokio::test]
+async fn legacy_approval_response_does_not_resolve_reused_id() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let session = Arc::new(session);
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
+    let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+    assert!(
+        session
+            .register_pending_approval("reused-approval".into(), "first-turn".into(), first_tx)
+            .await
+            .is_none()
+    );
+    assert!(
+        session
+            .notify_approval(
+                "reused-approval",
+                codex_protocol::protocol::ReviewDecision::Approved,
+            )
+            .await
+    );
+    assert_eq!(
+        first_rx.await.expect("first-use legacy approval"),
+        codex_protocol::protocol::ReviewDecision::Approved
+    );
+
+    *session.active_turn.lock().await = Some(ActiveTurn::default());
+    let (second_tx, mut second_rx) = tokio::sync::oneshot::channel();
+    assert!(
+        session
+            .register_pending_approval("reused-approval".into(), "second-turn".into(), second_tx)
+            .await
+            .is_none()
+    );
+
+    assert!(
+        !session
+            .notify_approval(
+                "reused-approval",
+                codex_protocol::protocol::ReviewDecision::Approved,
+            )
+            .await
+    );
+    assert!(matches!(
+        second_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    assert!(
+        session
+            .notify_approval_for_turn(
+                "reused-approval",
+                Some("second-turn"),
+                codex_protocol::protocol::ReviewDecision::Approved,
+            )
+            .await
+    );
+    assert_eq!(
+        second_rx.await.expect("turn-bound reused approval"),
+        codex_protocol::protocol::ReviewDecision::Approved
     );
 }
 
@@ -8893,6 +9264,7 @@ where
         mcp_prewarm_task: std::sync::Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        seen_interactive_response_ids: std::sync::Mutex::new(HashSet::new()),
         async_hook_results,
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
@@ -11019,6 +11391,35 @@ async fn recv_terminal_event(
     })
     .await
     .expect("terminal event should be delivered")
+}
+
+struct BlockingTurnAbortLifecycle {
+    expected_turn_id: String,
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    blocked_once: std::sync::atomic::AtomicBool,
+}
+
+impl codex_extension_api::TurnLifecycleContributor for BlockingTurnAbortLifecycle {
+    fn on_turn_abort<'a>(
+        &'a self,
+        input: codex_extension_api::TurnAbortInput<'a>,
+    ) -> codex_extension_api::ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            if !self
+                .blocked_once
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                assert_eq!(self.expected_turn_id, input.turn_store.level_id());
+                assert_eq!(
+                    codex_protocol::protocol::TurnAbortReason::Interrupted,
+                    input.reason
+                );
+                self.entered.notify_one();
+                self.release.notified().await;
+            }
+        })
+    }
 }
 
 #[derive(Clone, Copy)]

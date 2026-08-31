@@ -1,4 +1,7 @@
 use super::*;
+use crate::context::InternalContextSource;
+use crate::context::InternalModelContextFragment;
+use crate::context::UserInstructions;
 use codex_context_fragments::AnnotatedContent;
 use codex_protocol::models::ContentItemKind;
 use pretty_assertions::assert_eq;
@@ -64,6 +67,64 @@ fn world_state_hash_normalizes_crlf_line_endings() {
     assert_eq!(
         WorldStateHash::from_fragment(&TestFragment("line one\r\nline two".to_string())),
         WorldStateHash::from_fragment(&TestFragment("line one\nline two".to_string())),
+    );
+}
+
+struct RoleFragment(&'static str);
+
+impl ContextualUserFragment for RoleFragment {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("generic.role_test".to_string())
+    }
+
+    fn role(&self) -> &'static str {
+        self.0
+    }
+
+    fn markers(&self) -> (&'static str, &'static str) {
+        Self::type_markers()
+    }
+
+    fn type_markers() -> (&'static str, &'static str) {
+        ("", "")
+    }
+
+    fn body(&self) -> String {
+        "same context".to_string()
+    }
+}
+
+#[test]
+fn world_state_hash_preserves_explicit_roles_and_migrated_context() {
+    let developer = WorldStateHash::from_fragment(&RoleFragment("developer"));
+
+    assert_ne!(
+        WorldStateHash::from_fragment(&RoleFragment("system")),
+        developer
+    );
+    assert_ne!(
+        WorldStateHash::from_fragment(&RoleFragment("user")),
+        developer
+    );
+
+    let agents = UserInstructions {
+        directory: None,
+        text: "Follow the repository instructions.".to_string(),
+    };
+    assert_eq!(agents.role(), "developer");
+    assert_eq!(
+        WorldStateHash::from_fragment(&agents),
+        WorldStateHash::from_fragment(&TestFragment(agents.render())),
+    );
+
+    let internal = InternalModelContextFragment::new(
+        InternalContextSource::from_static("extension"),
+        "Internal steering.",
+    );
+    assert_eq!(internal.role(), "developer");
+    assert_eq!(
+        WorldStateHash::from_fragment(&internal),
+        WorldStateHash::from_fragment(&TestFragment(internal.render())),
     );
 }
 

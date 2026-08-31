@@ -1,5 +1,7 @@
 use super::*;
 use crate::context::APPROVED_COMMAND_PREFIX_SAVED_MESSAGE_PREFIX;
+use crate::context::InternalContextSource;
+use crate::context::InternalModelContextFragment;
 use crate::context::UserInstructions;
 use crate::context::world_state::WorldState;
 use crate::context::world_state::WorldStateSection;
@@ -152,27 +154,99 @@ fn conversation_history_snapshot_shares_response_items_until_history_changes() {
 }
 
 #[test]
-fn conversation_history_snapshot_excludes_contextual_user_messages() {
-    let contextual_message = crate::context::ContextualUserFragment::into(UserInstructions {
+fn shared_and_review_history_exclude_migrated_contextual_messages() {
+    let agents_context = crate::context::ContextualUserFragment::into(UserInstructions {
         directory: None,
         text: "Follow the repository instructions.".to_string(),
     });
+    let internal_context =
+        crate::context::ContextualUserFragment::into(InternalModelContextFragment::new(
+            InternalContextSource::from_static("extension"),
+            "Internal steering.",
+        ));
     let user_message = user_input_text_msg("Review this repository.");
     let assistant_message = assistant_msg("I will inspect the repository.");
     let developer_message = developer_msg(
-        "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nDeveloper context\n</INSTRUCTIONS>",
+        "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nOrdinary developer message\n</INSTRUCTIONS>",
     );
-    let history = create_history_with_items(vec![
-        contextual_message,
+    let expected = vec![
         user_message.clone(),
         assistant_message.clone(),
         developer_message.clone(),
+    ];
+    let mut history = create_history_with_items(vec![
+        agents_context,
+        internal_context,
+        user_message,
+        assistant_message,
+        developer_message,
     ]);
-    let snapshot = history.conversation_history_snapshot();
 
     assert_eq!(
-        snapshot.items().cloned().collect::<Vec<_>>(),
-        vec![user_message, assistant_message, developer_message],
+        history
+            .conversation_history_snapshot()
+            .items()
+            .cloned()
+            .collect::<Vec<_>>(),
+        expected
+    );
+
+    history.replace_compacted(Vec::new());
+    assert_eq!(
+        history
+            .conversation_history_snapshot()
+            .review_items()
+            .cloned()
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+#[test]
+fn shared_and_review_history_keep_mixed_developer_context_bundle() {
+    let mixed_context = ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![
+            ContentItem::InputText {
+                text: "Ordinary developer instructions.".to_string(),
+            },
+            ContentItem::InputText {
+                text: "# AGENTS.md instructions\n\n<INSTRUCTIONS>\nRepository instructions.\n</INSTRUCTIONS>"
+                    .to_string(),
+            },
+        ],
+        phase: None,
+        internal_chat_message_metadata_passthrough: Some(
+            InternalChatMessageMetadataPassthrough {
+                content_item_kinds: Some(vec![
+                    ContentItemKind("generic.developer_instructions".to_string()),
+                    ContentItemKind("agents_md.instructions".to_string()),
+                ]),
+                ..Default::default()
+            },
+        ),
+    };
+    let mut history = create_history_with_items(vec![mixed_context.clone()]);
+    let expected = vec![mixed_context];
+
+    assert_eq!(
+        history
+            .conversation_history_snapshot()
+            .items()
+            .cloned()
+            .collect::<Vec<_>>(),
+        expected
+    );
+
+    history.replace_compacted(Vec::new());
+    assert_eq!(
+        history
+            .conversation_history_snapshot()
+            .review_items()
+            .cloned()
+            .collect::<Vec<_>>(),
+        expected
     );
 }
 

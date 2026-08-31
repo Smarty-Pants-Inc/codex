@@ -6,6 +6,9 @@ use crate::config::ManagedFeatures;
 use crate::config::NetworkProxySpec;
 use crate::config::PermissionProfileSnapshot;
 use crate::config::test_config;
+use crate::context::InternalContextSource;
+use crate::context::InternalModelContextFragment;
+use crate::context::UserInstructions;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::guardian::approval_request::guardian_request_target_item_id;
 use crate::guardian::prompt::BUNDLED_GUARDIAN_POLICY;
@@ -922,7 +925,16 @@ async fn build_guardian_prompt_stale_delta_version_falls_back_to_full_prompt() -
 }
 
 #[test]
-fn collect_guardian_transcript_entries_skips_contextual_user_messages() {
+fn collect_guardian_transcript_entries_skips_contextual_messages_across_roles() {
+    let agents_context = crate::context::ContextualUserFragment::into(UserInstructions {
+        directory: None,
+        text: "Follow the repository instructions.".to_string(),
+    });
+    let internal_context =
+        crate::context::ContextualUserFragment::into(InternalModelContextFragment::new(
+            InternalContextSource::from_static("extension"),
+            "Internal steering.",
+        ));
     let items = vec![
         ResponseItem::Message {
             id: None,
@@ -933,6 +945,8 @@ fn collect_guardian_transcript_entries_skips_contextual_user_messages() {
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         },
+        agents_context,
+        internal_context,
         ResponseItem::Message {
             id: None,
             role: "assistant".to_string(),

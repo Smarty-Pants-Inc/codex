@@ -199,6 +199,23 @@ impl McpProcess {
         .await
     }
 
+    pub async fn send_codex_tool_reply(
+        &mut self,
+        thread_id: String,
+        prompt: String,
+    ) -> anyhow::Result<i64> {
+        let params = CallToolRequestParams::new("codex-reply").with_arguments(
+            [
+                ("threadId".to_string(), serde_json::Value::String(thread_id)),
+                ("prompt".to_string(), serde_json::Value::String(prompt)),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        self.send_request("tools/call", Some(serde_json::to_value(params)?))
+            .await
+    }
+
     async fn send_request(
         &mut self,
         method: &str,

@@ -114,7 +114,7 @@ fn format_labeled_requests_snapshot(
 
 fn user_instructions_wrapper_count(request: &ResponsesRequest) -> usize {
     request
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .iter()
         .filter(|text| text.starts_with("# AGENTS.md instructions"))
         .count()

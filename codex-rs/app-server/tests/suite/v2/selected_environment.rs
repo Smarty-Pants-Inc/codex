@@ -133,8 +133,10 @@ async fn thread_start_reports_selected_environment_instruction_source() -> Resul
     )
     .await??;
 
-    let user_context = response_mock.single_request().message_input_texts("user");
-    let instructions = user_context
+    let developer_context = response_mock
+        .single_request()
+        .message_input_texts("developer");
+    let instructions = developer_context
         .iter()
         .find(|text| text.starts_with("# AGENTS.md instructions"))
         .context("selected environment instructions should be model visible")?;

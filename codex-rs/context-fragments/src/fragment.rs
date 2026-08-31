@@ -66,6 +66,14 @@ pub trait ContextualUserFragment {
 
     /// Returns a stable `<feature>.<name>` classification, using `generic` for shared fragments.
     fn content_kind(&self) -> ContentItemKind;
+    /// Returns the role used for semantic comparison of persisted context.
+    ///
+    /// This normally matches the rendered role. Fragments that intentionally
+    /// migrate channels can override it to retain compatibility with prior
+    /// persisted state.
+    fn semantic_role(&self) -> &'static str {
+        self.role()
+    }
 
     /// Whether this fragment must be recorded as its own response item.
     fn requires_separate_message(&self) -> bool {

@@ -179,7 +179,13 @@ pub async fn exec_approval(
     turn_id: Option<String>,
     decision: ReviewDecision,
 ) {
-    let event_turn_id = turn_id.unwrap_or_else(|| approval_id.clone());
+    let Some((matched_turn_id, tx_approve)) = sess
+        .take_pending_approval_for_turn(&approval_id, turn_id.as_deref())
+        .await
+    else {
+        return;
+    };
+
     if let ReviewDecision::ApprovedExecpolicyAmendment {
         proposed_execpolicy_amendment,
     } = &decision
@@ -191,26 +197,39 @@ pub async fn exec_approval(
         tracing::warn!("{message}");
         let warning = EventMsg::Warning(WarningEvent { message });
         sess.send_event_raw(Event {
-            id: event_turn_id.clone(),
+            id: matched_turn_id.clone(),
             msg: warning,
         })
         .await;
     }
-    match decision {
-        ReviewDecision::Abort => {
-            sess.interrupt_task().await;
-        }
-        other => sess.notify_approval(&approval_id, other).await,
+
+    if matches!(&decision, ReviewDecision::Abort) {
+        // Abort before waking the waiter so its replacement cannot displace this lifecycle.
+        sess.abort_turn_if_active(&matched_turn_id, TurnAbortReason::Interrupted)
+            .await;
     }
+    tx_approve.send(decision).ok();
 }
 
-pub async fn patch_approval(sess: &Arc<Session>, id: String, decision: ReviewDecision) {
-    match decision {
-        ReviewDecision::Abort => {
-            sess.interrupt_task().await;
-        }
-        other => sess.notify_approval(&id, other).await,
+pub async fn patch_approval(
+    sess: &Arc<Session>,
+    id: String,
+    turn_id: Option<String>,
+    decision: ReviewDecision,
+) {
+    let Some((matched_turn_id, tx_approve)) = sess
+        .take_pending_approval_for_turn(&id, turn_id.as_deref())
+        .await
+    else {
+        return;
+    };
+
+    if matches!(&decision, ReviewDecision::Abort) {
+        // Abort before waking the waiter so its replacement cannot displace this lifecycle.
+        sess.abort_turn_if_active(&matched_turn_id, TurnAbortReason::Interrupted)
+            .await;
     }
+    tx_approve.send(decision).ok();
 }
 
 pub async fn request_user_input_response(
@@ -224,9 +243,10 @@ pub async fn request_user_input_response(
 pub async fn request_permissions_response(
     sess: &Arc<Session>,
     id: String,
+    turn_id: String,
     response: RequestPermissionsResponse,
 ) {
-    sess.notify_request_permissions_response(&id, response)
+    sess.notify_request_permissions_response_for_turn(&id, Some(&turn_id), response)
         .await;
 }
 
@@ -644,7 +664,15 @@ pub(super) async fn submission_loop(
                     false
                 }
                 Op::PatchApproval { id, decision } => {
-                    patch_approval(&sess, id, decision).await;
+                    patch_approval(&sess, id, None, decision).await;
+                    false
+                }
+                Op::PatchApprovalForTurn {
+                    id,
+                    turn_id,
+                    decision,
+                } => {
+                    patch_approval(&sess, id, Some(turn_id), decision).await;
                     false
                 }
                 Op::UserInputAnswer { id, response } => {
@@ -652,7 +680,16 @@ pub(super) async fn submission_loop(
                     false
                 }
                 Op::RequestPermissionsResponse { id, response } => {
-                    request_permissions_response(&sess, id, response).await;
+                    sess.notify_request_permissions_response(&id, response)
+                        .await;
+                    false
+                }
+                Op::RequestPermissionsResponseForTurn {
+                    id,
+                    turn_id,
+                    response,
+                } => {
+                    request_permissions_response(&sess, id, turn_id, response).await;
                     false
                 }
                 Op::DynamicToolResponse { id, response } => {

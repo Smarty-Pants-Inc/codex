@@ -330,7 +330,7 @@ fn write_global_file(
 
 fn instruction_fragments(request: &responses::ResponsesRequest) -> Vec<String> {
     request
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .filter(|text| text.starts_with("# AGENTS.md instructions"))
         .collect()
@@ -341,7 +341,7 @@ fn instruction_fragments_in_items(items: &[Value]) -> Vec<String> {
         .iter()
         .filter(|item| {
             item.get("type").and_then(Value::as_str) == Some("message")
-                && item.get("role").and_then(Value::as_str) == Some("user")
+                && item.get("role").and_then(Value::as_str) == Some("developer")
         })
         .filter_map(|item| item.get("content").and_then(Value::as_array))
         .flatten()

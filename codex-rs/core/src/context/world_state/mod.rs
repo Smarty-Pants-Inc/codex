@@ -270,7 +270,7 @@ impl WorldStateHash {
     pub(crate) fn from_fragment(fragment: &(impl ContextualUserFragment + ?Sized)) -> Self {
         let mut hasher = Sha1::new();
         hasher.update(b"codex-world-state-fragment-v1\0");
-        hash_component(&mut hasher, fragment.role());
+        hash_component(&mut hasher, fragment.semantic_role());
         hash_component(&mut hasher, &fragment.render());
         Self(format!("{:x}", hasher.finalize()))
     }

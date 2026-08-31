@@ -1,4 +1,4 @@
-//! Hidden user-context fragment for extension-owned model steering.
+//! Hidden developer-context fragment for extension-owned model steering.
 
 use super::ContextualUserFragment;
 use codex_protocol::models::ContentItemKind;
@@ -82,6 +82,11 @@ impl ContextualUserFragment for InternalModelContextFragment {
     }
 
     fn role(&self) -> &'static str {
+        "developer"
+    }
+
+    fn semantic_role(&self) -> &'static str {
+        // Preserve the legacy user-channel identity used by persisted context.
         "user"
     }
 

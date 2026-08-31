@@ -362,6 +362,117 @@ async fn patch_approval_triggers_elicitation() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_patch_approval_reused_call_id_resolves_second_turn() {
+    if env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
+        println!(
+            "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
+        );
+        return;
+    }
+
+    patch_approval_reused_call_id_resolves_second_turn()
+        .await
+        .expect("second patch approval response should resolve");
+}
+
+async fn patch_approval_reused_call_id_resolves_second_turn() -> anyhow::Result<()> {
+    if cfg!(windows) {
+        return Ok(());
+    }
+
+    let cwd = TempDir::new()?;
+    let test_file = cwd.path().join("reused-call-id.txt");
+    let patch_content = format!(
+        "*** Begin Patch\n*** Add File: {}\n+new content\n*** End Patch",
+        test_file.to_string_lossy()
+    );
+    let McpHandle {
+        process: mut mcp_process,
+        server: _server,
+        dir: _dir,
+    } = create_mcp_process(vec![
+        create_apply_patch_sse_response(&patch_content, "call1234")?,
+        create_final_assistant_message_sse_response("First patch was not applied.")?,
+        create_apply_patch_sse_response(&patch_content, "call1234")?,
+        create_final_assistant_message_sse_response("Second patch was not applied.")?,
+    ])
+    .await?;
+    let config = Some(HashMap::from([
+        ("approvals_reviewer".to_string(), json!("user")),
+        ("features.guardian_approval".to_string(), json!(false)),
+    ]));
+    let first_request_id = mcp_process
+        .send_codex_tool_call(CodexToolCallParam {
+            cwd: Some(cwd.path().to_string_lossy().to_string()),
+            prompt: "please modify the test file".to_string(),
+            config,
+            ..Default::default()
+        })
+        .await?;
+    let first_request = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp_process.read_stream_until_request_message(),
+    )
+    .await??;
+    let first_params = serde_json::from_value::<PatchApprovalElicitRequestParams>(
+        first_request
+            .request
+            .params
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("first elicitation params must be set"))?,
+    )?;
+    assert_eq!(first_params.codex_call_id, "call1234");
+    let thread_id = first_params.thread_id.to_string();
+    mcp_process
+        .send_response(
+            first_request.id,
+            serde_json::to_value(PatchApprovalResponse {
+                decision: ReviewDecision::denied("first response"),
+            })?,
+        )
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp_process.read_stream_until_response_message(RequestId::Number(first_request_id)),
+    )
+    .await??;
+
+    let second_request_id = mcp_process
+        .send_codex_tool_reply(thread_id.clone(), "please try the patch again".to_string())
+        .await?;
+    let second_request = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp_process.read_stream_until_request_message(),
+    )
+    .await??;
+    let second_params = serde_json::from_value::<PatchApprovalElicitRequestParams>(
+        second_request
+            .request
+            .params
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("second elicitation params must be set"))?,
+    )?;
+    assert_eq!(second_params.codex_call_id, "call1234");
+    assert_eq!(second_params.thread_id.to_string(), thread_id);
+    mcp_process
+        .send_response(
+            second_request.id,
+            serde_json::to_value(PatchApprovalResponse {
+                decision: ReviewDecision::denied("second response"),
+            })?,
+        )
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp_process.read_stream_until_response_message(RequestId::Number(second_request_id)),
+    )
+    .await??;
+
+    assert!(!test_file.exists());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_codex_tool_passes_base_instructions() {
     skip_if_no_network!();
 

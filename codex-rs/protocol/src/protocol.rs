@@ -640,20 +640,33 @@ pub enum Op {
         start_options: TurnStartOptions,
     },
 
-    /// Approve a command execution
+    /// Approve a command execution.
     ExecApproval {
-        /// The id of the submission we are approving
+        /// The id of the submission we are approving.
         id: String,
         /// Turn id associated with the approval event, when available.
+        ///
+        /// When omitted, this resolves only the first registration of an ID
+        /// in a session. After reuse, a turn-bound response is required.
         turn_id: Option<String>,
         /// The user's decision in response to the request.
         decision: ReviewDecision,
     },
 
-    /// Approve a code patch
+    /// Approve a code patch using legacy ID-only routing.
     PatchApproval {
-        /// The id of the submission we are approving
+        /// The id of the submission we are approving.
         id: String,
+        /// The user's decision in response to the request.
+        decision: ReviewDecision,
+    },
+
+    /// Approve a code patch for the turn that requested it.
+    PatchApprovalForTurn {
+        /// The id of the submission we are approving.
+        id: String,
+        /// Turn that originated the approval request.
+        turn_id: String,
         /// The user's decision in response to the request.
         decision: ReviewDecision,
     },
@@ -680,10 +693,20 @@ pub enum Op {
         response: RequestUserInputResponse,
     },
 
-    /// Resolve a request_permissions tool call.
+    /// Resolve a request_permissions tool call using legacy ID-only routing.
     RequestPermissionsResponse {
         /// Call id for the in-flight request.
         id: String,
+        /// User-granted permissions.
+        response: RequestPermissionsResponse,
+    },
+
+    /// Resolve a request_permissions tool call for the turn that requested it.
+    RequestPermissionsResponseForTurn {
+        /// Call id for the in-flight request.
+        id: String,
+        /// Turn that originated the request.
+        turn_id: String,
         /// User-granted permissions.
         response: RequestPermissionsResponse,
     },
@@ -926,10 +949,11 @@ impl Op {
             Self::TurnSettings { .. } => "turn_settings",
             Self::InterAgentCommunication { .. } => "inter_agent_communication",
             Self::ExecApproval { .. } => "exec_approval",
-            Self::PatchApproval { .. } => "patch_approval",
+            Self::PatchApproval { .. } | Self::PatchApprovalForTurn { .. } => "patch_approval",
             Self::ResolveElicitation { .. } => "resolve_elicitation",
             Self::UserInputAnswer { .. } => "user_input_answer",
-            Self::RequestPermissionsResponse { .. } => "request_permissions_response",
+            Self::RequestPermissionsResponse { .. }
+            | Self::RequestPermissionsResponseForTurn { .. } => "request_permissions_response",
             Self::DynamicToolResponse { .. } => "dynamic_tool_response",
             Self::RefreshMcpServers => "refresh_mcp_servers",
             Self::ReloadUserConfig => "reload_user_config",
