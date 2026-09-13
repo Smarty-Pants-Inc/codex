@@ -298,9 +298,25 @@ impl AgentControl {
     )]
     pub(crate) async fn ensure_v2_agent_loaded(
         &self,
+        config: Config,
+        thread_id: ThreadId,
+        parent: Option<Arc<CodexThread>>,
+    ) -> CodexResult<()> {
+        self.ensure_v2_agent_loaded_with_extension_init(
+            config,
+            thread_id,
+            parent,
+            ExtensionDataInit::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn ensure_v2_agent_loaded_with_extension_init(
+        &self,
         mut config: Config,
         thread_id: ThreadId,
         parent: Option<Arc<CodexThread>>,
+        thread_extension_init: ExtensionDataInit,
     ) -> CodexResult<()> {
         let state = self.upgrade()?;
         let parent = if let Some(parent) = parent {
@@ -460,10 +476,10 @@ impl AgentControl {
                     let owner_environment = parent_environments
                         .turn_environments()
                         .find(|environment| {
-                            environment.selection.environment_id == *environment_id
-                                && environment.cwd() == &selection.cwd
-                                && environment.workspace_roots()
-                                    == selection.workspace_roots.as_slice()
+                            let parent_selection = &environment.selection;
+                            parent_selection.environment_id == selection.environment_id
+                                && parent_selection.cwd == selection.cwd
+                                && parent_selection.workspace_roots == selection.workspace_roots
                         })
                         .ok_or_else(|| {
                             invalid_environment("no longer matches a ready parent environment")
@@ -498,8 +514,8 @@ impl AgentControl {
                     let cwd = selection.cwd.to_abs_path().map_err(|_| {
                         invalid_environment("working directory is not a local absolute path")
                     })?;
-                    let roots = selection
-                        .workspace_roots
+                    let roots = owner_environment
+                        .workspace_roots()
                         .iter()
                         .map(PathUri::to_abs_path)
                         .collect::<Result<Vec<_>, _>>()
@@ -557,6 +573,7 @@ impl AgentControl {
                 inherited_environments,
                 inherited_exec_policy,
                 client_mcp_extensions,
+                thread_extension_init,
             })
             .await
         {
@@ -753,15 +770,16 @@ impl AgentControl {
         .await;
         drop(spawn_admission);
 
+        let start_options = TurnStartOptions {
+            parent_turn_id: options.parent_turn_id,
+            root_turn_id: options.root_turn_id,
+            cyber_access_program: options.cyber_access_program,
+            ..Default::default()
+        };
         match initial_input {
             SpawnInitialInput::UserInput(input) => {
-                self.send_input(
-                    new_thread.thread_id,
-                    input,
-                    options.parent_turn_id,
-                    options.root_turn_id,
-                )
-                .await?;
+                self.send_input(new_thread.thread_id, input, start_options)
+                    .await?;
             }
             SpawnInitialInput::InterAgentCommunication(communication, context) => {
                 self.send_inter_agent_communication_after_capacity_check(
@@ -769,8 +787,7 @@ impl AgentControl {
                     &state,
                     communication,
                     context,
-                    options.parent_turn_id,
-                    options.root_turn_id,
+                    start_options,
                 )
                 .await?;
             }
@@ -793,7 +810,6 @@ impl AgentControl {
             thread_id: new_thread.thread_id,
             metadata: agent_metadata,
             status: self.get_status(new_thread.thread_id).await,
-            multi_agent_version,
         })
     }
 
@@ -1084,11 +1100,31 @@ impl AgentControl {
         thread_id: ThreadId,
         session_source: SessionSource,
     ) -> CodexResult<ThreadId> {
-        let root_depth = thread_spawn_depth(&session_source).unwrap_or(0);
-        let (resumed_thread_id, resumed_multi_agent_version) = Box::pin(
-            self.resume_single_agent_from_rollout(config.clone(), thread_id, session_source),
+        self.resume_agent_from_rollout_with_extension_init(
+            config,
+            thread_id,
+            session_source,
+            ExtensionDataInit::default(),
         )
-        .await?;
+        .await
+    }
+
+    pub(crate) async fn resume_agent_from_rollout_with_extension_init(
+        &self,
+        config: Config,
+        thread_id: ThreadId,
+        session_source: SessionSource,
+        thread_extension_init: ExtensionDataInit,
+    ) -> CodexResult<ThreadId> {
+        let root_depth = thread_spawn_depth(&session_source).unwrap_or(0);
+        let (resumed_thread_id, resumed_multi_agent_version) =
+            Box::pin(self.resume_single_agent_from_rollout(
+                config.clone(),
+                thread_id,
+                session_source,
+                thread_extension_init,
+            ))
+            .await?;
         let state = self.upgrade()?;
         if config.multi_agent_version_from_features() == MultiAgentVersion::V2
             || resumed_multi_agent_version == MultiAgentVersion::V2
@@ -1134,6 +1170,7 @@ impl AgentControl {
                         config.clone(),
                         child_thread_id,
                         child_session_source,
+                        ExtensionDataInit::default(),
                     ))
                     .await
                     {
@@ -1153,11 +1190,16 @@ impl AgentControl {
         Ok(resumed_thread_id)
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "spawn admission must serialize agent restoration"
+    )]
     async fn resume_single_agent_from_rollout(
         &self,
         config: Config,
         thread_id: ThreadId,
         session_source: SessionSource,
+        thread_extension_init: ExtensionDataInit,
     ) -> CodexResult<(ThreadId, MultiAgentVersion)> {
         let state = self.upgrade()?;
         let stored_thread = state
@@ -1194,25 +1236,56 @@ impl AgentControl {
             )
             .await;
         let agent_max_threads = config.effective_agent_max_threads(multi_agent_version);
-        let mut reservation = self.state.reserve_spawn_slot(agent_max_threads)?;
-        let (session_source, agent_metadata) = match session_source {
-            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id,
-                depth,
-                agent_path,
-                agent_role: _,
-                agent_nickname: _,
-            }) => self.prepare_thread_spawn(
-                &mut reservation,
-                &config,
-                parent_thread_id,
-                depth,
-                agent_path.or(resumed_agent_path),
-                resumed_agent_role,
-                resumed_agent_nickname,
-            )?,
-            other => (other, AgentMetadata::default()),
-        };
+        let _spawn_admission = self.acquire_spawn_admission().await?;
+        let registered_metadata = matches!(
+            &session_source,
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+        )
+        .then(|| self.state.agent_metadata_for_thread(thread_id))
+        .flatten();
+        let (session_source, agent_metadata, reservation) =
+            if let Some(agent_metadata) = registered_metadata {
+                let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id,
+                    depth,
+                    ..
+                }) = session_source
+                else {
+                    unreachable!("registered metadata is only reused for thread-spawn agents");
+                };
+                if depth == 1 {
+                    self.state.register_root_thread(parent_thread_id);
+                }
+                let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id,
+                    depth,
+                    agent_path: agent_metadata.agent_path.clone(),
+                    agent_nickname: agent_metadata.agent_nickname.clone(),
+                    agent_role: agent_metadata.agent_role.clone(),
+                });
+                (session_source, agent_metadata, None)
+            } else {
+                let mut reservation = self.state.reserve_spawn_slot(agent_max_threads)?;
+                let (session_source, agent_metadata) = match session_source {
+                    SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                        parent_thread_id,
+                        depth,
+                        agent_path,
+                        agent_role: _,
+                        agent_nickname: _,
+                    }) => self.prepare_thread_spawn(
+                        &mut reservation,
+                        &config,
+                        parent_thread_id,
+                        depth,
+                        agent_path.or(resumed_agent_path),
+                        resumed_agent_role,
+                        resumed_agent_nickname,
+                    )?,
+                    other => (other, AgentMetadata::default()),
+                };
+                (session_source, agent_metadata, Some(reservation))
+            };
         let notification_source = session_source.clone();
         let inherited_environments = self
             .inherited_environments_for_source(&state, Some(&session_source))
@@ -1232,11 +1305,14 @@ impl AgentControl {
                 inherited_environments,
                 inherited_exec_policy,
                 client_mcp_extensions: None,
+                thread_extension_init,
             })
             .await?;
         let mut agent_metadata = agent_metadata;
         agent_metadata.agent_id = Some(resumed_thread.thread_id);
-        reservation.commit(agent_metadata.clone());
+        if let Some(reservation) = reservation {
+            reservation.commit(agent_metadata.clone());
+        }
         // Resumed threads are re-registered in-memory and need the same listener
         // attachment path as freshly spawned threads.
         state.notify_thread_created(resumed_thread.thread_id);

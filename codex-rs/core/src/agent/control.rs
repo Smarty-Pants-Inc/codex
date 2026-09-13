@@ -9,6 +9,7 @@ use crate::agent::role::resolve_role_config;
 use crate::agent::status::is_final;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
+use crate::codex_thread::CodexThread;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::config::Config;
 use crate::config::RolloutBudgetConfig;
@@ -52,6 +53,7 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelection;
+use codex_protocol::turn_input::CyberAccessProgram;
 use codex_protocol::user_input::UserInput;
 use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::ReadThreadParams;
@@ -92,6 +94,7 @@ pub(crate) struct SpawnAgentOptions {
     pub(crate) root_turn_id: Option<String>,
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
     pub(crate) multi_agent_v2_usage_hints: Option<ResolvedMultiAgentV2UsageHints>,
+    pub(crate) cyber_access_program: Option<CyberAccessProgram>,
 }
 
 pub(crate) struct RootTurnSuspensionAdmission {
@@ -109,14 +112,29 @@ pub(crate) struct LiveAgent {
     pub(crate) thread_id: ThreadId,
     pub(crate) metadata: AgentMetadata,
     pub(crate) status: AgentStatus,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentRuntimeInfo {
+    pub(crate) capability: crate::tools::spec_plan::MultiAgentCapability,
+    pub(crate) effective_model: String,
     pub(crate) multi_agent_version: MultiAgentVersion,
+}
+
+async fn runtime_info_for_thread(thread: &CodexThread) -> AgentRuntimeInfo {
+    let turn = thread.session.new_default_turn().await;
+    AgentRuntimeInfo {
+        capability: crate::tools::spec_plan::effective_agent_capability(turn.as_ref()),
+        effective_model: turn.model_info().slug.clone(),
+        multi_agent_version: turn.multi_agent_version,
+    }
 }
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ListedAgent {
     pub(crate) agent_name: String,
     pub(crate) agent_status: AgentStatus,
-    pub(crate) model: String,
-    pub(crate) multi_agent_version: Option<MultiAgentVersion>,
+    pub(crate) capability: crate::tools::spec_plan::MultiAgentCapability,
+    pub(crate) effective_model: String,
+    pub(crate) multi_agent_version: MultiAgentVersion,
 }
 
 /// Control-plane handle for multi-agent operations.
@@ -202,8 +220,7 @@ impl AgentControl {
         &self,
         agent_id: ThreadId,
         input: Vec<UserInput>,
-        parent_turn_id: Option<String>,
-        root_turn_id: Option<String>,
+        start_options: TurnStartOptions,
     ) -> CodexResult<String> {
         let state = self.upgrade()?;
         let thread = state.get_thread(agent_id).await?;
@@ -214,13 +231,7 @@ impl AgentControl {
         .chain(input)
         .collect();
         let result = match thread
-            .start_or_steer_turn(TurnInputRequest::developer_input(input).on_start(
-                TurnStartOptions {
-                    parent_turn_id,
-                    root_turn_id,
-                    ..Default::default()
-                },
-            ))
+            .start_or_steer_turn(TurnInputRequest::developer_input(input).on_start(start_options))
             .await
         {
             Ok(TurnInputSubmission::Started { turn_id }) => Ok(turn_id),
@@ -245,8 +256,7 @@ impl AgentControl {
         agent_id: ThreadId,
         communication: InterAgentCommunication,
         agent_communication_context: AgentCommunicationContext,
-        parent_turn_id: Option<String>,
-        root_turn_id: Option<String>,
+        start_options: TurnStartOptions,
     ) -> CodexResult<String> {
         let state = self.upgrade()?;
         if communication.trigger_turn {
@@ -259,8 +269,7 @@ impl AgentControl {
             &state,
             communication,
             agent_communication_context,
-            parent_turn_id,
-            root_turn_id,
+            start_options,
         )
         .await
     }
@@ -320,16 +329,14 @@ impl AgentControl {
         state: &Arc<ThreadManagerState>,
         communication: InterAgentCommunication,
         context: AgentCommunicationContext,
-        parent_turn_id: Option<String>,
-        root_turn_id: Option<String>,
+        start_options: TurnStartOptions,
     ) -> CodexResult<String> {
         self.submit_inter_agent_communication(
             agent_id,
             state,
             communication,
             context,
-            parent_turn_id,
-            root_turn_id,
+            start_options,
         )
         .await
     }
@@ -340,13 +347,18 @@ impl AgentControl {
         state: &Arc<ThreadManagerState>,
         communication: InterAgentCommunication,
         context: AgentCommunicationContext,
-        parent_turn_id: Option<String>,
-        root_turn_id: Option<String>,
+        start_options: TurnStartOptions,
     ) -> CodexResult<String> {
         let communication_for_log =
             crate::agent_communication::logging_enabled().then(|| communication.clone());
-        let parent_turn_id = parent_turn_id.filter(|_| communication.trigger_turn);
-        let root_turn_id = root_turn_id.filter(|_| communication.trigger_turn);
+        let (parent_turn_id, root_turn_id) = if communication.trigger_turn {
+            (
+                start_options.parent_turn_id.clone(),
+                start_options.root_turn_id.clone(),
+            )
+        } else {
+            (None, None)
+        };
         let result = self
             .handle_thread_request_result(
                 agent_id,
@@ -354,7 +366,10 @@ impl AgentControl {
                 state
                     .send_op(
                         agent_id,
-                        Op::InterAgentCommunication { communication },
+                        Op::InterAgentCommunication {
+                            communication,
+                            start_options,
+                        },
                         parent_turn_id,
                         root_turn_id,
                     )
@@ -441,7 +456,7 @@ impl AgentControl {
             .ok_or_else(|| CodexErr::ThreadNotFound(agent_id))
     }
 
-    async fn acquire_spawn_admission(&self) -> CodexResult<RwLockReadGuard<'_, bool>> {
+    pub(crate) async fn acquire_spawn_admission(&self) -> CodexResult<RwLockReadGuard<'_, bool>> {
         let admission = self.spawn_admission_sealed.read().await;
         if *admission {
             return Err(CodexErr::UnsupportedOperation(
@@ -487,6 +502,15 @@ impl AgentControl {
             return None;
         };
         Some(thread.config_snapshot().await)
+    }
+
+    pub(crate) async fn get_agent_runtime_info(
+        &self,
+        agent_id: ThreadId,
+    ) -> CodexResult<AgentRuntimeInfo> {
+        let state = self.upgrade()?;
+        let thread = state.get_thread(agent_id).await?;
+        Ok(runtime_info_for_thread(thread.as_ref()).await)
     }
 
     pub(crate) async fn resolve_agent_reference(
@@ -580,12 +604,13 @@ impl AgentControl {
             && let Some(root_thread_id) = self.state.agent_id_for_path(&root_path)
             && let Ok(root_thread) = state.get_thread(root_thread_id).await
         {
-            let snapshot = root_thread.config_snapshot().await;
+            let runtime = runtime_info_for_thread(root_thread.as_ref()).await;
             agents.push(ListedAgent {
                 agent_name: root_path.to_string(),
                 agent_status: root_thread.agent_status().await,
-                model: snapshot.model,
-                multi_agent_version: root_thread.multi_agent_version(),
+                capability: runtime.capability,
+                effective_model: runtime.effective_model,
+                multi_agent_version: runtime.multi_agent_version,
             });
         }
 
@@ -603,17 +628,18 @@ impl AgentControl {
             let Ok(thread) = state.get_thread(thread_id).await else {
                 continue;
             };
-            let snapshot = thread.config_snapshot().await;
             let agent_name = metadata
                 .agent_path
                 .as_ref()
                 .map(ToString::to_string)
                 .unwrap_or_else(|| thread_id.to_string());
+            let runtime = runtime_info_for_thread(thread.as_ref()).await;
             agents.push(ListedAgent {
                 agent_name,
                 agent_status: thread.agent_status().await,
-                model: snapshot.model,
-                multi_agent_version: thread.multi_agent_version(),
+                capability: runtime.capability,
+                effective_model: runtime.effective_model,
+                multi_agent_version: runtime.multi_agent_version,
             });
         }
 
@@ -699,8 +725,7 @@ impl AgentControl {
                         parent_thread_id,
                         communication,
                         context,
-                        /*parent_turn_id*/ None,
-                        /*root_turn_id*/ None,
+                        TurnStartOptions::default(),
                     )
                     .await;
                 return;

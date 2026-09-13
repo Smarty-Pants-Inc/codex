@@ -12,12 +12,15 @@ use codex_core::StartIfIdleSubmission;
 use codex_core::ThreadManager;
 use codex_core::TurnInput;
 use codex_core::TurnInputRequest;
+use codex_core::TurnStartOptions;
+use codex_extension_api::ExtensionData;
 use codex_extension_api::ExtensionEventSink;
 use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ThreadIdleCause;
 use codex_extension_api::ThreadIdleInput;
 use codex_extension_api::ThreadLifecycleContributor;
 use codex_extension_api::ThreadResumeInput;
+use codex_extension_api::ThreadStartInput;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::models::snapshot_local_user_input;
@@ -38,6 +41,11 @@ use tokio::sync::Mutex;
 use tokio::sync::OwnedMutexGuard;
 use tokio::sync::broadcast::error::TryRecvError;
 use uuid::Uuid;
+
+/// Marks a resumed runtime whose persisted queue must remain pending until the
+/// host finishes restoring higher-priority automatic work.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SuppressQueueResumeWake;
 
 /// One user message waiting to start on its thread.
 #[derive(Clone, Debug, PartialEq)]
@@ -74,6 +82,24 @@ struct QueueAutomaticAdmission {
     queue_reservation: StdMutex<Option<Box<dyn Send>>>,
 }
 
+/// Admission marker retained in thread extension data so Core's mailbox wakeup
+/// observes the same direct-input intent count as queue dispatch.
+struct QueueDirectInputAdmission {
+    dispatch: Arc<QueueDispatchState>,
+}
+
+fn reserve_if_no_pending(dispatch: &QueueDispatchState, reserve: &mut dyn FnMut()) -> bool {
+    let pending = dispatch
+        .pending_enqueues
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if *pending != 0 {
+        return false;
+    }
+    reserve();
+    true
+}
+
 /// Retains the weakly indexed state until after its mutex guard is released.
 struct QueueDispatchGuard {
     _guard: OwnedMutexGuard<()>,
@@ -88,21 +114,24 @@ impl std::fmt::Debug for QueueAutomaticAdmission {
 
 impl IdleTurnAdmission for QueueAutomaticAdmission {
     fn reserve_if_allowed(&self, reserve: &mut dyn FnMut()) -> bool {
-        let pending = self
-            .dispatch
-            .pending_enqueues
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let admitted = *pending == 0;
-        if admitted {
-            reserve();
-        }
-        drop(pending);
+        let admitted = reserve_if_no_pending(&self.dispatch, reserve);
         self.queue_reservation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
         admitted
+    }
+}
+
+impl std::fmt::Debug for QueueDirectInputAdmission {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("QueueDirectInputAdmission")
+    }
+}
+
+impl IdleTurnAdmission for QueueDirectInputAdmission {
+    fn reserve_if_allowed(&self, reserve: &mut dyn FnMut()) -> bool {
+        reserve_if_no_pending(&self.dispatch, reserve)
     }
 }
 
@@ -123,9 +152,11 @@ impl Drop for QueueEnqueueIntent {
             .pending_enqueues
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *pending = pending
-            .checked_sub(1)
-            .expect("pending enqueue intent count must not underflow");
+        debug_assert!(
+            *pending > 0,
+            "pending enqueue intent count must not underflow"
+        );
+        *pending = pending.saturating_sub(1);
         let should_wake = self.wake_on_drop && *pending == 0;
         drop(pending);
 
@@ -244,11 +275,22 @@ impl QueuedItemService {
                 }
             }
             if !newly_loaded_threads.is_empty() {
-                let created_threads = thread_ids
+                let mut created_threads = Vec::new();
+                for thread_id in thread_ids
                     .iter()
                     .copied()
                     .filter(|thread_id| newly_loaded_threads.contains(thread_id))
-                    .collect::<Vec<_>>();
+                {
+                    let wake_suppressed = manager.get_thread(thread_id).await.is_ok_and(|thread| {
+                        thread
+                            .thread_extension_data()
+                            .get::<SuppressQueueResumeWake>()
+                            .is_some()
+                    });
+                    if !wake_suppressed {
+                        created_threads.push(thread_id);
+                    }
+                }
                 match service
                     .queue
                     .changes_since(/*revision*/ 0, &created_threads)
@@ -272,6 +314,9 @@ impl QueuedItemService {
                     continue;
                 }
                 service.emit_changed(thread_id);
+                if service.resume_wake_suppressed(thread_id).await {
+                    continue;
+                }
                 if dispatches
                     .get(&thread_id)
                     .is_some_and(|dispatch| !dispatch.is_finished())
@@ -285,6 +330,9 @@ impl QueuedItemService {
                             let Some(service) = service.upgrade() else {
                                 return;
                             };
+                            if service.resume_wake_suppressed(thread_id).await {
+                                return;
+                            }
                             let Some(manager) = service.thread_manager.upgrade() else {
                                 return;
                             };
@@ -306,7 +354,7 @@ impl QueuedItemService {
                                 .await
                             {
                                 Ok(items) if items.is_empty() => return,
-                                Ok(_) => service.wake_if_loaded(thread_id).await,
+                                Ok(_) => service.watcher_wake_if_loaded(thread_id).await,
                                 Err(error) => {
                                     tracing::warn!(%thread_id, %error, "failed to check queued user input");
                                 }
@@ -344,6 +392,13 @@ impl QueuedItemService {
             _guard: guard,
             _state: state,
         }
+    }
+
+    fn install_idle_admission(&self, thread_store: &ExtensionData, thread_id: ThreadId) {
+        let dispatch = self.dispatch_state(thread_id);
+        thread_store.get_or_init::<Arc<dyn IdleTurnAdmission>>(|| {
+            Arc::new(QueueDirectInputAdmission { dispatch }) as Arc<dyn IdleTurnAdmission>
+        });
     }
 
     /// Registers a received direct-input enqueue before it can wait behind another request.
@@ -542,7 +597,12 @@ impl QueuedItemService {
             return Err(QueueServiceError::InvalidInput);
         };
         let submission = thread
-            .start_turn_if_idle(TurnInputRequest::new(input).with_trace(trace))
+            .start_turn_if_idle(TurnInputRequest::new(input).with_trace(trace).on_start(
+                TurnStartOptions {
+                    turn_trigger: Some("queue".to_string()),
+                    ..Default::default()
+                },
+            ))
             .await?;
         if matches!(submission, StartIfIdleSubmission::Started { .. }) {
             self.delete_locked(thread_id, queued_item_id).await?;
@@ -585,7 +645,10 @@ impl QueuedItemService {
             }
 
             match thread
-                .start_turn_if_idle(TurnInputRequest::new(input))
+                .start_turn_if_idle(TurnInputRequest::new(input).on_start(TurnStartOptions {
+                    turn_trigger: Some("queue".to_string()),
+                    ..Default::default()
+                }))
                 .await
             {
                 Ok(StartIfIdleSubmission::Started { .. }) => {
@@ -616,6 +679,24 @@ impl QueuedItemService {
 
     async fn wake_if_loaded(&self, thread_id: ThreadId) {
         wake_loaded_thread(self.thread_manager.clone(), thread_id).await;
+    }
+
+    async fn watcher_wake_if_loaded(&self, thread_id: ThreadId) {
+        if !self.resume_wake_suppressed(thread_id).await {
+            self.wake_if_loaded(thread_id).await;
+        }
+    }
+
+    async fn resume_wake_suppressed(&self, thread_id: ThreadId) -> bool {
+        let Some(manager) = self.thread_manager.upgrade() else {
+            return false;
+        };
+        manager.get_thread(thread_id).await.is_ok_and(|thread| {
+            thread
+                .thread_extension_data()
+                .get::<SuppressQueueResumeWake>()
+                .is_some()
+        })
     }
 
     fn emit_changed(&self, thread_id: ThreadId) {
@@ -687,20 +768,39 @@ impl<C> ThreadLifecycleContributor<C> for QueuedItemService
 where
     C: Send + Sync + 'static,
 {
+    fn on_thread_start<'a>(&'a self, input: ThreadStartInput<'a, C>) -> ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            let Ok(thread_id) = ThreadId::from_string(input.thread_store.level_id()) else {
+                return;
+            };
+            self.install_idle_admission(input.thread_store, thread_id);
+        })
+    }
+
     fn on_thread_resume<'a>(&'a self, input: ThreadResumeInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
             if let Ok(thread_id) = ThreadId::from_string(input.thread_store.level_id()) {
-                self.resumed_threads
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .insert(thread_id);
+                self.install_idle_admission(input.thread_store, thread_id);
+                if input
+                    .thread_store
+                    .get::<SuppressQueueResumeWake>()
+                    .is_none()
+                {
+                    self.resumed_threads
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .insert(thread_id);
+                }
             }
         })
     }
 
     fn on_thread_idle<'a>(&'a self, input: ThreadIdleInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
-            if input.cause == ThreadIdleCause::Interrupted {
+            if matches!(
+                input.cause,
+                ThreadIdleCause::Interrupted | ThreadIdleCause::Restored
+            ) {
                 return;
             }
             let Ok(thread_id) = ThreadId::from_string(input.thread_store.level_id()) else {
@@ -710,6 +810,7 @@ where
                 );
                 return;
             };
+            self.install_idle_admission(input.thread_store, thread_id);
             let _guard = self.dispatch_guard(thread_id).await;
             if let Err(error) = self.dispatch_if_idle(thread_id).await {
                 tracing::warn!(%thread_id, %error, "failed to dispatch queued user input");

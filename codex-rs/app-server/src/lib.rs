@@ -4,7 +4,6 @@
 use codex_arg0::Arg0DispatchPaths;
 use codex_code_mode::CodeModeSessionProvider;
 use codex_code_mode::GrpcCodeModeSessionProvider;
-use codex_code_mode::WebSocketCodeModeSessionProvider;
 use codex_config::LoaderOverrides;
 use codex_config::NoopThreadConfigLoader;
 use codex_core::config::Config;
@@ -440,7 +439,6 @@ pub enum PluginStartupTasks {
 pub struct AppServerRuntimeOptions {
     pub code_mode_host_transport: CodeModeHostTransport,
     pub plugin_startup_tasks: PluginStartupTasks,
-    pub goal_auto_continue_enabled: bool,
     pub remote_control_startup_mode: RemoteControlStartupMode,
     pub install_shutdown_signal_handler: bool,
 }
@@ -450,7 +448,6 @@ impl Default for AppServerRuntimeOptions {
         Self {
             code_mode_host_transport: CodeModeHostTransport::Local,
             plugin_startup_tasks: PluginStartupTasks::Start,
-            goal_auto_continue_enabled: false,
             remote_control_startup_mode: RemoteControlStartupMode::ResolvePersisted,
             install_shutdown_signal_handler: true,
         }
@@ -554,20 +551,6 @@ pub async fn run_main_with_transport_options(
     let code_mode_session_provider: Option<Arc<dyn CodeModeSessionProvider>> =
         match &runtime_options.code_mode_host_transport {
             CodeModeHostTransport::Local => None,
-            CodeModeHostTransport::WebSocket(url) => {
-                if !config.features.enabled(Feature::CodeModeHost) {
-                    return Err(std::io::Error::new(
-                        ErrorKind::InvalidInput,
-                        "remote code-mode host requires the code_mode_host feature to be enabled",
-                    ));
-                }
-                Some(Arc::new(
-                    WebSocketCodeModeSessionProvider::with_http_client_factory(
-                        url.to_string(),
-                        config.http_client_factory(),
-                    ),
-                ))
-            }
             CodeModeHostTransport::Grpc(url) => {
                 if !config.features.enabled(Feature::CodeModeHost) {
                     return Err(std::io::Error::new(
@@ -928,7 +911,6 @@ pub async fn run_main_with_transport_options(
             installation_id,
             code_mode_session_provider,
             rpc_transport: analytics_rpc_transport(&transport),
-            goal_auto_continue_enabled: runtime_options.goal_auto_continue_enabled,
             remote_control_handle: Some(remote_control_handle.clone()),
             plugin_startup_tasks: runtime_options.plugin_startup_tasks,
         }));
