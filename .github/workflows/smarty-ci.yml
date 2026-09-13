@@ -67,11 +67,62 @@ jobs:
         working-directory: codex-rs
         run: cargo fmt -- --config imports_granularity=Item --check
       - name: Discover exact focused test roster
+        id: discovery
         working-directory: codex-rs
         run: |
           set -euo pipefail
           cargo nextest list --locked -p codex-tui --message-format json > ../evidence/discovered.json
           cargo nextest list --locked -p codex-tui -E "$FILTER" --message-format json > ../evidence/selected.json
+      - name: Diagnose failed locked discovery in disposable source copy
+        if: ${{ failure() && steps.discovery.outcome == 'failure' }}
+        timeout-minutes: 5
+        env:
+          CARGO_NET_RETRY: 0
+        run: |
+          set -euo pipefail
+          evidence="$GITHUB_WORKSPACE/evidence/lock-diagnostic"
+          mkdir -p "$evidence"
+          scratch=$(mktemp -d "$RUNNER_TEMP/codex-lock-diagnostic.XXXXXX")
+          trap 'status=$?; printf "%s\n" "$status" > "$evidence/diagnostic-exit.txt"; rm -rf -- "$scratch"' EXIT
+          release=3d2ee51ca2d5db578f328aa75e20aa22c0197c9a
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          if ! git cat-file -e "$release^{commit}"; then
+            git fetch --no-tags --depth=1 origin "$release"
+          fi
+          printf 'release=%s\nexecuted=%s\n' "$release" "$GITHUB_SHA" > "$evidence/revisions.txt"
+          git diff --exit-code "$release" "$GITHUB_SHA" -- \
+            ':(glob)**/Cargo.toml' ':(glob)**/Cargo.lock' ':(glob)**/.cargo/**' \
+            ':(glob)**/rust-toolchain*' > "$evidence/release-inputs.patch"
+          sha256sum codex-rs/Cargo.lock > "$evidence/canonical-lock.sha256"
+          git archive "$GITHUB_SHA" | tar -x -C "$scratch"
+          (
+            cd "$scratch"
+            find . -type f ! -path './codex-rs/Cargo.lock' -print0 | sort -z | xargs -0 sha256sum
+          ) > "$evidence/scratch-files.sha256"
+          sha256sum "$scratch/codex-rs/Cargo.lock" > "$evidence/scratch-lock-before.sha256"
+          set +e
+          (
+            cd "$scratch/codex-rs"
+            timeout 240s cargo +1.95.0 metadata --format-version=1 --all-features \
+              --filter-platform x86_64-unknown-linux-gnu
+          ) > "$evidence/metadata.json" 2> "$evidence/metadata.stderr"
+          metadata_status=$?
+          set -e
+          printf '%s\n' "$metadata_status" > "$evidence/metadata-exit.txt"
+          sha256sum "$scratch/codex-rs/Cargo.lock" > "$evidence/scratch-lock-after.sha256"
+          diff_status=0
+          diff -u --label canonical/Cargo.lock --label scratch/Cargo.lock \
+            codex-rs/Cargo.lock "$scratch/codex-rs/Cargo.lock" > "$evidence/lock.patch" || diff_status=$?
+          test "$diff_status" -le 1
+          sha256sum -c "$evidence/canonical-lock.sha256"
+          (
+            cd "$scratch"
+            find . -type f ! -path './codex-rs/Cargo.lock' -print0 | sort -z | xargs -0 sha256sum
+          ) > "$evidence/scratch-files-after.sha256"
+          diff -u "$evidence/scratch-files.sha256" "$evidence/scratch-files-after.sha256"
+          git diff --exit-code
+          echo 'Diagnostic only: locked acceptance failed; no test or artifact acceptance.'
+          exit 1
       - name: Focused native regressions, without retries or snapshot updates
         run: |
           set -euo pipefail
