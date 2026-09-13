@@ -197,6 +197,30 @@ jobs:
           sha256sum codex-rs/Cargo.lock codex-rs/rust-toolchain.toml codex-rs/.config/nextest.toml \
             justfile scripts/format.py scripts/uv.lock sdk/python/uv.lock tools/buildifier \
             .github/workflows/smarty-ci.yml > backend-evidence/inputs.sha256
+      - name: Build backend runtime test prerequisites
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+          # Package-scoped nextest runs do not build sibling packages' executables.
+          cargo build --locked \
+            -p codex-cli --bin codex \
+            -p codex-rmcp-client --bin test_stdio_server --bin test_streamable_http_server \
+            -p codex-code-mode-host --bin codex-code-mode-host \
+            -p codex-linux-sandbox --bin codex-linux-sandbox \
+            -p codex-shell-escalation --bin codex-execve-wrapper \
+            2>&1 | tee ../backend-evidence/runtime-prerequisites.txt
+          for binary in codex test_stdio_server test_streamable_http_server codex-code-mode-host codex-linux-sandbox codex-execve-wrapper; do
+            path="$CARGO_TARGET_DIR/debug/$binary"
+            if [[ ! -x "$path" ]]; then
+              echo "Missing runtime test executable: $path" >&2
+              exit 1
+            fi
+            sha256sum "$path" >> ../backend-evidence/runtime-prerequisites.sha256
+            echo "CARGO_BIN_EXE_$binary=$path" >> "$GITHUB_ENV"
+            if [[ "$binary" == *-* ]]; then
+              echo "CARGO_BIN_EXE_${binary//-/_}=$path" >> "$GITHUB_ENV"
+            fi
+          done
       - name: Complete backend project tests
         run: |
           set -euo pipefail
