@@ -459,6 +459,8 @@ pub(super) async fn drain_history(
         if matches!(
             event,
             AppEvent::InsertHistoryCell(_)
+                | AppEvent::ConsolidateAgentMessage { .. }
+                | AppEvent::ConsolidateProposedPlan(_)
                 | AppEvent::BeginThreadSwitchHistoryReplayBuffer
                 | AppEvent::EndInitialHistoryReplayBuffer
         ) {
