@@ -6,12 +6,22 @@ use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use tokio::sync::Semaphore;
 
-#[derive(Default)]
 pub(crate) struct KeepWorking {
     pub(crate) settlement: Mutex<Settlement>,
     pub(crate) halted: AtomicBool,
-    writer: tokio::sync::Mutex<()>,
+    writer: Semaphore,
+}
+
+impl Default for KeepWorking {
+    fn default() -> Self {
+        Self {
+            settlement: Mutex::default(),
+            halted: AtomicBool::default(),
+            writer: Semaphore::new(/*permits*/ 1),
+        }
+    }
 }
 
 impl KeepWorking {
@@ -30,7 +40,7 @@ impl KeepWorking {
         intent: TurnStartGuard,
         enabled: bool,
     ) -> Result<(), String> {
-        let _writer = self.writer.lock().await;
+        let _writer = self.writer.acquire().await.map_err(|err| err.to_string())?;
         if intent.is_revoked() {
             return Err("keep_working intent was stopped or superseded".to_string());
         }
@@ -58,9 +68,9 @@ impl KeepWorking {
             settlement.stop();
             self.halted.store(/*val*/ true, Ordering::SeqCst);
         }
-        // ponytail: this lock spans only transactional flag writes, never native
+        // ponytail: this permit spans only transactional flag writes, never native
         // admission. A stop callback must not wait for the goal-state semaphore.
-        let _writer = self.writer.lock().await;
+        let _writer = self.writer.acquire().await.map_err(|err| err.to_string())?;
         store
             .set_keep_working(thread_id, /*enabled*/ false)
             .await

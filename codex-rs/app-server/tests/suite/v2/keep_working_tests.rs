@@ -422,7 +422,7 @@ async fn keep_working_peer_handoff_survives_the_old_interrupt() -> Result<()> {
     test.codex
         .submit(Op::InterAgentCommunication {
             communication: codex_protocol::protocol::InterAgentCommunication::new(
-                codex_protocol::AgentPath::try_from("/root/peer")?,
+                codex_protocol::AgentPath::try_from("/root/peer").map_err(anyhow::Error::msg)?,
                 codex_protocol::AgentPath::root(),
                 Vec::new(),
                 PEER.to_string(),

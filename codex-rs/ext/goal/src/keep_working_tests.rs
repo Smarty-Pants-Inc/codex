@@ -75,7 +75,7 @@ async fn stop_revokes_claim_before_waiting_for_writer_and_fresh_on_still_works()
         settlement.finish("old-turn");
         settlement.take_completed().expect("one completed claim")
     };
-    let writer = control.writer.lock().await;
+    let writer = control.writer.acquire().await.expect("writer gate open");
     let mut stopping = Box::pin(control.stop(state.thread_goals(), thread_id));
     poll_fn(|cx| {
         assert!(stopping.as_mut().poll(cx).is_pending());
