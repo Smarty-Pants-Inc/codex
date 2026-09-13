@@ -22,10 +22,14 @@ impl GoalStore {
         } else {
             "DELETE FROM thread_keep_working WHERE thread_id = ?"
         };
+        // A cancelled writer must roll back queued work, not leave an autocommit
+        // INSERT that could run after a later stop's DELETE.
+        let mut transaction = self.pool.begin().await?;
         sqlx::query(query)
             .bind(thread_id.to_string())
-            .execute(self.pool.as_ref())
+            .execute(&mut *transaction)
             .await?;
+        transaction.commit().await?;
         Ok(())
     }
 }

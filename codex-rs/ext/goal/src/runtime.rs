@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
@@ -51,9 +50,11 @@ pub(crate) enum ContinuationTrigger {
     ThreadIdle(ThreadIdleCause),
 }
 
+#[path = "keep_working.rs"]
+mod keep_working;
 #[path = "settlement.rs"]
 mod settlement;
-use settlement::Settlement;
+use keep_working::KeepWorking;
 
 struct GoalRuntimeInner {
     thread_id: ThreadId,
@@ -67,8 +68,7 @@ struct GoalRuntimeInner {
     enabled: AtomicBool,
     tools_available_for_thread: bool,
     goal_state_lock: Semaphore,
-    settlement: Mutex<Settlement>,
-    keep_working_halted: AtomicBool,
+    keep_working: KeepWorking,
 }
 
 pub(crate) struct AccountedGoalProgress {
@@ -122,8 +122,7 @@ impl GoalRuntimeHandle {
                 enabled: AtomicBool::new(config.enabled),
                 tools_available_for_thread: config.tools_available_for_thread,
                 goal_state_lock: Semaphore::new(/*permits*/ 1),
-                settlement: Mutex::new(Settlement::None),
-                keep_working_halted: AtomicBool::new(false),
+                keep_working: KeepWorking::default(),
             }),
         }
     }
@@ -145,23 +144,31 @@ impl GoalRuntimeHandle {
     }
 
     pub(crate) fn start_settlement(&self, turn_id: &str) {
-        *self
-            .inner
+        self.inner
+            .keep_working
             .settlement
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Settlement::Running(turn_id.to_string());
+            .unwrap_or_else(PoisonError::into_inner)
+            .start(turn_id);
     }
 
     pub(crate) fn finish_settlement(&self, turn_id: &str) {
         let mut settlement = self
             .inner
+            .keep_working
             .settlement
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         settlement.finish(turn_id);
     }
 
-    pub(crate) async fn set_keep_working(&self, enabled: bool) -> Result<(), String> {
+    pub(crate) async fn set_keep_working(
+        &self,
+        turn_id: &str,
+        enabled: bool,
+    ) -> Result<(), String> {
+        // Capture intent before any wait; a stopped call cannot become a fresh ON.
+        let intent = self.inner.keep_working.intent_for_turn(turn_id)?;
         let _permit = self.goal_state_permit().await?;
         if enabled
             && self
@@ -178,33 +185,21 @@ impl GoalRuntimeHandle {
             );
         }
         self.inner
-            .state_dbs
-            .thread_goals()
-            .set_keep_working(self.thread_id(), enabled)
+            .keep_working
+            .set(
+                self.inner.state_dbs.thread_goals(),
+                self.thread_id(),
+                intent,
+                enabled,
+            )
             .await
-            .map_err(|err| err.to_string())?;
-        self.inner
-            .keep_working_halted
-            .store(!enabled, Ordering::SeqCst);
-        Ok(())
     }
 
     pub(crate) async fn stop_keep_working(&self) -> Result<(), String> {
-        // ponytail: do not take goal_state_lock from a lifecycle callback. Core's
-        // submission loop can await this callback while idle admission awaits that loop.
-        // Latch OFF first so a failed database write stays fail-closed in this runtime.
-        self.inner.keep_working_halted.store(true, Ordering::SeqCst);
-        *self
-            .inner
-            .settlement
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Settlement::None;
         self.inner
-            .state_dbs
-            .thread_goals()
-            .set_keep_working(self.thread_id(), /*enabled*/ false)
+            .keep_working
+            .stop(self.inner.state_dbs.thread_goals(), self.thread_id())
             .await
-            .map_err(|err| err.to_string())
     }
 
     pub(crate) fn thread_id(&self) -> ThreadId {
@@ -517,13 +512,7 @@ impl GoalRuntimeHandle {
             if !matches!(
                 trigger,
                 ContinuationTrigger::ThreadIdle(ThreadIdleCause::Completed)
-            ) || self.inner.keep_working_halted.load(Ordering::SeqCst)
-                || !self
-                    .inner
-                    .settlement
-                    .lock()
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .take_completed()
+            ) || self.inner.keep_working.halted.load(Ordering::SeqCst)
             {
                 return Ok(());
             }
@@ -542,6 +531,37 @@ impl GoalRuntimeHandle {
         {
             return Ok(());
         }
+
+        let guard = {
+            let mut settlement = self
+                .inner
+                .keep_working
+                .settlement
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            match trigger {
+                ContinuationTrigger::ThreadIdle(ThreadIdleCause::Completed) if keep_working => {
+                    let Some(guard) = settlement.take_completed() else {
+                        return Ok(());
+                    };
+                    guard
+                }
+                ContinuationTrigger::ThreadIdle(ThreadIdleCause::Completed) => {
+                    // Legacy queue wakeups need not have a fresh model settlement,
+                    // but an idle notification cannot resurrect stopped authority.
+                    if matches!(*settlement, settlement::Settlement::None)
+                        && self.inner.keep_working.halted.load(Ordering::SeqCst)
+                    {
+                        return Ok(());
+                    }
+                    settlement.legacy_resume()
+                }
+                ContinuationTrigger::GoalUpdated => settlement.legacy_resume(),
+                ContinuationTrigger::ThreadIdle(
+                    ThreadIdleCause::Interrupted | ThreadIdleCause::Failed,
+                ) => unreachable!("stop handled above"),
+            }
+        };
 
         let Some(thread_manager) = self.inner.thread_manager.upgrade() else {
             tracing::debug!("skipping goal continuation because thread manager is unavailable");
@@ -595,7 +615,9 @@ impl GoalRuntimeHandle {
 
         match thread
             .start_turn_if_idle(
-                TurnInputRequest::new(TurnInput::ResponseItem(item)).on_start(start_options),
+                TurnInputRequest::new(TurnInput::ResponseItem(item))
+                    .on_start(start_options)
+                    .with_idle_start_guard(guard),
             )
             .await
         {

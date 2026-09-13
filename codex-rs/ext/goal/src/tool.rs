@@ -446,7 +446,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for KeepWorkingToolExecutor {
         Box::pin(async move {
             let args: KeepWorkingArgs = parse_arguments(invocation.function_arguments()?)?;
             self.0
-                .set_keep_working(args.enabled)
+                .set_keep_working(&invocation.turn_id, args.enabled)
                 .await
                 .map_err(FunctionCallError::RespondToModel)?;
             let value = serde_json::to_value(args)

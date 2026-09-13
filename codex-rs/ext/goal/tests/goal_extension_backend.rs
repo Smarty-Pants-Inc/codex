@@ -53,6 +53,8 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
 
+#[path = "../src/keep_working.rs"]
+mod keep_working;
 #[path = "../src/settlement.rs"]
 mod settlement;
 
@@ -60,18 +62,25 @@ mod settlement;
 fn keep_working_consumes_each_native_settlement_once() {
     use settlement::Settlement;
     let mut state = Settlement::default();
-    assert!(!state.take_completed()); // A resumed runtime has no admission to replay.
-    state = Settlement::Running("turn-1".to_string());
+    assert!(state.take_completed().is_none()); // Resume has no admission to replay.
+    state.start("turn-1");
     state.finish("stale-turn");
-    assert_eq!(state, Settlement::Running("turn-1".to_string()));
+    assert!(state.take_completed().is_none());
     state.finish("turn-1");
-    assert!(state.take_completed());
+    let old = state
+        .take_completed()
+        .expect("completed turn grants one claim");
     state.finish("turn-1");
-    assert!(!state.take_completed()); // Neither duplicate stop nor idle can retry admission.
-    state = Settlement::Running("turn-2".to_string());
-    assert!(!state.take_completed()); // Active work cannot grant an opportunity.
+    assert!(state.take_completed().is_none());
+    state.start("turn-2");
+    assert!(old.is_revoked()); // New user work supersedes a queued old claim.
+    assert!(state.take_completed().is_none());
     state.finish("turn-2");
-    assert!(!state.take_completed());
+    let pending = state.take_completed().expect("new settlement");
+    state.stop();
+    assert!(pending.is_revoked()); // Stop retains authority after the claim was consumed.
+    let resumed = state.legacy_resume();
+    assert!(!resumed.is_revoked()); // Explicit legacy resume is fresh authority.
 }
 
 #[tokio::test]
@@ -1517,6 +1526,7 @@ async fn keep_working_validates_arguments_and_persists_without_a_goal() -> anyho
     let state = test_runtime().await?;
     let thread_id = test_thread_id()?;
     let harness = GoalExtensionHarness::new(state.clone(), thread_id).await?;
+    harness.start_turn("turn-1", &TokenUsage::default()).await;
     let tools = harness.tools();
     let tool = tool_by_name(&tools, "keep_working");
     for args in [
@@ -1555,6 +1565,7 @@ async fn keep_working_and_legacy_goal_control_are_mutually_exclusive() -> anyhow
     let state = test_runtime().await?;
     let thread_id = test_thread_id()?;
     let harness = GoalExtensionHarness::new(state.clone(), thread_id).await?;
+    harness.start_turn("turn-1", &TokenUsage::default()).await;
     let tools = harness.tools();
     let enable = tool_call("keep_working", "enable", json!({"enabled": true}));
     let tool = tool_by_name(&tools, "keep_working");
@@ -1613,6 +1624,7 @@ async fn keep_working_terminal_lifecycle_persists_off_before_idle() -> anyhow::R
         harness.stop_turn("turn-1").await;
     }
     for cause in [ThreadIdleCause::Interrupted, ThreadIdleCause::Failed] {
+        harness.start_turn("turn-1", &TokenUsage::default()).await;
         tool.handle(tool_call(
             "keep_working",
             "enable",
