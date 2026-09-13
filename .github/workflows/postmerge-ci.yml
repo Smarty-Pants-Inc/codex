@@ -5,6 +5,11 @@ name: postmerge-ci
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - .mergify.yml
+      - .github/workflows/blocking-ci.yml
+      - .github/workflows/v8-canary.yml
+      - .github/workflows/postmerge-ci.yml
 
 jobs:
   # Keep reusable workflow calls alphabetized. Each child retains its own

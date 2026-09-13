@@ -3,9 +3,19 @@ name: blocking-ci
 # This is the single entrypoint for checks that block a PR merge. It also runs
 # after pushes to main so the same check family stays grouped in the Actions UI.
 on:
-  pull_request: {}
+  pull_request:
+    paths-ignore:
+      - .mergify.yml
+      - .github/workflows/blocking-ci.yml
+      - .github/workflows/v8-canary.yml
+      - .github/workflows/postmerge-ci.yml
   push:
     branches: [main]
+    paths-ignore:
+      - .mergify.yml
+      - .github/workflows/blocking-ci.yml
+      - .github/workflows/v8-canary.yml
+      - .github/workflows/postmerge-ci.yml
 
 jobs:
   # Keep reusable workflow calls alphabetized. The `required` job below is the

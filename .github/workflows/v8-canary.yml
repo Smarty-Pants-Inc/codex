@@ -1,12 +1,16 @@
 name: v8-canary
 
-# Do not use trigger-level path filters here. This workflow is also called by
-# postmerge-ci, and GitHub cannot share a path filter between pull_request and
-# workflow_call. v8_canary_changes.py is the single source of truth instead;
-# unrelated events run only the cheap metadata job below.
+# Skip policy-only PRs; postmerge-ci applies the same narrow path guard.
+# Reusable/manual calls retain their existing behavior. For all other changes,
+# v8_canary_changes.py selects the canary coverage.
 on:
   workflow_call:
-  pull_request: {}
+  pull_request:
+    paths-ignore:
+      - .mergify.yml
+      - .github/workflows/blocking-ci.yml
+      - .github/workflows/v8-canary.yml
+      - .github/workflows/postmerge-ci.yml
   workflow_dispatch:
 
 concurrency:
