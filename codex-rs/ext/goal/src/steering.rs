@@ -42,6 +42,13 @@ fn parse_embedded_template(source: &str, template_name: &str) -> Template {
     }
 }
 
+pub(crate) fn keep_working_steering_item() -> ResponseItem {
+    ContextualUserFragment::into(InternalModelContextFragment::new(
+        InternalContextSource::from_static("keep_working"),
+        "Continue useful authorized work from the existing conversation. If finished or waiting for input or external change, call keep_working(enabled=false), then explain the result. Do not invent work or poll.",
+    ))
+}
+
 pub(crate) fn budget_limit_steering_item(goal: &ThreadGoal) -> ResponseItem {
     goal_context_input_item(budget_limit_prompt(goal))
 }

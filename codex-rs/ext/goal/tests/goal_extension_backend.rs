@@ -15,6 +15,8 @@ use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ExtensionWarning;
 use codex_extension_api::FunctionCallError;
 use codex_extension_api::NoopTurnItemEmitter;
+use codex_extension_api::ThreadIdleCause;
+use codex_extension_api::ThreadIdleInput;
 use codex_extension_api::ThreadResumeInput;
 use codex_extension_api::ThreadStartInput;
 use codex_extension_api::ThreadStopInput;
@@ -50,6 +52,27 @@ use codex_protocol::protocol::TruncationPolicy;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
+
+#[path = "../src/settlement.rs"]
+mod settlement;
+
+#[test]
+fn keep_working_consumes_each_native_settlement_once() {
+    use settlement::Settlement;
+    let mut state = Settlement::default();
+    assert!(!state.take_completed()); // A resumed runtime has no admission to replay.
+    state = Settlement::Running("turn-1".to_string());
+    state.finish("stale-turn");
+    assert_eq!(state, Settlement::Running("turn-1".to_string()));
+    state.finish("turn-1");
+    assert!(state.take_completed());
+    state.finish("turn-1");
+    assert!(!state.take_completed()); // Neither duplicate stop nor idle can retry admission.
+    state = Settlement::Running("turn-2".to_string());
+    assert!(!state.take_completed()); // Active work cannot grant an opportunity.
+    state.finish("turn-2");
+    assert!(!state.take_completed());
+}
 
 #[tokio::test]
 async fn installed_goal_tools_create_goal_and_fill_empty_preview() -> anyhow::Result<()> {
@@ -1486,6 +1509,127 @@ async fn goal_service_enforces_maximum_token_budget_on_creation_and_updates() ->
         )
         .await?;
     assert_eq!(goal.goal.token_budget, Some(100));
+    Ok(())
+}
+
+#[tokio::test]
+async fn keep_working_validates_arguments_and_persists_without_a_goal() -> anyhow::Result<()> {
+    let state = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    let harness = GoalExtensionHarness::new(state.clone(), thread_id).await?;
+    let tools = harness.tools();
+    let tool = tool_by_name(&tools, "keep_working");
+    for args in [
+        json!({}),
+        json!({"enabled": 1}),
+        json!({"enabled": null}),
+        json!({"enabled": true, "objective": "extra"}),
+    ] {
+        assert!(
+            tool.handle(tool_call("keep_working", "invalid", args))
+                .await
+                .is_err()
+        );
+    }
+    assert!(!state.thread_goals().keep_working_enabled(thread_id).await?);
+    for enabled in [true, false, true] {
+        let call = tool_call("keep_working", "toggle", json!({"enabled": enabled}));
+        let output = tool.handle(call.clone()).await?;
+        assert_eq!(
+            output.code_mode_result(&call.payload),
+            json!({"enabled": enabled})
+        );
+        assert_eq!(
+            state.thread_goals().keep_working_enabled(thread_id).await?,
+            enabled
+        );
+    }
+    assert_eq!(state.thread_goals().get_thread_goal(thread_id).await?, None);
+    harness.resume_thread().await;
+    assert!(state.thread_goals().keep_working_enabled(thread_id).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keep_working_and_legacy_goal_control_are_mutually_exclusive() -> anyhow::Result<()> {
+    let state = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    let harness = GoalExtensionHarness::new(state.clone(), thread_id).await?;
+    let tools = harness.tools();
+    let enable = tool_call("keep_working", "enable", json!({"enabled": true}));
+    let tool = tool_by_name(&tools, "keep_working");
+    tool.handle(enable.clone()).await?;
+    tool_by_name(&tools, "create_goal")
+        .handle(tool_call(
+            "create_goal",
+            "create",
+            json!({"objective": "legacy work"}),
+        ))
+        .await?;
+    assert!(!state.thread_goals().keep_working_enabled(thread_id).await?);
+    assert!(tool.handle(enable.clone()).await.is_err());
+    tool_by_name(&tools, "update_goal")
+        .handle(tool_call(
+            "update_goal",
+            "complete",
+            json!({"status": "complete"}),
+        ))
+        .await?;
+    tool.handle(enable).await?;
+    harness
+        .goal_service
+        .set_thread_goal(
+            state.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Keep,
+                status: Some(ThreadGoalStatus::Active),
+                token_budget: GoalTokenBudgetUpdate::Keep,
+                max_goal_token_budget: None,
+            },
+        )
+        .await?;
+    assert!(!state.thread_goals().keep_working_enabled(thread_id).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keep_working_terminal_lifecycle_persists_off_before_idle() -> anyhow::Result<()> {
+    let state = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    let harness = GoalExtensionHarness::new(state.clone(), thread_id).await?;
+    let tools = harness.tools();
+    let tool = tool_by_name(&tools, "keep_working");
+    for error in [CodexErrorInfo::UsageLimitExceeded, CodexErrorInfo::Other] {
+        harness.start_turn("turn-1", &TokenUsage::default()).await;
+        tool.handle(tool_call(
+            "keep_working",
+            "enable",
+            json!({"enabled": true}),
+        ))
+        .await?;
+        harness.notify_turn_error("turn-1", error).await;
+        assert!(!state.thread_goals().keep_working_enabled(thread_id).await?);
+        harness.stop_turn("turn-1").await;
+    }
+    for cause in [ThreadIdleCause::Interrupted, ThreadIdleCause::Failed] {
+        tool.handle(tool_call(
+            "keep_working",
+            "enable",
+            json!({"enabled": true}),
+        ))
+        .await?;
+        for contributor in harness.registry.thread_lifecycle_contributors() {
+            contributor
+                .on_thread_idle(ThreadIdleInput {
+                    cause,
+                    session_store: &harness.session_store,
+                    thread_store: &harness.thread_store,
+                })
+                .await;
+        }
+        assert!(!state.thread_goals().keep_working_enabled(thread_id).await?);
+    }
     Ok(())
 }
 

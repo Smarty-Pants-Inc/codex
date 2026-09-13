@@ -191,6 +191,13 @@ impl GoalService {
             tracing::warn!("failed to prepare external goal mutation: {err}");
         }
 
+        // Explicit legacy goal control selects that policy before it can start work.
+        state_db
+            .thread_goals()
+            .set_keep_working(thread_id, /*enabled*/ false)
+            .await
+            .map_err(|err| GoalServiceError::Internal(err.to_string()))?;
+
         let (goal, previous_goal) = if let Some(objective) = objective {
             let existing_goal = state_db
                 .thread_goals()

@@ -1,4 +1,6 @@
 use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::PoisonError;
 use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -8,6 +10,7 @@ use codex_core::ThreadManager;
 use codex_core::TurnInput;
 use codex_core::TurnInputRequest;
 use codex_core::TurnStartOptions;
+use codex_extension_api::ThreadIdleCause;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ThreadGoal;
@@ -19,6 +22,7 @@ use crate::analytics::GoalEventAttribution;
 use crate::events::GoalEventEmitter;
 use crate::metrics::GoalMetrics;
 use crate::steering::continuation_steering_item;
+use crate::steering::keep_working_steering_item;
 use crate::steering::objective_updated_steering_item;
 use crate::tool::protocol_goal_from_state;
 use tokio::sync::Semaphore;
@@ -42,6 +46,15 @@ pub(crate) enum ActiveGoalStopReason {
     ExecutionUnavailable { expected_goal_id: String },
 }
 
+pub(crate) enum ContinuationTrigger {
+    GoalUpdated,
+    ThreadIdle(ThreadIdleCause),
+}
+
+#[path = "settlement.rs"]
+mod settlement;
+use settlement::Settlement;
+
 struct GoalRuntimeInner {
     thread_id: ThreadId,
     state_dbs: Arc<codex_state::StateRuntime>,
@@ -54,6 +67,8 @@ struct GoalRuntimeInner {
     enabled: AtomicBool,
     tools_available_for_thread: bool,
     goal_state_lock: Semaphore,
+    settlement: Mutex<Settlement>,
+    keep_working_halted: AtomicBool,
 }
 
 pub(crate) struct AccountedGoalProgress {
@@ -107,6 +122,8 @@ impl GoalRuntimeHandle {
                 enabled: AtomicBool::new(config.enabled),
                 tools_available_for_thread: config.tools_available_for_thread,
                 goal_state_lock: Semaphore::new(/*permits*/ 1),
+                settlement: Mutex::new(Settlement::None),
+                keep_working_halted: AtomicBool::new(false),
             }),
         }
     }
@@ -120,7 +137,74 @@ impl GoalRuntimeHandle {
     }
 
     pub(crate) fn tools_visible(&self) -> bool {
-        self.is_enabled() && self.inner.tools_available_for_thread
+        self.is_enabled() && self.tools_available_for_thread()
+    }
+
+    pub(crate) fn tools_available_for_thread(&self) -> bool {
+        self.inner.tools_available_for_thread
+    }
+
+    pub(crate) fn start_settlement(&self, turn_id: &str) {
+        *self
+            .inner
+            .settlement
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Settlement::Running(turn_id.to_string());
+    }
+
+    pub(crate) fn finish_settlement(&self, turn_id: &str) {
+        let mut settlement = self
+            .inner
+            .settlement
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        settlement.finish(turn_id);
+    }
+
+    pub(crate) async fn set_keep_working(&self, enabled: bool) -> Result<(), String> {
+        let _permit = self.goal_state_permit().await?;
+        if enabled
+            && self
+                .inner
+                .state_dbs
+                .thread_goals()
+                .get_thread_goal(self.thread_id())
+                .await
+                .map_err(|err| err.to_string())?
+                .is_some_and(|goal| goal.status != codex_state::ThreadGoalStatus::Complete)
+        {
+            return Err(
+                "keep_working cannot be enabled while an unfinished legacy goal exists".to_string(),
+            );
+        }
+        self.inner
+            .state_dbs
+            .thread_goals()
+            .set_keep_working(self.thread_id(), enabled)
+            .await
+            .map_err(|err| err.to_string())?;
+        self.inner
+            .keep_working_halted
+            .store(!enabled, Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub(crate) async fn stop_keep_working(&self) -> Result<(), String> {
+        // ponytail: do not take goal_state_lock from a lifecycle callback. Core's
+        // submission loop can await this callback while idle admission awaits that loop.
+        // Latch OFF first so a failed database write stays fail-closed in this runtime.
+        self.inner.keep_working_halted.store(true, Ordering::SeqCst);
+        *self
+            .inner
+            .settlement
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Settlement::None;
+        self.inner
+            .state_dbs
+            .thread_goals()
+            .set_keep_working(self.thread_id(), /*enabled*/ false)
+            .await
+            .map_err(|err| err.to_string())
     }
 
     pub(crate) fn thread_id(&self) -> ThreadId {
@@ -227,7 +311,8 @@ impl GoalRuntimeHandle {
                     let item = objective_updated_steering_item(&protocol_goal_from_state(goal));
                     self.inject_active_turn_steering(item).await;
                 }
-                self.continue_if_idle().await?;
+                self.continue_if_idle(ContinuationTrigger::GoalUpdated)
+                    .await?;
             }
             codex_state::ThreadGoalStatus::BudgetLimited => {
                 if self.inner.accounting_state.current_turn_id().is_none() {
@@ -268,7 +353,14 @@ impl GoalRuntimeHandle {
         turn_id: &str,
         reason: ActiveGoalStopReason,
     ) -> Result<(), String> {
-        if !self.is_enabled() {
+        self.stop_keep_working().await?;
+        if !self.is_enabled()
+            || self
+                .inner
+                .accounting_state
+                .current_active_goal_id_for_turn(turn_id)
+                .is_none()
+        {
             return Ok(());
         }
 
@@ -396,8 +488,17 @@ impl GoalRuntimeHandle {
         Ok(())
     }
 
-    pub(crate) async fn continue_if_idle(&self) -> Result<(), String> {
-        if !self.tools_visible() {
+    pub(crate) async fn continue_if_idle(
+        &self,
+        trigger: ContinuationTrigger,
+    ) -> Result<(), String> {
+        if matches!(
+            trigger,
+            ContinuationTrigger::ThreadIdle(ThreadIdleCause::Interrupted | ThreadIdleCause::Failed)
+        ) {
+            return self.stop_keep_working().await;
+        }
+        if !self.tools_available_for_thread() {
             self.inner.accounting_state.clear_active_goal();
             return Ok(());
         }
@@ -405,13 +506,39 @@ impl GoalRuntimeHandle {
         // change the goal after we read it but before the continuation launches.
         let _goal_state_permit = self.goal_state_permit().await?;
 
-        if self
+        let keep_working = self
             .inner
             .state_dbs
             .thread_goals()
-            .has_thread_goal_continuation_deferral(self.thread_id())
+            .keep_working_enabled(self.thread_id())
             .await
-            .map_err(|err| err.to_string())?
+            .map_err(|err| err.to_string())?;
+        if keep_working {
+            if !matches!(
+                trigger,
+                ContinuationTrigger::ThreadIdle(ThreadIdleCause::Completed)
+            ) || self.inner.keep_working_halted.load(Ordering::SeqCst)
+                || !self
+                    .inner
+                    .settlement
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .take_completed()
+            {
+                return Ok(());
+            }
+        } else if !self.is_enabled() {
+            return Ok(());
+        }
+
+        if !keep_working
+            && self
+                .inner
+                .state_dbs
+                .thread_goals()
+                .has_thread_goal_continuation_deferral(self.thread_id())
+                .await
+                .map_err(|err| err.to_string())?
         {
             return Ok(());
         }
@@ -425,37 +552,50 @@ impl GoalRuntimeHandle {
             return Ok(());
         };
 
-        let Some(goal) = self
-            .inner
-            .state_dbs
-            .thread_goals()
-            .get_thread_goal(self.thread_id())
-            .await
-            .map_err(|err| err.to_string())?
-        else {
-            self.inner.accounting_state.clear_active_goal();
-            return Ok(());
+        let (item, start_options) = if keep_working {
+            (
+                keep_working_steering_item(),
+                TurnStartOptions {
+                    turn_trigger: Some("keep_working".to_string()),
+                    ..Default::default()
+                },
+            )
+        } else {
+            let Some(goal) = self
+                .inner
+                .state_dbs
+                .thread_goals()
+                .get_thread_goal(self.thread_id())
+                .await
+                .map_err(|err| err.to_string())?
+            else {
+                self.inner.accounting_state.clear_active_goal();
+                return Ok(());
+            };
+            if goal.status != codex_state::ThreadGoalStatus::Active {
+                self.inner.accounting_state.clear_active_goal();
+                return Ok(());
+            }
+            let options = thread
+                .thread_extension_data()
+                .get::<TurnStartOptions>()
+                .map(|options| options.as_ref().clone())
+                .unwrap_or_default();
+            (
+                continuation_steering_item(
+                    &protocol_goal_from_state(goal),
+                    thread.config().await.update_plan_enabled,
+                ),
+                TurnStartOptions {
+                    turn_trigger: Some("goal".to_string()),
+                    ..options
+                },
+            )
         };
-        if goal.status != codex_state::ThreadGoalStatus::Active {
-            self.inner.accounting_state.clear_active_goal();
-            return Ok(());
-        }
-        let start_options = thread
-            .thread_extension_data()
-            .get::<TurnStartOptions>()
-            .map(|options| options.as_ref().clone())
-            .unwrap_or_default();
-        let item = continuation_steering_item(
-            &protocol_goal_from_state(goal),
-            thread.config().await.update_plan_enabled,
-        );
 
         match thread
             .start_turn_if_idle(
-                TurnInputRequest::new(TurnInput::ResponseItem(item)).on_start(TurnStartOptions {
-                    turn_trigger: Some("goal".to_string()),
-                    ..start_options
-                }),
+                TurnInputRequest::new(TurnInput::ResponseItem(item)).on_start(start_options),
             )
             .await
         {
