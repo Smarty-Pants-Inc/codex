@@ -213,17 +213,19 @@ async fn realtime_replay_restores_durable_speech_in_order_and_deduplicates_live_
         // consolidation. Speech must remain deferred until that acknowledgement.
         assert_eq!(chat.pending_stream_consolidations, 1);
         chat.note_stream_consolidation_completed();
-        insta::assert_snapshot!(transcript(&mut rx).join("\n\n"), @"
-        › Playback diagnostic. Copper lantern. What is 3 plus 4? Please answer in one short sentence.
+        insta::allow_duplicates! {
+            insta::assert_snapshot!(transcript(&mut rx).join("\n\n"), @"
+            › Playback diagnostic. Copper lantern. What is 3 plus 4? Please answer in one short sentence.
 
-        • Sure thing! Three plus four equals seven.
+            • Sure thing! Three plus four equals seven.
 
-        › Typed question
+            › Typed question
 
-        • Typed answer
+            • Typed answer
 
-        • Later speech
-        ");
+            • Later speech
+            ");
+        }
         assert!(ops.try_recv().is_err());
     }
 }

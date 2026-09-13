@@ -97,8 +97,8 @@ jobs:
         if: always()
         run: |
           mkdir -p evidence
-          if [[ -f "$CARGO_TARGET_DIR/nextest/local/junit.xml" ]]; then
-            cp "$CARGO_TARGET_DIR/nextest/local/junit.xml" evidence/junit.xml
+          if [[ -f codex-rs/target/nextest/local/junit.xml ]]; then
+            cp codex-rs/target/nextest/local/junit.xml evidence/junit.xml
           fi
           python3 - <<'PY'
           import json
