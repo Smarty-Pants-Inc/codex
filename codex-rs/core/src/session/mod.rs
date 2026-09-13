@@ -4569,10 +4569,15 @@ impl Session {
     pub async fn interrupt_task(self: &Arc<Self>) {
         info!("interrupt received: abort current task, if any");
         let had_active_turn = self.active_turn.lock().await.is_some();
+        self.mark_interrupted();
         self.abort_all_tasks(TurnAbortReason::Interrupted).await;
         if !had_active_turn {
             self.cancel_mcp_startup();
         }
+        // A task can finish before abort acquires it, or there may be no task.
+        // Stop-only observers must run even with pending mail; duplicate stops are safe.
+        self.emit_thread_idle_lifecycle(codex_extension_api::ThreadIdleCause::Interrupted)
+            .await;
     }
 
     pub(crate) fn hooks(&self) -> Arc<Hooks> {
