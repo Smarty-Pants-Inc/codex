@@ -109,7 +109,11 @@ jobs:
           for name in ('discovered', 'selected'):
               path = root / f'{name}.json'
               if path.exists():
-                  data = json.loads(path.read_text())
+                  try:
+                      data = json.loads(path.read_text())
+                  except json.JSONDecodeError:
+                      counts[f'{name}_error'] = 'Incomplete or invalid discovery JSON; counts unknown'
+                      continue
                   cases = [case for suite in data['rust-suites'].values() for case in suite['testcases'].values()]
                   counts[name] = sum(case['filter-match']['status'] == 'matches' for case in cases)
                   counts[f'{name}_ignored'] = sum(case['ignored'] for case in cases if case['filter-match']['status'] == 'matches')
