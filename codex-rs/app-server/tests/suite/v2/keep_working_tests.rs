@@ -22,8 +22,14 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::Op;
 use codex_utils_absolute_path::test_support::PathExt;
 use core_test_support::responses;
+use core_test_support::streaming_sse::StreamingSseChunk;
+use core_test_support::streaming_sse::start_streaming_sse_server;
+use core_test_support::test_codex::test_codex;
+use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::sync::Arc;
@@ -304,6 +310,210 @@ async fn keep_working_idle_interrupt_persists_off_and_explicit_legacy_resume_wor
     assert!(!state.thread_goals().keep_working_enabled(native_id).await?);
     timeout(TIMEOUT, app.shutdown_gracefully()).await??;
     assert_eq!(mock.requests().len(), 5);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keep_working_peer_handoff_survives_the_old_interrupt() -> Result<()> {
+    const INITIAL: &str = "initial keep-working mailbox regression";
+    const PEER: &str = "pending peer work owns the next turn";
+    let (release_old, old_gate) = tokio::sync::oneshot::channel();
+    let (release_enable, enable_gate) = tokio::sync::oneshot::channel();
+    let (release_peer, peer_gate) = tokio::sync::oneshot::channel();
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![StreamingSseChunk {
+            gate: None,
+            body: toggle_response(/*enabled*/ true),
+        }],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: responses::sse_completed("initial-complete"),
+        }],
+        vec![
+            StreamingSseChunk {
+                gate: None,
+                body: responses::sse(vec![responses::ev_response_created("old-automatic")]),
+            },
+            StreamingSseChunk {
+                gate: Some(old_gate),
+                body: responses::sse(vec![responses::ev_completed("old-automatic")]),
+            },
+        ],
+        vec![StreamingSseChunk {
+            gate: Some(enable_gate),
+            body: responses::sse(vec![
+                responses::ev_function_call("peer-enable", "keep_working", r#"{"enabled":true}"#),
+                responses::ev_completed("peer-enable"),
+            ]),
+        }],
+        vec![StreamingSseChunk {
+            gate: Some(peer_gate),
+            body: responses::sse_completed("peer-complete"),
+        }],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: toggle_response(/*enabled*/ false),
+        }],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: responses::sse_completed("all-done"),
+        }],
+    ])
+    .await;
+    let home = Arc::new(TempDir::new()?);
+    let state = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(home.path().abs()),
+        "openai".to_string(),
+    )
+    .await?;
+    let goals = Arc::new(codex_goal_extension::GoalService::new());
+    let test = test_codex()
+        .with_home(Arc::clone(&home))
+        .with_extensions_factory({
+            let state = Arc::clone(&state);
+            move |manager| {
+                let mut registry = codex_extension_api::ExtensionRegistryBuilder::new();
+                codex_goal_extension::install_with_backend(
+                    &mut registry,
+                    Arc::clone(&state),
+                    codex_analytics::AnalyticsEventsClient::disabled(),
+                    /*metrics_client*/ None,
+                    manager,
+                    Arc::clone(&goals),
+                    |_config: &codex_core::config::Config| {
+                        codex_goal_extension::GoalExtensionConfig {
+                            enabled: false,
+                            max_goal_token_budget: None,
+                        }
+                    },
+                );
+                Arc::new(registry.build())
+            }
+        })
+        .build_with_streaming_server(&server)
+        .await?;
+    let native_id = test.session_configured.thread_id;
+    test.codex
+        .start_or_steer_turn(codex_core::TurnInputRequest::user_input(vec![
+            codex_protocol::user_input::UserInput::Text {
+                text: INITIAL.to_string(),
+                text_elements: Vec::new(),
+            },
+        ]))
+        .await?;
+    let EventMsg::TurnComplete(initial) = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await
+    else {
+        unreachable!("waited for initial completion");
+    };
+    let EventMsg::TurnStarted(old) = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnStarted(_))
+    })
+    .await
+    else {
+        unreachable!("waited for the claimed automatic turn");
+    };
+    timeout(TIMEOUT, server.wait_for_request_count(/*count*/ 3)).await?;
+
+    // The old automatic turn is blocked in its model stream, so the triggering
+    // mail remains pending until Interrupt takes the old task and hands it off.
+    test.codex
+        .submit(Op::InterAgentCommunication {
+            communication: codex_protocol::protocol::InterAgentCommunication::new(
+                codex_protocol::AgentPath::try_from("/root/peer")?,
+                codex_protocol::AgentPath::root(),
+                Vec::new(),
+                PEER.to_string(),
+                /*trigger_turn*/ true,
+            ),
+            start_options: Default::default(),
+        })
+        .await?;
+    test.codex.submit(Op::Interrupt).await?;
+    wait_for_event(&test.codex, |event| matches!(event, EventMsg::TurnAborted(aborted) if aborted.turn_id.as_deref() == Some(old.turn_id.as_str()))).await;
+    let EventMsg::TurnStarted(peer) = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnStarted(_))
+    })
+    .await
+    else {
+        unreachable!("waited for the peer handoff");
+    };
+    // This native-loop barrier follows the whole Interrupt handler, not only its
+    // old-turn abort event. The peer turn already owns its real goal settlement.
+    test.codex
+        .submit(Op::ThreadSettings {
+            thread_settings: codex_protocol::protocol::ThreadSettingsOverrides {
+                effort: Some(Some(codex_protocol::openai_models::ReasoningEffort::High)),
+                ..Default::default()
+            },
+        })
+        .await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ThreadSettingsApplied(_))
+    })
+    .await;
+    assert!(!state.thread_goals().keep_working_enabled(native_id).await?);
+    release_enable.send(()).expect("peer enable gate");
+    timeout(TIMEOUT, server.wait_for_request_count(/*count*/ 5)).await?;
+    assert!(state.thread_goals().keep_working_enabled(native_id).await?);
+    let requests = server.requests().await;
+    let enabled: serde_json::Value = serde_json::from_slice(&requests[4])?;
+    let output = enabled["input"]
+        .as_array()
+        .expect("input array")
+        .iter()
+        .find(|item| item["type"] == "function_call_output" && item["call_id"] == "peer-enable")
+        .expect("actual goal tool output");
+    assert_eq!(output["output"], json!("{\"enabled\":true}"));
+    assert!(!String::from_utf8_lossy(&requests[2]).contains(PEER));
+    let history = String::from_utf8_lossy(&requests[3]);
+    assert!(
+        history.find(INITIAL).expect("initial history") < history.find(PEER).expect("peer history")
+    );
+
+    release_peer.send(()).expect("peer completion gate");
+    wait_for_event(&test.codex, |event| matches!(event, EventMsg::TurnComplete(completed) if completed.turn_id == peer.turn_id)).await;
+    let EventMsg::TurnComplete(fresh) = wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await
+    else {
+        unreachable!("waited for exactly one fresh continuation");
+    };
+    assert!(!state.thread_goals().keep_working_enabled(native_id).await?);
+    test.codex.submit(Op::Shutdown).await?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::ShutdownComplete)
+    })
+    .await;
+    let requests = server.requests().await;
+    let turn_ids: Vec<_> = requests
+        .iter()
+        .map(|body| {
+            let request: serde_json::Value = serde_json::from_slice(body).expect("request JSON");
+            request["client_metadata"]["turn_id"].clone()
+        })
+        .collect();
+    // The old claim was interrupted, never replayed. Only the peer settlement
+    // earns a new continuation; no extra automatic or mail-delivery turn appears.
+    assert_eq!(
+        turn_ids,
+        vec![
+            json!(initial.turn_id),
+            json!(initial.turn_id),
+            json!(old.turn_id),
+            json!(peer.turn_id),
+            json!(peer.turn_id),
+            json!(fresh.turn_id),
+            json!(fresh.turn_id),
+        ]
+    );
+    assert_ne!(old.turn_id, peer.turn_id);
+    assert_ne!(peer.turn_id, fresh.turn_id);
+    let _ = release_old.send(());
+    server.shutdown().await;
     Ok(())
 }
 

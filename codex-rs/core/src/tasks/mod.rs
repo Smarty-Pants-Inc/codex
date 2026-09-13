@@ -509,6 +509,19 @@ impl Session {
     }
 
     pub async fn abort_all_tasks(self: &Arc<Self>, reason: TurnAbortReason) {
+        // ponytail: idle shutdown shares this entry point, but is not a user stop.
+        // Only explicit Interrupt adds the stop-only notification.
+        self.abort_all_tasks_with_notification(reason, std::future::ready(()))
+            .await;
+    }
+
+    /// Runs the notification after old-task cleanup, even if no task remained,
+    /// but before pending mail can acquire a new turn's authority.
+    pub(crate) async fn abort_all_tasks_with_notification(
+        self: &Arc<Self>,
+        reason: TurnAbortReason,
+        notification: impl std::future::Future<Output = ()> + Send,
+    ) {
         let mut aborted_turn = false;
         let mut active_turn_to_clear = None;
         let mut turn_context = None;
@@ -534,6 +547,7 @@ impl Session {
             // in-flight approval wait can surface as a model-visible rejection before TurnAborted.
             self.input_queue.clear_pending(&active_turn).await;
         }
+        notification.await;
         if reason == TurnAbortReason::Interrupted && aborted_turn {
             self.maybe_start_turn_for_pending_work().await;
         }
