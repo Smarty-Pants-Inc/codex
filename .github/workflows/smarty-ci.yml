@@ -197,10 +197,16 @@ jobs:
           sha256sum codex-rs/Cargo.lock codex-rs/rust-toolchain.toml codex-rs/.config/nextest.toml \
             justfile scripts/format.py scripts/uv.lock sdk/python/uv.lock tools/buildifier \
             .github/workflows/smarty-ci.yml > backend-evidence/inputs.sha256
+      - name: Configure matching sandbox V8 artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
       - name: Build backend runtime test prerequisites
         working-directory: codex-rs
         run: |
           set -euo pipefail
+          sha256sum "$RUSTY_V8_ARCHIVE" "$RUSTY_V8_SRC_BINDING_PATH" \
+            > ../backend-evidence/rusty-v8.sha256
           # Package-scoped nextest runs do not build sibling packages' executables.
           cargo build --locked \
             -p codex-cli --bin codex \
