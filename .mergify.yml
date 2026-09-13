@@ -6,10 +6,10 @@ merge_queue:
 queue_rules:
   - name: default
     batch_size: 1
-    checks_timeout: 30 min
+    checks_timeout: 130 min
     merge_method: merge
     queue_conditions:
-      - base = main
+      - base ~= ^(?:main|codex/maintenance-0\.153\.4)$
       - -draft
       - check-success = smarty-review
       - check-success = smarty-land-ready
