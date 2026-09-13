@@ -3,11 +3,16 @@ use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
+use codex_app_server_protocol::ThreadGoalSetResponse;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
+use codex_app_server_protocol::ThreadSettingsUpdateParams;
+use codex_app_server_protocol::ThreadSettingsUpdateResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnCompletedNotification;
+use codex_app_server_protocol::TurnInterruptParams;
+use codex_app_server_protocol::TurnInterruptResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
@@ -43,10 +48,7 @@ async fn start(
     config: MockResponsesConfig,
     home: &TempDir,
 ) -> Result<(TestAppServer, String, Arc<codex_state::StateRuntime>)> {
-    config
-        .with_model("gpt-5.2-codex")
-        .disable_feature(Feature::Goals)
-        .write(home.path())?;
+    config.with_model("gpt-5.2-codex").write(home.path())?;
     let mut app = TestAppServer::builder()
         .with_codex_home(home.path())
         .without_managed_config()
@@ -104,7 +106,11 @@ async fn keep_working_completed_admits_one_continuation_and_off_keeps_final_expl
     )
     .await;
     let home = TempDir::new()?;
-    let (mut app, thread_id, state) = start(MockResponsesConfig::new(&server.uri()), &home).await?;
+    let (mut app, thread_id, state) = start(
+        MockResponsesConfig::new(&server.uri()).disable_feature(Feature::Goals),
+        &home,
+    )
+    .await?;
     let first = timeout(
         TIMEOUT,
         app.start_turn_and_wait_for_completion(turn(&thread_id, ModeKind::Default)),
@@ -205,6 +211,99 @@ async fn keep_working_plan_rejection_is_not_replayed_on_cold_resume_or_fork() ->
     );
     timeout(TIMEOUT, app.shutdown_gracefully()).await??;
     assert_eq!(mock.requests().len(), 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn keep_working_idle_interrupt_persists_off_and_explicit_legacy_resume_works() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            toggle_response(/*enabled*/ true),
+            responses::sse_completed("settled-in-plan"),
+            responses::sse(vec![
+                responses::ev_function_call(
+                    "complete-goal",
+                    "update_goal",
+                    r#"{"status":"complete"}"#,
+                ),
+                responses::ev_completed("goal-tool"),
+            ]),
+            responses::sse_completed("legacy-complete"),
+            responses::sse_completed("explicit-user-work"),
+        ],
+    )
+    .await;
+    let home = TempDir::new()?;
+    let (mut app, thread_id, state) = start(
+        MockResponsesConfig::new(&server.uri()).enable_feature(Feature::Goals),
+        &home,
+    )
+    .await?;
+    timeout(
+        TIMEOUT,
+        app.start_turn_and_wait_for_completion(turn(&thread_id, ModeKind::Plan)),
+    )
+    .await??;
+    let native_id = ThreadId::from_string(&thread_id)?;
+    assert!(state.thread_goals().keep_working_enabled(native_id).await?);
+    app.clear_message_buffer();
+    // The existing empty-turn interrupt is an idle/startup stop, not a new RPC.
+    let id = app
+        .send_turn_interrupt_request(TurnInterruptParams {
+            thread_id: thread_id.clone(),
+            turn_id: String::new(),
+        })
+        .await?;
+    let _: TurnInterruptResponse = timeout(TIMEOUT, app.read_response(id)).await??;
+    let id = app
+        .send_thread_settings_update_request(ThreadSettingsUpdateParams {
+            thread_id: thread_id.clone(),
+            collaboration_mode: turn(&thread_id, ModeKind::Default).collaboration_mode,
+            ..Default::default()
+        })
+        .await?;
+    let _: ThreadSettingsUpdateResponse = timeout(TIMEOUT, app.read_response(id)).await??;
+    // The notification (not the RPC's submission acknowledgement) fences the
+    // native loop after Interrupt, without starting another turn or clearing stop.
+    timeout(
+        TIMEOUT,
+        app.read_stream_until_notification_message("thread/settings/updated"),
+    )
+    .await??;
+    assert!(!state.thread_goals().keep_working_enabled(native_id).await?);
+
+    let id = app.send_raw_request("thread/goal/set", Some(json!({
+        "threadId": thread_id, "objective": "Complete the legacy regression fixture", "status": "active",
+    }))).await?;
+    let _: ThreadGoalSetResponse = timeout(TIMEOUT, app.read_response(id)).await??;
+    let notification = timeout(
+        TIMEOUT,
+        app.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+    let completed: TurnCompletedNotification =
+        serde_json::from_value(notification.params.expect("completion params"))?;
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
+    assert_eq!(
+        state
+            .thread_goals()
+            .get_thread_goal(native_id)
+            .await?
+            .expect("legacy goal")
+            .status,
+        codex_state::ThreadGoalStatus::Complete
+    );
+    let explicit = timeout(
+        TIMEOUT,
+        app.start_turn_and_wait_for_completion(turn(&thread_id, ModeKind::Default)),
+    )
+    .await??;
+    assert_eq!(explicit.turn.status, TurnStatus::Completed);
+    assert!(!state.thread_goals().keep_working_enabled(native_id).await?);
+    timeout(TIMEOUT, app.shutdown_gracefully()).await??;
+    assert_eq!(mock.requests().len(), 5);
     Ok(())
 }
 

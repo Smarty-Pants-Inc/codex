@@ -235,7 +235,12 @@ async fn stopped_automatic_intent_cannot_mutate_or_restart(stop_point: StopPoint
         submit_user_message(&test.codex, "intervening user work")
             .await
             .expect("intervening turn");
-        server.wait_for_request_count(/*count*/ 2).await;
+        timeout(
+            Duration::from_secs(/*secs*/ 10),
+            server.wait_for_request_count(/*count*/ 2),
+        )
+        .await
+        .expect("intervening turn reached the model");
     }
     test.codex
         .submit(Op::Interrupt)
