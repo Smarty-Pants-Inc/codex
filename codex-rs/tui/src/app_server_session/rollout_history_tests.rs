@@ -155,7 +155,8 @@ async fn rollout_maintenance_contention_disables_cached_legacy_resume_shortcut()
         .resume_thread(config, thread_id, ResumeModelSettings::RestoreFromThread)
         .await?;
 
-    assert_eq!(app_server.next_request_id, next_request_id + 3);
+    // Resume, ordinary turn/item pages, and one bounded canonical timeline page.
+    assert_eq!(app_server.next_request_id, next_request_id + 4);
     assert_eq!(resumed.session.thread_id, thread_id);
     assert_eq!(
         app_server

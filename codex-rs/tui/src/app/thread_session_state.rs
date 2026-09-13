@@ -108,6 +108,7 @@ impl App {
                 collaboration_mode: None,
                 personality: None,
                 message_history: None,
+                realtime_history: Default::default(),
                 network_proxy: None,
                 rollout_path: thread.path.clone(),
             }
@@ -190,6 +191,7 @@ mod tests {
             collaboration_mode: None,
             personality: None,
             message_history: None,
+            realtime_history: Default::default(),
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
         }

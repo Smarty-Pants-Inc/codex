@@ -6,7 +6,8 @@ name: v8-canary
 # unrelated events run only the cheap metadata job below.
 on:
   workflow_call:
-  pull_request: {}
+  pull_request:
+    branches-ignore: [codex/maintenance-0.153.4]
   workflow_dispatch:
 
 concurrency:

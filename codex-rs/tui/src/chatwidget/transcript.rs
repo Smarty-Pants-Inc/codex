@@ -27,6 +27,7 @@ pub(super) struct ActiveCellLayoutCache {
 
 #[derive(Default)]
 pub(super) struct TranscriptState {
+    pub(super) realtime: super::realtime_transcripts::RealtimeTranscriptState,
     pub(super) active_cell: Option<Box<dyn HistoryCell>>,
     /// Monotonic-ish counter used to invalidate transcript overlay caching.
     pub(super) active_cell_revision: u64,

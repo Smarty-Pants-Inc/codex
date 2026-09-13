@@ -4,6 +4,7 @@
 //! live-only side effects.
 
 use super::*;
+use crate::realtime_history::RealtimeHistoryAnchor;
 
 impl ChatWidget {
     /// Replay a subset of initial events into the UI to seed the transcript when
@@ -12,6 +13,9 @@ impl ChatWidget {
     /// avoid triggering side effects. Event ids are passed as `None` to
     /// distinguish replayed events from live ones.
     pub(crate) fn replay_thread_turns(&mut self, turns: Vec<Turn>, replay_kind: ReplayKind) {
+        if let Some(notice) = self.transcript.realtime.history.notice.take() {
+            self.add_warning_message(notice);
+        }
         let hidden_nested_review_turns = std::iter::once(/*value*/ false)
             .chain(turns.windows(/*size*/ 2).map(|turns| {
                 crate::app_backtrack::is_hidden_nested_review_turn(&turns[0], &turns[1])
@@ -35,6 +39,14 @@ impl ChatWidget {
             }
             for item in items {
                 if hidden_nested_review_turn && matches!(item, ThreadItem::UserMessage { .. }) {
+                    self.replay_realtime_history(RealtimeHistoryAnchor::Item(
+                        turn_id.clone(),
+                        item.id().to_string(),
+                    ));
+                    self.replay_realtime_history(RealtimeHistoryAnchor::AfterItem(
+                        turn_id.clone(),
+                        item.id().to_string(),
+                    ));
                     continue;
                 }
                 self.replay_thread_item(item, turn_id.clone(), replay_kind);
@@ -66,6 +78,7 @@ impl ChatWidget {
                 );
             }
         }
+        self.replay_realtime_history(RealtimeHistoryAnchor::End);
     }
 
     pub(crate) fn replay_thread_item(
@@ -83,6 +96,12 @@ impl ChatWidget {
         turn_id: String,
         render_source: ThreadItemRenderSource,
     ) {
+        self.replay_realtime_history(RealtimeHistoryAnchor::Item(
+            turn_id.clone(),
+            item.id().to_string(),
+        ));
+        let realtime_anchor =
+            RealtimeHistoryAnchor::AfterItem(turn_id.clone(), item.id().to_string());
         let from_replay = render_source.is_replay();
         let replay_kind = render_source.replay_kind();
         match item {
@@ -248,6 +267,7 @@ impl ChatWidget {
             ThreadItem::Sleep(_) => {}
         }
 
+        self.replay_realtime_history(realtime_anchor);
         if matches!(replay_kind, Some(ReplayKind::ThreadSnapshot)) && turn_id.is_empty() {
             self.request_redraw();
         }

@@ -62,6 +62,7 @@ fn configured_thread_session(thread_id: ThreadId) -> crate::session_state::Threa
         collaboration_mode: None,
         personality: None,
         message_history: None,
+        realtime_history: Default::default(),
         network_proxy: None,
         rollout_path: None,
     }

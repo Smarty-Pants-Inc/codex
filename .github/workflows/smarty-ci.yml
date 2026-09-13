@@ -1,0 +1,137 @@
+name: smarty-ci
+
+# Release-scoped review and exact-landed-artifact checks. Publication is gated by
+# independent source/workflow admission; this does not authorize an agent dispatch.
+on:
+  pull_request:
+    branches: [codex/maintenance-0.153.4]
+  push:
+    branches: [codex/maintenance-0.153.4]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-maintenance-0.153.4
+  cancel-in-progress: false
+
+jobs:
+  smarty-ci:
+    if: github.repository == 'Smarty-Pants-Inc/codex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_NET_GIT_FETCH_WITH_CLI: true
+      INSTA_UPDATE: 'no'
+      TARGET: x86_64-unknown-linux-gnu
+      FILTER: 'test(realtime_) | test(history_replay) | test(replay_thread_snapshot) | test(rollout_history) | test(session_lifecycle_requests) | test(thread_event) | test(reconnect) | test(tokens) | test(exec_flow)'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Set disposable build directory
+        run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/codex-target" >> "$GITHUB_ENV"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # PR: GitHub's combined merge revision. Push: the exact landed commit.
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          components: rustfmt, clippy
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: just@1.51.0,nextest@0.9.103
+      - name: Native Linux test prerequisites (disposable runner only)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev bubblewrap
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Record exact source and toolchain
+        run: |
+          set -euo pipefail
+          mkdir -p evidence package
+          jq -n --arg commit "$(git rev-parse HEAD)" --arg tree "$(git rev-parse 'HEAD^{tree}')" \
+            --arg definition "${GITHUB_WORKFLOW_SHA}" --arg run "${GITHUB_RUN_ID}" \
+            --arg attempt "${GITHUB_RUN_ATTEMPT}" --arg job "${GITHUB_JOB}" \
+            --arg target "$TARGET" --arg filter "$FILTER" \
+            '{commit:$commit,tree:$tree,definition:$definition,run:$run,attempt:$attempt,job:$job,target:$target,filter:$filter,retries:0}' > evidence/source.json
+          { rustc -Vv; cargo -V; just --version; cargo nextest --version; uname -a; } > evidence/tools.txt
+          sha256sum codex-rs/Cargo.lock codex-rs/rust-toolchain.toml .github/workflows/smarty-ci.yml > evidence/inputs.sha256
+      - name: Format check
+        working-directory: codex-rs
+        run: cargo fmt -- --config imports_granularity=Item --check
+      - name: Discover exact focused test roster
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+          cargo nextest list --locked -p codex-tui --message-format json > ../evidence/discovered.json
+          cargo nextest list --locked -p codex-tui -E "$FILTER" --message-format json > ../evidence/selected.json
+      - name: Focused native regressions, without retries or snapshot updates
+        run: |
+          set -euo pipefail
+          just test --locked -p codex-tui -E "$FILTER" --retries 0 --test-threads 2 \
+            --status-level all --final-status-level all 2>&1 | tee evidence/tests.txt
+      - name: Scoped Clippy
+        run: just clippy --locked -p codex-tui -- -D warnings
+      - name: Build exact staged GNU frontend
+        working-directory: codex-rs
+        run: cargo build --locked --release -p codex-cli --bin codex --target "$TARGET"
+      - name: Package frontend and inspect ELF requirements, without activation
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          test -z "$(git ls-files --others --exclude-standard -- codex-rs .github scripts)"
+          install -m 755 "$CARGO_TARGET_DIR/$TARGET/release/codex" package/codex
+          cp evidence/source.json package/source.json
+          { file package/codex; readelf -l package/codex; readelf -d package/codex; } > evidence/elf.txt
+          sha256sum package/codex > evidence/binary.sha256
+          tar -czf "evidence/codex-frontend-$TARGET.tar.gz" -C package codex source.json
+          sha256sum "evidence/codex-frontend-$TARGET.tar.gz" > evidence/archive.sha256
+      - name: Retain test results and actual counts
+        if: always()
+        run: |
+          mkdir -p evidence
+          if [[ -f codex-rs/target/nextest/local/junit.xml ]]; then
+            cp codex-rs/target/nextest/local/junit.xml evidence/junit.xml
+          fi
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          root = Path('evidence')
+          counts = {}
+          for name in ('discovered', 'selected'):
+              path = root / f'{name}.json'
+              if path.exists():
+                  try:
+                      data = json.loads(path.read_text())
+                  except json.JSONDecodeError:
+                      counts[f'{name}_error'] = 'Incomplete or invalid discovery JSON; counts unknown'
+                      continue
+                  cases = [case for suite in data['rust-suites'].values() for case in suite['testcases'].values()]
+                  counts[name] = len(cases) if name == 'discovered' else sum(case['filter-match']['status'] == 'matches' for case in cases)
+                  counts[f'{name}_ignored'] = sum(case['ignored'] for case in cases if name == 'discovered' or case['filter-match']['status'] == 'matches')
+                  if name == 'selected':
+                      counts['filtered_out'] = sum(case['filter-match'].get('reason') == 'expression' for case in cases)
+          path = root / 'junit.xml'
+          if path.exists():
+              cases = ET.parse(path).findall('.//testcase')
+              counts['executed'] = sum(case.find('skipped') is None for case in cases)
+              counts['skipped_in_junit'] = sum(case.find('skipped') is not None for case in cases)
+              counts['failed'] = sum(case.find('failure') is not None or case.find('error') is not None for case in cases)
+          (root / 'counts.json').write_text(json.dumps(counts, indent=2) + '\n')
+          PY
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        id: artifact
+        if: always()
+        with:
+          name: codex-native-${{ github.sha }}-${{ github.run_attempt }}
+          path: evidence/
+          retention-days: 1
+          if-no-files-found: error

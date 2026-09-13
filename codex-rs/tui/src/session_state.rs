@@ -53,6 +53,7 @@ pub(crate) struct ThreadSessionState {
     pub(crate) collaboration_mode: Option<Box<CollaborationMode>>,
     pub(crate) personality: Option<Personality>,
     pub(crate) message_history: Option<MessageHistoryMetadata>,
+    pub(crate) realtime_history: crate::realtime_history::RealtimeHistory,
     pub(crate) network_proxy: Option<SessionNetworkProxyRuntime>,
     pub(crate) rollout_path: Option<PathBuf>,
 }

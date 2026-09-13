@@ -558,6 +558,7 @@ fn session_configured_event(model: &str) -> ThreadSessionState {
         collaboration_mode: None,
         personality: None,
         message_history: None,
+        realtime_history: Default::default(),
         network_proxy: None,
         rollout_path: Some(PathBuf::new()),
     }
