@@ -5310,6 +5310,7 @@ async fn render_clear_ui_header_after_long_transcript_for_snapshot() -> String {
             collaboration_mode: None,
             personality: None,
             message_history: None,
+            realtime_history: Default::default(),
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
         };
@@ -5821,6 +5822,7 @@ fn test_thread_session(thread_id: ThreadId, cwd: PathBuf) -> ThreadSessionState 
         collaboration_mode: None,
         personality: None,
         message_history: None,
+        realtime_history: Default::default(),
         network_proxy: None,
         rollout_path: Some(PathBuf::new()),
     }
@@ -6658,6 +6660,7 @@ async fn backtrack_selection_preserves_selected_prompt_and_requests_branch() {
             collaboration_mode: None,
             personality: None,
             message_history: None,
+            realtime_history: Default::default(),
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
         };
@@ -6729,6 +6732,7 @@ async fn backtrack_selection_preserves_selected_prompt_and_requests_branch() {
             collaboration_mode: None,
             personality: None,
             message_history: None,
+            realtime_history: Default::default(),
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
         });
@@ -7804,6 +7808,7 @@ async fn new_session_requests_shutdown_for_previous_conversation() {
             collaboration_mode: None,
             personality: None,
             message_history: None,
+            realtime_history: Default::default(),
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
         };
@@ -8505,6 +8510,7 @@ async fn clear_only_ui_reset_preserves_chat_session_state() {
             collaboration_mode: None,
             personality: None,
             message_history: None,
+            realtime_history: Default::default(),
             network_proxy: None,
             rollout_path: Some(PathBuf::new()),
         });
@@ -8650,3 +8656,5 @@ mod active_reconnect;
 #[cfg(unix)]
 #[path = "tests/navigation_reconnect_tests.rs"]
 mod navigation_reconnect;
+#[path = "tests/realtime_history_tests.rs"]
+mod realtime_history_tests;

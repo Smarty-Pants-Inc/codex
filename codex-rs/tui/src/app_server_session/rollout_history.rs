@@ -144,10 +144,18 @@ impl AppServerSession {
         let fork_parent_title = self
             .fork_parent_title_from_app_server(response.thread.forked_from_id.as_deref())
             .await;
+        let realtime_history = if response.thread.history_mode == ThreadHistoryMode::Paginated
+            && !response.thread.ephemeral
+        {
+            self.realtime_history(thread_id).await
+        } else {
+            Default::default()
+        };
         let mut started =
             started_thread_from_resume_response(response, &config, self.thread_params_mode())
                 .await?;
         started.session.fork_parent_title = fork_parent_title;
+        started.session.realtime_history = realtime_history;
         if self.task_tools_available(thread_id) {
             self.remember_task_tool_thread(thread_id);
             started.task_tools_available = true;

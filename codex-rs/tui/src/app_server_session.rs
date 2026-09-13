@@ -6,6 +6,7 @@
 mod fs;
 mod history;
 mod models;
+mod realtime_history;
 mod rollout_history;
 
 pub(crate) use history::HISTORY_ITEM_PAGE_LIMIT;
@@ -2270,6 +2271,7 @@ async fn thread_session_state_from_thread_response(
             log_id,
             entry_count,
         }),
+        realtime_history: Default::default(),
         network_proxy: None,
         rollout_path,
     })

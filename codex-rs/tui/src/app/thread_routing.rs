@@ -1608,10 +1608,8 @@ impl App {
                 preserve_in_flight_turn: true,
             },
         );
-        if !snapshot.turns.is_empty() {
-            self.chat_widget
-                .replay_thread_turns(snapshot.turns, ReplayKind::ThreadSnapshot);
-        }
+        self.chat_widget
+            .replay_thread_turns(snapshot.turns, ReplayKind::ThreadSnapshot);
         for (event, changes) in snapshot.events.into_iter().zip(request_changes) {
             if suppress_replay_notices && replay_filter::event_is_notice(&event) {
                 continue;

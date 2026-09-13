@@ -4305,6 +4305,7 @@ async fn session_configured_clears_goal_status_footer() {
         collaboration_mode: None,
         personality: None,
         message_history: None,
+        realtime_history: Default::default(),
         network_proxy: None,
         rollout_path: Some(rollout_file.path().to_path_buf()),
     });

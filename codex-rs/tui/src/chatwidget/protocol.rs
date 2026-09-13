@@ -31,6 +31,13 @@ impl ChatWidget {
             self.restore_retry_status_header_if_present();
         }
         match notification {
+            ServerNotification::ThreadRealtimeItemCompleted(notification) => {
+                self.on_realtime_item_completed(
+                    &notification.thread_id,
+                    notification.item,
+                    realtime_transcripts::RealtimeTranscriptSource::Live,
+                );
+            }
             ServerNotification::ThreadTokenUsageUpdated(notification) => {
                 self.set_token_info(Some(token_usage_info_from_app_server(
                     notification.token_usage,
@@ -248,7 +255,6 @@ impl ChatWidget {
             | ServerNotification::ThreadRealtimeItemAdded(_)
             | ServerNotification::ThreadRealtimeItemStarted(_)
             | ServerNotification::ThreadRealtimeItemTranscriptDelta(_)
-            | ServerNotification::ThreadRealtimeItemCompleted(_)
             | ServerNotification::ThreadRealtimeOutputAudioDelta(_)
             | ServerNotification::ThreadRealtimeError(_)
             | ServerNotification::ThreadRealtimeClosed(_)
@@ -262,6 +268,7 @@ impl ChatWidget {
             | ServerNotification::ThreadProjectUpdated(_) => {}
             ServerNotification::ContextCompacted(_) => {}
         }
+        self.flush_realtime_transcripts();
         self.thread_usage.replaying_turn_completion = was_replaying_turn_completion;
     }
 
@@ -270,6 +277,11 @@ impl ChatWidget {
         notification: TurnCompletedNotification,
         replay_kind: Option<ReplayKind>,
     ) {
+        self.replay_realtime_history(crate::realtime_history::RealtimeHistoryAnchor::Turn(
+            notification.turn.id.clone(),
+        ));
+        let realtime_anchor =
+            crate::realtime_history::RealtimeHistoryAnchor::AfterTurn(notification.turn.id.clone());
         // User-message dedupe only suppresses the app-server echo of a prompt
         // this TUI already rendered locally. Once that turn ends, another
         // client can submit the same text and it still needs its own user cell.
@@ -346,6 +358,7 @@ impl ChatWidget {
             }
             TurnStatus::InProgress => {}
         }
+        self.replay_realtime_history(realtime_anchor);
         self.thread_usage.replaying_turn_completion = was_replaying_turn_completion;
     }
 
