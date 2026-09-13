@@ -20,9 +20,13 @@ async fn realtime_resume_reads_backwards_pages_and_replays_voice_only_thread_sna
     let server = tokio::spawn(async move {
         let (stream, _) = listener.accept().await?;
         let mut timeline_reads = 0;
+        let mut resumes = 0;
+        let typed_answer =
+            json!({"type": "agentMessage", "id": "typed-answer", "text": "Typed answer"});
         serve_reconnect_requests(tokio_tungstenite::accept_async(stream).await?, |request| {
             let result = match request.method.as_str() {
                 "thread/resume" => {
+                    resumes += 1;
                     let params = request.params.as_ref().unwrap();
                     assert_eq!(params["threadId"], id.to_string());
                     assert!(params["model"].is_null());
@@ -36,6 +40,11 @@ async fn realtime_resume_reads_backwards_pages_and_replays_voice_only_thread_sna
                     "approvalPolicy": "never", "approvalsReviewer": "user",
                     "sandbox": {"type": "dangerFullAccess"}, "reasoningEffort": null})
                 }
+                "thread/turns/list" if resumes == 2 => json!({"data": [{
+                    "id": "ordinary-turn", "status": "completed", "itemsView": "full",
+                    "items": [typed_answer], "error": null,
+                    "startedAt": null, "completedAt": null, "durationMs": null
+                }], "nextCursor": null}),
                 "thread/turns/list" | "thread/items/list" => json!({"data": [], "nextCursor": null}),
                 "thread/timeline/list" => {
                     let params = request.params.as_ref().unwrap();
@@ -49,10 +58,17 @@ async fn realtime_resume_reads_backwards_pages_and_replays_voice_only_thread_sna
                                 "type": "transcriptSegment", "role": "assistant", "text": "More speech"}}],
                             "nextCursor": format!("cursor-{timeline_reads}"), "activeRealtimeSessionAtPageStart": "voice"})
                     } else if params["cursor"].is_null() {
-                        json!({"data": [{"type": "realtime", "position": 31,
+                        let mut data = vec![json!({"type": "realtime", "position": 31,
                             "item": {"id": "assistant", "realtimeSessionId": "voice",
-                                "type": "transcriptSegment", "role": "assistant", "text": "Spoken answer"}}],
-                            "nextCursor": "older", "activeRealtimeSessionAtPageStart": "voice"})
+                                "type": "transcriptSegment", "role": "assistant", "text": "Spoken answer"}})];
+                        if resumes == 2 {
+                            data.push(json!({"type": "item", "position": 32,
+                                "turnId": "ordinary-turn", "item": typed_answer}));
+                            data.push(json!({"type": "realtime", "position": 33,
+                                "item": {"id": "tail", "realtimeSessionId": "voice",
+                                    "type": "transcriptSegment", "role": "assistant", "text": "Later speech"}}));
+                        }
+                        json!({"data": data, "nextCursor": "older", "activeRealtimeSessionAtPageStart": "voice"})
                     } else {
                         assert_eq!(params["cursor"], "older");
                         json!({"data": [{"type": "realtime", "position": 30,
@@ -71,9 +87,9 @@ async fn realtime_resume_reads_backwards_pages_and_replays_voice_only_thread_sna
         ThreadParamsMode::Remote,
     );
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    // Both initial attachment and the resume used by reconnect read persisted
-    // facts again; neither needs an active local voice session or an ordinary turn.
-    for _ in 0..2 {
+    // Initial attachment is voice-only. The second resume also exercises speech
+    // after an ordinary answer through the App's real consolidation callback.
+    for resume_index in 0..2 {
         let started = session
             .resume_thread(
                 app.config.clone(),
@@ -81,7 +97,7 @@ async fn realtime_resume_reads_backwards_pages_and_replays_voice_only_thread_sna
                 ResumeModelSettings::PreserveExistingThread,
             )
             .await?;
-        assert!(started.turns.is_empty());
+        assert_eq!(started.turns.is_empty(), resume_index == 0);
         assert!(started.session.realtime_history.notice.is_none());
         let mut snapshot = ThreadEventSnapshot {
             session: Some(started.session),
@@ -111,6 +127,12 @@ async fn realtime_resume_reads_backwards_pages_and_replays_voice_only_thread_sna
             assert_eq!(rendered.matches("Spoken question").count(), 1);
             assert_eq!(rendered.matches("Spoken answer").count(), 1);
             assert!(rendered.find("Spoken question") < rendered.find("Spoken answer"));
+            if resume_index == 1 {
+                assert_eq!(rendered.matches("Typed answer").count(), 1);
+                assert_eq!(rendered.matches("Later speech").count(), 1);
+                assert!(rendered.find("Spoken answer") < rendered.find("Typed answer"));
+                assert!(rendered.find("Typed answer") < rendered.find("Later speech"));
+            }
             assert!(ops.try_recv().is_err());
         }
     }

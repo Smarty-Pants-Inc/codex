@@ -209,6 +209,10 @@ async fn realtime_replay_restores_durable_speech_in_order_and_deduplicates_live_
         chat.replay_thread_turns(vec![turn.clone()], replay_kind);
         deliver(&mut chat, user.clone());
         deliver(&mut chat, assistant.clone());
+        // The manual widget has no App loop to acknowledge the ordinary answer's
+        // consolidation. Speech must remain deferred until that acknowledgement.
+        assert_eq!(chat.pending_stream_consolidations, 1);
+        chat.note_stream_consolidation_completed();
         insta::assert_snapshot!(transcript(&mut rx).join("\n\n"), @"
         › Playback diagnostic. Copper lantern. What is 3 plus 4? Please answer in one short sentence.
 
