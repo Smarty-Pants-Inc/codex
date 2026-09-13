@@ -68,6 +68,7 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
         app.app_server_target = AppServerTarget::Remote { endpoint };
         let thread = json!({
             "id": id, "sessionId": id, "preview": "only once", "ephemeral": false,
+            "historyMode": "paginated",
             "modelProvider": "test-provider", "createdAt": 1, "updatedAt": 2,
             "status": {"type": "idle"}, "cwd": cwd, "cliVersion": "0.0.0", "source": "cli",
             "turns": [test_turn("accepted", TurnStatus::Completed, vec![ThreadItem::UserMessage {
@@ -88,6 +89,14 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
                             "approvalPolicy": "never", "approvalsReviewer": "user", "sandbox": {"type": "dangerFullAccess"}, "reasoningEffort": null}}))
                     }
                     "thread/read" => Some(json!({"result": {"thread": thread}})),
+                    "thread/turns/list" => Some(json!({"result": {"data": thread["turns"], "nextCursor": null}})),
+                    "thread/items/list" => Some(json!({"result": {"data": [], "nextCursor": null}})),
+                    "thread/timeline/list" => Some(json!({"result": {"data": [
+                        {"type": "realtime", "position": 30, "item": {
+                            "id": "offline-speech", "realtimeSessionId": "external-voice",
+                            "type": "transcriptSegment", "role": "assistant", "text": "Spoken while offline"
+                        }}
+                    ], "nextCursor": null, "activeRealtimeSessionAtPageStart": null}})),
                     "thread/list" | "thread/loaded/list" => Some(json!({"result": {"data": [], "nextCursor": null}})),
                     "thread/goal/get" => Some(json!({"result": {"goal": null}})),
                     "turn/start" => {
@@ -255,6 +264,8 @@ async fn reconnect_restores_history_permissions_and_keeps_old_input_paused() -> 
         );
         let history = drain_history(&mut app, &mut tui, &mut session, &mut events).await?;
         assert_eq!(history.matches("only once").count(), 1);
+        assert_eq!(history.matches("Spoken while offline").count(), 1);
+        assert!(history.find("only once") < history.find("Spoken while offline"));
         if recovered_queue {
             assert!(app.chat_widget.has_queued_follow_up_messages());
             assert!(!app.chat_widget.maybe_send_next_queued_input());

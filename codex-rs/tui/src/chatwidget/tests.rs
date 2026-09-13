@@ -258,6 +258,8 @@ mod plugin_catalog;
 mod popups_and_settings;
 #[path = "tests/rate_limit_recovery_tests.rs"]
 mod rate_limit_recovery_tests;
+#[path = "tests/realtime_transcripts_tests.rs"]
+mod realtime_transcripts_tests;
 mod review_mode;
 mod side;
 mod slash_commands;
