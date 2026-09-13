@@ -56,7 +56,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p evidence package
-          jq -n --arg commit "$(git rev-parse HEAD)" --arg tree "$(git rev-parse HEAD^{tree})" \
+          jq -n --arg commit "$(git rev-parse HEAD)" --arg tree "$(git rev-parse 'HEAD^{tree}')" \
             --arg definition "${GITHUB_WORKFLOW_SHA}" --arg run "${GITHUB_RUN_ID}" \
             --arg attempt "${GITHUB_RUN_ATTEMPT}" --arg job "${GITHUB_JOB}" \
             --arg target "$TARGET" --arg filter "$FILTER" \
@@ -91,8 +91,8 @@ jobs:
           cp evidence/source.json package/source.json
           { file package/codex; readelf -l package/codex; readelf -d package/codex; } > evidence/elf.txt
           sha256sum package/codex > evidence/binary.sha256
-          tar -czf evidence/codex-frontend-$TARGET.tar.gz -C package codex source.json
-          sha256sum evidence/codex-frontend-$TARGET.tar.gz > evidence/archive.sha256
+          tar -czf "evidence/codex-frontend-$TARGET.tar.gz" -C package codex source.json
+          sha256sum "evidence/codex-frontend-$TARGET.tar.gz" > evidence/archive.sha256
       - name: Retain test results and actual counts
         if: always()
         run: |
