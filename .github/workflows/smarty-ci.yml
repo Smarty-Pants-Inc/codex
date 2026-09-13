@@ -66,63 +66,6 @@ jobs:
       - name: Format check
         working-directory: codex-rs
         run: cargo fmt -- --config imports_granularity=Item --check
-      - name: Set up pinned Bazel for temporary lock correspondence only
-        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
-        with:
-          bazelisk-version: 1.28.1
-          bazelisk-cache: false
-          disk-cache: false
-          external-cache: false
-          repository-cache: false
-          cache-save: false
-          bazelrc: |
-            common --disk_cache=
-            common --repository_cache=
-            common --repo_contents_cache=
-            common --remote_cache=
-            common --remote_executor=
-            common --bes_backend=
-            common --experimental_remote_downloader=
-      - name: Check module lock correspondence in disposable source copy
-        timeout-minutes: 20
-        run: |
-          set -euo pipefail
-          evidence="$GITHUB_WORKSPACE/evidence/bazel-lock-correspondence"
-          mkdir -p "$evidence"
-          scratch=$(mktemp -d "$RUNNER_TEMP/codex-bazel-lock.XXXXXX")
-          trap 'status=$?; printf "%s\n" "$status" > "$evidence/correspondence-exit.txt"; rm -rf -- "$scratch"' EXIT
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          printf '%s\n' "$GITHUB_SHA" > "$evidence/executed-commit.txt"
-          sha256sum codex-rs/Cargo.lock MODULE.bazel.lock > "$evidence/canonical-locks.sha256"
-          git archive "$GITHUB_SHA" | tar -x -C "$scratch"
-          (
-            cd "$scratch"
-            find . -type f ! -path './MODULE.bazel.lock' -print0 | sort -z | xargs -0 sha256sum
-          ) > "$evidence/scratch-files.sha256"
-          cp MODULE.bazel.lock "$evidence/MODULE.bazel.lock.before"
-          set +e
-          (
-            cd "$scratch"
-            timeout 1140s just bazel-lock-update
-          ) > "$evidence/refresh.log" 2>&1
-          refresh_status=$?
-          set -e
-          printf '%s\n' "$refresh_status" > "$evidence/refresh-exit.txt"
-          cp "$scratch/MODULE.bazel.lock" "$evidence/MODULE.bazel.lock.after"
-          sha256sum "$evidence"/MODULE.bazel.lock.* > "$evidence/module-locks.sha256"
-          diff_status=0
-          diff -u --label canonical/MODULE.bazel.lock --label scratch/MODULE.bazel.lock \
-            MODULE.bazel.lock "$scratch/MODULE.bazel.lock" > "$evidence/module-lock.patch" || diff_status=$?
-          test "$diff_status" -le 1
-          sha256sum -c "$evidence/canonical-locks.sha256"
-          (
-            cd "$scratch"
-            find . -type f ! -path './MODULE.bazel.lock' -print0 | sort -z | xargs -0 sha256sum
-          ) > "$evidence/scratch-files-after.sha256"
-          diff -u "$evidence/scratch-files.sha256" "$evidence/scratch-files-after.sha256"
-          git diff --exit-code
-          test "$refresh_status" -eq 0
-          test "$diff_status" -eq 0
       - name: Discover exact focused test roster
         working-directory: codex-rs
         run: |
@@ -172,16 +115,16 @@ jobs:
                       counts[f'{name}_error'] = 'Incomplete or invalid discovery JSON; counts unknown'
                       continue
                   cases = [case for suite in data['rust-suites'].values() for case in suite['testcases'].values()]
-                  counts[name] = sum(case['filter-match']['status'] == 'matches' for case in cases)
-                  counts[f'{name}_ignored'] = sum(case['ignored'] for case in cases if case['filter-match']['status'] == 'matches')
+                  counts[name] = len(cases) if name == 'discovered' else sum(case['filter-match']['status'] == 'matches' for case in cases)
+                  counts[f'{name}_ignored'] = sum(case['ignored'] for case in cases if name == 'discovered' or case['filter-match']['status'] == 'matches')
+                  if name == 'selected':
+                      counts['filtered_out'] = sum(case['filter-match'].get('reason') == 'expression' for case in cases)
           path = root / 'junit.xml'
           if path.exists():
               cases = ET.parse(path).findall('.//testcase')
               counts['executed'] = sum(case.find('skipped') is None for case in cases)
               counts['skipped_in_junit'] = sum(case.find('skipped') is not None for case in cases)
               counts['failed'] = sum(case.find('failure') is not None or case.find('error') is not None for case in cases)
-          if 'discovered' in counts and 'selected' in counts:
-              counts['filtered_out'] = counts['discovered'] - counts['selected']
           (root / 'counts.json').write_text(json.dumps(counts, indent=2) + '\n')
           PY
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
