@@ -32,7 +32,11 @@ impl ChatWidget {
         }
         match notification {
             ServerNotification::ThreadRealtimeItemCompleted(notification) => {
-                self.on_realtime_item_completed(&notification.thread_id, notification.item);
+                self.on_realtime_item_completed(
+                    &notification.thread_id,
+                    notification.item,
+                    realtime_transcripts::RealtimeTranscriptSource::Live,
+                );
             }
             ServerNotification::ThreadTokenUsageUpdated(notification) => {
                 self.set_token_info(Some(token_usage_info_from_app_server(

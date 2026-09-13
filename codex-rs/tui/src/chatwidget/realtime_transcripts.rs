@@ -10,6 +10,11 @@ use std::collections::VecDeque;
 // Match the app's bounded thread-event replay window. A rebuilt widget gets a fresh window.
 const RECENT_TRANSCRIPT_CAPACITY: usize = 32_768;
 
+pub(super) enum RealtimeTranscriptSource {
+    Live,
+    History,
+}
+
 #[derive(Default)]
 pub(super) struct RealtimeTranscriptState {
     pub(super) history: crate::realtime_history::RealtimeHistory,
@@ -27,12 +32,21 @@ impl ChatWidget {
             && let Some(thread_id) = self.thread_id()
         {
             for item in items {
-                self.on_realtime_item_completed(&thread_id.to_string(), item);
+                self.on_realtime_item_completed(
+                    &thread_id.to_string(),
+                    item,
+                    RealtimeTranscriptSource::History,
+                );
             }
         }
     }
 
-    pub(super) fn on_realtime_item_completed(&mut self, thread_id: &str, item: ThreadRealtimeItem) {
+    pub(super) fn on_realtime_item_completed(
+        &mut self,
+        thread_id: &str,
+        item: ThreadRealtimeItem,
+        source: RealtimeTranscriptSource,
+    ) {
         if self
             .thread_id()
             .is_none_or(|id| id.to_string() != thread_id)
@@ -51,8 +65,18 @@ impl ChatWidget {
         {
             state.seen.remove(&oldest);
         }
-        state.pending.push_back(item);
-        self.flush_realtime_transcripts();
+        if matches!(source, RealtimeTranscriptSource::History)
+            && self.stream_controller.is_none()
+            && self.plan_stream_controller.is_none()
+        {
+            // Replay queues completed ordinary cells and their consolidation before this anchor.
+            // Queue speech next in that same FIFO: waiting for the App's acknowledgement here
+            // would move it behind ordinary history that the rest of replay has already queued.
+            self.insert_realtime_transcript(item);
+        } else {
+            state.pending.push_back(item);
+            self.flush_realtime_transcripts();
+        }
     }
 
     pub(super) fn flush_realtime_transcripts(&mut self) {
@@ -64,28 +88,32 @@ impl ChatWidget {
             return;
         }
         while let Some(item) = self.transcript.realtime.pending.pop_front() {
-            let ThreadRealtimeItemContent::TranscriptSegment { role, text } = item.content else {
-                continue;
-            };
-            let cell: Box<dyn HistoryCell> = match role {
-                ThreadRealtimeTranscriptRole::User => Box::new(history_cell::new_user_prompt(
-                    text,
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                )),
-                ThreadRealtimeTranscriptRole::Assistant => {
-                    Box::new(
-                        history_cell::AgentMarkdownCell::new_with_inline_visualizations(
-                            text,
-                            self.config.cwd.as_path(),
-                            /*inline_visualization_context*/ None,
-                        ),
-                    )
-                }
-            };
-            self.add_boxed_history(cell);
-            self.request_redraw();
+            self.insert_realtime_transcript(item);
         }
+    }
+
+    fn insert_realtime_transcript(&mut self, item: ThreadRealtimeItem) {
+        let ThreadRealtimeItemContent::TranscriptSegment { role, text } = item.content else {
+            return;
+        };
+        let cell: Box<dyn HistoryCell> = match role {
+            ThreadRealtimeTranscriptRole::User => Box::new(history_cell::new_user_prompt(
+                text,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )),
+            ThreadRealtimeTranscriptRole::Assistant => {
+                Box::new(
+                    history_cell::AgentMarkdownCell::new_with_inline_visualizations(
+                        text,
+                        self.config.cwd.as_path(),
+                        /*inline_visualization_context*/ None,
+                    ),
+                )
+            }
+        };
+        self.add_boxed_history(cell);
+        self.request_redraw();
     }
 }

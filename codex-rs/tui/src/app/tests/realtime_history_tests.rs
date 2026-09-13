@@ -21,8 +21,13 @@ async fn realtime_resume_reads_backwards_pages_and_replays_voice_only_thread_sna
         let (stream, _) = listener.accept().await?;
         let mut timeline_reads = 0;
         let mut resumes = 0;
+        let earlier_answer =
+            json!({"type": "agentMessage", "id": "earlier-answer", "text": "Earlier typed answer"});
         let typed_answer =
             json!({"type": "agentMessage", "id": "typed-answer", "text": "Typed answer"});
+        let typed_continuation = json!({"type": "agentMessage", "id": "typed-continuation", "text": "Typed continuation"});
+        let last_answer =
+            json!({"type": "agentMessage", "id": "last-answer", "text": "Last typed answer"});
         serve_reconnect_requests(tokio_tungstenite::accept_async(stream).await?, |request| {
             let result = match request.method.as_str() {
                 "thread/resume" => {
@@ -40,11 +45,19 @@ async fn realtime_resume_reads_backwards_pages_and_replays_voice_only_thread_sna
                     "approvalPolicy": "never", "approvalsReviewer": "user",
                     "sandbox": {"type": "dangerFullAccess"}, "reasoningEffort": null})
                 }
-                "thread/turns/list" if resumes == 2 => json!({"data": [{
-                    "id": "ordinary-turn", "status": "completed", "itemsView": "full",
-                    "items": [typed_answer], "error": null,
-                    "startedAt": null, "completedAt": null, "durationMs": null
-                }], "nextCursor": null}),
+                "thread/turns/list" if resumes == 2 => {
+                    assert_eq!(request.params.as_ref().unwrap()["sortDirection"], "desc");
+                    let turns = [
+                        ("earlier-turn", vec![earlier_answer.clone()]),
+                        ("ordinary-turn", vec![typed_answer.clone(), typed_continuation.clone()]),
+                        ("last-turn", vec![last_answer.clone()]),
+                    ].into_iter().rev().map(|(turn_id, items)| json!({
+                        "id": turn_id, "status": "completed", "itemsView": "full",
+                        "items": items, "error": null,
+                        "startedAt": null, "completedAt": null, "durationMs": null
+                    })).collect::<Vec<_>>();
+                    json!({"data": turns, "nextCursor": null})
+                }
                 "thread/turns/list" | "thread/items/list" => json!({"data": [], "nextCursor": null}),
                 "thread/timeline/list" => {
                     let params = request.params.as_ref().unwrap();
@@ -62,19 +75,40 @@ async fn realtime_resume_reads_backwards_pages_and_replays_voice_only_thread_sna
                             "item": {"id": "assistant", "realtimeSessionId": "voice",
                                 "type": "transcriptSegment", "role": "assistant", "text": "Spoken answer"}})];
                         if resumes == 2 {
-                            data.push(json!({"type": "item", "position": 32,
-                                "turnId": "ordinary-turn", "item": typed_answer}));
-                            data.push(json!({"type": "realtime", "position": 33,
-                                "item": {"id": "tail", "realtimeSessionId": "voice",
-                                    "type": "transcriptSegment", "role": "assistant", "text": "Later speech"}}));
+                            data.extend([
+                                json!({"type": "item", "position": 42,
+                                    "turnId": "ordinary-turn", "item": typed_answer}),
+                                json!({"type": "realtime", "position": 43,
+                                    "item": {"id": "between-items", "realtimeSessionId": "voice",
+                                        "type": "transcriptSegment", "role": "assistant", "text": "Between-item speech"}}),
+                                json!({"type": "item", "position": 44,
+                                    "turnId": "ordinary-turn", "item": typed_continuation}),
+                                json!({"type": "item", "position": 52,
+                                    "turnId": "last-turn", "item": last_answer}),
+                                json!({"type": "realtime", "position": 58,
+                                    "item": {"id": "tail", "realtimeSessionId": "voice",
+                                        "type": "transcriptSegment", "role": "assistant", "text": "Later speech"}}),
+                                json!({"type": "realtime", "position": 59,
+                                    "item": {"id": "tail-user", "realtimeSessionId": "voice",
+                                        "type": "transcriptSegment", "role": "user", "text": "Later question"}}),
+                            ]);
                         }
                         json!({"data": data, "nextCursor": "older", "activeRealtimeSessionAtPageStart": "voice"})
                     } else {
                         assert_eq!(params["cursor"], "older");
-                        json!({"data": [{"type": "realtime", "position": 30,
+                        let mut data = Vec::new();
+                        if resumes == 2 {
+                            data.extend([
+                                json!({"type": "item", "position": 10,
+                                    "turnId": "earlier-turn", "item": earlier_answer}),
+                                json!({"type": "turnCompleted", "position": 14,
+                                    "turnId": "earlier-turn", "status": "completed"}),
+                            ]);
+                        }
+                        data.push(json!({"type": "realtime", "position": 30,
                             "item": {"id": "user", "realtimeSessionId": "voice",
-                                "type": "transcriptSegment", "role": "user", "text": "Spoken question"}}],
-                            "nextCursor": null, "activeRealtimeSessionAtPageStart": "voice"})
+                                "type": "transcriptSegment", "role": "user", "text": "Spoken question"}}));
+                        json!({"data": data, "nextCursor": null, "activeRealtimeSessionAtPageStart": "voice"})
                     }
                 }
                 method => panic!("unexpected operation during voice replay: {method}"),
@@ -87,8 +121,8 @@ async fn realtime_resume_reads_backwards_pages_and_replays_voice_only_thread_sna
         ThreadParamsMode::Remote,
     );
     let mut tui = crate::tui::test_support::make_test_tui()?;
-    // Initial attachment is voice-only. The second resume also exercises speech
-    // after an ordinary answer through the App's real consolidation callback.
+    // Initial attachment is voice-only. The second resume interleaves speech with
+    // ordinary turns/items while all their consolidations await the real App dispatcher.
     for resume_index in 0..2 {
         let started = session
             .resume_thread(
@@ -132,6 +166,24 @@ async fn realtime_resume_reads_backwards_pages_and_replays_voice_only_thread_sna
                 assert_eq!(rendered.matches("Later speech").count(), 1);
                 assert!(rendered.find("Spoken answer") < rendered.find("Typed answer"));
                 assert!(rendered.find("Typed answer") < rendered.find("Later speech"));
+                let messages = rendered
+                    .lines()
+                    .filter(|line| line.starts_with("• ") || line.starts_with("› "))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                insta::allow_duplicates! {
+                    insta::assert_snapshot!(messages, @"
+                    • Earlier typed answer
+                    › Spoken question
+                    • Spoken answer
+                    • Typed answer
+                    • Between-item speech
+                    • Typed continuation
+                    • Last typed answer
+                    • Later speech
+                    › Later question
+                    ");
+                }
             }
             assert!(ops.try_recv().is_err());
         }

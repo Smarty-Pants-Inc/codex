@@ -210,7 +210,7 @@ async fn realtime_replay_restores_durable_speech_in_order_and_deduplicates_live_
         deliver(&mut chat, user.clone());
         deliver(&mut chat, assistant.clone());
         // The manual widget has no App loop to acknowledge the ordinary answer's
-        // consolidation. Speech must remain deferred until that acknowledgement.
+        // consolidation. Complete that callback before checking the queued history.
         assert_eq!(chat.pending_stream_consolidations, 1);
         chat.note_stream_consolidation_completed();
         insta::allow_duplicates! {
