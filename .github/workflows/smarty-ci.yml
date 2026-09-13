@@ -75,7 +75,6 @@ jobs:
           external-cache: false
           repository-cache: false
           cache-save: false
-          token: ''
           bazelrc: |
             common --disk_cache=
             common --repository_cache=
