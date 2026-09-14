@@ -27,6 +27,9 @@ jobs:
       CARGO_NET_GIT_FETCH_WITH_CLI: true
       INSTA_UPDATE: 'no'
       TARGET: x86_64-unknown-linux-gnu
+      USE_SCCACHE: 'true'
+      CARGO_INCREMENTAL: '0'
+      SCCACHE_CACHE_SIZE: 10G
       FILTER: 'test(realtime_) | test(history_replay) | test(replay_thread_snapshot) | test(rollout_history) | test(session_lifecycle_requests) | test(thread_event) | test(reconnect) | test(tokens) | test(exec_flow)'
     defaults:
       run:
@@ -63,6 +66,41 @@ jobs:
             '{commit:$commit,tree:$tree,definition:$definition,run:$run,attempt:$attempt,job:$job,target:$target,filter:$filter,retries:0}' > evidence/source.json
           { rustc -Vv; cargo -V; just --version; cargo nextest --version; uname -a; } > evidence/tools.txt
           sha256sum codex-rs/Cargo.lock codex-rs/rust-toolchain.toml .github/workflows/smarty-ci.yml > evidence/inputs.sha256
+      - name: Install sccache
+        if: ${{ env.USE_SCCACHE == 'true' }}
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: sccache@0.7.5
+      - name: Verify sccache version
+        if: ${{ env.USE_SCCACHE == 'true' }}
+        run: |
+          version="$(sccache --version)"
+          printf '%s\n' "$version" | tee evidence/sccache-version.txt
+          test "$version" = 'sccache 0.7.5'
+      - name: Configure sccache backend
+        if: ${{ env.USE_SCCACHE == 'true' }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${ACTIONS_CACHE_URL:-}" && -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+            echo "Using sccache GitHub backend"
+          else
+            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_DIR=${{ github.workspace }}/.sccache" >> "$GITHUB_ENV"
+            echo "Using sccache local disk + actions/cache fallback"
+          fi
+      - name: Enable sccache wrapper
+        if: ${{ env.USE_SCCACHE == 'true' }}
+        run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+      - name: Restore sccache cache (fallback)
+        if: ${{ env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true' }}
+        id: cache_sccache_restore
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ github.workspace }}/.sccache/
+          key: sccache-smarty-v2-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-smarty-v2-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-
       - name: Format check
         working-directory: codex-rs
         run: cargo fmt -- --config imports_granularity=Item --check
@@ -79,20 +117,77 @@ jobs:
             --status-level all --final-status-level all 2>&1 | tee evidence/tests.txt
       - name: Scoped Clippy
         run: just clippy --locked -p codex-tui -- -D warnings
-      - name: Build exact staged GNU frontend
+      - name: Configure matching sandbox V8 artifacts for the release package
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
+      - name: Build and finalize bundled bwrap before compiling its digest into Codex
         working-directory: codex-rs
-        run: cargo build --locked --release -p codex-cli --bin codex --target "$TARGET"
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --target "$TARGET" -p codex-bwrap --bin bwrap
+          bwrap_path="$CARGO_TARGET_DIR/$TARGET/release/bwrap"
+          strip --strip-debug --strip-unneeded "$bwrap_path"
+          sha256sum "$bwrap_path" > ../evidence/bwrap.sha256
+          digest="$(sha256sum "$bwrap_path" | awk '{print $1}')"
+          echo "CODEX_BWRAP_SHA256=$digest" >> "$GITHUB_ENV"
+      - name: Build exact staged GNU frontend and native companions
+        working-directory: codex-rs
+        run: |
+          sha256sum "$RUSTY_V8_ARCHIVE" "$RUSTY_V8_SRC_BINDING_PATH" > ../evidence/rusty-v8.sha256
+          cargo build --locked --release --target "$TARGET" \
+            -p codex-cli --bin codex \
+            -p codex-code-mode-host --bin codex-code-mode-host
       - name: Package frontend and inspect ELF requirements, without activation
         run: |
           set -euo pipefail
+          release="$CARGO_TARGET_DIR/$TARGET/release"
+          CODEX_REPO_ROOT="$GITHUB_WORKSPACE" python3 scripts/build_codex_package.py \
+            --target "$TARGET" --variant codex --cargo-profile release --package-dir package \
+            --entrypoint-bin "$release/codex" \
+            --code-mode-host-bin "$release/codex-code-mode-host" --bwrap-bin "$release/bwrap"
+          sha256sum --check evidence/bwrap.sha256
+          printf '%s  %s\n' "$CODEX_BWRAP_SHA256" package/codex-resources/bwrap | sha256sum --check
           git diff --exit-code
           test -z "$(git ls-files --others --exclude-standard -- codex-rs .github scripts)"
-          install -m 755 "$CARGO_TARGET_DIR/$TARGET/release/codex" package/codex
           cp evidence/source.json package/source.json
-          { file package/codex; readelf -l package/codex; readelf -d package/codex; } > evidence/elf.txt
-          sha256sum package/codex > evidence/binary.sha256
-          tar -czf "evidence/codex-frontend-$TARGET.tar.gz" -C package codex source.json
+          { file package/bin/codex; readelf -l package/bin/codex; readelf -d package/bin/codex; } > evidence/elf.txt
+          sha256sum package/bin/codex > evidence/binary.sha256
+          find package -type f -print0 | sort -z | xargs -0 sha256sum > evidence/package-files.sha256
+          sha256sum scripts/build_codex_package.py scripts/codex_package/*.py \
+            scripts/codex_package/rg scripts/codex_package/codex-zsh \
+            .github/scripts/check_codex_package.py >> evidence/inputs.sha256
+          tar -czf "evidence/codex-frontend-$TARGET.tar.gz" -C package .
           sha256sum "evidence/codex-frontend-$TARGET.tar.gz" > evidence/archive.sha256
+      - name: Preflight the packaged native runtime without a model call
+        run: |
+          CODEX_REPO_ROOT="$GITHUB_WORKSPACE" python3 -m unittest discover \
+            -s .github/scripts -p test_check_codex_package.py
+          CODEX_REPO_ROOT="$GITHUB_WORKSPACE" python3 .github/scripts/check_codex_package.py \
+            "evidence/codex-frontend-$TARGET.tar.gz" "$TARGET" evidence/package-preflight.json
+      - name: Save sccache cache (fallback)
+        if: always() && !cancelled() && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ github.workspace }}/.sccache/
+          key: sccache-smarty-v2-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.run_id }}
+      - name: sccache stats
+        if: always() && env.USE_SCCACHE == 'true'
+        continue-on-error: true
+        run: |
+          mkdir -p evidence
+          sccache --show-stats 2>&1 | tee evidence/sccache.txt || true
+      - name: sccache summary
+        if: always() && env.USE_SCCACHE == 'true'
+        run: |
+          {
+            echo "### sccache stats — x86_64-unknown-linux-gnu (maintenance-baseline)";
+            echo;
+            echo '```';
+            sccache --show-stats || true;
+            echo '```';
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Retain test results and actual counts
         if: always()
         run: |
@@ -147,6 +242,9 @@ jobs:
       CARGO_NET_GIT_FETCH_WITH_CLI: true
       INSTA_UPDATE: 'no'
       PROJECTS: 'codex-protocol codex-state codex-goal-extension codex-core core_test_support codex-app-server'
+      USE_SCCACHE: 'true'
+      CARGO_INCREMENTAL: '0'
+      SCCACHE_CACHE_SIZE: 10G
     defaults:
       run:
         shell: bash
@@ -197,6 +295,41 @@ jobs:
           sha256sum codex-rs/Cargo.lock codex-rs/rust-toolchain.toml codex-rs/.config/nextest.toml \
             justfile scripts/format.py scripts/uv.lock sdk/python/uv.lock tools/buildifier \
             .github/workflows/smarty-ci.yml > backend-evidence/inputs.sha256
+      - name: Install sccache
+        if: ${{ env.USE_SCCACHE == 'true' }}
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: sccache@0.7.5
+      - name: Verify sccache version
+        if: ${{ env.USE_SCCACHE == 'true' }}
+        run: |
+          version="$(sccache --version)"
+          printf '%s\n' "$version" | tee backend-evidence/sccache-version.txt
+          test "$version" = 'sccache 0.7.5'
+      - name: Configure sccache backend
+        if: ${{ env.USE_SCCACHE == 'true' }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${ACTIONS_CACHE_URL:-}" && -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
+            echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+            echo "Using sccache GitHub backend"
+          else
+            echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+            echo "SCCACHE_DIR=${{ github.workspace }}/.sccache" >> "$GITHUB_ENV"
+            echo "Using sccache local disk + actions/cache fallback"
+          fi
+      - name: Enable sccache wrapper
+        if: ${{ env.USE_SCCACHE == 'true' }}
+        run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+      - name: Restore sccache cache (fallback)
+        if: ${{ env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true' }}
+        id: cache_sccache_restore
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ github.workspace }}/.sccache/
+          key: sccache-smarty-v2-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.run_id }}
+          restore-keys: |
+            sccache-smarty-v2-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-
       - name: Configure matching sandbox V8 artifacts
         uses: ./.github/actions/setup-rusty-v8
         with:
@@ -315,6 +448,29 @@ jobs:
               counts[project] = result
           (root / 'counts.json').write_text(json.dumps(counts, indent=2) + '\n')
           PY
+      - name: Save sccache cache (fallback)
+        if: always() && !cancelled() && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ github.workspace }}/.sccache/
+          key: sccache-smarty-v2-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.run_id }}
+      - name: sccache stats
+        if: always() && env.USE_SCCACHE == 'true'
+        continue-on-error: true
+        run: |
+          mkdir -p backend-evidence
+          sccache --show-stats 2>&1 | tee backend-evidence/sccache.txt || true
+      - name: sccache summary
+        if: always() && env.USE_SCCACHE == 'true'
+        run: |
+          {
+            echo "### sccache stats — x86_64-unknown-linux-gnu (backend)";
+            echo;
+            echo '```';
+            sccache --show-stats || true;
+            echo '```';
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Record backend final resources
         if: always()
         run: |
