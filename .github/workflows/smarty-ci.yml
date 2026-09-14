@@ -30,6 +30,8 @@ jobs:
       USE_SCCACHE: 'true'
       CARGO_INCREMENTAL: '0'
       SCCACHE_CACHE_SIZE: 10G
+      # Long tests/link steps must not expire the job-local server and reset its counters.
+      SCCACHE_IDLE_TIMEOUT: '0'
       FILTER: 'test(realtime_) | test(history_replay) | test(replay_thread_snapshot) | test(rollout_history) | test(session_lifecycle_requests) | test(thread_event) | test(reconnect) | test(tokens) | test(exec_flow)'
     defaults:
       run:
@@ -101,6 +103,19 @@ jobs:
           key: sccache-smarty-v2-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.run_id }}
           restore-keys: |
             sccache-smarty-v2-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-
+      - name: Record compiler cache restore
+        if: always()
+        env:
+          CACHE_OUTCOME: ${{ steps.cache_sccache_restore.outcome }}
+          CACHE_PRIMARY_KEY: ${{ steps.cache_sccache_restore.outputs.cache-primary-key }}
+          CACHE_MATCHED_KEY: ${{ steps.cache_sccache_restore.outputs.cache-matched-key }}
+          CACHE_EXACT_HIT: ${{ steps.cache_sccache_restore.outputs.cache-hit }}
+        run: |
+          mkdir -p evidence
+          jq -n '{event:env.GITHUB_EVENT_NAME,ref:env.GITHUB_REF,
+            gha_backend:env.SCCACHE_GHA_ENABLED,outcome:env.CACHE_OUTCOME,
+            primary_key:env.CACHE_PRIMARY_KEY,matched_key:env.CACHE_MATCHED_KEY,
+            exact_hit:env.CACHE_EXACT_HIT}' > evidence/cache-restore.json
       - name: Format check
         working-directory: codex-rs
         run: cargo fmt -- --config imports_granularity=Item --check
@@ -166,6 +181,7 @@ jobs:
           CODEX_REPO_ROOT="$GITHUB_WORKSPACE" python3 .github/scripts/check_codex_package.py \
             "evidence/codex-frontend-$TARGET.tar.gz" "$TARGET" evidence/package-preflight.json
       - name: Save sccache cache (fallback)
+        id: cache_sccache_save
         if: always() && !cancelled() && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
@@ -175,8 +191,11 @@ jobs:
       - name: sccache stats
         if: always() && env.USE_SCCACHE == 'true'
         continue-on-error: true
+        env:
+          CACHE_SAVE_OUTCOME: ${{ steps.cache_sccache_save.outcome }}
         run: |
           mkdir -p evidence
+          jq -n '{outcome:env.CACHE_SAVE_OUTCOME}' > evidence/cache-save.json
           sccache --show-stats 2>&1 | tee evidence/sccache.txt || true
       - name: sccache summary
         if: always() && env.USE_SCCACHE == 'true'
@@ -245,6 +264,10 @@ jobs:
       USE_SCCACHE: 'true'
       CARGO_INCREMENTAL: '0'
       SCCACHE_CACHE_SIZE: 10G
+      # Keep cumulative compiler counters across the long core/app-server test phases.
+      SCCACHE_IDLE_TIMEOUT: '0'
+      # Command-tree timings, not pure compile/test time. The *-exit.txt files own status, including signals.
+      CI_TIME_FORMAT: '{"elapsed_seconds":%e,"user_seconds":%U,"system_seconds":%S,"max_rss_kib":%M}'
     defaults:
       run:
         shell: bash
@@ -255,6 +278,8 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
+      - name: Validate CI phase receipt wiring without building Rust
+        run: python3 -m unittest discover -s .github/scripts -p test_ci_phase_receipts.py
       - name: Record backend initial resources
         run: |
           mkdir -p backend-evidence
@@ -291,7 +316,7 @@ jobs:
             --arg attempt "$GITHUB_RUN_ATTEMPT" --arg job "$GITHUB_JOB" --arg projects "$PROJECTS" \
             '{commit:$commit,tree:$tree,definition:$definition,run:$run,attempt:$attempt,job:$job,
               projects:($projects|split(" ")),profile:"local",testThreads:2}' > backend-evidence/source.json
-          { rustc -Vv; cargo -V; just --version; cargo nextest --version; uv --version; uname -a; } > backend-evidence/tools.txt
+          { rustc -Vv; cargo -V; just --version; cargo nextest --version; uv --version; /usr/bin/time --version; uname -a; } > backend-evidence/tools.txt
           sha256sum codex-rs/Cargo.lock codex-rs/rust-toolchain.toml codex-rs/.config/nextest.toml \
             justfile scripts/format.py scripts/uv.lock sdk/python/uv.lock tools/buildifier \
             .github/workflows/smarty-ci.yml > backend-evidence/inputs.sha256
@@ -330,6 +355,19 @@ jobs:
           key: sccache-smarty-v2-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.run_id }}
           restore-keys: |
             sccache-smarty-v2-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-
+      - name: Record compiler cache restore
+        if: always()
+        env:
+          CACHE_OUTCOME: ${{ steps.cache_sccache_restore.outcome }}
+          CACHE_PRIMARY_KEY: ${{ steps.cache_sccache_restore.outputs.cache-primary-key }}
+          CACHE_MATCHED_KEY: ${{ steps.cache_sccache_restore.outputs.cache-matched-key }}
+          CACHE_EXACT_HIT: ${{ steps.cache_sccache_restore.outputs.cache-hit }}
+        run: |
+          mkdir -p backend-evidence
+          jq -n '{event:env.GITHUB_EVENT_NAME,ref:env.GITHUB_REF,
+            gha_backend:env.SCCACHE_GHA_ENABLED,outcome:env.CACHE_OUTCOME,
+            primary_key:env.CACHE_PRIMARY_KEY,matched_key:env.CACHE_MATCHED_KEY,
+            exact_hit:env.CACHE_EXACT_HIT}' > backend-evidence/cache-restore.json
       - name: Configure matching sandbox V8 artifacts
         uses: ./.github/actions/setup-rusty-v8
         with:
@@ -371,7 +409,8 @@ jobs:
             # Each project overwrites the local-profile JUnit path; never reuse a previous result.
             rm -f codex-rs/target/nextest/local/junit.xml
             discovery_exit=0
-            (cd codex-rs && cargo nextest list --locked -p "$project" --message-format json) \
+            (cd codex-rs && /usr/bin/time -q -f "$CI_TIME_FORMAT" -o "$output/discovery-time.json" \
+              cargo nextest list --locked -p "$project" --message-format json) \
               > "$output/discovered.json" 2> "$output/discovery.txt" || discovery_exit=$?
             echo "$discovery_exit" > "$output/discovery-exit.txt"
             if [[ "$discovery_exit" != 0 ]]; then
@@ -379,7 +418,8 @@ jobs:
               continue
             fi
             test_exit=0
-            just test --locked -p "$project" --test-threads 2 \
+            /usr/bin/time -q -f "$CI_TIME_FORMAT" -o "$output/test-time.json" \
+              just test --locked -p "$project" --test-threads 2 \
               --status-level all --final-status-level all 2>&1 | tee "$output/tests.txt" || test_exit=$?
             echo "$test_exit" > "$output/test-exit.txt"
             if [[ -s codex-rs/target/nextest/local/junit.xml ]]; then
@@ -397,7 +437,8 @@ jobs:
           failed=0
           for project in $PROJECTS; do
             lint_exit=0
-            just clippy --locked -p "$project" -- -D warnings \
+            /usr/bin/time -q -f "$CI_TIME_FORMAT" -o "backend-evidence/$project/clippy-time.json" \
+              just clippy --locked -p "$project" -- -D warnings \
               2>&1 | tee "backend-evidence/$project/clippy.txt" || lint_exit=$?
             echo "$lint_exit" > "backend-evidence/$project/clippy-exit.txt"
             if [[ "$lint_exit" != 0 ]]; then failed=1; fi
@@ -449,6 +490,7 @@ jobs:
           (root / 'counts.json').write_text(json.dumps(counts, indent=2) + '\n')
           PY
       - name: Save sccache cache (fallback)
+        id: cache_sccache_save
         if: always() && !cancelled() && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
@@ -458,8 +500,11 @@ jobs:
       - name: sccache stats
         if: always() && env.USE_SCCACHE == 'true'
         continue-on-error: true
+        env:
+          CACHE_SAVE_OUTCOME: ${{ steps.cache_sccache_save.outcome }}
         run: |
           mkdir -p backend-evidence
+          jq -n '{outcome:env.CACHE_SAVE_OUTCOME}' > backend-evidence/cache-save.json
           sccache --show-stats 2>&1 | tee backend-evidence/sccache.txt || true
       - name: sccache summary
         if: always() && env.USE_SCCACHE == 'true'
