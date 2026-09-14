@@ -140,6 +140,7 @@ async fn stopped_automatic_intent_cannot_mutate_or_restart(stop_point: StopPoint
     struct StopObserver {
         guard: TurnStartGuard,
         stopped: Arc<tokio::sync::Notify>,
+        finish_abort: Arc<tokio::sync::Notify>,
     }
     impl codex_extension_api::ThreadLifecycleContributor<codex_core::config::Config> for StopObserver {
         fn on_thread_idle<'a>(
@@ -162,6 +163,7 @@ async fn stopped_automatic_intent_cannot_mutate_or_restart(stop_point: StopPoint
             Box::pin(async move {
                 self.guard.revoke();
                 self.stopped.notify_one();
+                self.finish_abort.notified().await;
             })
         }
     }
@@ -189,9 +191,11 @@ async fn stopped_automatic_intent_cannot_mutate_or_restart(stop_point: StopPoint
     let (server, _completions) = start_streaming_sse_server(streams).await;
     let guard = TurnStartGuard::default();
     let stopped = Arc::new(tokio::sync::Notify::new());
+    let finish_abort = Arc::new(tokio::sync::Notify::new());
     let observer = Arc::new(StopObserver {
         guard: guard.clone(),
         stopped: Arc::clone(&stopped),
+        finish_abort: Arc::clone(&finish_abort),
     });
     let mut registry = codex_extension_api::ExtensionRegistryBuilder::new();
     registry.thread_lifecycle_contributor(observer.clone());
@@ -249,6 +253,25 @@ async fn stopped_automatic_intent_cannot_mutate_or_restart(stop_point: StopPoint
     timeout(Duration::from_secs(/*secs*/ 10), stopped.notified())
         .await
         .expect("stop callback before release");
+    if stop_point == StopPoint::InterveningUserTurn {
+        assert!(
+            timeout(
+                Duration::from_millis(/*millis*/ 150),
+                wait_for_event(&test.codex, |event| matches!(
+                    event,
+                    EventMsg::TurnAborted(_)
+                )),
+            )
+            .await
+            .is_err(),
+            "terminal abort must wait for lifecycle effects"
+        );
+        finish_abort.notify_one();
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnAborted(_))
+        })
+        .await;
+    }
     release.send(()).expect("stale admission waiter");
     let rejected = timeout(Duration::from_secs(/*secs*/ 10), stale)
         .await
