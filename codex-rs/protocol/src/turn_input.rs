@@ -13,6 +13,9 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use ts_rs::TS;
 
 /// Result of stopping an unfinished root turn so another worker can recover it.
@@ -38,6 +41,23 @@ pub enum TurnInput {
     InterAgentCommunication(InterAgentCommunication),
 }
 
+/// Revocable authority for one generation of automatic work, not persisted or sent on the wire.
+///
+/// The owner revokes all clones on stop or when newer work supersedes the intent.
+/// Core checks it at idle admission; revocation never aborts an already admitted turn.
+#[derive(Clone, Debug, Default)]
+pub struct TurnStartGuard(Arc<AtomicBool>);
+
+impl TurnStartGuard {
+    pub fn revoke(&self) {
+        self.0.store(/*val*/ true, Ordering::SeqCst);
+    }
+
+    pub fn is_revoked(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
 /// One turn input and the context that follows it through submission.
 ///
 /// Callers choose start-or-steer, idle-start, or steer-only behavior through
@@ -50,6 +70,8 @@ pub struct TurnInputRequest {
     pub additional_context: BTreeMap<String, AdditionalContextEntry>,
     pub responsesapi_client_metadata: Option<HashMap<String, String>>,
     pub trace: Option<W3cTraceContext>,
+    /// Optional host-owned authority checked only by automatic idle starts.
+    pub idle_start_guard: Option<TurnStartGuard>,
 }
 
 /// Request to resume sampling for an interrupted regular turn.
@@ -75,7 +97,14 @@ impl TurnInputRequest {
             additional_context: BTreeMap::new(),
             responsesapi_client_metadata: None,
             trace: None,
+            idle_start_guard: None,
         }
+    }
+
+    /// Fence automatic idle admission against stop or superseding work.
+    pub fn with_idle_start_guard(mut self, guard: TurnStartGuard) -> Self {
+        self.idle_start_guard = Some(guard);
+        self
     }
 
     /// Creates ordinary user input without a client-provided message id.
@@ -215,7 +244,7 @@ pub enum SteerSubmission {
 /// Why Core did not accept submitted turn input for turn processing.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum NotSubmittedReason {
-    /// `start_turn_if_idle` found an active turn.
+    /// `start_turn_if_idle` found active work or revoked automatic-start authority.
     NotIdle,
 
     /// `start_turn_if_idle` yielded to higher-priority trigger-turn mailbox input.

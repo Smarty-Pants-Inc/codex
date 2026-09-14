@@ -5,6 +5,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::Weak;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
@@ -85,6 +86,7 @@ use wiremock::matchers::path_regex;
 
 type ConfigMutator = dyn FnOnce(&mut Config) + Send;
 type PreBuildHook = dyn FnOnce(&Path) + Send + 'static;
+type ExtensionFactory = dyn Fn(Weak<ThreadManager>) -> Arc<ExtensionRegistry<Config>> + Send + Sync;
 type WorkspaceSetup = dyn FnOnce(AbsolutePathBuf, Arc<dyn ExecutorFileSystem>) -> BoxFuture<'static, Result<()>>
     + Send;
 const TEST_MODEL_WITH_EXPERIMENTAL_TOOLS: &str = "test-gpt-5.1-codex";
@@ -331,7 +333,7 @@ pub struct TestCodexBuilder {
     cloud_config_bundle: Option<CloudConfigBundleLoader>,
     user_shell_override: Option<Shell>,
     exec_server_url: Option<String>,
-    extensions: Arc<ExtensionRegistry<Config>>,
+    extensions: Arc<ExtensionFactory>,
     user_instructions_provider: Option<Arc<dyn UserInstructionsProvider>>,
     supports_openai_form_elicitation: bool,
     external_time_provider: Option<Arc<dyn TimeProvider>>,
@@ -431,8 +433,16 @@ impl TestCodexBuilder {
         self
     }
 
-    pub fn with_extensions(mut self, extensions: Arc<ExtensionRegistry<Config>>) -> Self {
-        self.extensions = extensions;
+    pub fn with_extensions(self, extensions: Arc<ExtensionRegistry<Config>>) -> Self {
+        self.with_extensions_factory(move |_| Arc::clone(&extensions))
+    }
+
+    /// Install real host extensions that need a weak reference to their owning manager.
+    pub fn with_extensions_factory(
+        mut self,
+        factory: impl Fn(Weak<ThreadManager>) -> Arc<ExtensionRegistry<Config>> + Send + Sync + 'static,
+    ) -> Self {
+        self.extensions = Arc::new(factory);
         self
     }
 
@@ -692,38 +702,39 @@ impl TestCodexBuilder {
             .models_manager
             .clone()
             .unwrap_or_else(|| codex_core::build_models_manager(&config, auth_manager.clone()));
-        let thread_manager = ThreadManager::new(
-            &config,
-            auth_manager.clone(),
-            models_manager,
-            codex_core::CodexAppsToolsCache::default(),
-            SessionSource::Exec,
-            Arc::clone(&environment_manager),
-            Arc::clone(&self.extensions),
-            user_instructions_provider,
-            /*analytics_events_client*/ None,
-            Arc::clone(&thread_store),
-            codex_core::local_agent_graph_store_from_state_db(state_db.as_ref()),
-            installation_id,
-            /*attestation_provider*/ None,
-            /*external_time_provider*/ self.external_time_provider.clone(),
-        );
-        let code_mode_host_program = self
-            .code_mode_host_program
-            .take()
-            .or_else(|| codex_utils_cargo_bin::cargo_bin("codex-code-mode-host").ok());
-        let thread_manager = if config.features.enabled(Feature::CodeModeHost)
-            && let Some(code_mode_host_program) = code_mode_host_program
-        {
-            codex_core::test_support::with_code_mode_host_program(
-                thread_manager,
-                code_mode_host_program,
+        let thread_manager = Arc::new_cyclic(|manager| {
+            let thread_manager = ThreadManager::new(
                 &config,
-            )
-        } else {
-            thread_manager
-        };
-        let thread_manager = Arc::new(thread_manager);
+                auth_manager.clone(),
+                models_manager,
+                codex_core::CodexAppsToolsCache::default(),
+                SessionSource::Exec,
+                Arc::clone(&environment_manager),
+                (self.extensions)(manager.clone()),
+                user_instructions_provider,
+                /*analytics_events_client*/ None,
+                Arc::clone(&thread_store),
+                codex_core::local_agent_graph_store_from_state_db(state_db.as_ref()),
+                installation_id,
+                /*attestation_provider*/ None,
+                /*external_time_provider*/ self.external_time_provider.clone(),
+            );
+            let code_mode_host_program = self
+                .code_mode_host_program
+                .take()
+                .or_else(|| codex_utils_cargo_bin::cargo_bin("codex-code-mode-host").ok());
+            if config.features.enabled(Feature::CodeModeHost)
+                && let Some(code_mode_host_program) = code_mode_host_program
+            {
+                codex_core::test_support::with_code_mode_host_program(
+                    thread_manager,
+                    code_mode_host_program,
+                    &config,
+                )
+            } else {
+                thread_manager
+            }
+        });
         let user_shell_override = self.user_shell_override.clone();
         let client_mcp_extensions = || {
             ClientMcpExtensions::new(
@@ -1354,7 +1365,7 @@ pub fn test_codex() -> TestCodexBuilder {
         cloud_config_bundle: None,
         user_shell_override: None,
         exec_server_url: None,
-        extensions: empty_extension_registry(),
+        extensions: Arc::new(|_| empty_extension_registry()),
         user_instructions_provider: None,
         supports_openai_form_elicitation: false,
         external_time_provider: None,

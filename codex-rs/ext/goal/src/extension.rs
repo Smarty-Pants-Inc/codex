@@ -15,8 +15,10 @@ use codex_extension_api::ThreadResumeInput;
 use codex_extension_api::ThreadStartInput;
 use codex_extension_api::ThreadStopInput;
 use codex_extension_api::TokenUsageContributor;
+use codex_extension_api::ToolCall;
 use codex_extension_api::ToolCallOutcome;
 use codex_extension_api::ToolContributor;
+use codex_extension_api::ToolExecutor;
 use codex_extension_api::ToolFinishInput;
 use codex_extension_api::ToolLifecycleContributor;
 use codex_extension_api::ToolLifecycleFuture;
@@ -40,12 +42,14 @@ use crate::api::GoalService;
 use crate::events::GoalEventEmitter;
 use crate::metrics::GoalMetrics;
 use crate::runtime::ActiveGoalStopReason;
+use crate::runtime::ContinuationTrigger;
 use crate::runtime::GoalRuntimeConfig;
 use crate::runtime::GoalRuntimeHandle;
 use crate::spec::CREATE_GOAL_TOOL_NAME;
 use crate::spec::UPDATE_GOAL_TOOL_NAME;
 use crate::steering::budget_limit_steering_item;
 use crate::tool::GoalToolExecutor;
+use crate::tool::KeepWorkingToolExecutor;
 
 #[derive(Clone, Debug)]
 pub struct GoalExtensionConfig {
@@ -178,7 +182,10 @@ where
                 return;
             };
 
-            if let Err(err) = runtime.continue_if_idle().await {
+            if let Err(err) = runtime
+                .continue_if_idle(ContinuationTrigger::ThreadIdle(input.cause))
+                .await
+            {
                 tracing::warn!(
                     "failed to continue active goal for idle thread {}: {err}",
                     runtime.thread_id()
@@ -225,6 +232,7 @@ where
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
                 return;
             };
+            runtime.start_settlement(input.turn_id);
             if !runtime.is_enabled() {
                 return;
             }
@@ -276,6 +284,7 @@ where
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
                 return;
             };
+            runtime.finish_settlement(input.turn_store.level_id());
             if !runtime.is_enabled() {
                 return;
             }
@@ -334,6 +343,9 @@ where
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
                 return;
             };
+            if let Err(err) = runtime.stop_keep_working().await {
+                tracing::warn!("failed to disable keep_working after turn abort: {err}");
+            }
             if !runtime.is_enabled() {
                 return;
             }
@@ -498,22 +510,25 @@ where
         &self,
         _session_store: &ExtensionData,
         thread_store: &ExtensionData,
-    ) -> Vec<
-        Arc<dyn for<'call> codex_extension_api::ToolExecutor<codex_extension_api::ToolCall<'call>>>,
-    > {
+    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
         let Some(runtime) = goal_runtime_handle(thread_store) else {
             return Vec::new();
         };
-        if !runtime.tools_visible() {
+        if !runtime.tools_available_for_thread() {
             return Vec::new();
+        }
+        let keep_working = Arc::new(KeepWorkingToolExecutor(Arc::clone(&runtime)));
+        if !runtime.tools_visible() {
+            return vec![keep_working];
         }
         let max_goal_token_budget = thread_store
             .get::<GoalExtensionConfig>()
             .and_then(|config| config.max_goal_token_budget);
 
         vec![
+            keep_working,
             Arc::new(GoalToolExecutor::get(
-                runtime.thread_id(),
+                Arc::clone(&runtime),
                 Arc::clone(&self.state_dbs),
                 runtime.accounting_state(),
                 self.analytics.clone(),
@@ -521,7 +536,7 @@ where
                 self.metrics.clone(),
             )),
             Arc::new(GoalToolExecutor::create(
-                runtime.thread_id(),
+                Arc::clone(&runtime),
                 Arc::clone(&self.state_dbs),
                 runtime.accounting_state(),
                 self.analytics.clone(),
@@ -530,7 +545,7 @@ where
                 max_goal_token_budget,
             )),
             Arc::new(GoalToolExecutor::update(
-                runtime.thread_id(),
+                Arc::clone(&runtime),
                 Arc::clone(&self.state_dbs),
                 runtime.accounting_state(),
                 self.analytics.clone(),

@@ -34,6 +34,7 @@ use codex_protocol::turn_input::TurnInput as SubmittedTurnInput;
 use codex_protocol::turn_input::TurnInputMode;
 use codex_protocol::turn_input::TurnInputRequest;
 use codex_protocol::turn_input::TurnInputSubmission;
+use codex_protocol::turn_input::TurnStartGuard;
 use codex_protocol::turn_input::TurnStartOptions;
 use codex_protocol::user_input::UserInput;
 use serde_json::Value;
@@ -81,6 +82,7 @@ impl TurnStartKind {
 struct PreparedTurnInputSettings {
     thread_settings_update: Option<SessionSettingsUpdate>,
     start_options: TurnStartOptions,
+    idle_start_guard: Option<TurnStartGuard>,
 }
 
 impl PreparedTurnInputSettings {
@@ -104,6 +106,7 @@ impl PreparedTurnInputSettings {
         Ok(Self {
             thread_settings_update,
             start_options,
+            idle_start_guard: None,
         })
     }
 
@@ -112,14 +115,14 @@ impl PreparedTurnInputSettings {
     }
 
     /// Applies persistent settings and start-only options before creating a
-    /// new turn context. Returns `None` if admission rejects the candidate,
+    /// new turn context. Returns a rejection reason if admission rejects the candidate,
     /// without committing its settings.
     async fn apply_started(
         self,
         session: &Arc<Session>,
         submission_id: String,
         kind: TurnStartKind,
-    ) -> CodexResult<Option<Arc<TurnContext>>> {
+    ) -> CodexResult<Result<Arc<TurnContext>, NotSubmittedReason>> {
         let TurnStartOptions {
             turn_trigger,
             final_output_json_schema,
@@ -141,6 +144,7 @@ impl PreparedTurnInputSettings {
             final_output_json_schema,
             cyber_access_program,
         };
+        let mut rejection = NotSubmittedReason::PlanMode;
         let turn_context = match kind {
             TurnStartKind::User | TurnStartKind::Recovery => Some(
                 session
@@ -153,13 +157,26 @@ impl PreparedTurnInputSettings {
                         submission_id.clone(),
                         updates,
                         options,
-                        |current, proposed| kind.permits_settings(current, proposed),
+                        |current, proposed| {
+                            if !kind.permits_settings(current, proposed) {
+                                return false;
+                            }
+                            if self
+                                .idle_start_guard
+                                .as_ref()
+                                .is_some_and(TurnStartGuard::is_revoked)
+                            {
+                                rejection = NotSubmittedReason::NotIdle;
+                                return false;
+                            }
+                            true
+                        },
                     )
                     .await?
             }
         };
         let Some((turn_context, settings_snapshot)) = turn_context else {
-            return Ok(None);
+            return Ok(Err(rejection));
         };
         if let Some(turn_trigger) = turn_trigger {
             turn_context
@@ -179,7 +196,7 @@ impl PreparedTurnInputSettings {
                 .turn_metadata_state
                 .set_root_turn_id(root_turn_id);
         }
-        Ok(Some(turn_context))
+        Ok(Ok(turn_context))
     }
 
     /// Applies only persistent settings after steering succeeds. The active
@@ -282,7 +299,7 @@ async fn start_or_steer(
             Ok(TurnInputSubmission::Steered { turn_id })
         }
         Err(NotSubmittedReason::NoActiveTurn) => {
-            let Some(turn_context) = settings
+            let Ok(turn_context) = settings
                 .apply_started(session, submission_id.clone(), TurnStartKind::User)
                 .await?
             else {
@@ -336,6 +353,7 @@ async fn start_if_idle(
         start,
         additional_context,
         responsesapi_client_metadata,
+        idle_start_guard,
         ..
     } = request;
     let can_start_root_turn = start.parent_turn_id.is_none() && start.root_turn_id.is_none();
@@ -373,23 +391,23 @@ async fn start_if_idle(
         });
     }
 
-    let settings = match PreparedTurnInputSettings::prepare(session, thread_settings, start).await {
-        Ok(settings) => settings,
-        Err(error) => {
-            session.clear_reserved_idle_turn(&turn_state).await;
-            return Err(error);
-        }
-    };
+    let mut settings =
+        match PreparedTurnInputSettings::prepare(session, thread_settings, start).await {
+            Ok(settings) => settings,
+            Err(error) => {
+                session.clear_reserved_idle_turn(&turn_state).await;
+                return Err(error);
+            }
+        };
+    settings.idle_start_guard = idle_start_guard;
     let turn_context = match settings
         .apply_started(session, submission_id.clone(), kind)
         .await
     {
-        Ok(Some(turn_context)) => turn_context,
-        Ok(None) => {
+        Ok(Ok(turn_context)) => turn_context,
+        Ok(Err(reason)) => {
             session.clear_reserved_idle_turn(&turn_state).await;
-            return Ok(TurnInputSubmission::NotSubmitted {
-                reason: NotSubmittedReason::PlanMode,
-            });
+            return Ok(TurnInputSubmission::NotSubmitted { reason });
         }
         Err(error) => {
             session.clear_reserved_idle_turn(&turn_state).await;

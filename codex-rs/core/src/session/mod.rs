@@ -4569,7 +4569,12 @@ impl Session {
     pub async fn interrupt_task(self: &Arc<Self>) {
         info!("interrupt received: abort current task, if any");
         let had_active_turn = self.active_turn.lock().await.is_some();
-        self.abort_all_tasks(TurnAbortReason::Interrupted).await;
+        self.mark_interrupted();
+        self.abort_all_tasks_with_notification(
+            TurnAbortReason::Interrupted,
+            self.emit_thread_idle_lifecycle(codex_extension_api::ThreadIdleCause::Interrupted),
+        )
+        .await;
         if !had_active_turn {
             self.cancel_mcp_startup();
         }

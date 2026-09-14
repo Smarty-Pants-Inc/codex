@@ -12,8 +12,10 @@ use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TurnEnvironmentSelections;
+use codex_protocol::turn_input::TurnStartGuard;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses;
 use core_test_support::responses::ev_completed;
@@ -123,6 +125,190 @@ async fn start_turn_if_idle_keeps_automatic_plan_rejections_atomic(
     let request = response_mock.single_request();
     assert!(request.body_contains_text("explicit user input"));
     assert!(!request.body_contains_text("rejected automatic input"));
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StopPoint {
+    Idle,
+    InterveningUserTurn,
+}
+
+#[test_case(StopPoint::Idle; "idle stop")]
+#[test_case(StopPoint::InterveningUserTurn; "user work then stop")]
+#[tokio::test]
+async fn stopped_automatic_intent_cannot_mutate_or_restart(stop_point: StopPoint) {
+    struct StopObserver {
+        guard: TurnStartGuard,
+        stopped: Arc<tokio::sync::Notify>,
+        finish_abort: Arc<tokio::sync::Notify>,
+    }
+    impl codex_extension_api::ThreadLifecycleContributor<codex_core::config::Config> for StopObserver {
+        fn on_thread_idle<'a>(
+            &'a self,
+            input: codex_extension_api::ThreadIdleInput<'a>,
+        ) -> codex_extension_api::ExtensionFuture<'a, ()> {
+            Box::pin(async move {
+                if input.cause == codex_extension_api::ThreadIdleCause::Interrupted {
+                    self.guard.revoke();
+                    self.stopped.notify_one();
+                }
+            })
+        }
+    }
+    impl codex_extension_api::TurnLifecycleContributor for StopObserver {
+        fn on_turn_abort<'a>(
+            &'a self,
+            _input: codex_extension_api::TurnAbortInput<'a>,
+        ) -> codex_extension_api::ExtensionFuture<'a, ()> {
+            Box::pin(async move {
+                self.guard.revoke();
+                self.stopped.notify_one();
+                self.finish_abort.notified().await;
+            })
+        }
+    }
+    let (release_active, active_gate) = oneshot::channel();
+    let mut streams = vec![vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse_completed("settled"),
+    }]];
+    if stop_point == StopPoint::InterveningUserTurn {
+        streams.push(vec![
+            StreamingSseChunk {
+                gate: None,
+                body: responses::sse(vec![ev_response_created("active")]),
+            },
+            StreamingSseChunk {
+                gate: Some(active_gate),
+                body: responses::sse(vec![ev_completed("active")]),
+            },
+        ]);
+    }
+    streams.push(vec![StreamingSseChunk {
+        gate: None,
+        body: responses::sse_completed("fresh"),
+    }]);
+    let (server, _completions) = start_streaming_sse_server(streams).await;
+    let guard = TurnStartGuard::default();
+    let stopped = Arc::new(tokio::sync::Notify::new());
+    let finish_abort = Arc::new(tokio::sync::Notify::new());
+    let observer = Arc::new(StopObserver {
+        guard: guard.clone(),
+        stopped: Arc::clone(&stopped),
+        finish_abort: Arc::clone(&finish_abort),
+    });
+    let mut registry = codex_extension_api::ExtensionRegistryBuilder::new();
+    registry.thread_lifecycle_contributor(observer.clone());
+    registry.turn_lifecycle_contributor(observer);
+    let test = test_codex()
+        .with_extensions(Arc::new(registry.build()))
+        .build_with_streaming_server(&server)
+        .await
+        .expect("native session");
+    submit_user_message(&test.codex, "initial work")
+        .await
+        .expect("initial user turn");
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+
+    let before = test.codex.thread_settings_snapshot().await;
+    let (release, paused) = oneshot::channel();
+    let (ready, entered) = oneshot::channel();
+    let stale = tokio::spawn({
+        let codex = Arc::clone(&test.codex);
+        async move {
+            let request = TurnInputRequest::new(TurnInput::ResponseItem(
+                responses::user_message_item("stale automatic input"),
+            ))
+            .with_idle_start_guard(guard)
+            .with_thread_settings(ThreadSettingsOverrides {
+                effort: Some(Some(codex_protocol::openai_models::ReasoningEffort::High)),
+                ..Default::default()
+            });
+            ready.send(()).expect("admission barrier receiver");
+            paused.await.expect("release stale admission");
+            codex.start_turn_if_idle(request).await
+        }
+    });
+    entered
+        .await
+        .expect("completed intent paused before admission");
+    if stop_point == StopPoint::InterveningUserTurn {
+        submit_user_message(&test.codex, "intervening user work")
+            .await
+            .expect("intervening turn");
+        timeout(
+            Duration::from_secs(/*secs*/ 10),
+            server.wait_for_request_count(/*count*/ 2),
+        )
+        .await
+        .expect("intervening turn reached the model");
+    }
+    test.codex
+        .submit(Op::Interrupt)
+        .await
+        .expect("ordered stop");
+    timeout(Duration::from_secs(/*secs*/ 10), stopped.notified())
+        .await
+        .expect("stop callback before release");
+    if stop_point == StopPoint::InterveningUserTurn {
+        assert!(
+            timeout(
+                Duration::from_millis(/*millis*/ 150),
+                wait_for_event(&test.codex, |event| matches!(
+                    event,
+                    EventMsg::TurnAborted(_)
+                )),
+            )
+            .await
+            .is_err(),
+            "terminal abort must wait for lifecycle effects"
+        );
+        finish_abort.notify_one();
+        wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnAborted(_))
+        })
+        .await;
+    }
+    release.send(()).expect("stale admission waiter");
+    let rejected = timeout(Duration::from_secs(/*secs*/ 10), stale)
+        .await
+        .expect("no submission-loop deadlock")
+        .expect("stale task joined")
+        .expect("typed admission result");
+    assert_eq!(
+        rejected,
+        StartIfIdleSubmission::NotSubmitted {
+            reason: NotSubmittedReason::NotIdle
+        }
+    );
+    assert_eq!(test.codex.thread_settings_snapshot().await, before);
+
+    // Fresh explicit authority is allowed even though native status was Interrupted.
+    let fresh = test
+        .codex
+        .start_turn_if_idle(user_message_request("fresh explicit work"))
+        .await
+        .expect("fresh explicit admission");
+    assert!(matches!(fresh, StartIfIdleSubmission::Started { .. }));
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let requests = server.requests().await;
+    assert_eq!(
+        requests.len(),
+        if stop_point == StopPoint::Idle { 2 } else { 3 }
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|body| String::from_utf8_lossy(body).contains("stale automatic input"))
+    );
+    let _ = release_active.send(());
+    server.shutdown().await;
 }
 
 #[tokio::test]
