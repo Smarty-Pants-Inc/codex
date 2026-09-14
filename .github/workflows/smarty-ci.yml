@@ -112,20 +112,54 @@ jobs:
             --status-level all --final-status-level all 2>&1 | tee evidence/tests.txt
       - name: Scoped Clippy
         run: just clippy --locked -p codex-tui -- -D warnings
-      - name: Build exact staged GNU frontend
+      - name: Configure matching sandbox V8 artifacts for the release package
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
+      - name: Build and finalize bundled bwrap before compiling its digest into Codex
         working-directory: codex-rs
-        run: cargo build --locked --release -p codex-cli --bin codex --target "$TARGET"
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --target "$TARGET" -p codex-bwrap --bin bwrap
+          bwrap_path="$CARGO_TARGET_DIR/$TARGET/release/bwrap"
+          strip --strip-debug --strip-unneeded "$bwrap_path"
+          sha256sum "$bwrap_path" > ../evidence/bwrap.sha256
+          digest="$(sha256sum "$bwrap_path" | awk '{print $1}')"
+          echo "CODEX_BWRAP_SHA256=$digest" >> "$GITHUB_ENV"
+      - name: Build exact staged GNU frontend and native companions
+        working-directory: codex-rs
+        run: |
+          sha256sum "$RUSTY_V8_ARCHIVE" "$RUSTY_V8_SRC_BINDING_PATH" > ../evidence/rusty-v8.sha256
+          cargo build --locked --release --target "$TARGET" \
+            -p codex-cli --bin codex \
+            -p codex-code-mode-host --bin codex-code-mode-host
       - name: Package frontend and inspect ELF requirements, without activation
         run: |
           set -euo pipefail
+          release="$CARGO_TARGET_DIR/$TARGET/release"
+          CODEX_REPO_ROOT="$GITHUB_WORKSPACE" python3 scripts/build_codex_package.py \
+            --target "$TARGET" --variant codex --cargo-profile release --package-dir package \
+            --entrypoint-bin "$release/codex" \
+            --code-mode-host-bin "$release/codex-code-mode-host" --bwrap-bin "$release/bwrap"
+          sha256sum --check evidence/bwrap.sha256
+          printf '%s  %s\n' "$CODEX_BWRAP_SHA256" package/codex-resources/bwrap | sha256sum --check
           git diff --exit-code
           test -z "$(git ls-files --others --exclude-standard -- codex-rs .github scripts)"
-          install -m 755 "$CARGO_TARGET_DIR/$TARGET/release/codex" package/codex
           cp evidence/source.json package/source.json
-          { file package/codex; readelf -l package/codex; readelf -d package/codex; } > evidence/elf.txt
-          sha256sum package/codex > evidence/binary.sha256
-          tar -czf "evidence/codex-frontend-$TARGET.tar.gz" -C package codex source.json
+          { file package/bin/codex; readelf -l package/bin/codex; readelf -d package/bin/codex; } > evidence/elf.txt
+          sha256sum package/bin/codex > evidence/binary.sha256
+          find package -type f -print0 | sort -z | xargs -0 sha256sum > evidence/package-files.sha256
+          sha256sum scripts/build_codex_package.py scripts/codex_package/*.py \
+            scripts/codex_package/rg scripts/codex_package/codex-zsh \
+            .github/scripts/check_codex_package.py >> evidence/inputs.sha256
+          tar -czf "evidence/codex-frontend-$TARGET.tar.gz" -C package .
           sha256sum "evidence/codex-frontend-$TARGET.tar.gz" > evidence/archive.sha256
+      - name: Preflight the packaged native runtime without a model call
+        run: |
+          CODEX_REPO_ROOT="$GITHUB_WORKSPACE" python3 -m unittest discover \
+            -s .github/scripts -p test_check_codex_package.py
+          CODEX_REPO_ROOT="$GITHUB_WORKSPACE" python3 .github/scripts/check_codex_package.py \
+            "evidence/codex-frontend-$TARGET.tar.gz" "$TARGET" evidence/package-preflight.json
       - name: Save sccache cache (fallback)
         if: always() && !cancelled() && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
         continue-on-error: true
