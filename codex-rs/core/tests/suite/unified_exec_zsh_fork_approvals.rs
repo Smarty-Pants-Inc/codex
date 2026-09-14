@@ -26,6 +26,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -100,6 +101,46 @@ async fn unified_exec_zsh_fork_parent_approval_preserves_denied_reads() -> Resul
     )
     .await?;
     approve_expected_exec(&test, &command).await?;
+
+    // Denied reads keep the parent sandboxed; its require_escalated request
+    // still prompts for the intercepted exec, whose approval cannot bypass the deny.
+    let event = wait_for_event(&test.codex, |event| {
+        matches!(
+            event,
+            EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
+        )
+    })
+    .await;
+    let EventMsg::ExecApprovalRequest(inner_approval) = event else {
+        panic!("expected separate approval for the intercepted denied read");
+    };
+    let [program, argument] = inner_approval.command.as_slice() else {
+        panic!(
+            "expected only cat and the denied path: {:?}",
+            inner_approval.command
+        );
+    };
+    assert!(Path::new(program).is_absolute());
+    assert_eq!(
+        (
+            Path::new(program).file_name(),
+            Path::new(argument),
+            inner_approval.call_id.as_str(),
+            inner_approval.environment_id.as_deref(),
+        ),
+        (
+            Some(std::ffi::OsStr::new("cat")),
+            denied_path.as_path(),
+            call_id,
+            Some(codex_exec_server::LOCAL_ENVIRONMENT_ID),
+        )
+    );
+    let approval_id = inner_approval
+        .approval_id
+        .as_ref()
+        .context("intercepted execve should have a subprocess approval id")?;
+    assert_ne!(approval_id, call_id);
+    approve_exec(&test, inner_approval.effective_approval_id()).await?;
     wait_for_completion_without_approval(&test).await;
 
     let result = command_result(&results, call_id);
@@ -700,9 +741,9 @@ fn permission_profile_from_toml(profile: &str) -> Result<PermissionProfile> {
                 ":project_roots" => FileSystemPath::Special {
                     value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
                 },
-                _ if *access == FileSystemAccessMode::Deny => FileSystemPath::GlobPattern {
-                    pattern: path.clone(),
-                },
+                _ if *access == FileSystemAccessMode::Deny => {
+                    FileSystemPath::from(AbsolutePathBuf::try_from(path.as_str())?)
+                }
                 _ => anyhow::bail!("unexpected filesystem entry in test profile: {path}"),
             };
             Ok(FileSystemSandboxEntry {

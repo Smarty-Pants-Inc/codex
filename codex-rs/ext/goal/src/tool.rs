@@ -20,16 +20,20 @@ use crate::analytics::GoalAnalytics;
 use crate::analytics::GoalEventAttribution;
 use crate::events::GoalEventEmitter;
 use crate::metrics::GoalMetrics;
+use crate::runtime::GoalRuntimeHandle;
 use crate::spec::CREATE_GOAL_TOOL_NAME;
 use crate::spec::GET_GOAL_TOOL_NAME;
+use crate::spec::KEEP_WORKING_TOOL_NAME;
 use crate::spec::UPDATE_GOAL_TOOL_NAME;
 use crate::spec::create_create_goal_tool;
 use crate::spec::create_get_goal_tool;
+use crate::spec::create_keep_working_tool;
 use crate::spec::create_update_goal_tool;
 
 #[derive(Clone)]
 pub(crate) struct GoalToolExecutor {
     kind: GoalToolKind,
+    runtime: Arc<GoalRuntimeHandle>,
     thread_id: ThreadId,
     state_db: Arc<codex_state::StateRuntime>,
     accounting_state: Arc<GoalAccountingState>,
@@ -75,7 +79,7 @@ enum CompletionBudgetReport {
 
 impl GoalToolExecutor {
     pub(crate) fn get(
-        thread_id: ThreadId,
+        runtime: Arc<GoalRuntimeHandle>,
         state_db: Arc<codex_state::StateRuntime>,
         accounting_state: Arc<GoalAccountingState>,
         analytics: GoalAnalytics,
@@ -84,7 +88,8 @@ impl GoalToolExecutor {
     ) -> Self {
         Self {
             kind: GoalToolKind::Get,
-            thread_id,
+            thread_id: runtime.thread_id(),
+            runtime,
             state_db,
             accounting_state,
             analytics,
@@ -95,7 +100,7 @@ impl GoalToolExecutor {
     }
 
     pub(crate) fn create(
-        thread_id: ThreadId,
+        runtime: Arc<GoalRuntimeHandle>,
         state_db: Arc<codex_state::StateRuntime>,
         accounting_state: Arc<GoalAccountingState>,
         analytics: GoalAnalytics,
@@ -105,7 +110,8 @@ impl GoalToolExecutor {
     ) -> Self {
         Self {
             kind: GoalToolKind::Create,
-            thread_id,
+            thread_id: runtime.thread_id(),
+            runtime,
             state_db,
             accounting_state,
             analytics,
@@ -116,7 +122,7 @@ impl GoalToolExecutor {
     }
 
     pub(crate) fn update(
-        thread_id: ThreadId,
+        runtime: Arc<GoalRuntimeHandle>,
         state_db: Arc<codex_state::StateRuntime>,
         accounting_state: Arc<GoalAccountingState>,
         analytics: GoalAnalytics,
@@ -125,7 +131,8 @@ impl GoalToolExecutor {
     ) -> Self {
         Self {
             kind: GoalToolKind::Update,
-            thread_id,
+            thread_id: runtime.thread_id(),
+            runtime,
             state_db,
             accounting_state,
             analytics,
@@ -200,6 +207,16 @@ impl GoalToolExecutor {
         validate_goal_budget(request.token_budget, self.max_goal_token_budget)
             .map_err(FunctionCallError::RespondToModel)?;
 
+        let _permit = self
+            .runtime
+            .goal_state_permit()
+            .await
+            .map_err(FunctionCallError::RespondToModel)?;
+        self.state_db
+            .thread_goals()
+            .set_keep_working(self.thread_id, /*enabled*/ false)
+            .await
+            .map_err(|err| FunctionCallError::RespondToModel(err.to_string()))?;
         let goal = self
             .state_db
             .thread_goals()
@@ -399,6 +416,43 @@ impl GoalToolExecutor {
                 .is_none_or(|expected_goal_id| goal.goal_id == expected_goal_id)
                 .then_some(goal.status)
         }))
+    }
+}
+
+pub(crate) struct KeepWorkingToolExecutor(pub(crate) Arc<GoalRuntimeHandle>);
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct KeepWorkingArgs {
+    enabled: bool,
+}
+
+impl<'call> ToolExecutor<ToolCall<'call>> for KeepWorkingToolExecutor {
+    fn tool_name(&self) -> ToolName {
+        ToolName::plain(KEEP_WORKING_TOOL_NAME)
+    }
+
+    fn spec(&self) -> ToolSpec {
+        create_keep_working_tool()
+    }
+
+    fn handle<'a>(
+        &'a self,
+        invocation: ToolCall<'call>,
+    ) -> codex_extension_api::ToolExecutorFuture<'a>
+    where
+        'call: 'a,
+    {
+        Box::pin(async move {
+            let args: KeepWorkingArgs = parse_arguments(invocation.function_arguments()?)?;
+            self.0
+                .set_keep_working(&invocation.turn_id, args.enabled)
+                .await
+                .map_err(FunctionCallError::RespondToModel)?;
+            let value = serde_json::to_value(args)
+                .map_err(|err| FunctionCallError::Fatal(err.to_string()))?;
+            Ok(Box::new(JsonToolOutput::new(value)) as Box<dyn ToolOutput>)
+        })
     }
 }
 

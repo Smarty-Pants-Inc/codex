@@ -509,13 +509,24 @@ impl Session {
     }
 
     pub async fn abort_all_tasks(self: &Arc<Self>, reason: TurnAbortReason) {
+        // ponytail: idle shutdown shares this entry point, but is not a user stop.
+        // Only explicit Interrupt adds the stop-only notification.
+        self.abort_all_tasks_with_notification(reason, std::future::ready(()))
+            .await;
+    }
+
+    /// Runs the notification after old-task cleanup, even if no task remained,
+    /// but before pending mail can acquire a new turn's authority.
+    pub(crate) async fn abort_all_tasks_with_notification(
+        self: &Arc<Self>,
+        reason: TurnAbortReason,
+        notification: impl std::future::Future<Output = ()> + Send,
+    ) {
         let mut aborted_turn = false;
         let mut active_turn_to_clear = None;
-        let mut turn_context = None;
         if let Some(mut active_turn) = self.take_active_turn(&reason).await {
             let task = active_turn.task.take();
             aborted_turn = task.is_some();
-            turn_context = task.as_ref().map(|task| Arc::clone(&task.turn_context));
             if let Some(task) = task {
                 self.handle_task_abort(task, reason.clone(), &active_turn.turn_state)
                     .await;
@@ -525,15 +536,12 @@ impl Session {
             }
         }
 
-        if let Some(turn_context) = turn_context.as_deref() {
-            self.emit_turn_abort_lifecycle(reason.clone(), turn_context.extension_data.as_ref())
-                .await;
-        }
         if let Some(active_turn) = active_turn_to_clear {
             // Let interrupted tasks observe cancellation before dropping pending approvals, or an
             // in-flight approval wait can surface as a model-visible rejection before TurnAborted.
             self.input_queue.clear_pending(&active_turn).await;
         }
+        notification.await;
         if reason == TurnAbortReason::Interrupted && aborted_turn {
             self.maybe_start_turn_for_pending_work().await;
         }
@@ -567,13 +575,8 @@ impl Session {
         };
 
         let task = active_turn.task.take();
-        let turn_context = task.as_ref().map(|task| Arc::clone(&task.turn_context));
         if let Some(task) = task {
             self.handle_task_abort(task, reason.clone(), &active_turn.turn_state)
-                .await;
-        }
-        if let Some(turn_context) = turn_context.as_deref() {
-            self.emit_turn_abort_lifecycle(reason.clone(), turn_context.extension_data.as_ref())
                 .await;
         }
         // Let interrupted tasks observe cancellation before dropping pending approvals, or an
@@ -907,6 +910,8 @@ impl Session {
     ) {
         let sub_id = task.turn_context.sub_id.clone();
         if task.cancellation_token.is_cancelled() {
+            self.emit_turn_abort_lifecycle(reason, task.turn_context.extension_data.as_ref())
+                .await;
             return;
         }
 
@@ -983,6 +988,9 @@ impl Session {
                 turn_id: task.turn_context.sub_id.clone(),
                 profile,
             });
+        // Complete abort effects before clients observe the terminal event and re-read state.
+        self.emit_turn_abort_lifecycle(reason.clone(), task.turn_context.extension_data.as_ref())
+            .await;
         let event = EventMsg::TurnAborted(TurnAbortedEvent {
             turn_id: Some(task.turn_context.sub_id.clone()),
             reason,

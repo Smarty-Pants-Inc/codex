@@ -44,6 +44,8 @@ mod hooks_list;
 mod host_skills;
 mod imagegen_extension;
 mod initialize;
+#[path = "keep_working_tests.rs"]
+mod keep_working;
 mod marketplace_add;
 mod marketplace_remove;
 mod marketplace_upgrade;

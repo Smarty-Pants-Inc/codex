@@ -1,7 +1,7 @@
 name: smarty-ci
 
-# Release-scoped review and exact-landed-artifact checks. Publication is gated by
-# independent source/workflow admission; this does not authorize an agent dispatch.
+# Maintenance baseline plus complete backend project checks. Publication is gated
+# by source/workflow/cost admission; this definition does not authorize dispatch.
 on:
   pull_request:
     branches: [codex/maintenance-0.153.4]
@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  smarty-ci:
+  maintenance-baseline:
     if: github.repository == 'Smarty-Pants-Inc/codex'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
@@ -135,3 +135,227 @@ jobs:
           path: evidence/
           retention-days: 1
           if-no-files-found: error
+
+  backend:
+    if: github.repository == 'Smarty-Pants-Inc/codex'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_NET_GIT_FETCH_WITH_CLI: true
+      INSTA_UPDATE: 'no'
+      PROJECTS: 'codex-protocol codex-state codex-goal-extension codex-core core_test_support codex-app-server'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Set disposable backend build directory
+        run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/codex-backend-target" >> "$GITHUB_ENV"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Record backend initial resources
+        run: |
+          mkdir -p backend-evidence
+          {
+            date -u +%FT%TZ
+            nproc
+            free -b
+            df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+          } > backend-evidence/resources-start.txt 2>&1
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          components: rustfmt, clippy, rust-src
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: just@1.51.0,nextest@0.9.103
+      - uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: '0.11.3'
+          enable-cache: false
+      - name: Native Linux backend prerequisites (disposable runner only)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev bubblewrap
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Record backend source and toolchain
+        run: |
+          set -euo pipefail
+          mkdir -p backend-evidence
+          jq -n --arg commit "$(git rev-parse HEAD)" --arg tree "$(git rev-parse 'HEAD^{tree}')" \
+            --arg definition "$GITHUB_WORKFLOW_SHA" --arg run "$GITHUB_RUN_ID" \
+            --arg attempt "$GITHUB_RUN_ATTEMPT" --arg job "$GITHUB_JOB" --arg projects "$PROJECTS" \
+            '{commit:$commit,tree:$tree,definition:$definition,run:$run,attempt:$attempt,job:$job,
+              projects:($projects|split(" ")),profile:"local",testThreads:2}' > backend-evidence/source.json
+          { rustc -Vv; cargo -V; just --version; cargo nextest --version; uv --version; uname -a; } > backend-evidence/tools.txt
+          sha256sum codex-rs/Cargo.lock codex-rs/rust-toolchain.toml codex-rs/.config/nextest.toml \
+            justfile scripts/format.py scripts/uv.lock sdk/python/uv.lock tools/buildifier \
+            .github/workflows/smarty-ci.yml > backend-evidence/inputs.sha256
+      - name: Configure matching sandbox V8 artifacts
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
+      - name: Build backend runtime test prerequisites
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+          sha256sum "$RUSTY_V8_ARCHIVE" "$RUSTY_V8_SRC_BINDING_PATH" \
+            > ../backend-evidence/rusty-v8.sha256
+          # Package-scoped nextest runs do not build sibling packages' executables.
+          cargo build --locked \
+            -p codex-cli --bin codex \
+            -p codex-rmcp-client --bin test_stdio_server --bin test_streamable_http_server \
+            -p codex-code-mode-host --bin codex-code-mode-host \
+            -p codex-linux-sandbox --bin codex-linux-sandbox \
+            -p codex-shell-escalation --bin codex-execve-wrapper \
+            2>&1 | tee ../backend-evidence/runtime-prerequisites.txt
+          for binary in codex test_stdio_server test_streamable_http_server codex-code-mode-host codex-linux-sandbox codex-execve-wrapper; do
+            path="$CARGO_TARGET_DIR/debug/$binary"
+            if [[ ! -x "$path" ]]; then
+              echo "Missing runtime test executable: $path" >&2
+              exit 1
+            fi
+            sha256sum "$path" >> ../backend-evidence/runtime-prerequisites.sha256
+            echo "CARGO_BIN_EXE_$binary=$path" >> "$GITHUB_ENV"
+            if [[ "$binary" == *-* ]]; then
+              echo "CARGO_BIN_EXE_${binary//-/_}=$path" >> "$GITHUB_ENV"
+            fi
+          done
+      - name: Complete backend project tests
+        run: |
+          set -euo pipefail
+          failed=0
+          for project in $PROJECTS; do
+            output="$GITHUB_WORKSPACE/backend-evidence/$project"
+            mkdir -p "$output"
+            date -u +%FT%TZ > "$output/started.txt"
+            # Each project overwrites the local-profile JUnit path; never reuse a previous result.
+            rm -f codex-rs/target/nextest/local/junit.xml
+            discovery_exit=0
+            (cd codex-rs && cargo nextest list --locked -p "$project" --message-format json) \
+              > "$output/discovered.json" 2> "$output/discovery.txt" || discovery_exit=$?
+            echo "$discovery_exit" > "$output/discovery-exit.txt"
+            if [[ "$discovery_exit" != 0 ]]; then
+              failed=1
+              continue
+            fi
+            test_exit=0
+            just test --locked -p "$project" --test-threads 2 \
+              --status-level all --final-status-level all 2>&1 | tee "$output/tests.txt" || test_exit=$?
+            echo "$test_exit" > "$output/test-exit.txt"
+            if [[ -s codex-rs/target/nextest/local/junit.xml ]]; then
+              cp codex-rs/target/nextest/local/junit.xml "$output/junit.xml"
+            else
+              failed=1
+            fi
+            date -u +%FT%TZ > "$output/completed.txt"
+            if [[ "$test_exit" != 0 ]]; then failed=1; fi
+          done
+          exit "$failed"
+      - name: Scoped backend Clippy
+        run: |
+          set -euo pipefail
+          failed=0
+          for project in $PROJECTS; do
+            lint_exit=0
+            just clippy --locked -p "$project" -- -D warnings \
+              2>&1 | tee "backend-evidence/$project/clippy.txt" || lint_exit=$?
+            echo "$lint_exit" > "backend-evidence/$project/clippy-exit.txt"
+            if [[ "$lint_exit" != 0 ]]; then failed=1; fi
+          done
+          exit "$failed"
+      - name: Full formatter check (pinned Rust and locked Python tools)
+        run: just fmt-check
+      - name: Verify backend source unchanged
+        run: |
+          git diff --exit-code
+          test -z "$(git ls-files --others --exclude-standard -- codex-rs .github scripts sdk tools justfile)"
+      - name: Retain per-project backend counts
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          root = Path('backend-evidence')
+          root.mkdir(exist_ok=True)
+          counts = {}
+          for project in os.environ['PROJECTS'].split():
+              output = root / project
+              result = {}
+              for phase in ('discovery', 'test', 'clippy'):
+                  path = output / f'{phase}-exit.txt'
+                  result[f'{phase}_exit'] = int(path.read_text()) if path.exists() else None
+              path = output / 'discovered.json'
+              if path.exists():
+                  try:
+                      data = json.loads(path.read_text())
+                      cases = [case for suite in data['rust-suites'].values() for case in suite['testcases'].values()]
+                      result['discovered'] = len(cases)
+                      result['selected'] = sum(case['filter-match']['status'] == 'matches' for case in cases)
+                      result['ignored'] = sum(case['ignored'] for case in cases)
+                      result['filtered_out'] = sum(case['filter-match'].get('reason') == 'expression' for case in cases)
+                  except (json.JSONDecodeError, KeyError):
+                      result['discovery_error'] = 'Incomplete discovery; counts unknown'
+              path = output / 'junit.xml'
+              if path.exists():
+                  cases = ET.parse(path).findall('.//testcase')
+                  result['executed'] = sum(case.find('skipped') is None for case in cases)
+                  result['skipped_in_junit'] = sum(case.find('skipped') is not None for case in cases)
+                  result['failed'] = sum(case.find('failure') is not None or case.find('error') is not None for case in cases)
+                  result['passed'] = result['executed'] - result['failed']
+              counts[project] = result
+          (root / 'counts.json').write_text(json.dumps(counts, indent=2) + '\n')
+          PY
+      - name: Record backend final resources
+        if: always()
+        run: |
+          mkdir -p backend-evidence
+          failed=0
+          {
+            date -u +%FT%TZ || failed=1
+            free -b || failed=1
+            df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP" || failed=1
+            if [[ ! -f backend-evidence/resources-start.txt ]]; then
+              echo 'Initial resource receipt absent; initial phase did not complete.'
+            fi
+            for path in "${CARGO_TARGET_DIR:-}" "$GITHUB_WORKSPACE/backend-evidence"; do
+              if [[ -e "$path" ]]; then
+                du -sxB1 "$path" || failed=1
+              else
+                printf 'Path absent (not measured): %s\n' "$path"
+              fi
+            done
+          } > backend-evidence/resources-final.txt 2>&1
+          exit "$failed"
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        if: always()
+        with:
+          name: codex-backend-${{ github.sha }}-${{ github.run_attempt }}
+          path: backend-evidence/
+          retention-days: 1
+          if-no-files-found: error
+
+  required:
+    name: smarty-ci
+    if: ${{ always() && github.repository == 'Smarty-Pants-Inc/codex' }}
+    needs: [maintenance-baseline, backend]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require baseline and backend success
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: python3 .github/scripts/check_ci_results.py

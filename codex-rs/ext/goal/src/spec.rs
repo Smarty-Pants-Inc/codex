@@ -9,6 +9,23 @@ use std::collections::BTreeMap;
 pub const GET_GOAL_TOOL_NAME: &str = "get_goal";
 pub const CREATE_GOAL_TOOL_NAME: &str = "create_goal";
 pub const UPDATE_GOAL_TOOL_NAME: &str = "update_goal";
+pub(crate) const KEEP_WORKING_TOOL_NAME: &str = "keep_working";
+
+pub(crate) fn create_keep_working_tool() -> ToolSpec {
+    ToolSpec::Function(ResponsesApiTool {
+        name: KEEP_WORKING_TOOL_NAME.to_string(),
+        description: "Control continued work on this thread. Default OFF. Set enabled=true when useful authorized work remains; after a successful turn, this permits one further work opportunity. Set enabled=false when finished or waiting for input or external change. OFF does not interrupt your current response. Do not invent work or poll. Mutually exclusive with an unfinished legacy goal. Interruptions and terminal errors turn this OFF; resuming never starts work by itself."
+            .to_string(),
+        strict: true,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            BTreeMap::from([("enabled".to_string(), JsonSchema::boolean(/*description*/ None))]),
+            /*required*/ Some(vec!["enabled".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: None,
+    })
+}
 
 pub fn create_get_goal_tool() -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {

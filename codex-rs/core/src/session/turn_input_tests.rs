@@ -615,7 +615,7 @@ async fn automatic_admission_rechecks_plan_mode_without_committing_sparse_settin
             )
             .await
             .expect("automatic admission should return a typed rejection");
-        assert!(outcome.is_none());
+        assert!(matches!(outcome, Err(NotSubmittedReason::PlanMode)));
         assert_eq!(session.thread_settings_snapshot().await, desired_settings);
         assert!(session.active_turn.lock().await.is_none());
         assert_eq!(
@@ -653,6 +653,55 @@ async fn automatic_admission_rechecks_plan_mode_without_committing_sparse_settin
         *records.lock().expect("config records lock"),
         vec![(AskForApproval::Never, ApprovalsReviewer::AutoReview)]
     );
+}
+
+#[tokio::test]
+async fn revoked_idle_guard_is_checked_after_preview_without_mutation() {
+    let (session, _turn_context, rx) = make_session_and_context_with_rx().await;
+    let before = session.thread_settings_snapshot().await;
+    let history = session.clone_history().await.into_raw_items();
+    for mode in [ModeKind::Default, ModeKind::Plan] {
+        let guard = TurnStartGuard::default();
+        let mut collaboration_mode = session.collaboration_mode().await;
+        collaboration_mode.mode = mode;
+        let mut prepared = PreparedTurnInputSettings::prepare(
+            &session,
+            ThreadSettingsOverrides {
+                collaboration_mode: Some(collaboration_mode),
+                effort: Some(Some(ReasoningEffort::High)),
+                ..Default::default()
+            },
+            TurnStartOptions::default(),
+        )
+        .await
+        .expect("valid preview");
+        prepared.idle_start_guard = Some(guard.clone());
+        guard.revoke(); // Deterministic stop between preview and the commit predicate.
+        let result = prepared
+            .apply_started(&session, "revoked".to_string(), TurnStartKind::Automatic)
+            .await
+            .expect("typed rejection");
+        let expected = if mode == ModeKind::Plan {
+            NotSubmittedReason::PlanMode
+        } else {
+            NotSubmittedReason::NotIdle
+        };
+        assert!(matches!(result, Err(reason) if reason == expected));
+        assert_eq!(session.thread_settings_snapshot().await, before);
+        assert_eq!(session.clone_history().await.into_raw_items(), history);
+        assert!(session.active_turn.lock().await.is_none());
+        assert!(
+            session
+                .input_queue
+                .get_pending_input(&session.active_turn)
+                .await
+                .0
+                .is_empty()
+        );
+        while let Ok(event) = rx.try_recv() {
+            assert_ne!(event.id, "revoked");
+        }
+    }
 }
 
 #[test_case(TurnStartKind::User; "ordinary constructor")]
@@ -829,6 +878,24 @@ async fn start_only_rejects_pending_trigger_turn_without_injecting() {
         },
         submission
     );
+    assert!(session.active_turn.lock().await.is_none());
+    assert!(session.input_queue.has_trigger_turn_mailbox_items().await);
+    assert_eq!(session.collaboration_mode().await.mode, ModeKind::Plan);
+
+    let guard = TurnStartGuard::default();
+    guard.revoke();
+    let stopped = handle(
+        &session,
+        TurnInputRequest::new(SubmittedTurnInput::ResponseItem(user_message(
+            "stopped input",
+        )))
+        .with_idle_start_guard(guard),
+        TurnInputMode::StartIfIdle,
+        "stopped-submission".to_string(),
+    )
+    .await
+    .expect("typed rejection");
+    assert_eq!(stopped, submission); // Trigger mail still wins over Plan and revocation.
     assert!(session.active_turn.lock().await.is_none());
     assert!(session.input_queue.has_trigger_turn_mailbox_items().await);
     assert_eq!(session.collaboration_mode().await.mode, ModeKind::Plan);

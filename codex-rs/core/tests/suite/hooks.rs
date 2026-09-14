@@ -7,6 +7,7 @@ use anyhow::Result;
 use codex_config::HookStateToml;
 use codex_config::McpServerConfig;
 use codex_config::test_support::CloudConfigBundleFixture;
+use codex_core::StartIfIdleSubmission;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInput;
 use codex_core::TurnInputRequest;
@@ -362,6 +363,9 @@ import sys
 import time
 
 prompt = json.load(sys.stdin).get("prompt")
+# Emit one result so the next user turn only observes the buffered context.
+if Path(r"{finished_path}").exists():
+    sys.exit(0)
 Path(r"{started_path}").write_text(prompt, encoding="utf-8")
 while {gated} and not Path(r"{release_path}").exists():
     time.sleep(0.01)
@@ -1817,7 +1821,11 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn(
             text_elements: Vec::new(),
         }])
     };
-    test.codex.start_turn_if_idle(next_turn).await?;
+    let next_submission = test.codex.start_turn_if_idle(next_turn).await?;
+    assert!(
+        matches!(next_submission, StartIfIdleSubmission::Started { .. }),
+        "expected the next turn to start: {next_submission:?}"
+    );
 
     let mut warning_event = None;
     timeout(Duration::from_secs(5), async {

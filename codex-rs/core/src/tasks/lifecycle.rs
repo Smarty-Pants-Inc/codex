@@ -56,6 +56,11 @@ impl Session {
             return;
         }
 
+        self.emit_thread_idle_lifecycle(cause).await;
+    }
+
+    /// Notify stop-only observers even when a taskless interrupt has queued input.
+    pub(crate) async fn emit_thread_idle_lifecycle(&self, cause: ThreadIdleCause) {
         for contributor in self.services.extensions.thread_lifecycle_contributors() {
             contributor
                 .on_thread_idle(codex_extension_api::ThreadIdleInput {
