@@ -93,9 +93,9 @@ jobs:
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ github.workspace }}/.sccache/
-          key: sccache-smarty-v1-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ github.event_name }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.run_id }}
+          key: sccache-smarty-v1-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.run_id }}
           restore-keys: |
-            sccache-smarty-v1-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ github.event_name }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-
+            sccache-smarty-v1-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-
       - name: Format check
         working-directory: codex-rs
         run: cargo fmt -- --config imports_granularity=Item --check
@@ -132,7 +132,7 @@ jobs:
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ github.workspace }}/.sccache/
-          key: sccache-smarty-v1-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ github.event_name }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.run_id }}
+          key: sccache-smarty-v1-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.run_id }}
       - name: sccache stats
         if: always() && env.USE_SCCACHE == 'true'
         continue-on-error: true
@@ -283,9 +283,9 @@ jobs:
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ github.workspace }}/.sccache/
-          key: sccache-smarty-v1-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ github.event_name }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.run_id }}
+          key: sccache-smarty-v1-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.run_id }}
           restore-keys: |
-            sccache-smarty-v1-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ github.event_name }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-
+            sccache-smarty-v1-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-
       - name: Configure matching sandbox V8 artifacts
         uses: ./.github/actions/setup-rusty-v8
         with:
@@ -410,7 +410,7 @@ jobs:
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ github.workspace }}/.sccache/
-          key: sccache-smarty-v1-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ github.event_name }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.run_id }}
+          key: sccache-smarty-v1-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.run_id }}
       - name: sccache stats
         if: always() && env.USE_SCCACHE == 'true'
         continue-on-error: true
