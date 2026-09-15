@@ -59,7 +59,7 @@ async fn outcome_callbacks_cover_lower_retries_and_counter_restart() {
                         "x-request-id".parse().unwrap(),
                         format!("wire-{n}").parse().unwrap(),
                     )]);
-                    if n % 2 == 0 {
+                    if n.is_multiple_of(/*rhs*/ 2) {
                         Err(TransportError::Http {
                             status: StatusCode::TOO_MANY_REQUESTS,
                             headers: Some(headers),

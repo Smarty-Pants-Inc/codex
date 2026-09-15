@@ -106,7 +106,7 @@ impl ObservationSlot {
         let audit = state
             .active_capture
             .as_mut()
-            .expect("validated active capture under slot lock");
+            .ok_or(ObservationError::Unavailable)?;
         audit.record.attempt_id = Uuid::new_v4();
         audit.record.request_id = Uuid::new_v4();
         audit.record.provider_request_id = None;
