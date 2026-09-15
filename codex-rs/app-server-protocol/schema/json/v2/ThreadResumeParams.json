@@ -1328,6 +1328,19 @@
       ],
       "type": "string"
     },
+    "ThreadObservationOptions": {
+      "properties": {
+        "protocol": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "protocol"
+      ],
+      "type": "object"
+    },
     "ThreadResumeInitialTurnsPageParams": {
       "properties": {
         "itemsView": {

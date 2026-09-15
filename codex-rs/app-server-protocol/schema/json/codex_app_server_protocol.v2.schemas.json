@@ -11569,6 +11569,69 @@
       ],
       "title": "Nullable_GetAccountTokenUsageParams"
     },
+    "ObservationCaptureState": {
+      "enum": [
+        "current",
+        "cleared",
+        "expired",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "ObservationFrame": {
+      "properties": {
+        "expiresAt": {
+          "description": "Unix seconds. Native admission validates the bounded active lease.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "hash": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expiresAt",
+        "hash",
+        "text"
+      ],
+      "type": "object"
+    },
+    "ObservationFrameUpdate": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ObservationFrame"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Required nullable value: omitting `frame` must not silently clear a slot."
+    },
+    "ObservationPublicationState": {
+      "enum": [
+        "current",
+        "cleared",
+        "expired"
+      ],
+      "type": "string"
+    },
+    "ObservationReplacement": {
+      "enum": [
+        "fullContext"
+      ],
+      "type": "string"
+    },
+    "ObservationSubmissionOutcome": {
+      "enum": [
+        "accepted",
+        "rejected",
+        "unknown"
+      ],
+      "type": "string"
+    },
     "OverriddenMetadata": {
       "properties": {
         "effectiveValue": true,
@@ -15522,6 +15585,46 @@
             "params"
           ],
           "title": "Thread/startedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "thread/observation/captured"
+              ],
+              "title": "Thread/observation/capturedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadObservationCapturedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Thread/observation/capturedNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
+                "thread/observation/submitted"
+              ],
+              "title": "Thread/observation/submittedNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/ThreadObservationSubmittedNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Thread/observation/submittedNotification",
           "type": "object"
         },
         {
@@ -19825,6 +19928,196 @@
         "threadId"
       ],
       "title": "ThreadNameUpdatedNotification",
+      "type": "object"
+    },
+    "ThreadObservationCapabilities": {
+      "properties": {
+        "automaticAdmission": {
+          "type": "boolean"
+        },
+        "maxFrameBytes": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxInFlightDecisions": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxLeaseSeconds": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "ownerEpoch": {
+          "type": "string"
+        },
+        "protocol": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "replacement": {
+          "$ref": "#/definitions/ObservationReplacement"
+        },
+        "reservedTokens": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "automaticAdmission",
+        "maxFrameBytes",
+        "maxInFlightDecisions",
+        "maxLeaseSeconds",
+        "ownerEpoch",
+        "protocol",
+        "replacement",
+        "reservedTokens"
+      ],
+      "type": "object"
+    },
+    "ThreadObservationCapturedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "capturedAt": {
+          "description": "Native per-decision capture time, in Unix seconds; not host composition time.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "commitOrder": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "decisionId": {
+          "type": "string"
+        },
+        "frameHash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "frameRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "ownerEpoch": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/definitions/ObservationCaptureState"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capturedAt",
+        "commitOrder",
+        "decisionId",
+        "frameRevision",
+        "ownerEpoch",
+        "state",
+        "threadId",
+        "turnId"
+      ],
+      "title": "ThreadObservationCapturedNotification",
+      "type": "object"
+    },
+    "ThreadObservationOptions": {
+      "properties": {
+        "protocol": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "protocol"
+      ],
+      "type": "object"
+    },
+    "ThreadObservationSubmittedNotification": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "properties": {
+        "attemptId": {
+          "type": "string"
+        },
+        "capturedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "commitOrder": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "decisionId": {
+          "type": "string"
+        },
+        "frameHash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "frameRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "outcome": {
+          "$ref": "#/definitions/ObservationSubmissionOutcome"
+        },
+        "ownerEpoch": {
+          "type": "string"
+        },
+        "providerRequestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "description": "Native wire-request identity, not a fabricated upstream ID.",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/definitions/ObservationCaptureState"
+        },
+        "terminalDecision": {
+          "type": "boolean"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attemptId",
+        "capturedAt",
+        "commitOrder",
+        "decisionId",
+        "frameRevision",
+        "outcome",
+        "ownerEpoch",
+        "requestId",
+        "state",
+        "terminalDecision",
+        "threadId",
+        "turnId"
+      ],
+      "title": "ThreadObservationSubmittedNotification",
       "type": "object"
     },
     "ThreadProjectUpdatedNotification": {

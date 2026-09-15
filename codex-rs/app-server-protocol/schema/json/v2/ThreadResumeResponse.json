@@ -947,6 +947,12 @@
       ],
       "type": "string"
     },
+    "ObservationReplacement": {
+      "enum": [
+        "fullContext"
+      ],
+      "type": "string"
+    },
     "PatchApplyStatus": {
       "enum": [
         "inProgress",
@@ -2344,6 +2350,55 @@
           "type": "object"
         }
       ]
+    },
+    "ThreadObservationCapabilities": {
+      "properties": {
+        "automaticAdmission": {
+          "type": "boolean"
+        },
+        "maxFrameBytes": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxInFlightDecisions": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxLeaseSeconds": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "ownerEpoch": {
+          "type": "string"
+        },
+        "protocol": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "replacement": {
+          "$ref": "#/definitions/ObservationReplacement"
+        },
+        "reservedTokens": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "automaticAdmission",
+        "maxFrameBytes",
+        "maxInFlightDecisions",
+        "maxLeaseSeconds",
+        "ownerEpoch",
+        "protocol",
+        "replacement",
+        "reservedTokens"
+      ],
+      "type": "object"
     },
     "ThreadSection": {
       "description": "An independently persisted, user-visible thread section.",

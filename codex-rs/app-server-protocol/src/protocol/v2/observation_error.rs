@@ -1,7 +1,7 @@
-use schemars::JsonSchema;
+use crate::JsonSchema;
+use crate::TS;
 use serde::Deserialize;
 use serde::Serialize;
-use ts_rs::TS;
 
 /// Application error, distinct from the generic overloaded/internal errors.
 pub const THREAD_OBSERVATION_REJECTED_ERROR_CODE: i64 = -32002;

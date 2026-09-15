@@ -3137,6 +3137,23 @@
       ],
       "type": "string"
     },
+    "ObservationCaptureState": {
+      "enum": [
+        "current",
+        "cleared",
+        "expired",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "ObservationSubmissionOutcome": {
+      "enum": [
+        "accepted",
+        "rejected",
+        "unknown"
+      ],
+      "type": "string"
+    },
     "PatchApplyStatus": {
       "enum": [
         "inProgress",
@@ -5297,6 +5314,130 @@
       ],
       "type": "object"
     },
+    "ThreadObservationCapturedNotification": {
+      "properties": {
+        "capturedAt": {
+          "description": "Native per-decision capture time, in Unix seconds; not host composition time.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "commitOrder": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "decisionId": {
+          "type": "string"
+        },
+        "frameHash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "frameRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "ownerEpoch": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/definitions/ObservationCaptureState"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "capturedAt",
+        "commitOrder",
+        "decisionId",
+        "frameRevision",
+        "ownerEpoch",
+        "state",
+        "threadId",
+        "turnId"
+      ],
+      "type": "object"
+    },
+    "ThreadObservationSubmittedNotification": {
+      "properties": {
+        "attemptId": {
+          "type": "string"
+        },
+        "capturedAt": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "commitOrder": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "decisionId": {
+          "type": "string"
+        },
+        "frameHash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "frameRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "outcome": {
+          "$ref": "#/definitions/ObservationSubmissionOutcome"
+        },
+        "ownerEpoch": {
+          "type": "string"
+        },
+        "providerRequestId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "requestId": {
+          "description": "Native wire-request identity, not a fabricated upstream ID.",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/definitions/ObservationCaptureState"
+        },
+        "terminalDecision": {
+          "type": "boolean"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "turnId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attemptId",
+        "capturedAt",
+        "commitOrder",
+        "decisionId",
+        "frameRevision",
+        "outcome",
+        "ownerEpoch",
+        "requestId",
+        "state",
+        "terminalDecision",
+        "threadId",
+        "turnId"
+      ],
+      "type": "object"
+    },
     "ThreadProjectUpdatedNotification": {
       "properties": {
         "projectId": {
@@ -6743,6 +6884,46 @@
         "params"
       ],
       "title": "Thread/startedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "thread/observation/captured"
+          ],
+          "title": "Thread/observation/capturedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadObservationCapturedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Thread/observation/capturedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "thread/observation/submitted"
+          ],
+          "title": "Thread/observation/submittedNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadObservationSubmittedNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Thread/observation/submittedNotification",
       "type": "object"
     },
     {
