@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [codex/maintenance-0.153.4]
   push:
-    branches: [codex/maintenance-0.153.4]
+    branches: [codex/maintenance-0.153.4, ci/sense19-generators]
 
 permissions:
   contents: read
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   maintenance-baseline:
-    if: github.repository == 'Smarty-Pants-Inc/codex'
+    if: github.repository == 'Smarty-Pants-Inc/codex' && github.ref != 'refs/heads/ci/sense19-generators'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -251,10 +251,11 @@ jobs:
           if-no-files-found: error
 
   backend:
-    if: github.repository == 'Smarty-Pants-Inc/codex'
+    if: github.repository == 'Smarty-Pants-Inc/codex' && (github.ref != 'refs/heads/ci/sense19-generators' || (github.event_name == 'push' && !github.event.deleted))
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
+      CAPACITY_COMBINED: ${{ github.event_name == 'push' && github.ref == 'refs/heads/ci/sense19-generators' }}
       CARGO_BUILD_JOBS: 2
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -277,8 +278,159 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.sha }}
+          fetch-depth: ${{ env.CAPACITY_COMBINED == 'true' && 3 || 1 }}
           persist-credentials: false
+      - name: Verify fixed repair source and retain definition
+        if: ${{ env.CAPACITY_COMBINED == 'true' }}
+        id: repair_source
+        run: |
+          set -euo pipefail
+          source_exit=0
+          bash -euxo pipefail > "$RUNNER_TEMP/capacity-combined-source.stdout" 2> "$RUNNER_TEMP/capacity-combined-source.stderr" <<'SH' || source_exit=$?
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/ci/sense19-generators
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          test "$(uname -m)" = x86_64
+          test "$GITHUB_SHA" = "$GITHUB_WORKFLOW_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_WORKFLOW_SHA"
+          test "$(git show -s --format=%P HEAD)" = 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3'
+          test "$(git show -s --format=%P HEAD^)" = '397b3d1a6f517f14ae924b8696a60deefee3d376'
+          test "$(git diff --name-only HEAD^ HEAD)" = '.github/workflows/smarty-ci.yml'
+          test -z "$(git status --porcelain)"
+          definition_tree="$(git rev-parse 'HEAD^{tree}')"
+          cp .github/workflows/smarty-ci.yml "$RUNNER_TEMP/capacity-combined-definition.yml"
+          git checkout --detach 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3'
+          test "$(git rev-parse HEAD)" = 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3'
+          test "$(git rev-parse 'HEAD^{tree}')" = '693afb709dec5374190b7ee287c838410d9c1896'
+          test -z "$(git status --porcelain)"
+          jq -n --arg definition "$GITHUB_WORKFLOW_SHA" --arg definitionTree "$definition_tree" --arg definitionParent 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3' \
+            --arg source 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3' --arg tree '693afb709dec5374190b7ee287c838410d9c1896' \
+            --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" --arg job "$GITHUB_JOB" \
+            --arg event "$GITHUB_EVENT_NAME" --arg ref "$GITHUB_REF" \
+            --arg runner "$RUNNER_NAME" --arg os "$RUNNER_OS" --arg arch "$RUNNER_ARCH" \
+            --arg account "$(id -un)" --arg uid "$(id -u)" \
+            '{scope:"focused capacity checks only, not affected-package completion or H/Q/L",definition:$definition,definitionTree:$definitionTree,definitionParent:$definitionParent,
+              source:$source,tree:$tree,run:$run,attempt:$attempt,job:$job,event:$event,ref:$ref,
+              runner:$runner,os:$os,arch:$arch,account:$account,uid:$uid,cleanInput:true,
+              testGroups:[{group:"codex-core",package:"codex-core",target:"all"},
+                {group:"codex-app-server",package:"codex-app-server",target:"all"}]}' > "$RUNNER_TEMP/capacity-combined-input.json"
+          SH
+          mkdir -p backend-evidence/capacity-combined
+          cp "$RUNNER_TEMP"/capacity-combined-source.stdout "$RUNNER_TEMP"/capacity-combined-source.stderr backend-evidence/capacity-combined/
+          printf '%s\n' "$source_exit" > backend-evidence/capacity-combined/source-exit.txt
+          test "$source_exit" = 0
+          cp "$RUNNER_TEMP"/capacity-combined-definition.yml "$RUNNER_TEMP"/capacity-combined-input.json backend-evidence/capacity-combined/
+          sha256sum backend-evidence/capacity-combined/capacity-combined-definition.yml codex-rs/Cargo.lock MODULE.bazel.lock \
+            justfile scripts/just-shell.py > backend-evidence/capacity-combined/input.sha256
+          echo 'PROJECTS=codex-core codex-app-server' >> "$GITHUB_ENV"
+          echo 'TEST_GROUPS=codex-core codex-app-server' >> "$GITHUB_ENV"
+          cat > backend-evidence/capacity-combined/phase.sh <<'SH'
+          phase() {
+            local name="$1"; shift
+            local output="$GITHUB_WORKSPACE/backend-evidence/capacity-combined/$name"
+            local code=0
+            mkdir -p "$output"
+            printf '%q ' "$@" > "$output/command.txt"
+            date -u +%FT%TZ > "$output/started.txt"
+            /usr/bin/time -q -f "$CI_TIME_FORMAT" -o "$output/time.json" "$@" \
+              > "$output/stdout.txt" 2> "$output/stderr.txt" || code=$?
+            printf '%s\n' "$code" > "$output/exit.txt"
+            date -u +%FT%TZ > "$output/completed.txt"
+            if [[ "$code" != 0 ]]; then
+              if [[ ! -f "$GITHUB_WORKSPACE/backend-evidence/capacity-combined/first-failure.txt" ]]; then
+                printf '%s %s\n' "$name" "$code" > "$GITHUB_WORKSPACE/backend-evidence/capacity-combined/first-failure.txt"
+              fi
+              exit "$code"
+            fi
+          }
+          SH
+          cat > backend-evidence/capacity-combined/verify-roster.py <<'PY'
+          """Validate future native discovery and JUnit; authored anchors are requirements only."""
+          import json
+          from pathlib import Path
+          import sys
+          import xml.etree.ElementTree as ET
+
+          project, phase = sys.argv[1:]
+          root = Path('backend-evidence') / project
+          binary = project + '::all'
+          controls = {
+              'suite::client::usage_limit_error_emits_rate_limit_event',
+              'suite::client::provider_auth_command_refreshes_after_401',
+              'suite::external_auth::external_auth_401_retry_uses_refreshed_chatgpt_headers',
+          }
+          core = 'suite::retry_after::capacity::'
+          goal = 'suite::v2::keep_working_tests::capacity_retry::capacity_retry_preserves_goal_status_until_real_settlement::'
+          core_cases = {
+              'streamed_capacity_preserves_tool_result_and_queued_steering': (
+                  'overloaded_recovers', 'slow_down_recovers', 'exhaustion_keeps_steering_unadmitted'),
+              'http_capacity_never_renews_sampling_allowance': (
+                  'http_zero', 'http_exhaustion', 'stream_then_http_zero', 'stream_then_http_exhaustion'),
+              'noncapacity_stream_errors_remain_terminal': ('quota', 'billing', 'policy'),
+              'websocket_capacity_recovers_without_http_fallback': ('overloaded', 'slow_down'),
+          }
+          if project == 'codex-core':
+              prefixes = ('suite::retry_after::', 'suite::websocket_fallback::')
+              required = controls | {core + 'interrupt_cancels_capacity_backoff_without_another_sample'}
+              required |= {core + name + '::' + case for name, cases in core_cases.items() for case in cases}
+              required |= {'suite::retry_after::' + name for name in (
+                  'sse_overload_with_retry_after_exhausts_stream_retries',
+                  'sse_overload_without_retry_after_is_terminal',
+                  'websocket_overload_with_nested_retry_after_exhausts_stream_retries',
+                  'websocket_overload_without_retry_after_is_terminal',
+              )}
+          elif project == 'codex-app-server':
+              prefixes = ('suite::v2::keep_working_tests::capacity_retry::',)
+              controls = set()
+              required = {goal + case for case in (
+                  'active_recovers', 'active_exhausts', 'paused_recovers', 'paused_exhausts')}
+          else:
+              raise ValueError(f'Unexpected project: {project}')
+
+
+          def cases(path):
+              data = json.loads(path.read_text())
+              suites = data['rust-suites']
+              if set(suites) != {binary}:
+                  raise ValueError('Expected exactly the selected all integration target')
+              suite = suites[binary]
+              if (suite['package-name'], suite['binary-id'], suite['binary-name'], suite['kind'], suite['status']) != (
+                      project, binary, 'all', 'test', 'listed'):
+                  raise ValueError('Wrong package/binary/target or missing native listing')
+              return suite['testcases']
+
+
+          full = cases(root / 'full-discovered.json')
+          expected = {name for name in full if name.startswith(prefixes) or name in controls}
+          if any(full[name]['ignored'] or full[name]['filter-match']['status'] != 'matches' for name in expected):
+              raise ValueError('Ignored or unmatched full-discovery case in required scope')
+          actual = {name: case for name, case in cases(root / 'discovered.json').items()
+                    if case['filter-match']['status'] == 'matches'}
+          if not required <= expected or set(actual) != expected or any(actual[name]['ignored'] for name in expected):
+              raise ValueError('Missing required native cases, ignored cases, or selected/full discovery mismatch')
+          if not all(any(name.startswith(prefix) for name in expected) for prefix in prefixes):
+              raise ValueError('An entire required suite is missing')
+          if project == 'codex-app-server' and expected != required:
+              raise ValueError('Expected all four corrected goal cases only')
+          roster = [{'binary_id': binary, 'test_name': name} for name in sorted(expected)]
+          if phase == 'discovery':
+              (root / 'actual-roster.json').write_text(json.dumps(roster, indent=2) + '\n')
+          elif phase == 'junit':
+              if json.loads((root / 'actual-roster.json').read_text()) != roster:
+                  raise ValueError('Retained native roster changed')
+              cases = ET.parse(root / 'junit.xml').findall('.//testcase')
+              executed = sorted((case.attrib['classname'], case.attrib['name']) for case in cases)
+              if executed != [(binary, name) for name in sorted(expected)]:
+                  raise ValueError('Missing, extra, duplicate or wrong-target JUnit cases')
+              if any(case.find(tag) is not None for case in cases for tag in ('skipped', 'failure', 'error', 'rerunFailure', 'rerunError', 'flakyFailure', 'flakyError')):
+                  raise ValueError('Unsuccessful or retried JUnit case')
+          else:
+              raise ValueError(f'Unexpected phase: {phase}')
+          print(json.dumps({'phase': phase, 'native_roster': roster, 'count': len(roster)}, indent=2))
+          PY
       - name: Validate CI phase receipt wiring without building Rust
+        if: ${{ env.CAPACITY_COMBINED != 'true' }}
         run: python3 -m unittest discover -s .github/scripts -p test_ci_phase_receipts.py
       - name: Record backend initial resources
         run: |
@@ -288,6 +440,12 @@ jobs:
             nproc
             free -b
             df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+            if [[ "$CAPACITY_COMBINED" == true ]]; then
+              for resource in cpu.max memory.max memory.peak; do
+                path="/sys/fs/cgroup/$resource"
+                if [[ -r "$path" ]]; then printf '%s=' "$resource"; cat "$path"; fi
+              done
+            fi
           } > backend-evidence/resources-start.txt 2>&1
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
@@ -301,12 +459,19 @@ jobs:
           version: '0.11.3'
           enable-cache: false
       - name: Native Linux backend prerequisites (disposable runner only)
+        if: ${{ env.CAPACITY_COMBINED != 'true' }}
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev bubblewrap
           sudo sysctl -w kernel.unprivileged_userns_clone=1
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Repair compilation prerequisites (disposable runner only)
+        if: ${{ env.CAPACITY_COMBINED == 'true' }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev
       - name: Record backend source and toolchain
         run: |
           set -euo pipefail
@@ -372,7 +537,201 @@ jobs:
         uses: ./.github/actions/setup-rusty-v8
         with:
           target: x86_64-unknown-linux-gnu
+      - name: Capacity runtime test prerequisite
+        if: ${{ env.CAPACITY_COMBINED == 'true' }}
+        id: capacity_runtime
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/backend-evidence/capacity-combined/phase.sh"
+          phase runtime-prerequisites bash -euo pipefail -c 'cd codex-rs; cargo build --locked -p codex-linux-sandbox --bin codex-linux-sandbox; test -x "$CARGO_TARGET_DIR/debug/codex-linux-sandbox"; sha256sum "$CARGO_TARGET_DIR/debug/codex-linux-sandbox"'
+      - name: Read-only Core and app-server Clippy
+        if: ${{ env.CAPACITY_COMBINED == 'true' }}
+        id: repair_checks
+        run: |
+          set -euo pipefail
+          output="$GITHUB_WORKSPACE/backend-evidence/capacity-combined"
+          test "$(git rev-parse HEAD)" = 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3'
+          index="$RUNNER_TEMP/capacity-combined-before.index"
+          trap 'rm -f "$index" "$index.lock"' EXIT
+          GIT_INDEX_FILE="$index" git read-tree 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3'
+          GIT_INDEX_FILE="$index" git add -A -- . ':!backend-evidence' ':!.sccache'
+          GIT_INDEX_FILE="$index" git write-tree > "$output/command-input-tree.txt"
+          test "$(cat "$output/command-input-tree.txt")" = '693afb709dec5374190b7ee287c838410d9c1896'
+          git diff --cached --exit-code 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3'
+          source "$GITHUB_WORKSPACE/backend-evidence/capacity-combined/phase.sh"
+          sha256sum "$RUSTY_V8_ARCHIVE" "$RUSTY_V8_SRC_BINDING_PATH" > backend-evidence/rusty-v8.sha256
+          phase focused-clippy just clippy --locked -p codex-core -p codex-app-server -- -D warnings
+      - name: Bind scoped fix to unchanged source
+        if: ${{ env.CAPACITY_COMBINED == 'true' }}
+        id: capacity_fix_source
+        run: |
+          set -euo pipefail
+          output="$GITHUB_WORKSPACE/backend-evidence/capacity-combined"
+          test "$(git rev-parse HEAD)" = 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3'
+          index="$RUNNER_TEMP/capacity-combined-before.index"
+          trap 'rm -f "$index" "$index.lock"' EXIT
+          GIT_INDEX_FILE="$index" git read-tree 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3'
+          GIT_INDEX_FILE="$index" git add -A -- . ':!backend-evidence' ':!.sccache'
+          GIT_INDEX_FILE="$index" git write-tree > "$output/fix-input-tree.txt"
+          test "$(cat "$output/fix-input-tree.txt")" = '693afb709dec5374190b7ee287c838410d9c1896'
+          git diff --cached --exit-code 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3'
+      - name: Scoped Core and app-server fix without accepted writeback
+        if: ${{ env.CAPACITY_COMBINED == 'true' }}
+        id: capacity_fix
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/backend-evidence/capacity-combined/phase.sh"
+          phase scoped-fix just fix --locked -p codex-core -p codex-app-server -- -D warnings
+      - name: Bind repair tests to unchanged source
+        if: ${{ env.CAPACITY_COMBINED == 'true' }}
+        id: repair_check_source
+        run: |
+          set -euo pipefail
+          output="$GITHUB_WORKSPACE/backend-evidence/capacity-combined"
+          test "$(git rev-parse HEAD)" = 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3'
+          index="$RUNNER_TEMP/capacity-combined-before.index"
+          trap 'rm -f "$index" "$index.lock"' EXIT
+          GIT_INDEX_FILE="$index" git read-tree 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3'
+          GIT_INDEX_FILE="$index" git add -A -- . ':!backend-evidence' ':!.sccache'
+          GIT_INDEX_FILE="$index" git write-tree > "$output/checks-input-tree.txt"
+          test "$(cat "$output/checks-input-tree.txt")" = '693afb709dec5374190b7ee287c838410d9c1896'
+          git diff --cached --exit-code 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3'
+      - name: Capacity Core and corrected goal integration tests
+        if: ${{ env.CAPACITY_COMBINED == 'true' }}
+        id: repair_tests
+        run: |
+          set -euo pipefail
+          failed=0
+          for group in $TEST_GROUPS; do
+            project="$group"
+            retry_args=(--retries 0)
+            case "$group" in
+              codex-core) selection=(--test all -E 'test(suite::retry_after::) | test(suite::websocket_fallback::) | test(=suite::client::usage_limit_error_emits_rate_limit_event) | test(=suite::client::provider_auth_command_refreshes_after_401) | test(=suite::external_auth::external_auth_401_retry_uses_refreshed_chatgpt_headers)') ;;
+              codex-app-server) selection=(--test all -E 'test(suite::v2::keep_working_tests::capacity_retry::)') ;;
+              *) echo "Unexpected capacity test group: $group" >&2; exit 1 ;;
+            esac
+            output="$GITHUB_WORKSPACE/backend-evidence/$group"
+            mkdir -p "$output"
+            printf '%s\n' "${selection[@]}" "${retry_args[@]}" > "$output/selection.txt"
+            date -u +%FT%TZ > "$output/started.txt"
+            # Each project overwrites the local-profile JUnit path; never reuse a previous result.
+            rm -f codex-rs/target/nextest/local/junit.xml
+            printf '%q ' cargo nextest list --locked -p "$project" --test all --message-format json > "$output/full-discovery-command.txt"
+            full_exit=0
+            (cd codex-rs && /usr/bin/time -q -f "$CI_TIME_FORMAT" -o "$output/full-discovery-time.json" \
+              cargo nextest list --locked -p "$project" --test all --message-format json) \
+              > "$output/full-discovered.json" 2> "$output/full-discovery.txt" || full_exit=$?
+            echo "$full_exit" > "$output/full-discovery-exit.txt"
+            if [[ "$full_exit" != 0 ]]; then
+              failed=1
+              if [[ ! -f backend-evidence/capacity-combined/first-failure.txt ]]; then
+                printf '%s full-discovery %s\n' "$group" "$full_exit" > backend-evidence/capacity-combined/first-failure.txt
+              fi
+              continue
+            fi
+            printf '%q ' cargo nextest list --locked -p "$project" "${selection[@]}" --message-format json > "$output/discovery-command.txt"
+            discovery_exit=0
+            (cd codex-rs && /usr/bin/time -q -f "$CI_TIME_FORMAT" -o "$output/discovery-time.json" \
+              cargo nextest list --locked -p "$project" "${selection[@]}" --message-format json) \
+              > "$output/discovered.json" 2> "$output/discovery.txt" || discovery_exit=$?
+            echo "$discovery_exit" > "$output/discovery-exit.txt"
+            if [[ "${CAPACITY_COMBINED:-false}" == true && "$discovery_exit" != 0 && ! -f backend-evidence/capacity-combined/first-failure.txt ]]; then
+              printf '%s discovery %s\n' "$group" "$discovery_exit" > backend-evidence/capacity-combined/first-failure.txt
+            fi
+            if [[ "$discovery_exit" != 0 ]]; then
+              failed=1
+              continue
+            fi
+            roster_exit=0
+            python3 backend-evidence/capacity-combined/verify-roster.py "$group" discovery \
+              > "$output/discovery-validation.txt" 2>&1 || roster_exit=$?
+            echo "$roster_exit" > "$output/discovery-validation-exit.txt"
+            if [[ "$roster_exit" != 0 ]]; then
+              failed=1
+              if [[ ! -f backend-evidence/capacity-combined/first-failure.txt ]]; then
+                printf '%s discovery-roster %s\n' "$group" "$roster_exit" > backend-evidence/capacity-combined/first-failure.txt
+              fi
+              continue
+            fi
+            printf '%q ' just test --locked -p "$project" "${selection[@]}" "${retry_args[@]}" --test-threads 2 --status-level all --final-status-level all > "$output/test-command.txt"
+            test_exit=0
+            /usr/bin/time -q -f "$CI_TIME_FORMAT" -o "$output/test-time.json" \
+              just test --locked -p "$project" "${selection[@]}" "${retry_args[@]}" --test-threads 2 \
+              --status-level all --final-status-level all 2>&1 | tee "$output/tests.txt" || test_exit=$?
+            echo "$test_exit" > "$output/test-exit.txt"
+            if [[ "${CAPACITY_COMBINED:-false}" == true && "$test_exit" != 0 && ! -f backend-evidence/capacity-combined/first-failure.txt ]]; then
+              printf '%s test %s\n' "$group" "$test_exit" > backend-evidence/capacity-combined/first-failure.txt
+            fi
+            if [[ -s codex-rs/target/nextest/local/junit.xml ]]; then
+              cp codex-rs/target/nextest/local/junit.xml "$output/junit.xml"
+              roster_exit=0
+              python3 backend-evidence/capacity-combined/verify-roster.py "$group" junit \
+                > "$output/junit-validation.txt" 2>&1 || roster_exit=$?
+              echo "$roster_exit" > "$output/junit-validation-exit.txt"
+              if [[ "$roster_exit" != 0 ]]; then
+                failed=1
+                if [[ ! -f backend-evidence/capacity-combined/first-failure.txt ]]; then
+                  printf '%s junit-roster %s\n' "$group" "$roster_exit" > backend-evidence/capacity-combined/first-failure.txt
+                fi
+              fi
+            else
+              failed=1
+              if [[ "${CAPACITY_COMBINED:-false}" == true && ! -f backend-evidence/capacity-combined/first-failure.txt ]]; then
+                printf '%s missing-junit 1\n' "$group" > backend-evidence/capacity-combined/first-failure.txt
+              fi
+            fi
+            date -u +%FT%TZ > "$output/completed.txt"
+            if [[ "$test_exit" != 0 ]]; then failed=1; fi
+          done
+          exit "$failed"
+      - name: Retain repair result and reject all source writeback
+        if: always() && env.CAPACITY_COMBINED == 'true'
+        env:
+          STEPS_JSON: ${{ toJSON(steps) }}
+        run: |
+          set -euo pipefail
+          output="$GITHUB_WORKSPACE/backend-evidence/capacity-combined"
+          mkdir -p "$output"
+          printf '%s\n' "$STEPS_JSON" > "$output/steps.json"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path('backend-evidence/capacity-combined')
+          phases = {}
+          for name in ('runtime-prerequisites', 'focused-clippy', 'scoped-fix'):
+              path = root / name / 'exit.txt'
+              phases[name] = int(path.read_text()) if path.exists() else None
+          (root / 'phase-exits.json').write_text(json.dumps(phases, indent=2) + '\n')
+          PY
+          if [[ ! -f "$output/capacity-combined-input.json" ]]; then
+            echo 'Input not verified; no output source tree claimed.' > "$output/output-unavailable.txt"
+            exit 1
+          fi
+          code=0
+          bash -euxo pipefail > "$output/source-drift.stdout" 2> "$output/source-drift.stderr" <<'SH' || code=$?
+          output="$GITHUB_WORKSPACE/backend-evidence/capacity-combined"
+          index="$RUNNER_TEMP/capacity-combined-after.index"
+          trap 'rm -f "$index" "$index.lock"' EXIT
+          export GIT_INDEX_FILE="$index"
+          git read-tree 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3'
+          git add -A -- . ':!backend-evidence' ':!.sccache'
+          tree="$(git write-tree)"
+          printf '%s\n' "$tree" > "$output/output-tree.txt"
+          git diff --cached --binary --full-index 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3' > "$output/writeback.diff"
+          git diff --cached --name-status 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3' > "$output/changed-paths.txt"
+          sha256sum "$output/writeback.diff" > "$output/writeback.sha256"
+          test "$(git rev-parse HEAD)" = 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3'
+          test "$tree" = '693afb709dec5374190b7ee287c838410d9c1896'
+          unset GIT_INDEX_FILE
+          git diff --cached --exit-code 'ac87f68d3f3723eebcb80fd02c88ce48bec73af3'
+          SH
+          printf '%s\n' "$code" > "$output/source-drift-exit.txt"
+          if [[ "$code" != 0 && ! -f "$output/first-failure.txt" ]]; then
+            printf 'source-drift %s\n' "$code" > "$output/first-failure.txt"
+          fi
+          exit "$code"
       - name: Build backend runtime test prerequisites
+        if: ${{ env.CAPACITY_COMBINED != 'true' }}
         working-directory: codex-rs
         run: |
           set -euo pipefail
@@ -399,6 +758,7 @@ jobs:
             fi
           done
       - name: Complete backend project tests
+        if: ${{ env.CAPACITY_COMBINED != 'true' }}
         run: |
           set -euo pipefail
           failed=0
@@ -432,6 +792,7 @@ jobs:
           done
           exit "$failed"
       - name: Scoped backend Clippy
+        if: ${{ env.CAPACITY_COMBINED != 'true' }}
         run: |
           set -euo pipefail
           failed=0
@@ -445,8 +806,10 @@ jobs:
           done
           exit "$failed"
       - name: Full formatter check (pinned Rust and locked Python tools)
+        if: ${{ env.CAPACITY_COMBINED != 'true' }}
         run: just fmt-check
       - name: Verify backend source unchanged
+        if: ${{ env.CAPACITY_COMBINED != 'true' }}
         run: |
           git diff --exit-code
           test -z "$(git ls-files --others --exclude-standard -- codex-rs .github scripts sdk tools justfile)"
@@ -462,7 +825,10 @@ jobs:
           root = Path('backend-evidence')
           root.mkdir(exist_ok=True)
           counts = {}
-          for project in os.environ['PROJECTS'].split():
+          projects = os.environ['PROJECTS']
+          if os.environ.get('CAPACITY_COMBINED') == 'true':
+              projects = os.environ.get('TEST_GROUPS', projects)
+          for project in projects.split():
               output = root / project
               result = {}
               for phase in ('discovery', 'test', 'clippy'):
@@ -535,6 +901,12 @@ jobs:
                 printf 'Path absent (not measured): %s\n' "$path"
               fi
             done
+            if [[ "$CAPACITY_COMBINED" == true ]]; then
+              for resource in cpu.max memory.max memory.peak; do
+                path="/sys/fs/cgroup/$resource"
+                if [[ -r "$path" ]]; then printf '%s=' "$resource"; cat "$path"; fi
+              done
+            fi
           } > backend-evidence/resources-final.txt 2>&1
           exit "$failed"
       - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
@@ -547,7 +919,7 @@ jobs:
 
   required:
     name: smarty-ci
-    if: ${{ always() && github.repository == 'Smarty-Pants-Inc/codex' }}
+    if: ${{ always() && github.repository == 'Smarty-Pants-Inc/codex' && github.ref != 'refs/heads/ci/sense19-generators' }}
     needs: [maintenance-baseline, backend]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
