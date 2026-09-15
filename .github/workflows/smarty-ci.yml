@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [codex/maintenance-0.153.4]
   push:
-    branches: [codex/maintenance-0.153.4]
+    branches: [codex/maintenance-0.153.4, ci/sense19-generators]
 
 permissions:
   contents: read
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   maintenance-baseline:
-    if: github.repository == 'Smarty-Pants-Inc/codex'
+    if: github.repository == 'Smarty-Pants-Inc/codex' && github.ref != 'refs/heads/ci/sense19-generators'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -251,10 +251,11 @@ jobs:
           if-no-files-found: error
 
   backend:
-    if: github.repository == 'Smarty-Pants-Inc/codex'
+    if: github.repository == 'Smarty-Pants-Inc/codex' && (github.ref != 'refs/heads/ci/sense19-generators' || !github.event.deleted)
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
+      SENSE19_GENERATORS: ${{ github.event_name == 'push' && github.ref == 'refs/heads/ci/sense19-generators' }}
       CARGO_BUILD_JOBS: 2
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -277,7 +278,68 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.sha }}
+          # D must be one definition-only commit on fixed H; no arbitrary source input.
+          fetch-depth: ${{ env.SENSE19_GENERATORS == 'true' && 2 || 1 }}
           persist-credentials: false
+      - name: Verify fixed Sense19 source and retain definition D
+        if: ${{ env.SENSE19_GENERATORS == 'true' }}
+        id: generator_source
+        run: |
+          set -euo pipefail
+          source_exit=0
+          bash -euxo pipefail > "$RUNNER_TEMP/sense19-source.stdout" 2> "$RUNNER_TEMP/sense19-source.stderr" <<'SH' || source_exit=$?
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          test "$(uname -m)" = x86_64
+          test "$GITHUB_SHA" = "$GITHUB_WORKFLOW_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_WORKFLOW_SHA"
+          test "$(git rev-parse HEAD^)" = 'd0aacc2f1e91c6219e8153237333fb339b9749e2'
+          test "$(git diff --name-only HEAD^ HEAD)" = '.github/workflows/smarty-ci.yml'
+          test -z "$(git status --porcelain)"
+          definition_tree="$(git rev-parse 'HEAD^{tree}')"
+          cp .github/workflows/smarty-ci.yml "$RUNNER_TEMP/sense19-definition.yml"
+          git checkout --detach 'd0aacc2f1e91c6219e8153237333fb339b9749e2'
+          test "$(git rev-parse HEAD)" = 'd0aacc2f1e91c6219e8153237333fb339b9749e2'
+          test "$(git rev-parse 'HEAD^{tree}')" = '0f824bec34e0101166f4548012c3fe64c68da2bb'
+          test -z "$(git status --porcelain)"
+          test -f codex-rs/Cargo.lock
+          jq -n --arg definition "$GITHUB_WORKFLOW_SHA" --arg definitionTree "$definition_tree" \
+            --arg source 'd0aacc2f1e91c6219e8153237333fb339b9749e2' --arg tree '0f824bec34e0101166f4548012c3fe64c68da2bb' --arg run "$GITHUB_RUN_ID" \
+            --arg attempt "$GITHUB_RUN_ATTEMPT" --arg job "$GITHUB_JOB" \
+            --arg event "$GITHUB_EVENT_NAME" --arg ref "$GITHUB_REF" \
+            --arg runner "$RUNNER_NAME" --arg os "$RUNNER_OS" --arg arch "$RUNNER_ARCH" \
+            --arg account "$(id -un)" --arg uid "$(id -u)" \
+            '{scope:"generator materialization, not H/Q/L acceptance",definition:$definition,definitionTree:$definitionTree,
+              source:$source,tree:$tree,run:$run,attempt:$attempt,job:$job,event:$event,ref:$ref,
+              runner:$runner,os:$os,arch:$arch,account:$account,uid:$uid,cleanInput:true}' > "$RUNNER_TEMP/sense19-input.json"
+          SH
+          mkdir -p backend-evidence/generator
+          cp "$RUNNER_TEMP"/sense19-source.stdout "$RUNNER_TEMP"/sense19-source.stderr backend-evidence/generator/
+          printf '%s\n' "$source_exit" > backend-evidence/generator/source-exit.txt
+          test "$source_exit" = 0
+          cp "$RUNNER_TEMP"/sense19-definition.yml "$RUNNER_TEMP"/sense19-input.json backend-evidence/generator/
+          sha256sum codex-rs/Cargo.lock backend-evidence/generator/sense19-definition.yml > backend-evidence/generator/input.sha256
+          echo 'PROJECTS=codex-app-server-protocol codex-app-server codex-core codex-goal-extension' >> "$GITHUB_ENV"
+          cat > backend-evidence/generator/phase.sh <<'SH'
+          phase() {
+            local name="$1"; shift
+            local output="$GITHUB_WORKSPACE/backend-evidence/generator/$name"
+            local code=0
+            mkdir -p "$output"
+            printf '%q ' "$@" > "$output/command.txt"
+            date -u +%FT%TZ > "$output/started.txt"
+            /usr/bin/time -q -f "$CI_TIME_FORMAT" -o "$output/time.json" "$@" \
+              > "$output/stdout.txt" 2> "$output/stderr.txt" || code=$?
+            printf '%s\n' "$code" > "$output/exit.txt"
+            date -u +%FT%TZ > "$output/completed.txt"
+            if [[ "$code" != 0 ]]; then
+              if [[ ! -f "$GITHUB_WORKSPACE/backend-evidence/generator/first-failure.txt" ]]; then
+                printf '%s %s\n' "$name" "$code" > "$GITHUB_WORKSPACE/backend-evidence/generator/first-failure.txt"
+              fi
+              exit "$code"
+            fi
+          }
+          SH
       - name: Validate CI phase receipt wiring without building Rust
         run: python3 -m unittest discover -s .github/scripts -p test_ci_phase_receipts.py
       - name: Record backend initial resources
@@ -300,6 +362,13 @@ jobs:
         with:
           version: '0.11.3'
           enable-cache: false
+      - name: Existing pinned Bazel installer for generator branch
+        if: ${{ env.SENSE19_GENERATORS == 'true' }}
+        id: generator_bazel
+        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86
+        with:
+          bazelisk-version: 1.28.1
+          output-base: ${{ runner.temp }}/codex-bazel-output
       - name: Native Linux backend prerequisites (disposable runner only)
         run: |
           set -euo pipefail
@@ -372,7 +441,21 @@ jobs:
         uses: ./.github/actions/setup-rusty-v8
         with:
           target: x86_64-unknown-linux-gnu
+      - name: Materialize Sense19 locks and both schemas
+        if: ${{ env.SENSE19_GENERATORS == 'true' }}
+        id: generator_materialize
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/backend-evidence/generator/phase.sh"
+          # Only this disposable runner's Bazel config; workspace/cache/remote policy stays intact.
+          printf '\ncommon --jobs=2\n' >> "$HOME/.bazelrc"
+          phase bazel-version bazel --version
+          (cd codex-rs && phase cargo-metadata cargo metadata --format-version 1)
+          phase bazel-lock just bazel-lock-update
+          (cd codex-rs && phase normal-schema just write-app-server-schema)
+          (cd codex-rs && phase experimental-schema just write-app-server-schema --experimental)
       - name: Build backend runtime test prerequisites
+        if: ${{ env.SENSE19_GENERATORS != 'true' }}
         working-directory: codex-rs
         run: |
           set -euo pipefail
@@ -398,40 +481,119 @@ jobs:
               echo "CARGO_BIN_EXE_${binary//-/_}=$path" >> "$GITHUB_ENV"
             fi
           done
+      - name: Scoped Sense19 and continuity fix and format
+        if: ${{ env.SENSE19_GENERATORS == 'true' }}
+        id: generator_fix
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/backend-evidence/generator/phase.sh"
+          packages=(codex-app-server codex-core codex-extension-api codex-goal-extension codex-queue-extension codex-state codex-analytics codex-app-server-protocol codex-cli codex-api codex-client core_test_support codex-exec codex-http-client codex-tui)
+          args=()
+          for package in "${packages[@]}"; do args+=(-p "$package"); done
+          phase scoped-fix just fix --locked "${args[@]}" -- -D warnings
+          phase format just fmt
+          phase format-check just fmt-check
+      - name: Bind affected checks to generated source tree
+        if: ${{ env.SENSE19_GENERATORS == 'true' }}
+        id: generator_check_source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = 'd0aacc2f1e91c6219e8153237333fb339b9749e2'
+          export GIT_INDEX_FILE="$RUNNER_TEMP/sense19-check.index"
+          git read-tree 'd0aacc2f1e91c6219e8153237333fb339b9749e2'
+          git add -A -- . ':!backend-evidence' ':!.sccache'
+          tree="$(git write-tree)"
+          printf '%s\n' "$tree" > backend-evidence/generator/checks-input-tree.txt
+      - name: Generator runtime test prerequisites
+        if: ${{ env.SENSE19_GENERATORS == 'true' }}
+        id: generator_prerequisites
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/backend-evidence/generator/phase.sh"
+          phase runtime-prerequisites bash -euo pipefail <<'SH'
+          set -euo pipefail
+          sha256sum "$RUSTY_V8_ARCHIVE" "$RUSTY_V8_SRC_BINDING_PATH" \
+            > ../backend-evidence/rusty-v8.sha256
+          # Package-scoped nextest runs do not build sibling packages' executables.
+          cargo build --locked \
+            -p codex-cli --bin codex \
+            -p codex-rmcp-client --bin test_stdio_server --bin test_streamable_http_server \
+            -p codex-code-mode-host --bin codex-code-mode-host \
+            -p codex-linux-sandbox --bin codex-linux-sandbox \
+            -p codex-shell-escalation --bin codex-execve-wrapper \
+            2>&1 | tee ../backend-evidence/runtime-prerequisites.txt
+          for binary in codex test_stdio_server test_streamable_http_server codex-code-mode-host codex-linux-sandbox codex-execve-wrapper; do
+            path="$CARGO_TARGET_DIR/debug/$binary"
+            if [[ ! -x "$path" ]]; then
+              echo "Missing runtime test executable: $path" >&2
+              exit 1
+            fi
+            sha256sum "$path" >> ../backend-evidence/runtime-prerequisites.sha256
+            echo "CARGO_BIN_EXE_$binary=$path" >> "$GITHUB_ENV"
+            if [[ "$binary" == *-* ]]; then
+              echo "CARGO_BIN_EXE_${binary//-/_}=$path" >> "$GITHUB_ENV"
+            fi
+          done
+          SH
       - name: Complete backend project tests
+        id: backend_tests
         run: |
           set -euo pipefail
           failed=0
           for project in $PROJECTS; do
+            selection=()
+            retry_args=()
+            if [[ "${SENSE19_GENERATORS:-false}" == true ]]; then
+              retry_args=(--retries 0)
+              case "$project" in
+                codex-app-server-protocol) ;;
+                codex-app-server) selection=(-E 'test(=observation_admission::tests::startup_lock_and_actual_origin_fence_admission) | test(=observation_admission::tests::connection_revocation_prevents_late_install_admission) | test(=thread_state::observation_lifecycle::tests::listener_clear_replace_and_drop_keep_core_binding_revoked) | test(=thread_state::observation_lifecycle::tests::conflicting_install_cannot_replace_core_binding) | test(=suite::v2::observation_lifecycle::observation_start_and_admitted_resume_install_fresh_owned_relays) | test(keep_working_requires_fresh_enable_after_human_input_resume_or_fork)') ;;
+                codex-core) selection=(-E 'test(=suite::observation_transport::observation_clear_keeps_foreground_requests_full_context_http) | test(=suite::observation_retry::unchanged_retry_retains_a_and_completed_tool_retry_captures_b) | test(human_input_queue_and_manual_compaction_invalidate_at_admission)') ;;
+                codex-goal-extension) selection=(-E 'test(boundaries_revoke_authority_without_restoring_it_from_storage) | test(new_input_revokes_a_stop_waiting_for_the_writer) | test(only_host_ready_replacement_retires_the_previous_runtime)') ;;
+                *) echo "Unexpected generator project: $project" >&2; exit 1 ;;
+              esac
+            fi
             output="$GITHUB_WORKSPACE/backend-evidence/$project"
             mkdir -p "$output"
+            printf '%s\n' "${selection[@]}" "${retry_args[@]}" > "$output/selection.txt"
             date -u +%FT%TZ > "$output/started.txt"
             # Each project overwrites the local-profile JUnit path; never reuse a previous result.
             rm -f codex-rs/target/nextest/local/junit.xml
             discovery_exit=0
             (cd codex-rs && /usr/bin/time -q -f "$CI_TIME_FORMAT" -o "$output/discovery-time.json" \
-              cargo nextest list --locked -p "$project" --message-format json) \
+              cargo nextest list --locked -p "$project" "${selection[@]}" --message-format json) \
               > "$output/discovered.json" 2> "$output/discovery.txt" || discovery_exit=$?
             echo "$discovery_exit" > "$output/discovery-exit.txt"
+            if [[ "${SENSE19_GENERATORS:-false}" == true && "$discovery_exit" != 0 && ! -f backend-evidence/generator/first-failure.txt ]]; then
+              printf '%s discovery %s\n' "$project" "$discovery_exit" > backend-evidence/generator/first-failure.txt
+            fi
             if [[ "$discovery_exit" != 0 ]]; then
               failed=1
               continue
             fi
             test_exit=0
             /usr/bin/time -q -f "$CI_TIME_FORMAT" -o "$output/test-time.json" \
-              just test --locked -p "$project" --test-threads 2 \
+              just test --locked -p "$project" "${selection[@]}" "${retry_args[@]}" --test-threads 2 \
               --status-level all --final-status-level all 2>&1 | tee "$output/tests.txt" || test_exit=$?
             echo "$test_exit" > "$output/test-exit.txt"
+            if [[ "${SENSE19_GENERATORS:-false}" == true && "$test_exit" != 0 && ! -f backend-evidence/generator/first-failure.txt ]]; then
+              printf '%s test %s\n' "$project" "$test_exit" > backend-evidence/generator/first-failure.txt
+            fi
             if [[ -s codex-rs/target/nextest/local/junit.xml ]]; then
               cp codex-rs/target/nextest/local/junit.xml "$output/junit.xml"
             else
               failed=1
+              if [[ "${SENSE19_GENERATORS:-false}" == true && ! -f backend-evidence/generator/first-failure.txt ]]; then
+                printf '%s missing-junit 1\n' "$project" > backend-evidence/generator/first-failure.txt
+              fi
             fi
             date -u +%FT%TZ > "$output/completed.txt"
             if [[ "$test_exit" != 0 ]]; then failed=1; fi
           done
           exit "$failed"
       - name: Scoped backend Clippy
+        if: ${{ env.SENSE19_GENERATORS != 'true' }}
         run: |
           set -euo pipefail
           failed=0
@@ -445,8 +607,10 @@ jobs:
           done
           exit "$failed"
       - name: Full formatter check (pinned Rust and locked Python tools)
+        if: ${{ env.SENSE19_GENERATORS != 'true' }}
         run: just fmt-check
       - name: Verify backend source unchanged
+        if: ${{ env.SENSE19_GENERATORS != 'true' }}
         run: |
           git diff --exit-code
           test -z "$(git ls-files --others --exclude-standard -- codex-rs .github scripts sdk tools justfile)"
@@ -516,6 +680,47 @@ jobs:
             sccache --show-stats || true;
             echo '```';
           } >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain generated or partial repair source even on failure
+        if: ${{ always() && env.SENSE19_GENERATORS == 'true' }}
+        id: generator_capture
+        env:
+          STEP_RESULTS: ${{ toJSON(steps) }}
+        run: |
+          set -euo pipefail
+          mkdir -p backend-evidence/generator
+          printf '%s\n' "$STEP_RESULTS" > backend-evidence/generator/steps.json
+          if [[ ! -f backend-evidence/generator/source-exit.txt || "$(<backend-evidence/generator/source-exit.txt)" != 0 ]]; then
+            echo 'Input not verified; no output source tree claimed.' > backend-evidence/generator/output-unavailable.txt
+            exit 1
+          fi
+          test "$(git rev-parse HEAD)" = 'd0aacc2f1e91c6219e8153237333fb339b9749e2'
+          export GIT_INDEX_FILE="$RUNNER_TEMP/sense19-output.index"
+          git read-tree 'd0aacc2f1e91c6219e8153237333fb339b9749e2'
+          git add -A -- . ':!backend-evidence' ':!.sccache'
+          git diff --cached --binary 'd0aacc2f1e91c6219e8153237333fb339b9749e2' > backend-evidence/generator/generated.diff
+          git diff --cached --name-status 'd0aacc2f1e91c6219e8153237333fb339b9749e2' > backend-evidence/generator/changed-paths.txt
+          git write-tree > backend-evidence/generator/output-tree.txt
+          sha256sum backend-evidence/generator/generated.diff > backend-evidence/generator/generated.sha256
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path('backend-evidence/generator')
+          phases = ('bazel-version', 'cargo-metadata', 'bazel-lock', 'normal-schema', 'experimental-schema',
+                    'runtime-prerequisites', 'scoped-fix', 'format', 'format-check')
+          results = {name: int((root / name / 'exit.txt').read_text()) if (root / name / 'exit.txt').exists()
+                     else None for name in phases}
+          (root / 'phase-exits.json').write_text(json.dumps(results, indent=2) + '\n')
+          PY
+          if [[ -f backend-evidence/generator/checks-input-tree.txt ]]; then
+            if ! cmp -s backend-evidence/generator/checks-input-tree.txt backend-evidence/generator/output-tree.txt; then
+              if [[ ! -f backend-evidence/generator/first-failure.txt ]]; then
+                echo 'post-check-source-drift 1' > backend-evidence/generator/first-failure.txt
+              fi
+              echo false > backend-evidence/generator/checks-source-unchanged.txt
+              exit 1
+            fi
+            echo true > backend-evidence/generator/checks-source-unchanged.txt
+          fi
       - name: Record backend final resources
         if: always()
         run: |
@@ -547,7 +752,7 @@ jobs:
 
   required:
     name: smarty-ci
-    if: ${{ always() && github.repository == 'Smarty-Pants-Inc/codex' }}
+    if: ${{ always() && github.repository == 'Smarty-Pants-Inc/codex' && github.ref != 'refs/heads/ci/sense19-generators' }}
     needs: [maintenance-baseline, backend]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
