@@ -37,6 +37,9 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
+#[path = "capacity_retry_tests.rs"]
+mod capacity_retry;
+
 const TIMEOUT: Duration = Duration::from_secs(60);
 
 fn toggle_response(enabled: bool) -> String {

@@ -1422,6 +1422,9 @@ async fn run_sampling_request(
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
     loop {
+        if cancellation_token.is_cancelled() {
+            return Err(CodexErr::TurnAborted);
+        }
         let prompt_input = if let Some(input) = initial_input.take() {
             input
         } else {
@@ -1470,7 +1473,14 @@ async fn run_sampling_request(
         )
         .await;
         client_session.observation_decision = None;
-        let err = match sampling_result {
+        let streamed_capacity = matches!(
+            &sampling_result,
+            Err(SamplingRequestError::Stream(err))
+                if matches!(err.details(), CodexErrorDetails::ServerOverloaded)
+        );
+        let err = match sampling_result.map_err(|failure| match failure {
+            SamplingRequestError::Stream(err) | SamplingRequestError::Other(err) => err,
+        }) {
             Ok(output) => {
                 return Ok((output, original_input.unwrap_or(prompt.input)));
             }
@@ -1494,7 +1504,9 @@ async fn run_sampling_request(
             original_input = Some(prompt.input);
         }
 
-        if !err.is_retryable() {
+        // HTTP overloads have already spent their request-layer allowance. Only
+        // overload delivered by an established stream belongs to this retry loop.
+        if !err.is_retryable() && !streamed_capacity {
             return Err(err);
         }
 
@@ -1507,7 +1519,8 @@ async fn run_sampling_request(
             &turn_context,
             ResponsesStreamRequest::Sampling,
         )
-        .await?;
+        .or_cancel(&cancellation_token)
+        .await??;
         turn_context.turn_timing_state.record_sampling_retry();
     }
 }
@@ -2248,6 +2261,19 @@ fn assign_missing_streamed_response_item_id(
     Session::assign_missing_response_item_id(item);
 }
 
+// Keep capacity origin local to sampling; do not broaden CodexErr retryability.
+#[derive(Debug)]
+enum SamplingRequestError {
+    Stream(CodexErr),
+    Other(CodexErr),
+}
+
+impl From<CodexErr> for SamplingRequestError {
+    fn from(err: CodexErr) -> Self {
+        Self::Other(err)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[instrument(level = "trace",
     skip_all,
@@ -2266,7 +2292,10 @@ async fn try_run_sampling_request(
     turn_diff_tracker: SharedTurnDiffTracker,
     prompt: &Prompt,
     cancellation_token: CancellationToken,
-) -> CodexResult<SamplingRequestResult> {
+) -> Result<SamplingRequestResult, SamplingRequestError> {
+    if cancellation_token.is_cancelled() {
+        return Err(CodexErr::TurnAborted.into());
+    }
     let turn_context = Arc::clone(&step_context.turn);
     feedback_tags!(
         model = step_context.settings.model_info.slug.clone(),
@@ -2300,7 +2329,8 @@ async fn try_run_sampling_request(
         )
         .instrument(trace_span!("stream_request"))
         .or_cancel(&cancellation_token)
-        .await??;
+        .await
+        .map_err(CodexErr::from)??;
     let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
@@ -2330,7 +2360,7 @@ async fn try_run_sampling_request(
         !sess.services.extensions.turn_item_contributors().is_empty();
     let mut active_item_is_streaming_to_client = false;
     let receiving_span = trace_span!("receiving_stream");
-    let outcome: CodexResult<SamplingRequestResult> = loop {
+    let outcome: Result<SamplingRequestResult, SamplingRequestError> = loop {
         let handle_responses = trace_span!(
             parent: &receiving_span,
             "handle_responses",
@@ -2354,17 +2384,17 @@ async fn try_run_sampling_request(
         {
             Ok(event) => event,
             Err(codex_async_utils::CancelErr::Cancelled) => {
-                break Err(CodexErr::TurnAborted);
+                break Err(CodexErr::TurnAborted.into());
             }
         };
 
         let event = match event {
             Some(Ok(event)) => event,
-            Some(Err(err)) => break Err(err),
+            Some(Err(err)) => break Err(SamplingRequestError::Stream(err)),
             None => {
-                break Err(CodexErr::Stream(
-                    "stream closed before response.completed".into(),
-                ));
+                break Err(
+                    CodexErr::Stream("stream closed before response.completed".into()).into(),
+                );
             }
         };
 
@@ -2469,7 +2499,7 @@ async fn try_run_sampling_request(
                         .await
                     {
                         Ok(output_result) => output_result,
-                        Err(err) => break Err(err),
+                        Err(err) => break Err(err.into()),
                     };
                 if let Some(tool_future) = output_result.tool_future {
                     in_flight.push_back(tool_future);
@@ -2655,7 +2685,7 @@ async fn try_run_sampling_request(
                 should_emit_token_count = true;
                 should_emit_turn_diff = true;
                 if let Err(err) = budget_result {
-                    break Err(err);
+                    break Err(err.into());
                 }
                 if let Some(false) = end_turn {
                     needs_follow_up = true;
@@ -2841,7 +2871,7 @@ async fn try_run_sampling_request(
     }
 
     if cancellation_token.is_cancelled() {
-        return Err(CodexErr::TurnAborted);
+        return Err(CodexErr::TurnAborted.into());
     }
 
     if should_emit_turn_diff {

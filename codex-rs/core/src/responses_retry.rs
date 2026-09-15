@@ -82,7 +82,9 @@ pub(crate) async fn handle_retryable_response_stream_error(
         return Ok(());
     }
 
+    let capacity = matches!(err.details(), CodexErrorDetails::ServerOverloaded);
     if retry_state.retries >= max_retries
+        && !capacity
         && client_session.try_switch_fallback_transport(
             &turn_context.session_telemetry,
             turn_context.model_info(),
@@ -107,7 +109,8 @@ pub(crate) async fn handle_retryable_response_stream_error(
 
         // In release builds, hide the first websocket retry notification to reduce noisy
         // transient reconnect messages. In debug builds, keep full visibility for diagnosis.
-        let report_error = retry_count > 1
+        let report_error = capacity
+            || retry_count > 1
             || cfg!(debug_assertions)
             || !sess.services.model_client.responses_websocket_enabled();
         if report_error {
