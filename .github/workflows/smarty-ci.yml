@@ -255,7 +255,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      SENSE19_SCOPED_FIX: ${{ github.event_name == 'push' && github.ref == 'refs/heads/ci/sense19-generators' }}
+      SENSE19_COMPLETION: ${{ github.event_name == 'push' && github.ref == 'refs/heads/ci/sense19-generators' }}
       CARGO_BUILD_JOBS: 2
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -278,15 +278,15 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.sha }}
-          fetch-depth: ${{ env.SENSE19_SCOPED_FIX == 'true' && 2 || 1 }}
+          fetch-depth: ${{ env.SENSE19_COMPLETION == 'true' && 3 || 1 }}
           persist-credentials: false
-      - name: Verify fixed scoped-fix source and retain definition
-        if: ${{ env.SENSE19_SCOPED_FIX == 'true' }}
-        id: focused_source
+      - name: Verify fixed completion source and retain definition
+        if: ${{ env.SENSE19_COMPLETION == 'true' }}
+        id: completion_source
         run: |
           set -euo pipefail
           source_exit=0
-          bash -euxo pipefail > "$RUNNER_TEMP/sense19-fix-source.stdout" 2> "$RUNNER_TEMP/sense19-fix-source.stderr" <<'SH' || source_exit=$?
+          bash -euxo pipefail > "$RUNNER_TEMP/sense19-completion-source.stdout" 2> "$RUNNER_TEMP/sense19-completion-source.stderr" <<'SH' || source_exit=$?
           test "$GITHUB_EVENT_NAME" = push
           test "$GITHUB_REF" = refs/heads/ci/sense19-generators
           test "$RUNNER_OS" = Linux
@@ -294,35 +294,57 @@ jobs:
           test "$(uname -m)" = x86_64
           test "$GITHUB_SHA" = "$GITHUB_WORKFLOW_SHA"
           test "$(git rev-parse HEAD)" = "$GITHUB_WORKFLOW_SHA"
-          test "$(git show -s --format=%P HEAD)" = '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
+          test "$(git show -s --format=%P HEAD)" = 'f15366df8a70c9d9d705b30a8128ded59cbd7af3'
+          test "$(git show -s --format=%P HEAD^)" = '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
           test "$(git diff --name-only HEAD^ HEAD)" = '.github/workflows/smarty-ci.yml'
+          test "$(git diff --name-only '91c8e879acc7abe77e9d5388b9f0851e2be431b8' HEAD)" = '.github/workflows/smarty-ci.yml'
           test -z "$(git status --porcelain)"
           definition_tree="$(git rev-parse 'HEAD^{tree}')"
-          cp .github/workflows/smarty-ci.yml "$RUNNER_TEMP/sense19-fix-definition.yml"
+          cp .github/workflows/smarty-ci.yml "$RUNNER_TEMP/sense19-completion-definition.yml"
           git checkout --detach '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
           test "$(git rev-parse HEAD)" = '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
           test "$(git rev-parse 'HEAD^{tree}')" = '44dc2159c248448b55ca489f1cdb6fb8e79bf2bf'
           test -z "$(git status --porcelain)"
-          jq -n --arg definition "$GITHUB_WORKFLOW_SHA" --arg definitionTree "$definition_tree" \
+          jq -n --arg definition "$GITHUB_WORKFLOW_SHA" --arg definitionTree "$definition_tree" --arg definitionParent 'f15366df8a70c9d9d705b30a8128ded59cbd7af3' \
             --arg source '91c8e879acc7abe77e9d5388b9f0851e2be431b8' --arg tree '44dc2159c248448b55ca489f1cdb6fb8e79bf2bf' \
             --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" --arg job "$GITHUB_JOB" \
             --arg event "$GITHUB_EVENT_NAME" --arg ref "$GITHUB_REF" \
             --arg runner "$RUNNER_NAME" --arg os "$RUNNER_OS" --arg arch "$RUNNER_ARCH" \
             --arg account "$(id -un)" --arg uid "$(id -u)" \
-            '{scope:"protocol scoped-fix only, not H/Q/L",definition:$definition,definitionTree:$definitionTree,
+            '{scope:"remaining qualification only, not H/Q/L",definition:$definition,definitionTree:$definitionTree,definitionParent:$definitionParent,
               source:$source,tree:$tree,run:$run,attempt:$attempt,job:$job,event:$event,ref:$ref,
-              runner:$runner,os:$os,arch:$arch,account:$account,uid:$uid,cleanInput:true}' > "$RUNNER_TEMP/sense19-fix-input.json"
+              runner:$runner,os:$os,arch:$arch,account:$account,uid:$uid,cleanInput:true}' > "$RUNNER_TEMP/sense19-completion-input.json"
           SH
-          mkdir -p backend-evidence/scoped-fix
-          cp "$RUNNER_TEMP"/sense19-fix-source.stdout "$RUNNER_TEMP"/sense19-fix-source.stderr backend-evidence/scoped-fix/
-          printf '%s\n' "$source_exit" > backend-evidence/scoped-fix/source-exit.txt
+          mkdir -p backend-evidence/completion
+          cp "$RUNNER_TEMP"/sense19-completion-source.stdout "$RUNNER_TEMP"/sense19-completion-source.stderr backend-evidence/completion/
+          printf '%s\n' "$source_exit" > backend-evidence/completion/source-exit.txt
           test "$source_exit" = 0
-          cp "$RUNNER_TEMP"/sense19-fix-definition.yml "$RUNNER_TEMP"/sense19-fix-input.json backend-evidence/scoped-fix/
-          sha256sum backend-evidence/scoped-fix/sense19-fix-definition.yml codex-rs/Cargo.lock MODULE.bazel.lock \
-            justfile scripts/just-shell.py > backend-evidence/scoped-fix/input.sha256
-          echo 'PROJECTS=codex-app-server-protocol' >> "$GITHUB_ENV"
+          cp "$RUNNER_TEMP"/sense19-completion-definition.yml "$RUNNER_TEMP"/sense19-completion-input.json backend-evidence/completion/
+          sha256sum backend-evidence/completion/sense19-completion-definition.yml codex-rs/Cargo.lock MODULE.bazel.lock \
+            justfile scripts/just-shell.py > backend-evidence/completion/input.sha256
+          echo 'PROJECTS=codex-app-server-protocol codex-app-server codex-core codex-goal-extension' >> "$GITHUB_ENV"
+          cat > backend-evidence/completion/phase.sh <<'SH'
+          phase() {
+            local name="$1"; shift
+            local output="$GITHUB_WORKSPACE/backend-evidence/completion/$name"
+            local code=0
+            mkdir -p "$output"
+            printf '%q ' "$@" > "$output/command.txt"
+            date -u +%FT%TZ > "$output/started.txt"
+            /usr/bin/time -q -f "$CI_TIME_FORMAT" -o "$output/time.json" "$@" \
+              > "$output/stdout.txt" 2> "$output/stderr.txt" || code=$?
+            printf '%s\n' "$code" > "$output/exit.txt"
+            date -u +%FT%TZ > "$output/completed.txt"
+            if [[ "$code" != 0 ]]; then
+              if [[ ! -f "$GITHUB_WORKSPACE/backend-evidence/completion/first-failure.txt" ]]; then
+                printf '%s %s\n' "$name" "$code" > "$GITHUB_WORKSPACE/backend-evidence/completion/first-failure.txt"
+              fi
+              exit "$code"
+            fi
+          }
+          SH
       - name: Validate CI phase receipt wiring without building Rust
-        if: ${{ env.SENSE19_SCOPED_FIX != 'true' }}
+        if: ${{ env.SENSE19_COMPLETION != 'true' }}
         run: python3 -m unittest discover -s .github/scripts -p test_ci_phase_receipts.py
       - name: Record backend initial resources
         run: |
@@ -345,7 +367,6 @@ jobs:
           version: '0.11.3'
           enable-cache: false
       - name: Native Linux backend prerequisites (disposable runner only)
-        if: ${{ env.SENSE19_SCOPED_FIX != 'true' }}
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -414,53 +435,163 @@ jobs:
             primary_key:env.CACHE_PRIMARY_KEY,matched_key:env.CACHE_MATCHED_KEY,
             exact_hit:env.CACHE_EXACT_HIT}' > backend-evidence/cache-restore.json
       - name: Configure matching sandbox V8 artifacts
-        if: ${{ env.SENSE19_SCOPED_FIX != 'true' }}
         uses: ./.github/actions/setup-rusty-v8
         with:
           target: x86_64-unknown-linux-gnu
-      - name: Exact protocol scoped-fix, once
-        if: ${{ env.SENSE19_SCOPED_FIX == 'true' }}
-        id: focused_command
+      - name: Read-only completion format and remaining Clippy
+        if: ${{ env.SENSE19_COMPLETION == 'true' }}
+        id: completion_checks
         run: |
           set -euo pipefail
-          output="$GITHUB_WORKSPACE/backend-evidence/scoped-fix"
+          output="$GITHUB_WORKSPACE/backend-evidence/completion"
           test "$(git rev-parse HEAD)" = '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
-          index="$RUNNER_TEMP/sense19-fix-before.index"
+          index="$RUNNER_TEMP/sense19-completion-before.index"
           trap 'rm -f "$index" "$index.lock"' EXIT
           GIT_INDEX_FILE="$index" git read-tree '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
           GIT_INDEX_FILE="$index" git add -A -- . ':!backend-evidence' ':!.sccache'
           GIT_INDEX_FILE="$index" git write-tree > "$output/command-input-tree.txt"
           test "$(cat "$output/command-input-tree.txt")" = '44dc2159c248448b55ca489f1cdb6fb8e79bf2bf'
           git diff --cached --exit-code '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
-          command=(just fix --locked -p codex-app-server-protocol -- -D warnings)
-          printf '%q ' "${command[@]}" > "$output/command.txt"
-          date -u +%FT%TZ > "$output/started.txt"
-          code=0
-          /usr/bin/time -q -f "$CI_TIME_FORMAT" -o "$output/time.json" "${command[@]}" \
-            > "$output/stdout.txt" 2> "$output/stderr.txt" || code=$?
-          printf '%s\n' "$code" > "$output/exit.txt"
-          date -u +%FT%TZ > "$output/completed.txt"
-          if [[ "$code" != 0 ]]; then printf 'scoped-fix %s\n' "$code" > "$output/first-failure.txt"; fi
-          exit "$code"
-      - name: Retain scoped-fix result and reject all source writeback
-        if: always() && env.SENSE19_SCOPED_FIX == 'true'
+          source "$GITHUB_WORKSPACE/backend-evidence/completion/phase.sh"
+          phase format-check just fmt-check
+          phase remaining-clippy just clippy --locked \
+            -p codex-app-server -p codex-core -p codex-extension-api \
+            -p codex-goal-extension -p codex-queue-extension -p codex-state \
+            -p codex-analytics -p codex-cli -p codex-api -p codex-client \
+            -p core_test_support -p codex-exec -p codex-http-client -p codex-tui \
+            -- -D warnings
+      - name: Bind completion tests to unchanged source
+        if: ${{ env.SENSE19_COMPLETION == 'true' }}
+        id: completion_check_source
+        run: |
+          set -euo pipefail
+          output="$GITHUB_WORKSPACE/backend-evidence/completion"
+          test "$(git rev-parse HEAD)" = '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
+          index="$RUNNER_TEMP/sense19-completion-before.index"
+          trap 'rm -f "$index" "$index.lock"' EXIT
+          GIT_INDEX_FILE="$index" git read-tree '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
+          GIT_INDEX_FILE="$index" git add -A -- . ':!backend-evidence' ':!.sccache'
+          GIT_INDEX_FILE="$index" git write-tree > "$output/checks-input-tree.txt"
+          test "$(cat "$output/checks-input-tree.txt")" = '44dc2159c248448b55ca489f1cdb6fb8e79bf2bf'
+          git diff --cached --exit-code '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
+      - name: Completion runtime test prerequisites
+        if: ${{ env.SENSE19_COMPLETION == 'true' }}
+        id: completion_prerequisites
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/backend-evidence/completion/phase.sh"
+          phase runtime-prerequisites bash -euo pipefail <<'SH'
+          set -euo pipefail
+          sha256sum "$RUSTY_V8_ARCHIVE" "$RUSTY_V8_SRC_BINDING_PATH" \
+            > ../backend-evidence/rusty-v8.sha256
+          # Package-scoped nextest runs do not build sibling packages' executables.
+          cargo build --locked \
+            -p codex-cli --bin codex \
+            -p codex-rmcp-client --bin test_stdio_server --bin test_streamable_http_server \
+            -p codex-code-mode-host --bin codex-code-mode-host \
+            -p codex-linux-sandbox --bin codex-linux-sandbox \
+            -p codex-shell-escalation --bin codex-execve-wrapper \
+            2>&1 | tee ../backend-evidence/runtime-prerequisites.txt
+          for binary in codex test_stdio_server test_streamable_http_server codex-code-mode-host codex-linux-sandbox codex-execve-wrapper; do
+            path="$CARGO_TARGET_DIR/debug/$binary"
+            if [[ ! -x "$path" ]]; then
+              echo "Missing runtime test executable: $path" >&2
+              exit 1
+            fi
+            sha256sum "$path" >> ../backend-evidence/runtime-prerequisites.sha256
+            echo "CARGO_BIN_EXE_$binary=$path" >> "$GITHUB_ENV"
+            if [[ "$binary" == *-* ]]; then
+              echo "CARGO_BIN_EXE_${binary//-/_}=$path" >> "$GITHUB_ENV"
+            fi
+          done
+          SH
+      - name: Completion protocol and affected native tests
+        if: ${{ env.SENSE19_COMPLETION == 'true' }}
+        id: completion_tests
+        run: |
+          set -euo pipefail
+          failed=0
+          for project in $PROJECTS; do
+            selection=()
+            retry_args=()
+            if [[ "${SENSE19_COMPLETION:-false}" == true ]]; then
+              retry_args=(--retries 0)
+              case "$project" in
+                codex-app-server-protocol) ;;
+                codex-app-server) selection=(-E 'test(=observation_admission::tests::startup_lock_and_actual_origin_fence_admission) | test(=observation_admission::tests::connection_revocation_prevents_late_install_admission) | test(=thread_state::observation_lifecycle::tests::listener_clear_replace_and_drop_keep_core_binding_revoked) | test(=thread_state::observation_lifecycle::tests::conflicting_install_cannot_replace_core_binding) | test(=suite::v2::observation_lifecycle::observation_start_and_admitted_resume_install_fresh_owned_relays) | test(keep_working_requires_fresh_enable_after_human_input_resume_or_fork)') ;;
+                codex-core) selection=(-E 'test(=suite::observation_transport::observation_clear_keeps_foreground_requests_full_context_http) | test(=suite::observation_retry::unchanged_retry_retains_a_and_completed_tool_retry_captures_b) | test(human_input_queue_and_manual_compaction_invalidate_at_admission)') ;;
+                codex-goal-extension) selection=(-E 'test(boundaries_revoke_authority_without_restoring_it_from_storage) | test(new_input_revokes_a_stop_waiting_for_the_writer) | test(only_host_ready_replacement_retires_the_previous_runtime)') ;;
+                *) echo "Unexpected completion project: $project" >&2; exit 1 ;;
+              esac
+            fi
+            output="$GITHUB_WORKSPACE/backend-evidence/$project"
+            mkdir -p "$output"
+            printf '%s\n' "${selection[@]}" "${retry_args[@]}" > "$output/selection.txt"
+            date -u +%FT%TZ > "$output/started.txt"
+            # Each project overwrites the local-profile JUnit path; never reuse a previous result.
+            rm -f codex-rs/target/nextest/local/junit.xml
+            printf '%q ' cargo nextest list --locked -p "$project" "${selection[@]}" --message-format json > "$output/discovery-command.txt"
+            discovery_exit=0
+            (cd codex-rs && /usr/bin/time -q -f "$CI_TIME_FORMAT" -o "$output/discovery-time.json" \
+              cargo nextest list --locked -p "$project" "${selection[@]}" --message-format json) \
+              > "$output/discovered.json" 2> "$output/discovery.txt" || discovery_exit=$?
+            echo "$discovery_exit" > "$output/discovery-exit.txt"
+            if [[ "${SENSE19_COMPLETION:-false}" == true && "$discovery_exit" != 0 && ! -f backend-evidence/completion/first-failure.txt ]]; then
+              printf '%s discovery %s\n' "$project" "$discovery_exit" > backend-evidence/completion/first-failure.txt
+            fi
+            if [[ "$discovery_exit" != 0 ]]; then
+              failed=1
+              continue
+            fi
+            printf '%q ' just test --locked -p "$project" "${selection[@]}" "${retry_args[@]}" --test-threads 2 --status-level all --final-status-level all > "$output/test-command.txt"
+            test_exit=0
+            /usr/bin/time -q -f "$CI_TIME_FORMAT" -o "$output/test-time.json" \
+              just test --locked -p "$project" "${selection[@]}" "${retry_args[@]}" --test-threads 2 \
+              --status-level all --final-status-level all 2>&1 | tee "$output/tests.txt" || test_exit=$?
+            echo "$test_exit" > "$output/test-exit.txt"
+            if [[ "${SENSE19_COMPLETION:-false}" == true && "$test_exit" != 0 && ! -f backend-evidence/completion/first-failure.txt ]]; then
+              printf '%s test %s\n' "$project" "$test_exit" > backend-evidence/completion/first-failure.txt
+            fi
+            if [[ -s codex-rs/target/nextest/local/junit.xml ]]; then
+              cp codex-rs/target/nextest/local/junit.xml "$output/junit.xml"
+            else
+              failed=1
+              if [[ "${SENSE19_COMPLETION:-false}" == true && ! -f backend-evidence/completion/first-failure.txt ]]; then
+                printf '%s missing-junit 1\n' "$project" > backend-evidence/completion/first-failure.txt
+              fi
+            fi
+            date -u +%FT%TZ > "$output/completed.txt"
+            if [[ "$test_exit" != 0 ]]; then failed=1; fi
+          done
+          exit "$failed"
+      - name: Retain completion result and reject all source writeback
+        if: always() && env.SENSE19_COMPLETION == 'true'
         env:
           STEPS_JSON: ${{ toJSON(steps) }}
         run: |
           set -euo pipefail
-          output="$GITHUB_WORKSPACE/backend-evidence/scoped-fix"
+          output="$GITHUB_WORKSPACE/backend-evidence/completion"
           mkdir -p "$output"
           printf '%s\n' "$STEPS_JSON" > "$output/steps.json"
-          jq -n --arg exit "$(cat "$output/exit.txt" 2>/dev/null || true)" \
-            '{scopedFixExit:(if $exit == "" then null else ($exit|tonumber) end)}' > "$output/phase-exits.json"
-          if [[ ! -f "$output/sense19-fix-input.json" ]]; then
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path('backend-evidence/completion')
+          phases = {}
+          for name in ('format-check', 'remaining-clippy', 'runtime-prerequisites'):
+              path = root / name / 'exit.txt'
+              phases[name] = int(path.read_text()) if path.exists() else None
+          (root / 'phase-exits.json').write_text(json.dumps(phases, indent=2) + '\n')
+          PY
+          if [[ ! -f "$output/sense19-completion-input.json" ]]; then
             echo 'Input not verified; no output source tree claimed.' > "$output/output-unavailable.txt"
             exit 1
           fi
           code=0
           bash -euxo pipefail > "$output/source-drift.stdout" 2> "$output/source-drift.stderr" <<'SH' || code=$?
-          output="$GITHUB_WORKSPACE/backend-evidence/scoped-fix"
-          index="$RUNNER_TEMP/sense19-fix-after.index"
+          output="$GITHUB_WORKSPACE/backend-evidence/completion"
+          index="$RUNNER_TEMP/sense19-completion-after.index"
           trap 'rm -f "$index" "$index.lock"' EXIT
           export GIT_INDEX_FILE="$index"
           git read-tree '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
@@ -481,7 +612,7 @@ jobs:
           fi
           exit "$code"
       - name: Build backend runtime test prerequisites
-        if: ${{ env.SENSE19_SCOPED_FIX != 'true' }}
+        if: ${{ env.SENSE19_COMPLETION != 'true' }}
         working-directory: codex-rs
         run: |
           set -euo pipefail
@@ -508,7 +639,7 @@ jobs:
             fi
           done
       - name: Complete backend project tests
-        if: ${{ env.SENSE19_SCOPED_FIX != 'true' }}
+        if: ${{ env.SENSE19_COMPLETION != 'true' }}
         run: |
           set -euo pipefail
           failed=0
@@ -542,7 +673,7 @@ jobs:
           done
           exit "$failed"
       - name: Scoped backend Clippy
-        if: ${{ env.SENSE19_SCOPED_FIX != 'true' }}
+        if: ${{ env.SENSE19_COMPLETION != 'true' }}
         run: |
           set -euo pipefail
           failed=0
@@ -556,15 +687,15 @@ jobs:
           done
           exit "$failed"
       - name: Full formatter check (pinned Rust and locked Python tools)
-        if: ${{ env.SENSE19_SCOPED_FIX != 'true' }}
+        if: ${{ env.SENSE19_COMPLETION != 'true' }}
         run: just fmt-check
       - name: Verify backend source unchanged
-        if: ${{ env.SENSE19_SCOPED_FIX != 'true' }}
+        if: ${{ env.SENSE19_COMPLETION != 'true' }}
         run: |
           git diff --exit-code
           test -z "$(git ls-files --others --exclude-standard -- codex-rs .github scripts sdk tools justfile)"
       - name: Retain per-project backend counts
-        if: always() && env.SENSE19_SCOPED_FIX != 'true'
+        if: always()
         run: |
           python3 - <<'PY'
           import json
