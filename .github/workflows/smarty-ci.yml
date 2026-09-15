@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [codex/maintenance-0.153.4]
   push:
-    branches: [codex/maintenance-0.153.4]
+    branches: [codex/maintenance-0.153.4, ci/sense19-generators]
 
 permissions:
   contents: read
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   maintenance-baseline:
-    if: github.repository == 'Smarty-Pants-Inc/codex'
+    if: github.repository == 'Smarty-Pants-Inc/codex' && github.ref != 'refs/heads/ci/sense19-generators'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -251,10 +251,11 @@ jobs:
           if-no-files-found: error
 
   backend:
-    if: github.repository == 'Smarty-Pants-Inc/codex'
+    if: github.repository == 'Smarty-Pants-Inc/codex' && (github.ref != 'refs/heads/ci/sense19-generators' || (github.event_name == 'push' && !github.event.deleted))
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
+      SENSE19_SCOPED_FIX: ${{ github.event_name == 'push' && github.ref == 'refs/heads/ci/sense19-generators' }}
       CARGO_BUILD_JOBS: 2
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -277,8 +278,51 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.sha }}
+          fetch-depth: ${{ env.SENSE19_SCOPED_FIX == 'true' && 2 || 1 }}
           persist-credentials: false
+      - name: Verify fixed scoped-fix source and retain definition
+        if: ${{ env.SENSE19_SCOPED_FIX == 'true' }}
+        id: focused_source
+        run: |
+          set -euo pipefail
+          source_exit=0
+          bash -euxo pipefail > "$RUNNER_TEMP/sense19-fix-source.stdout" 2> "$RUNNER_TEMP/sense19-fix-source.stderr" <<'SH' || source_exit=$?
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/ci/sense19-generators
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          test "$(uname -m)" = x86_64
+          test "$GITHUB_SHA" = "$GITHUB_WORKFLOW_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_WORKFLOW_SHA"
+          test "$(git show -s --format=%P HEAD)" = '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
+          test "$(git diff --name-only HEAD^ HEAD)" = '.github/workflows/smarty-ci.yml'
+          test -z "$(git status --porcelain)"
+          definition_tree="$(git rev-parse 'HEAD^{tree}')"
+          cp .github/workflows/smarty-ci.yml "$RUNNER_TEMP/sense19-fix-definition.yml"
+          git checkout --detach '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
+          test "$(git rev-parse HEAD)" = '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
+          test "$(git rev-parse 'HEAD^{tree}')" = '44dc2159c248448b55ca489f1cdb6fb8e79bf2bf'
+          test -z "$(git status --porcelain)"
+          jq -n --arg definition "$GITHUB_WORKFLOW_SHA" --arg definitionTree "$definition_tree" \
+            --arg source '91c8e879acc7abe77e9d5388b9f0851e2be431b8' --arg tree '44dc2159c248448b55ca489f1cdb6fb8e79bf2bf' \
+            --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" --arg job "$GITHUB_JOB" \
+            --arg event "$GITHUB_EVENT_NAME" --arg ref "$GITHUB_REF" \
+            --arg runner "$RUNNER_NAME" --arg os "$RUNNER_OS" --arg arch "$RUNNER_ARCH" \
+            --arg account "$(id -un)" --arg uid "$(id -u)" \
+            '{scope:"protocol scoped-fix only, not H/Q/L",definition:$definition,definitionTree:$definitionTree,
+              source:$source,tree:$tree,run:$run,attempt:$attempt,job:$job,event:$event,ref:$ref,
+              runner:$runner,os:$os,arch:$arch,account:$account,uid:$uid,cleanInput:true}' > "$RUNNER_TEMP/sense19-fix-input.json"
+          SH
+          mkdir -p backend-evidence/scoped-fix
+          cp "$RUNNER_TEMP"/sense19-fix-source.stdout "$RUNNER_TEMP"/sense19-fix-source.stderr backend-evidence/scoped-fix/
+          printf '%s\n' "$source_exit" > backend-evidence/scoped-fix/source-exit.txt
+          test "$source_exit" = 0
+          cp "$RUNNER_TEMP"/sense19-fix-definition.yml "$RUNNER_TEMP"/sense19-fix-input.json backend-evidence/scoped-fix/
+          sha256sum backend-evidence/scoped-fix/sense19-fix-definition.yml codex-rs/Cargo.lock MODULE.bazel.lock \
+            justfile scripts/just-shell.py > backend-evidence/scoped-fix/input.sha256
+          echo 'PROJECTS=codex-app-server-protocol' >> "$GITHUB_ENV"
       - name: Validate CI phase receipt wiring without building Rust
+        if: ${{ env.SENSE19_SCOPED_FIX != 'true' }}
         run: python3 -m unittest discover -s .github/scripts -p test_ci_phase_receipts.py
       - name: Record backend initial resources
         run: |
@@ -301,6 +345,7 @@ jobs:
           version: '0.11.3'
           enable-cache: false
       - name: Native Linux backend prerequisites (disposable runner only)
+        if: ${{ env.SENSE19_SCOPED_FIX != 'true' }}
         run: |
           set -euo pipefail
           sudo apt-get update
@@ -369,10 +414,74 @@ jobs:
             primary_key:env.CACHE_PRIMARY_KEY,matched_key:env.CACHE_MATCHED_KEY,
             exact_hit:env.CACHE_EXACT_HIT}' > backend-evidence/cache-restore.json
       - name: Configure matching sandbox V8 artifacts
+        if: ${{ env.SENSE19_SCOPED_FIX != 'true' }}
         uses: ./.github/actions/setup-rusty-v8
         with:
           target: x86_64-unknown-linux-gnu
+      - name: Exact protocol scoped-fix, once
+        if: ${{ env.SENSE19_SCOPED_FIX == 'true' }}
+        id: focused_command
+        run: |
+          set -euo pipefail
+          output="$GITHUB_WORKSPACE/backend-evidence/scoped-fix"
+          test "$(git rev-parse HEAD)" = '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
+          index="$RUNNER_TEMP/sense19-fix-before.index"
+          trap 'rm -f "$index" "$index.lock"' EXIT
+          GIT_INDEX_FILE="$index" git read-tree '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
+          GIT_INDEX_FILE="$index" git add -A -- . ':!backend-evidence' ':!.sccache'
+          GIT_INDEX_FILE="$index" git write-tree > "$output/command-input-tree.txt"
+          test "$(cat "$output/command-input-tree.txt")" = '44dc2159c248448b55ca489f1cdb6fb8e79bf2bf'
+          git diff --cached --exit-code '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
+          command=(just fix --locked -p codex-app-server-protocol -- -D warnings)
+          printf '%q ' "${command[@]}" > "$output/command.txt"
+          date -u +%FT%TZ > "$output/started.txt"
+          code=0
+          /usr/bin/time -q -f "$CI_TIME_FORMAT" -o "$output/time.json" "${command[@]}" \
+            > "$output/stdout.txt" 2> "$output/stderr.txt" || code=$?
+          printf '%s\n' "$code" > "$output/exit.txt"
+          date -u +%FT%TZ > "$output/completed.txt"
+          if [[ "$code" != 0 ]]; then printf 'scoped-fix %s\n' "$code" > "$output/first-failure.txt"; fi
+          exit "$code"
+      - name: Retain scoped-fix result and reject all source writeback
+        if: always() && env.SENSE19_SCOPED_FIX == 'true'
+        env:
+          STEPS_JSON: ${{ toJSON(steps) }}
+        run: |
+          set -euo pipefail
+          output="$GITHUB_WORKSPACE/backend-evidence/scoped-fix"
+          mkdir -p "$output"
+          printf '%s\n' "$STEPS_JSON" > "$output/steps.json"
+          jq -n --arg exit "$(cat "$output/exit.txt" 2>/dev/null || true)" \
+            '{scopedFixExit:(if $exit == "" then null else ($exit|tonumber) end)}' > "$output/phase-exits.json"
+          if [[ ! -f "$output/sense19-fix-input.json" ]]; then
+            echo 'Input not verified; no output source tree claimed.' > "$output/output-unavailable.txt"
+            exit 1
+          fi
+          code=0
+          bash -euxo pipefail > "$output/source-drift.stdout" 2> "$output/source-drift.stderr" <<'SH' || code=$?
+          output="$GITHUB_WORKSPACE/backend-evidence/scoped-fix"
+          index="$RUNNER_TEMP/sense19-fix-after.index"
+          trap 'rm -f "$index" "$index.lock"' EXIT
+          export GIT_INDEX_FILE="$index"
+          git read-tree '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
+          git add -A -- . ':!backend-evidence' ':!.sccache'
+          tree="$(git write-tree)"
+          printf '%s\n' "$tree" > "$output/output-tree.txt"
+          git diff --cached --binary --full-index '91c8e879acc7abe77e9d5388b9f0851e2be431b8' > "$output/writeback.diff"
+          git diff --cached --name-status '91c8e879acc7abe77e9d5388b9f0851e2be431b8' > "$output/changed-paths.txt"
+          sha256sum "$output/writeback.diff" > "$output/writeback.sha256"
+          test "$(git rev-parse HEAD)" = '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
+          test "$tree" = '44dc2159c248448b55ca489f1cdb6fb8e79bf2bf'
+          unset GIT_INDEX_FILE
+          git diff --cached --exit-code '91c8e879acc7abe77e9d5388b9f0851e2be431b8'
+          SH
+          printf '%s\n' "$code" > "$output/source-drift-exit.txt"
+          if [[ "$code" != 0 && ! -f "$output/first-failure.txt" ]]; then
+            printf 'source-drift %s\n' "$code" > "$output/first-failure.txt"
+          fi
+          exit "$code"
       - name: Build backend runtime test prerequisites
+        if: ${{ env.SENSE19_SCOPED_FIX != 'true' }}
         working-directory: codex-rs
         run: |
           set -euo pipefail
@@ -399,6 +508,7 @@ jobs:
             fi
           done
       - name: Complete backend project tests
+        if: ${{ env.SENSE19_SCOPED_FIX != 'true' }}
         run: |
           set -euo pipefail
           failed=0
@@ -432,6 +542,7 @@ jobs:
           done
           exit "$failed"
       - name: Scoped backend Clippy
+        if: ${{ env.SENSE19_SCOPED_FIX != 'true' }}
         run: |
           set -euo pipefail
           failed=0
@@ -445,13 +556,15 @@ jobs:
           done
           exit "$failed"
       - name: Full formatter check (pinned Rust and locked Python tools)
+        if: ${{ env.SENSE19_SCOPED_FIX != 'true' }}
         run: just fmt-check
       - name: Verify backend source unchanged
+        if: ${{ env.SENSE19_SCOPED_FIX != 'true' }}
         run: |
           git diff --exit-code
           test -z "$(git ls-files --others --exclude-standard -- codex-rs .github scripts sdk tools justfile)"
       - name: Retain per-project backend counts
-        if: always()
+        if: always() && env.SENSE19_SCOPED_FIX != 'true'
         run: |
           python3 - <<'PY'
           import json
@@ -547,7 +660,7 @@ jobs:
 
   required:
     name: smarty-ci
-    if: ${{ always() && github.repository == 'Smarty-Pants-Inc/codex' }}
+    if: ${{ always() && github.repository == 'Smarty-Pants-Inc/codex' && github.ref != 'refs/heads/ci/sense19-generators' }}
     needs: [maintenance-baseline, backend]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
