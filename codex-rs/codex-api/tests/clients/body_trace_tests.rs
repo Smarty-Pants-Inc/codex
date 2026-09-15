@@ -1,4 +1,5 @@
 use super::*;
+use pretty_assertions::assert_eq;
 
 #[tokio::test]
 async fn body_redaction_survives_real_api_retry_and_telemetry_builder() -> Result<()> {

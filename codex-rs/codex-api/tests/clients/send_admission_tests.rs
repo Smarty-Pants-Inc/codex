@@ -1,5 +1,6 @@
 use super::*;
 use codex_client::RequestTelemetry;
+use pretty_assertions::assert_eq;
 
 struct AdmissionState {
     remaining: usize,
