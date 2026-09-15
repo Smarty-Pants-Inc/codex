@@ -324,6 +324,9 @@ async fn start_or_steer(
                 .maybe_emit_model_warnings_for_turn(turn_context.as_ref())
                 .await;
             if let SubmittedTurnInput::UserInput { content, .. } = &input {
+                if !content.is_empty() {
+                    session.notify_user_input(Some(&turn_context.sub_id));
+                }
                 turn_context.session_telemetry.user_prompt(content);
             }
             let mut task_input = merge_additional_context_input(session, additional_context).await;
@@ -436,6 +439,7 @@ async fn start_if_idle(
     let mut task_input = merge_additional_context_input(session, additional_context).await;
     match kind {
         TurnStartKind::User => {
+            session.notify_user_input(Some(&turn_context.sub_id));
             session.clear_connector_selection().await;
             if let SubmittedTurnInput::UserInput { content, .. } = &input {
                 turn_context.session_telemetry.user_prompt(content);
@@ -510,6 +514,12 @@ async fn steer(
 }
 
 impl Session {
+    pub(crate) fn notify_user_input(&self, turn_id: Option<&str>) {
+        for contributor in self.services.extensions.turn_lifecycle_contributors() {
+            contributor.on_user_input(&self.services.thread_extension_data, turn_id);
+        }
+    }
+
     pub(crate) async fn route_realtime_text_input(self: &Arc<Self>, text: String) {
         let submission_id = Uuid::now_v7().to_string();
         let submission = handle(
@@ -630,6 +640,7 @@ impl Session {
 
         let input = match input {
             SubmittedTurnInput::UserInput { content, client_id } => {
+                self.notify_user_input(Some(active_turn_id));
                 active_task
                     .turn_context
                     .session_telemetry

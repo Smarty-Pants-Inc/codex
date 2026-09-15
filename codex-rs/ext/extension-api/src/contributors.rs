@@ -184,6 +184,13 @@ pub trait ThreadLifecycleContributor<C: Sync>: Send + Sync {
 /// extension-private turn state. The host exposes stable identifiers and
 /// extension stores instead of core runtime objects.
 pub trait TurnLifecycleContributor: Send + Sync {
+    /// Called before validated human input, queue submissions, or host-owned
+    /// non-regular operations become runnable. `turn_id` identifies a regular
+    /// turn when present. Persistence failure does not restore old authority.
+    /// Only invalidate local intent. Do not perform I/O or re-enter host work
+    /// while admission locks are held.
+    fn on_user_input(&self, _thread_store: &ExtensionData, _turn_id: Option<&str>) {}
+
     /// Called after turn-scoped extension stores are created, before the task
     /// for the turn starts running.
     fn on_turn_start<'a>(&'a self, input: TurnStartInput<'a>) -> ExtensionFuture<'a, ()> {

@@ -750,12 +750,14 @@ impl MessageProcessor {
         &self,
         connection_id: ConnectionId,
         request_attestation: bool,
+        observation: Option<Arc<crate::observation_admission::ObservationAdmission>>,
     ) {
         self.thread_processor
             .connection_initialized(
                 connection_id,
                 ConnectionCapabilities {
                     request_attestation,
+                    observation,
                 },
             )
             .await;
@@ -802,6 +804,9 @@ impl MessageProcessor {
         connection_id: ConnectionId,
         session_state: &ConnectionSessionState,
     ) {
+        self.thread_processor
+            .revoke_observation_connection(connection_id)
+            .await;
         session_state.rpc_gate.close().await;
         session_state.mcp_event_streams.clear().await;
         if timeout(
@@ -873,6 +878,7 @@ impl MessageProcessor {
                         connection_id,
                         ConnectionCapabilities {
                             request_attestation: session.request_attestation(),
+                            ..Default::default()
                         },
                     )
                     .await;
@@ -1193,6 +1199,39 @@ impl MessageProcessor {
             ClientRequest::ThreadSetName { params, .. } => {
                 self.thread_processor
                     .thread_set_name(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::ThreadObservationSet { params, .. } => {
+                let frame = match params.frame {
+                    codex_app_server_protocol::ObservationFrameUpdate::Frame(frame) => {
+                        Some(codex_core::ObservationFrame {
+                            text: Arc::from(frame.text),
+                            hash: frame.hash,
+                            expires_at: frame.expires_at,
+                        })
+                    }
+                    codex_app_server_protocol::ObservationFrameUpdate::Clear(()) => None,
+                };
+                self.thread_processor
+                    .observation_request(
+                        request_id.clone(),
+                        &params.thread_id,
+                        &params.owner_epoch,
+                        crate::observation_bridge::ControlOperation::Set {
+                            revision: params.revision,
+                            frame,
+                        },
+                    )
+                    .await
+            }
+            ClientRequest::ThreadObservationRead { params, .. } => {
+                self.thread_processor
+                    .observation_request(
+                        request_id.clone(),
+                        &params.thread_id,
+                        &params.owner_epoch,
+                        crate::observation_bridge::ControlOperation::Read,
+                    )
                     .await
             }
             ClientRequest::ThreadGoalSet { params, .. } => {

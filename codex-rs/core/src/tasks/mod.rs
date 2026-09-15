@@ -287,6 +287,10 @@ impl Session {
     ) {
         let task: Arc<dyn AnySessionTask> = Arc::new(task);
         let task_kind = task.kind();
+        match task_kind {
+            TaskKind::Regular => {}
+            TaskKind::Review | TaskKind::Compact => self.notify_user_input(/*turn_id*/ None),
+        }
         let span_name = task.span_name();
         let started_at = Instant::now();
         let turn_started_at_unix_ms = turn_context

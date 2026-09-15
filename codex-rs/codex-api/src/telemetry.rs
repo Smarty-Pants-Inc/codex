@@ -6,6 +6,7 @@ use codex_client::RetryPolicy;
 use codex_client::StreamResponse;
 use codex_client::TransportError;
 use codex_client::run_with_retry;
+use http::HeaderMap;
 use http::StatusCode;
 use std::future::Future;
 use std::sync::Arc;
@@ -14,8 +15,20 @@ use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Error;
 use tokio_tungstenite::tungstenite::Message;
 
+#[cfg(test)]
+#[path = "telemetry_tests.rs"]
+mod tests;
+
 /// Generic telemetry.
 pub trait SseTelemetry: Send + Sync {
+    /// Bind an acceptance callback to the concrete HTTP attempt that opened this
+    /// stream. The returned closure must not consult a later mutable attempt ID.
+    /// It runs once when the decoder validates `response.created`, before event
+    /// forwarding; stream creation, headers and polling do not call it.
+    fn response_created_callback(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        None
+    }
+
     fn on_sse_poll(
         &self,
         result: &Result<
@@ -44,6 +57,7 @@ pub trait WebsocketTelemetry: Send + Sync {
 
 pub(crate) trait WithStatus {
     fn status(&self) -> StatusCode;
+    fn headers(&self) -> &HeaderMap;
 }
 
 fn http_status(err: &TransportError) -> Option<StatusCode> {
@@ -57,11 +71,19 @@ impl WithStatus for Response {
     fn status(&self) -> StatusCode {
         self.status
     }
+
+    fn headers(&self) -> &HeaderMap {
+        &self.headers
+    }
 }
 
 impl WithStatus for StreamResponse {
     fn status(&self) -> StatusCode {
         self.status
+    }
+
+    fn headers(&self) -> &HeaderMap {
+        &self.headers
     }
 }
 
@@ -83,11 +105,25 @@ where
         let send = send.clone();
         async move {
             let start = Instant::now();
+            // This wrapper also covers auth failure and admission rejection.
+            // EndpointSession owns the post-auth, fallible pre-send boundary.
             let result = send(req).await;
             if let Some(t) = telemetry.as_ref() {
                 let (status, err) = match &result {
-                    Ok(resp) => (Some(resp.status()), None),
-                    Err(err) => (http_status(err), Some(err)),
+                    Ok(resp) => {
+                        t.on_response_headers(resp.headers());
+                        (Some(resp.status()), None)
+                    }
+                    Err(err) => {
+                        if let TransportError::Http {
+                            headers: Some(headers),
+                            ..
+                        } = err
+                        {
+                            t.on_response_headers(headers);
+                        }
+                        (http_status(err), Some(err))
+                    }
                 };
                 t.on_request(attempt, status, err, start.elapsed());
             }

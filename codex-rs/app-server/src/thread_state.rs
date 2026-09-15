@@ -31,6 +31,9 @@ use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tracing::error;
 
+#[path = "observation_lifecycle.rs"]
+mod observation_lifecycle;
+
 type PendingInterruptQueue = Vec<ConnectionRequestId>;
 
 pub(crate) struct PendingThreadResumeRequest {
@@ -94,6 +97,8 @@ pub(crate) struct TurnSummary {
 
 #[derive(Default)]
 pub(crate) struct ThreadState {
+    pub(crate) observation: Option<Arc<crate::observation_bridge::ObservationBridge>>,
+    observation_relay: Option<observation_lifecycle::ObservationRelay>,
     pub(crate) pending_interrupts: PendingInterruptQueue,
     pub(crate) pending_rollbacks: Option<ConnectionRequestId>,
     pub(crate) turn_summary: TurnSummary,
@@ -126,6 +131,9 @@ impl ThreadState {
         watch_registration: WatchRegistration,
         thread_settings_baseline: ThreadSettings,
     ) -> (mpsc::UnboundedReceiver<ThreadListenerCommand>, u64) {
+        if !self.listener_matches(conversation) {
+            self.clear_observation();
+        }
         if let Some(previous) = self.cancel_tx.replace(cancel_tx) {
             let _ = previous.send(());
         }
@@ -139,6 +147,7 @@ impl ThreadState {
     }
 
     pub(crate) fn clear_listener(&mut self) {
+        self.clear_observation();
         if let Some(cancel_tx) = self.cancel_tx.take() {
             let _ = cancel_tx.send(());
         }
@@ -324,9 +333,10 @@ struct ThreadStateManagerInner {
     thread_ids_by_connection: HashMap<ConnectionId, HashSet<ThreadId>>,
 }
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct ConnectionCapabilities {
     pub(crate) request_attestation: bool,
+    pub(crate) observation: Option<Arc<crate::observation_admission::ObservationAdmission>>,
 }
 
 #[derive(Clone, Default)]
@@ -399,6 +409,52 @@ impl ThreadStateManager {
             .get(&thread_id)
             .map(|thread_entry| thread_entry.connection_ids.iter().copied().collect())
             .unwrap_or_default()
+    }
+
+    pub(crate) async fn observation_bridge(
+        &self,
+        thread_id: ThreadId,
+        connection_id: ConnectionId,
+    ) -> Option<Arc<crate::observation_bridge::ObservationBridge>> {
+        let entry = {
+            let state = self.state.lock().await;
+            state.live_connections.get(&connection_id)?;
+            state.threads.get(&thread_id)?.state.clone()
+        };
+        let state = entry.lock().await;
+        state
+            .observation
+            .as_ref()
+            .filter(|bridge| bridge.owner.connection_id == connection_id.0)
+            .cloned()
+    }
+
+    pub(crate) async fn revoke_observations(&self, connection_id: ConnectionId) {
+        let entries = {
+            let mut state = self.state.lock().await;
+            // Close admission before snapshotting: an in-flight start must not
+            // install after this connection's revocation pass has completed.
+            if let Some(capabilities) = state.live_connections.get_mut(&connection_id) {
+                capabilities.observation = None;
+            }
+            // Subscription is not ownership: an owner may have unsubscribed
+            // before its connection closes. Reuse the existing thread registry.
+            state
+                .threads
+                .values()
+                .map(|entry| entry.state.clone())
+                .collect::<Vec<_>>()
+        };
+        for entry in entries {
+            let mut state = entry.lock().await;
+            if state
+                .observation
+                .as_ref()
+                .is_some_and(|bridge| bridge.owner.connection_id == connection_id.0)
+            {
+                state.clear_observation();
+            }
+        }
     }
 
     pub(crate) async fn thread_state(&self, thread_id: ThreadId) -> Arc<Mutex<ThreadState>> {

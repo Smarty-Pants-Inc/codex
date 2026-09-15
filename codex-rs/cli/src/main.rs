@@ -544,6 +544,8 @@ struct LogoutCommand {
 
 #[derive(Debug, Parser)]
 struct AppServerCommand {
+    #[command(flatten)]
+    observation: codex_app_server::AppServerObservationArgs,
     /// Omit to run the app server; specify a subcommand for tooling.
     #[command(subcommand)]
     subcommand: Option<AppServerSubcommand>,
@@ -1244,6 +1246,7 @@ async fn cli_main(
         }
         Some(Subcommand::AppServer(app_server_cli)) => {
             let AppServerCommand {
+                observation,
                 subcommand,
                 code_mode_host,
                 strict_config: app_server_strict_config,
@@ -1268,10 +1271,15 @@ async fn cli_main(
                         listen
                     };
                     let auth = auth.try_into_settings()?;
+                    let observation_startup = observation.into_startup()?;
+                    let observation_enabled = observation_startup.is_some();
                     let runtime_options = codex_app_server::AppServerRuntimeOptions {
+                        observation_startup,
                         code_mode_host_transport: code_mode_host.into(),
-                        remote_control_startup_mode: match (remote_control, remote_control_disabled)
-                        {
+                        remote_control_startup_mode: match (
+                            remote_control,
+                            remote_control_disabled || observation_enabled,
+                        ) {
                             (true, _) => {
                                 codex_app_server::RemoteControlStartupMode::EnabledEphemeral
                             }

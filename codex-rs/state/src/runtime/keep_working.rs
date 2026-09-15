@@ -1,5 +1,6 @@
 use super::GoalStore;
 use codex_protocol::ThreadId;
+use codex_protocol::turn_input::TurnStartGuard;
 
 #[cfg(test)]
 #[path = "keep_working_tests.rs"]
@@ -17,6 +18,28 @@ impl GoalStore {
 
     /// Persists the setting only; this never starts or replays a turn.
     pub async fn set_keep_working(&self, thread_id: ThreadId, enabled: bool) -> anyhow::Result<()> {
+        self.set_keep_working_inner(thread_id, enabled, /*guard*/ None)
+            .await
+    }
+
+    /// Fence a runtime-owned write before commit while SQLite holds its writer
+    /// lock. A superseded operation must not overwrite a newer owner's setting.
+    pub async fn set_keep_working_if_current(
+        &self,
+        thread_id: ThreadId,
+        enabled: bool,
+        guard: &TurnStartGuard,
+    ) -> anyhow::Result<()> {
+        self.set_keep_working_inner(thread_id, enabled, Some(guard))
+            .await
+    }
+
+    async fn set_keep_working_inner(
+        &self,
+        thread_id: ThreadId,
+        enabled: bool,
+        guard: Option<&TurnStartGuard>,
+    ) -> anyhow::Result<()> {
         let query = if enabled {
             "INSERT INTO thread_keep_working (thread_id) VALUES (?) ON CONFLICT DO NOTHING"
         } else {
@@ -29,6 +52,10 @@ impl GoalStore {
             .bind(thread_id.to_string())
             .execute(&mut *transaction)
             .await?;
+        anyhow::ensure!(
+            !guard.is_some_and(TurnStartGuard::is_revoked),
+            "keep_working intent was stopped or superseded"
+        );
         transaction.commit().await?;
         Ok(())
     }

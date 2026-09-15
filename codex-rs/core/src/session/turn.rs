@@ -1391,6 +1391,20 @@ async fn run_sampling_request(
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
     let turn_context = Arc::clone(&step_context.turn);
     let base_instructions = sess.get_prompt_base_instructions().await;
+    let mut observations = if let Some(binding) = sess
+        .services
+        .thread_extension_data
+        .get::<crate::ObservationBinding>()
+    {
+        client_session.enable_observation_full_context();
+        Some(super::observation_sampling::ObservationSampling::new(
+            Arc::clone(&binding.slot),
+            binding.profile,
+            turn_context.sub_id.clone(),
+        ))
+    } else {
+        None
+    };
 
     let tool_runtime = ToolCallRuntime::new(
         Arc::clone(&sess),
@@ -1427,7 +1441,23 @@ async fn run_sampling_request(
             step_context.as_ref(),
             base_instructions.clone(),
         );
-        let err = match try_run_sampling_request(
+        let observation_prompt = if let Some(observations) = observations.as_mut() {
+            let mut canonical_input = prompt.input.clone();
+            client_session.prepare_response_items_for_request(&mut canonical_input);
+            let (item, decision_id) = observations
+                .prepare(canonical_input, &step_context.settings.model_info)
+                .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
+            client_session.observation_decision =
+                Some((Arc::clone(&observations.slot), decision_id));
+            let mut request_prompt = prompt.clone();
+            if let Some(item) = item {
+                request_prompt.input.push(item);
+            }
+            Some(request_prompt)
+        } else {
+            None
+        };
+        let sampling_result = try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
             Arc::clone(&step_context),
@@ -1435,11 +1465,12 @@ async fn run_sampling_request(
             client_session,
             responses_metadata,
             Arc::clone(&turn_diff_tracker),
-            &prompt,
+            observation_prompt.as_ref().unwrap_or(&prompt),
             cancellation_token.child_token(),
         )
-        .await
-        {
+        .await;
+        client_session.observation_decision = None;
+        let err = match sampling_result {
             Ok(output) => {
                 return Ok((output, original_input.unwrap_or(prompt.input)));
             }

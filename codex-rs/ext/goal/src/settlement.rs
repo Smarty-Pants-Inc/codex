@@ -11,6 +11,8 @@ pub(crate) enum Settlement {
     },
     Completed(TurnStartGuard),
     Claimed(TurnStartGuard),
+    // Fence a pending OFF write against a newer input/runtime boundary.
+    Stopped(TurnStartGuard),
 }
 
 impl Settlement {
@@ -24,11 +26,19 @@ impl Settlement {
 
     pub(crate) fn stop(&mut self) {
         match std::mem::take(self) {
-            Self::Running { guard, .. } | Self::Completed(guard) | Self::Claimed(guard) => {
-                guard.revoke()
-            }
+            Self::Running { guard, .. }
+            | Self::Completed(guard)
+            | Self::Claimed(guard)
+            | Self::Stopped(guard) => guard.revoke(),
             Self::None => {}
         }
+    }
+
+    pub(crate) fn stop_intent(&mut self) -> TurnStartGuard {
+        self.stop();
+        let guard = TurnStartGuard::default();
+        *self = Self::Stopped(guard.clone());
+        guard
     }
 
     pub(crate) fn guard_for_turn(&self, turn_id: &str) -> Option<TurnStartGuard> {
@@ -37,7 +47,11 @@ impl Settlement {
                 turn_id: current,
                 guard,
             } if current == turn_id => Some(guard.clone()),
-            Self::None | Self::Running { .. } | Self::Completed(_) | Self::Claimed(_) => None,
+            Self::None
+            | Self::Running { .. }
+            | Self::Completed(_)
+            | Self::Claimed(_)
+            | Self::Stopped(_) => None,
         }
     }
 
@@ -65,9 +79,10 @@ impl Settlement {
                 *self = Self::Claimed(guard.clone());
                 guard
             }
-            Self::Running { guard, .. } | Self::Completed(guard) | Self::Claimed(guard) => {
-                guard.clone()
-            }
+            Self::Running { guard, .. }
+            | Self::Completed(guard)
+            | Self::Claimed(guard)
+            | Self::Stopped(guard) => guard.clone(),
         }
     }
 }

@@ -271,6 +271,7 @@ impl QueuedItemService {
         let payload = serde_json::to_string(&input)?;
         let item = {
             let _dispatch_guard = self.dispatch_guard(thread_id).await;
+            self.notify_user_input(thread_id).await;
             let item = queued_item_from_record(self.queue.enqueue(thread_id, payload).await?)?;
             self.emit_changed(thread_id);
             item
@@ -320,6 +321,7 @@ impl QueuedItemService {
         }
         let input = prepare_queued_user_input(input).await?;
         let payload = serde_json::to_string(&input)?;
+        self.notify_user_input(thread_id).await;
         let item = self
             .queue
             .update(thread_id, queued_item_id, payload)
@@ -466,6 +468,14 @@ impl QueuedItemService {
                     return Ok(());
                 }
             }
+        }
+    }
+
+    async fn notify_user_input(&self, thread_id: ThreadId) {
+        if let Some(manager) = self.thread_manager.upgrade()
+            && let Ok(thread) = manager.get_thread(thread_id).await
+        {
+            thread.notify_queued_user_input().await;
         }
     }
 

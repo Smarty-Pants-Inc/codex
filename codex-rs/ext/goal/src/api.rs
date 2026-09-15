@@ -84,6 +84,11 @@ impl GoalSetOutcome {
     }
 }
 
+pub(crate) enum RuntimeRegistration {
+    Initializing,
+    Ready,
+}
+
 #[derive(Debug, Default)]
 pub struct GoalService {
     runtimes: Mutex<HashMap<String, Weak<GoalRuntimeHandle>>>,
@@ -342,12 +347,35 @@ impl GoalService {
         Ok(cleared)
     }
 
-    pub(crate) fn register_runtime(&self, runtime: &Arc<GoalRuntimeHandle>) {
-        self.runtimes()
-            .insert(runtime.thread_id().to_string(), Arc::downgrade(runtime));
+    pub(crate) fn register_runtime(
+        &self,
+        runtime: &Arc<GoalRuntimeHandle>,
+        phase: RuntimeRegistration,
+    ) {
+        let mut runtimes = self.runtimes();
+        if runtime.is_retired() {
+            return;
+        }
+        // A competing initializer may still lose Core's duplicate-thread check.
+        if matches!(phase, RuntimeRegistration::Initializing)
+            && runtimes
+                .get(&runtime.thread_id().to_string())
+                .and_then(Weak::upgrade)
+                .is_some()
+        {
+            return;
+        }
+        if let Some(previous) = runtimes
+            .insert(runtime.thread_id().to_string(), Arc::downgrade(runtime))
+            .and_then(|previous| previous.upgrade())
+            && !Arc::ptr_eq(&previous, runtime)
+        {
+            previous.invalidate_continuity(crate::runtime::ContinuityBoundary::Retire);
+        }
     }
 
     pub(crate) fn unregister_runtime(&self, runtime: &Arc<GoalRuntimeHandle>) {
+        runtime.invalidate_continuity(crate::runtime::ContinuityBoundary::Retire);
         let key = runtime.thread_id().to_string();
         let runtime = Arc::downgrade(runtime);
         let mut runtimes = self.runtimes();

@@ -11,6 +11,7 @@ use codex_extension_api::ExtensionFuture;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_extension_api::ThreadIdleInput;
 use codex_extension_api::ThreadLifecycleContributor;
+use codex_extension_api::ThreadReadyInput;
 use codex_extension_api::ThreadResumeInput;
 use codex_extension_api::ThreadStartInput;
 use codex_extension_api::ThreadStopInput;
@@ -39,10 +40,12 @@ use crate::accounting::BudgetLimitedGoalDisposition;
 use crate::accounting::GoalAccountingState;
 use crate::analytics::GoalAnalytics;
 use crate::api::GoalService;
+use crate::api::RuntimeRegistration;
 use crate::events::GoalEventEmitter;
 use crate::metrics::GoalMetrics;
 use crate::runtime::ActiveGoalStopReason;
 use crate::runtime::ContinuationTrigger;
+use crate::runtime::ContinuityBoundary;
 use crate::runtime::GoalRuntimeConfig;
 use crate::runtime::GoalRuntimeHandle;
 use crate::spec::CREATE_GOAL_TOOL_NAME;
@@ -157,7 +160,17 @@ where
                 )
             });
             runtime.set_enabled(enabled);
-            self.goal_service.register_runtime(&runtime);
+            self.goal_service
+                .register_runtime(&runtime, RuntimeRegistration::Initializing);
+        })
+    }
+
+    fn on_thread_ready<'a>(&'a self, input: ThreadReadyInput<'a, C>) -> ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            if let Some(runtime) = goal_runtime_handle(input.thread_store) {
+                self.goal_service
+                    .register_runtime(&runtime, RuntimeRegistration::Ready);
+            }
         })
     }
 
@@ -227,6 +240,12 @@ impl<C> TurnLifecycleContributor for GoalExtension<C>
 where
     C: Send + Sync + 'static,
 {
+    fn on_user_input(&self, thread_store: &ExtensionData, turn_id: Option<&str>) {
+        if let Some(runtime) = goal_runtime_handle(thread_store) {
+            runtime.invalidate_continuity(ContinuityBoundary::HumanInput(turn_id));
+        }
+    }
+
     fn on_turn_start<'a>(&'a self, input: TurnStartInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
@@ -343,7 +362,10 @@ where
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
                 return;
             };
-            if let Err(err) = runtime.stop_keep_working().await {
+            if let Err(err) = runtime
+                .stop_keep_working_for_turn(input.turn_store.level_id())
+                .await
+            {
                 tracing::warn!("failed to disable keep_working after turn abort: {err}");
             }
             if !runtime.is_enabled() {

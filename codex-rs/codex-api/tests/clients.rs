@@ -31,6 +31,11 @@ use http::StatusCode;
 use pretty_assertions::assert_eq;
 use serde_json::value::RawValue;
 
+#[path = "clients/body_trace_tests.rs"]
+mod body_trace;
+#[path = "clients/send_admission_tests.rs"]
+mod send_admission;
+
 fn assert_path_ends_with(requests: &[Request], suffix: &str) {
     assert_eq!(requests.len(), 1);
     let url = &requests[0].url;

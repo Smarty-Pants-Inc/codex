@@ -271,6 +271,7 @@ fn thread_resume_params_accept_turns_page_bootstrap() {
 #[test]
 fn thread_resume_response_round_trips_initial_turns_page() {
     let response = ThreadResumeResponse {
+        observation: None,
         thread: Thread {
             id: "thr_123".to_string(),
             extra: None,

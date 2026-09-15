@@ -280,6 +280,7 @@ fn sample_thread_start_response(
     model: &str,
 ) -> ClientResponsePayload {
     ClientResponsePayload::ThreadStart(ThreadStartResponse {
+        observation: None,
         thread: sample_thread_with_metadata(
             thread_id,
             ephemeral,
@@ -345,6 +346,7 @@ fn sample_thread_resume_response_with_source(
     parent_thread_id: Option<String>,
 ) -> ClientResponsePayload {
     ClientResponsePayload::ThreadResume(ThreadResumeResponse {
+        observation: None,
         thread: sample_thread_with_metadata(
             thread_id,
             ephemeral,

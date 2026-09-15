@@ -84,6 +84,25 @@ async fn context_window_token_status_with_config(
         context_window.saturating_mul(model_info.effective_context_window_percent) / 100
     });
 
+    // Only the qualified owner-admission path may attach an observation slot.
+    // Keep reserving after clear/expiry: replacement mode and an unavailable
+    // marker must not borrow capacity from canonical input or fallback prompts.
+    let observation_reserve = if sess
+        .services
+        .thread_extension_data
+        .get::<crate::ObservationBinding>()
+        .is_some()
+    {
+        crate::observation::RESERVED_TOKENS
+    } else {
+        0
+    };
+    let (auto_compact_scope_limit, full_context_window_limit) = reserve_observation_capacity(
+        auto_compact_scope_limit,
+        full_context_window_limit,
+        observation_reserve,
+    );
+
     // Report remaining tokens against the base (unbuffered) window, capped by the full context.
     let base_window_tokens_remaining = [
         tokens_remaining(auto_compact_scope_limit, auto_compact_scope_tokens),
@@ -98,8 +117,14 @@ async fn context_window_token_status_with_config(
         .token_budget
         .as_ref()
         .map_or(0, crate::config::TokenBudgetConfig::fallback_buffer_tokens);
-    let buffered_auto_compact_limit = auto_compact_scope_limit
-        .map(|limit| limit.saturating_add(auto_compact_fallback_buffer_tokens));
+    let buffered_auto_compact_limit = auto_compact_scope_limit.map(|limit| {
+        let buffered = limit.saturating_add(auto_compact_fallback_buffer_tokens);
+        if observation_reserve == 0 {
+            buffered
+        } else {
+            buffered.min(full_context_window_limit.unwrap_or(0))
+        }
+    });
 
     // Force compaction once the buffered window or the model's full context window is reached.
     let full_context_window_limit_reached =
@@ -119,3 +144,28 @@ async fn context_window_token_status_with_config(
         token_limit_reached,
     }
 }
+
+fn reserve_observation_capacity(
+    auto_compact_limit: Option<i64>,
+    full_context_limit: Option<i64>,
+    reserve: i64,
+) -> (Option<i64>, Option<i64>) {
+    if reserve == 0 {
+        return (auto_compact_limit, full_context_limit);
+    }
+    // Unknown full capacity cannot admit a reserved observation request. Normal
+    // disabled sessions retain their prior unknown-limit behavior above.
+    (
+        auto_compact_limit.map(|limit| limit.saturating_sub(reserve).max(0)),
+        Some(
+            full_context_limit
+                .unwrap_or(0)
+                .saturating_sub(reserve)
+                .max(0),
+        ),
+    )
+}
+
+#[cfg(test)]
+#[path = "context_window_tests.rs"]
+mod tests;

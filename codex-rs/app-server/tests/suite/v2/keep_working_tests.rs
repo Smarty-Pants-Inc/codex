@@ -169,13 +169,16 @@ async fn keep_working_completed_admits_one_continuation_and_off_keeps_final_expl
 }
 
 #[tokio::test]
-async fn keep_working_plan_rejection_is_not_replayed_on_cold_resume_or_fork() -> Result<()> {
+async fn keep_working_requires_fresh_enable_after_human_input_resume_or_fork() -> Result<()> {
     let server = responses::start_mock_server().await;
     let mock = responses::mount_sse_sequence(
         &server,
         vec![
             toggle_response(/*enabled*/ true),
             responses::sse(vec![responses::ev_completed("settled")]),
+            responses::sse_completed("human-before-close"),
+            responses::sse_completed("human-after-resume"),
+            responses::sse_completed("human-after-fork"),
         ],
     )
     .await;
@@ -183,6 +186,11 @@ async fn keep_working_plan_rejection_is_not_replayed_on_cold_resume_or_fork() ->
     let (mut app, thread_id, state) = start(MockResponsesConfig::new(&server.uri()), &home).await?;
     let params = turn(&thread_id, ModeKind::Plan);
     timeout(TIMEOUT, app.start_turn_and_wait_for_completion(params)).await??;
+    timeout(
+        TIMEOUT,
+        app.start_turn_and_wait_for_completion(turn(&thread_id, ModeKind::Default)),
+    )
+    .await??;
     timeout(TIMEOUT, app.shutdown_gracefully()).await??;
     assert!(
         state
@@ -202,6 +210,11 @@ async fn keep_working_plan_rejection_is_not_replayed_on_cold_resume_or_fork() ->
         })
         .await?;
     let _: ThreadResumeResponse = timeout(TIMEOUT, app.read_response(id)).await??;
+    timeout(
+        TIMEOUT,
+        app.start_turn_and_wait_for_completion(turn(&thread_id, ModeKind::Default)),
+    )
+    .await??;
     let id = app
         .send_thread_fork_request(ThreadForkParams {
             thread_id: thread_id.clone(),
@@ -215,8 +228,13 @@ async fn keep_working_plan_rejection_is_not_replayed_on_cold_resume_or_fork() ->
             .keep_working_enabled(ThreadId::from_string(&fork.thread.id)?)
             .await?
     );
+    timeout(
+        TIMEOUT,
+        app.start_turn_and_wait_for_completion(turn(&fork.thread.id, ModeKind::Default)),
+    )
+    .await??;
     timeout(TIMEOUT, app.shutdown_gracefully()).await??;
-    assert_eq!(mock.requests().len(), 2);
+    assert_eq!(mock.requests().len(), 5);
     Ok(())
 }
 

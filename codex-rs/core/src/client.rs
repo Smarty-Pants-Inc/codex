@@ -314,6 +314,8 @@ pub struct ModelClient {
 /// contract and can cause routing bugs.
 pub struct ModelClientSession {
     client: ModelClient,
+    observation_full_context: bool,
+    pub(crate) observation_decision: Option<(Arc<crate::ObservationSlot>, Uuid)>,
     websocket_session: WebsocketSession,
     /// Turn state for sticky routing.
     ///
@@ -558,6 +560,8 @@ impl ModelClient {
     pub fn new_session(&self) -> ModelClientSession {
         ModelClientSession {
             client: self.clone(),
+            observation_full_context: false,
+            observation_decision: None,
             websocket_session: self.take_cached_websocket_session(),
             turn_state: Arc::new(OnceLock::new()),
         }
@@ -1032,17 +1036,6 @@ impl ModelClient {
         Ok(request)
     }
 
-    fn prepare_response_items_for_request(&self, input: &mut [ResponseItem]) {
-        for item in input {
-            if item.id().is_some_and(|id| !id.is_prefixed()) {
-                item.set_id(/*new_id*/ None);
-            }
-            if !self.state.content_item_kinds_enabled {
-                item.clear_content_item_kinds();
-            }
-        }
-    }
-
     /// Returns whether the Responses-over-WebSocket transport is active for this session.
     ///
     /// WebSocket use is controlled by provider capability and session-scoped fallback state.
@@ -1339,6 +1332,9 @@ impl ModelClientSession {
         last_response: Option<&LastResponse>,
         allow_empty_delta: bool,
     ) -> Option<Vec<ResponseItem>> {
+        if self.observation_full_context {
+            return None;
+        }
         let previous_request = self.websocket_session.last_request.as_ref()?;
         if !responses_request_properties_match(previous_request, request) {
             trace!("incremental request failed, websocket reuse properties didn't match");
@@ -1420,7 +1416,7 @@ impl ModelClientSession {
         session_telemetry: &SessionTelemetry,
         responses_metadata: &CodexResponsesMetadata,
     ) -> std::result::Result<(), ApiError> {
-        if !self.client.responses_websocket_enabled() {
+        if !self.uses_websocket_transport() {
             return Ok(());
         }
         if self.websocket_session.connection.is_some() {
@@ -1598,6 +1594,17 @@ impl ModelClientSession {
                 RequestRouteTelemetry::for_endpoint(endpoint.path()),
                 self.client.state.auth_env_telemetry.clone(),
             );
+            let (request_telemetry, sse_telemetry) =
+                if let Some((slot, decision_id)) = &self.observation_decision {
+                    observation_telemetry::wrap(
+                        Arc::clone(slot),
+                        *decision_id,
+                        request_telemetry,
+                        sse_telemetry,
+                    )
+                } else {
+                    (request_telemetry, sse_telemetry)
+                };
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
             let mut options = self
                 .build_responses_options(
@@ -1633,8 +1640,7 @@ impl ModelClientSession {
                 client_setup.auth.as_ref(),
                 prompt.cyber_access_program,
             );
-            self.client
-                .prepare_response_items_for_request(&mut request.input);
+            self.prepare_response_items_for_request(&mut request.input);
             let request_session_telemetry =
                 session_telemetry_for_request(session_telemetry, &request);
             let inference_trace_attempt = inference_trace.start_attempt();
@@ -1647,6 +1653,11 @@ impl ModelClientSession {
             )
             .with_endpoint(endpoint)
             .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+            let client = if self.observation_full_context {
+                client.without_body_trace()
+            } else {
+                client
+            };
             let stream_result = client.stream_request(request, options).await;
 
             match stream_result {
@@ -1846,8 +1857,7 @@ impl ModelClientSession {
                 None => (None, None),
             };
             let original_item_ids = if let Some(incremental_items) = &mut incremental_items {
-                self.client
-                    .prepare_response_items_for_request(incremental_items);
+                self.prepare_response_items_for_request(incremental_items);
                 None
             } else {
                 let original_item_ids = request
@@ -1855,8 +1865,7 @@ impl ModelClientSession {
                     .iter()
                     .map(|item| item.id().cloned())
                     .collect::<Vec<_>>();
-                self.client
-                    .prepare_response_items_for_request(&mut request.input);
+                self.prepare_response_items_for_request(&mut request.input);
                 Some(original_item_ids)
             };
             let ws_payload = ResponseCreateWsRequest {
@@ -1962,7 +1971,7 @@ impl ModelClientSession {
         service_tier: Option<String>,
         responses_metadata: &CodexResponsesMetadata,
     ) -> Result<()> {
-        if !self.client.responses_websocket_enabled() {
+        if !self.uses_websocket_transport() {
             return Ok(());
         }
         if self.websocket_session.last_request.is_some() {
@@ -2024,10 +2033,16 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
+        let disabled_trace = InferenceTraceContext::disabled();
+        let inference_trace = if self.observation_full_context {
+            &disabled_trace
+        } else {
+            inference_trace
+        };
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
             WireApi::Responses => {
-                if self.client.responses_websocket_enabled() {
+                if self.uses_websocket_transport() {
                     let request_trace = current_span_w3c_trace_context();
                     match self
                         .stream_responses_websocket(
@@ -2731,3 +2746,10 @@ impl WebsocketTelemetry for ApiTelemetry {
 #[cfg(test)]
 #[path = "client_tests.rs"]
 mod tests;
+
+#[path = "client/observation.rs"]
+mod observation;
+#[path = "client/observation_telemetry.rs"]
+mod observation_telemetry;
+#[path = "client/request_input.rs"]
+mod request_input;

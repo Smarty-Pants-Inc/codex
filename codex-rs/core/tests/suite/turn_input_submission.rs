@@ -127,6 +127,92 @@ async fn start_turn_if_idle_keeps_automatic_plan_rejections_atomic(
     assert!(!request.body_contains_text("rejected automatic input"));
 }
 
+#[tokio::test]
+async fn human_input_queue_and_manual_compaction_invalidate_at_admission() {
+    #[derive(Default)]
+    struct Observer(std::sync::Mutex<Vec<Option<String>>>);
+    impl codex_extension_api::TurnLifecycleContributor for Observer {
+        fn on_user_input(
+            &self,
+            _store: &codex_extension_api::ExtensionData,
+            turn_id: Option<&str>,
+        ) {
+            self.0
+                .lock()
+                .expect("boundaries")
+                .push(turn_id.map(str::to_owned));
+        }
+    }
+    let observer = Arc::new(Observer::default());
+    let mut registry = codex_extension_api::ExtensionRegistryBuilder::new();
+    registry.turn_lifecycle_contributor(observer.clone());
+    let (release, gate) = oneshot::channel();
+    let (server, _completions) = start_streaming_sse_server(vec![
+        vec![
+            StreamingSseChunk {
+                gate: None,
+                body: responses::sse(vec![ev_response_created("active")]),
+            },
+            StreamingSseChunk {
+                gate: Some(gate),
+                body: responses::sse_completed("active"),
+            },
+        ],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: responses::sse_completed("steered"),
+        }],
+    ])
+    .await;
+    let test = test_codex()
+        .with_extensions(Arc::new(registry.build()))
+        .build_with_streaming_server(&server)
+        .await
+        .expect("native session");
+    let StartIfIdleSubmission::Started { turn_id } = test
+        .codex
+        .start_turn_if_idle(user_message_request("initial work"))
+        .await
+        .expect("start")
+    else {
+        panic!("user turn must start");
+    };
+    timeout(
+        Duration::from_secs(/*secs*/ 10),
+        server.wait_for_request_count(/*count*/ 1),
+    )
+    .await
+    .expect("active response");
+    assert!(test.codex.has_active_turn().await);
+    assert_eq!(
+        submit_user_message(&test.codex, "human steering")
+            .await
+            .expect("steer"),
+        TurnInputSubmission::Steered {
+            turn_id: turn_id.clone()
+        }
+    );
+    test.codex.notify_queued_user_input().await;
+    assert_eq!(
+        *observer.0.lock().expect("boundaries"),
+        vec![Some(turn_id); 3]
+    );
+    release.send(()).expect("release response");
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    test.codex
+        .submit(Op::Compact)
+        .await
+        .expect("manual compact");
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnStarted(_))
+    })
+    .await;
+    assert_eq!(observer.0.lock().expect("boundaries").last(), Some(&None));
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StopPoint {
     Idle,

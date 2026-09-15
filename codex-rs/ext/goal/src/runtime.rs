@@ -54,7 +54,11 @@ pub(crate) enum ContinuationTrigger {
 mod keep_working;
 #[path = "settlement.rs"]
 mod settlement;
+pub(crate) use keep_working::ContinuityBoundary;
 use keep_working::KeepWorking;
+
+#[path = "continuity.rs"]
+mod continuity;
 
 struct GoalRuntimeInner {
     thread_id: ThreadId,
@@ -144,12 +148,15 @@ impl GoalRuntimeHandle {
     }
 
     pub(crate) fn start_settlement(&self, turn_id: &str) {
-        self.inner
+        let mut settlement = self
+            .inner
             .keep_working
             .settlement
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .start(turn_id);
+            .unwrap_or_else(PoisonError::into_inner);
+        if !self.is_retired() {
+            settlement.start(turn_id);
+        }
     }
 
     pub(crate) fn finish_settlement(&self, turn_id: &str) {
@@ -192,13 +199,6 @@ impl GoalRuntimeHandle {
                 intent,
                 enabled,
             )
-            .await
-    }
-
-    pub(crate) async fn stop_keep_working(&self) -> Result<(), String> {
-        self.inner
-            .keep_working
-            .stop(self.inner.state_dbs.thread_goals(), self.thread_id())
             .await
     }
 
@@ -348,7 +348,7 @@ impl GoalRuntimeHandle {
         turn_id: &str,
         reason: ActiveGoalStopReason,
     ) -> Result<(), String> {
-        self.stop_keep_working().await?;
+        self.stop_keep_working_for_turn(turn_id).await?;
         if !self.is_enabled()
             || self
                 .inner
@@ -460,6 +460,7 @@ impl GoalRuntimeHandle {
     }
 
     pub async fn restore_after_resume(&self) -> Result<(), String> {
+        self.invalidate_continuity(ContinuityBoundary::Resume);
         if !self.is_enabled() {
             return Ok(());
         }
@@ -487,11 +488,14 @@ impl GoalRuntimeHandle {
         &self,
         trigger: ContinuationTrigger,
     ) -> Result<(), String> {
-        if matches!(
-            trigger,
-            ContinuationTrigger::ThreadIdle(ThreadIdleCause::Interrupted | ThreadIdleCause::Failed)
-        ) {
-            return self.stop_keep_working().await;
+        if self.is_retired() {
+            return Ok(());
+        }
+        if let ContinuationTrigger::ThreadIdle(
+            cause @ (ThreadIdleCause::Interrupted | ThreadIdleCause::Failed),
+        ) = trigger
+        {
+            return self.stop_keep_working_if_idle(cause).await;
         }
         if !self.tools_available_for_thread() {
             self.inner.accounting_state.clear_active_goal();
@@ -512,8 +516,7 @@ impl GoalRuntimeHandle {
             if !matches!(
                 trigger,
                 ContinuationTrigger::ThreadIdle(ThreadIdleCause::Completed)
-            ) || self.inner.keep_working.halted.load(Ordering::SeqCst)
-            {
+            ) {
                 return Ok(());
             }
         } else if !self.is_enabled() {
@@ -539,8 +542,17 @@ impl GoalRuntimeHandle {
                 .settlement
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner);
+            if self.is_retired() {
+                return Ok(());
+            }
             match trigger {
                 ContinuationTrigger::ThreadIdle(ThreadIdleCause::Completed) if keep_working => {
+                    // Check authority under the same lock that invalidates and claims it.
+                    if !self.inner.keep_working.eligible.load(Ordering::SeqCst)
+                        || self.inner.keep_working.halted.load(Ordering::SeqCst)
+                    {
+                        return Ok(());
+                    }
                     let Some(guard) = settlement.take_completed() else {
                         return Ok(());
                     };
@@ -549,8 +561,10 @@ impl GoalRuntimeHandle {
                 ContinuationTrigger::ThreadIdle(ThreadIdleCause::Completed) => {
                     // Legacy queue wakeups need not have a fresh model settlement,
                     // but an idle notification cannot resurrect stopped authority.
-                    if matches!(*settlement, settlement::Settlement::None)
-                        && self.inner.keep_working.halted.load(Ordering::SeqCst)
+                    if matches!(
+                        *settlement,
+                        settlement::Settlement::None | settlement::Settlement::Stopped(_)
+                    ) && self.inner.keep_working.halted.load(Ordering::SeqCst)
                     {
                         return Ok(());
                     }
@@ -571,6 +585,14 @@ impl GoalRuntimeHandle {
             tracing::debug!("skipping goal continuation because live thread is unavailable");
             return Ok(());
         };
+
+        if !thread
+            .thread_extension_data()
+            .get::<GoalRuntimeHandle>()
+            .is_some_and(|current| Arc::ptr_eq(&current.inner, &self.inner))
+        {
+            return Ok(());
+        }
 
         let (item, start_options) = if keep_working {
             (

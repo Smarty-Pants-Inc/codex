@@ -1,3 +1,6 @@
+mod input_boundary;
+mod observation;
+
 use crate::agent::AgentStatus;
 use crate::config::ConstraintResult;
 use crate::context::ContextualUserFragment;

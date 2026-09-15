@@ -1605,6 +1605,71 @@ async fn keep_working_and_legacy_goal_control_are_mutually_exclusive() -> anyhow
 }
 
 #[tokio::test]
+async fn only_host_ready_replacement_retires_the_previous_runtime() -> anyhow::Result<()> {
+    let state = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    let mut harness = GoalExtensionHarness::new(state, thread_id).await?;
+    harness.start_turn("turn-1", &TokenUsage::default()).await;
+    let tools = harness.tools();
+    let enable = || tool_call("keep_working", "enable", json!({"enabled": true}));
+    let old_tool = tool_by_name(&tools, "keep_working");
+    for ready in [false, true] {
+        let candidate = ExtensionData::new(thread_id.to_string());
+        for contributor in harness.registry.thread_lifecycle_contributors() {
+            contributor
+                .on_thread_start(ThreadStartInput {
+                    config: &(),
+                    session_source: &SessionSource::Cli,
+                    persistent_thread_state_available: true,
+                    environments: &[],
+                    mcp_resource_client: None,
+                    extension_metrics: None,
+                    session_store: &harness.session_store,
+                    thread_store: &candidate,
+                })
+                .await;
+            if ready {
+                contributor
+                    .on_thread_ready(codex_extension_api::ThreadReadyInput {
+                        config: &(),
+                        session_source: &SessionSource::Cli,
+                        session_store: &harness.session_store,
+                        thread_store: &candidate,
+                    })
+                    .await;
+                // A delayed ready callback from the retired runtime is inert.
+                contributor
+                    .on_thread_ready(codex_extension_api::ThreadReadyInput {
+                        config: &(),
+                        session_source: &SessionSource::Cli,
+                        session_store: &harness.session_store,
+                        thread_store: &harness.thread_store,
+                    })
+                    .await;
+            } else {
+                contributor
+                    .on_thread_stop(ThreadStopInput {
+                        session_store: &harness.session_store,
+                        thread_store: &candidate,
+                    })
+                    .await;
+            }
+        }
+        let result = old_tool.handle(enable()).await;
+        assert_eq!(result.is_ok(), !ready);
+        if ready {
+            harness.thread_store = candidate;
+            harness.start_turn("turn-1", &TokenUsage::default()).await;
+            let current = harness.tools();
+            tool_by_name(&current, "keep_working")
+                .handle(enable())
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn keep_working_terminal_lifecycle_persists_off_before_idle() -> anyhow::Result<()> {
     let state = test_runtime().await?;
     let thread_id = test_thread_id()?;

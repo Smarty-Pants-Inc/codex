@@ -657,6 +657,7 @@ mod thread_processor_behavior_tests {
     fn collect_resume_override_mismatches_includes_service_tier() {
         let cwd = test_path_buf("/tmp").abs();
         let request = ThreadResumeParams {
+            observation: None,
             thread_id: "thread-1".to_string(),
             history: None,
             path: None,
@@ -1379,6 +1380,7 @@ mod thread_processor_behavior_tests {
                 unrelated_supported_connection,
                 ConnectionCapabilities {
                     request_attestation: true,
+                    ..Default::default()
                 },
             )
             .await;
@@ -1387,6 +1389,7 @@ mod thread_processor_behavior_tests {
                 earlier_supported_connection,
                 ConnectionCapabilities {
                     request_attestation: true,
+                    ..Default::default()
                 },
             )
             .await;
@@ -1395,6 +1398,7 @@ mod thread_processor_behavior_tests {
                 later_supported_connection,
                 ConnectionCapabilities {
                     request_attestation: true,
+                    ..Default::default()
                 },
             )
             .await;
