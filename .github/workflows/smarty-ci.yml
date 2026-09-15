@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [codex/maintenance-0.153.4]
   push:
-    branches: [codex/maintenance-0.153.4]
+    branches: [codex/maintenance-0.153.4, ci/sense19-generators]
 
 permissions:
   contents: read
@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   maintenance-baseline:
-    if: github.repository == 'Smarty-Pants-Inc/codex'
+    if: github.repository == 'Smarty-Pants-Inc/codex' && github.ref != 'refs/heads/ci/sense19-generators'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
@@ -251,10 +251,11 @@ jobs:
           if-no-files-found: error
 
   backend:
-    if: github.repository == 'Smarty-Pants-Inc/codex'
+    if: github.repository == 'Smarty-Pants-Inc/codex' && (github.ref != 'refs/heads/ci/sense19-generators' || (github.event_name == 'push' && !github.event.deleted))
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
+      SENSE19_CLIPPY_REPAIR: ${{ github.event_name == 'push' && github.ref == 'refs/heads/ci/sense19-generators' }}
       CARGO_BUILD_JOBS: 2
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
@@ -277,8 +278,110 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.sha }}
+          fetch-depth: ${{ env.SENSE19_CLIPPY_REPAIR == 'true' && 3 || 1 }}
           persist-credentials: false
+      - name: Verify fixed repair source and retain definition
+        if: ${{ env.SENSE19_CLIPPY_REPAIR == 'true' }}
+        id: repair_source
+        run: |
+          set -euo pipefail
+          source_exit=0
+          bash -euxo pipefail > "$RUNNER_TEMP/sense19-clippy-repair-source.stdout" 2> "$RUNNER_TEMP/sense19-clippy-repair-source.stderr" <<'SH' || source_exit=$?
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/ci/sense19-generators
+          test "$RUNNER_OS" = Linux
+          test "$RUNNER_ARCH" = X64
+          test "$(uname -m)" = x86_64
+          test "$GITHUB_SHA" = "$GITHUB_WORKFLOW_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_WORKFLOW_SHA"
+          test "$(git show -s --format=%P HEAD)" = '2fe97737e5a634acd76df09b1a845db80d5c60db'
+          test "$(git show -s --format=%P HEAD^)" = 'fbaa26c4a068fd238745fae936155173fcf11639'
+          test "$(git diff --name-only HEAD^ HEAD)" = '.github/workflows/smarty-ci.yml'
+          test -z "$(git status --porcelain)"
+          definition_tree="$(git rev-parse 'HEAD^{tree}')"
+          cp .github/workflows/smarty-ci.yml "$RUNNER_TEMP/sense19-clippy-repair-definition.yml"
+          git checkout --detach '2fe97737e5a634acd76df09b1a845db80d5c60db'
+          test "$(git rev-parse HEAD)" = '2fe97737e5a634acd76df09b1a845db80d5c60db'
+          test "$(git rev-parse 'HEAD^{tree}')" = '7045fcb8348063d5561f97d036e7ac5f941ee8e1'
+          test -z "$(git status --porcelain)"
+          jq -n --arg definition "$GITHUB_WORKFLOW_SHA" --arg definitionTree "$definition_tree" --arg definitionParent '2fe97737e5a634acd76df09b1a845db80d5c60db' \
+            --arg source '2fe97737e5a634acd76df09b1a845db80d5c60db' --arg tree '7045fcb8348063d5561f97d036e7ac5f941ee8e1' \
+            --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" --arg job "$GITHUB_JOB" \
+            --arg event "$GITHUB_EVENT_NAME" --arg ref "$GITHUB_REF" \
+            --arg runner "$RUNNER_NAME" --arg os "$RUNNER_OS" --arg arch "$RUNNER_ARCH" \
+            --arg account "$(id -un)" --arg uid "$(id -u)" \
+            '{scope:"two-line repair checks only, not completion or H/Q/L",definition:$definition,definitionTree:$definitionTree,definitionParent:$definitionParent,
+              source:$source,tree:$tree,run:$run,attempt:$attempt,job:$job,event:$event,ref:$ref,
+              runner:$runner,os:$os,arch:$arch,account:$account,uid:$uid,cleanInput:true}' > "$RUNNER_TEMP/sense19-clippy-repair-input.json"
+          SH
+          mkdir -p backend-evidence/clippy-repair
+          cp "$RUNNER_TEMP"/sense19-clippy-repair-source.stdout "$RUNNER_TEMP"/sense19-clippy-repair-source.stderr backend-evidence/clippy-repair/
+          printf '%s\n' "$source_exit" > backend-evidence/clippy-repair/source-exit.txt
+          test "$source_exit" = 0
+          cp "$RUNNER_TEMP"/sense19-clippy-repair-definition.yml "$RUNNER_TEMP"/sense19-clippy-repair-input.json backend-evidence/clippy-repair/
+          sha256sum backend-evidence/clippy-repair/sense19-clippy-repair-definition.yml codex-rs/Cargo.lock MODULE.bazel.lock \
+            justfile scripts/just-shell.py > backend-evidence/clippy-repair/input.sha256
+          echo 'PROJECTS=codex-core codex-api' >> "$GITHUB_ENV"
+          cat > backend-evidence/clippy-repair/phase.sh <<'SH'
+          phase() {
+            local name="$1"; shift
+            local output="$GITHUB_WORKSPACE/backend-evidence/clippy-repair/$name"
+            local code=0
+            mkdir -p "$output"
+            printf '%q ' "$@" > "$output/command.txt"
+            date -u +%FT%TZ > "$output/started.txt"
+            /usr/bin/time -q -f "$CI_TIME_FORMAT" -o "$output/time.json" "$@" \
+              > "$output/stdout.txt" 2> "$output/stderr.txt" || code=$?
+            printf '%s\n' "$code" > "$output/exit.txt"
+            date -u +%FT%TZ > "$output/completed.txt"
+            if [[ "$code" != 0 ]]; then
+              if [[ ! -f "$GITHUB_WORKSPACE/backend-evidence/clippy-repair/first-failure.txt" ]]; then
+                printf '%s %s\n' "$name" "$code" > "$GITHUB_WORKSPACE/backend-evidence/clippy-repair/first-failure.txt"
+              fi
+              exit "$code"
+            fi
+          }
+          SH
+          cat > backend-evidence/clippy-repair/verify-roster.py <<'PY'
+          """Require the accepted selected cases, then their actual passing JUnit records."""
+          import json
+          from pathlib import Path
+          import sys
+          import xml.etree.ElementTree as ET
+
+          project, phase = sys.argv[1:]
+          expected = {
+              'codex-core': ['observation::audit::tests::' + name for name in (
+                  'full_fifo_stops_retry_but_cannot_consume_terminal_capacity',
+                  'immutable_attempts_bound_header_ids_and_latch_acceptance',
+                  'unsent_and_sequence_exhaustion_still_emit_one_rejected_terminal',
+                  'closed_receiver_or_revoked_owner_prevents_the_first_send',
+                  'admission_does_not_wait_for_a_busy_slot',
+              )],
+              'codex-api': ['telemetry::tests::outcome_callbacks_cover_lower_retries_and_counter_restart'],
+          }[project]
+          root = Path('backend-evidence') / project
+          if phase == 'discovery':
+              data = json.loads((root / 'discovered.json').read_text())
+              cases = [(name, case) for suite in data['rust-suites'].values()
+                       for name, case in suite['testcases'].items()
+                       if case['filter-match']['status'] == 'matches']
+              actual = [name for name, _ in cases]
+              unsuccessful = [name for name, case in cases if case['ignored']]
+          elif phase == 'junit':
+              cases = ET.parse(root / 'junit.xml').findall('.//testcase')
+              actual = [case.attrib['name'] for case in cases]
+              unsuccessful = [case.attrib['name'] for case in cases
+                              if any(case.find(tag) is not None for tag in ('skipped', 'failure', 'error'))]
+          else:
+              raise ValueError(f'Unexpected phase: {phase}')
+          print(json.dumps({'phase': phase, 'expected': sorted(expected),
+                            'actual': sorted(actual), 'unsuccessful': unsuccessful}, indent=2))
+          if sorted(actual) != sorted(expected) or unsuccessful:
+              sys.exit(1)
+          PY
       - name: Validate CI phase receipt wiring without building Rust
+        if: ${{ env.SENSE19_CLIPPY_REPAIR != 'true' }}
         run: python3 -m unittest discover -s .github/scripts -p test_ci_phase_receipts.py
       - name: Record backend initial resources
         run: |
@@ -301,12 +404,19 @@ jobs:
           version: '0.11.3'
           enable-cache: false
       - name: Native Linux backend prerequisites (disposable runner only)
+        if: ${{ env.SENSE19_CLIPPY_REPAIR != 'true' }}
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev bubblewrap
           sudo sysctl -w kernel.unprivileged_userns_clone=1
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Repair compilation prerequisites (disposable runner only)
+        if: ${{ env.SENSE19_CLIPPY_REPAIR == 'true' }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev
       - name: Record backend source and toolchain
         run: |
           set -euo pipefail
@@ -372,7 +482,159 @@ jobs:
         uses: ./.github/actions/setup-rusty-v8
         with:
           target: x86_64-unknown-linux-gnu
+      - name: Read-only Core and API Clippy
+        if: ${{ env.SENSE19_CLIPPY_REPAIR == 'true' }}
+        id: repair_checks
+        run: |
+          set -euo pipefail
+          output="$GITHUB_WORKSPACE/backend-evidence/clippy-repair"
+          test "$(git rev-parse HEAD)" = '2fe97737e5a634acd76df09b1a845db80d5c60db'
+          index="$RUNNER_TEMP/sense19-clippy-repair-before.index"
+          trap 'rm -f "$index" "$index.lock"' EXIT
+          GIT_INDEX_FILE="$index" git read-tree '2fe97737e5a634acd76df09b1a845db80d5c60db'
+          GIT_INDEX_FILE="$index" git add -A -- . ':!backend-evidence' ':!.sccache'
+          GIT_INDEX_FILE="$index" git write-tree > "$output/command-input-tree.txt"
+          test "$(cat "$output/command-input-tree.txt")" = '7045fcb8348063d5561f97d036e7ac5f941ee8e1'
+          git diff --cached --exit-code '2fe97737e5a634acd76df09b1a845db80d5c60db'
+          source "$GITHUB_WORKSPACE/backend-evidence/clippy-repair/phase.sh"
+          sha256sum "$RUSTY_V8_ARCHIVE" "$RUSTY_V8_SRC_BINDING_PATH" > backend-evidence/rusty-v8.sha256
+          phase focused-clippy just clippy --locked -p codex-core -p codex-api -- -D warnings
+      - name: Bind repair tests to unchanged source
+        if: ${{ env.SENSE19_CLIPPY_REPAIR == 'true' }}
+        id: repair_check_source
+        run: |
+          set -euo pipefail
+          output="$GITHUB_WORKSPACE/backend-evidence/clippy-repair"
+          test "$(git rev-parse HEAD)" = '2fe97737e5a634acd76df09b1a845db80d5c60db'
+          index="$RUNNER_TEMP/sense19-clippy-repair-before.index"
+          trap 'rm -f "$index" "$index.lock"' EXIT
+          GIT_INDEX_FILE="$index" git read-tree '2fe97737e5a634acd76df09b1a845db80d5c60db'
+          GIT_INDEX_FILE="$index" git add -A -- . ':!backend-evidence' ':!.sccache'
+          GIT_INDEX_FILE="$index" git write-tree > "$output/checks-input-tree.txt"
+          test "$(cat "$output/checks-input-tree.txt")" = '7045fcb8348063d5561f97d036e7ac5f941ee8e1'
+          git diff --cached --exit-code '2fe97737e5a634acd76df09b1a845db80d5c60db'
+      - name: Repair audit and telemetry library tests
+        if: ${{ env.SENSE19_CLIPPY_REPAIR == 'true' }}
+        id: repair_tests
+        run: |
+          set -euo pipefail
+          failed=0
+          for project in $PROJECTS; do
+            retry_args=(--retries 0)
+            case "$project" in
+              codex-core) selection=(--lib -E 'test(observation::audit::tests::)') ;;
+              codex-api) selection=(--lib -E 'test(=telemetry::tests::outcome_callbacks_cover_lower_retries_and_counter_restart)') ;;
+              *) echo "Unexpected repair project: $project" >&2; exit 1 ;;
+            esac
+            output="$GITHUB_WORKSPACE/backend-evidence/$project"
+            mkdir -p "$output"
+            printf '%s\n' "${selection[@]}" "${retry_args[@]}" > "$output/selection.txt"
+            date -u +%FT%TZ > "$output/started.txt"
+            # Each project overwrites the local-profile JUnit path; never reuse a previous result.
+            rm -f codex-rs/target/nextest/local/junit.xml
+            printf '%q ' cargo nextest list --locked -p "$project" "${selection[@]}" --message-format json > "$output/discovery-command.txt"
+            discovery_exit=0
+            (cd codex-rs && /usr/bin/time -q -f "$CI_TIME_FORMAT" -o "$output/discovery-time.json" \
+              cargo nextest list --locked -p "$project" "${selection[@]}" --message-format json) \
+              > "$output/discovered.json" 2> "$output/discovery.txt" || discovery_exit=$?
+            echo "$discovery_exit" > "$output/discovery-exit.txt"
+            if [[ "${SENSE19_CLIPPY_REPAIR:-false}" == true && "$discovery_exit" != 0 && ! -f backend-evidence/clippy-repair/first-failure.txt ]]; then
+              printf '%s discovery %s\n' "$project" "$discovery_exit" > backend-evidence/clippy-repair/first-failure.txt
+            fi
+            if [[ "$discovery_exit" != 0 ]]; then
+              failed=1
+              continue
+            fi
+            roster_exit=0
+            python3 backend-evidence/clippy-repair/verify-roster.py "$project" discovery \
+              > "$output/discovery-validation.txt" 2>&1 || roster_exit=$?
+            echo "$roster_exit" > "$output/discovery-validation-exit.txt"
+            if [[ "$roster_exit" != 0 ]]; then
+              failed=1
+              if [[ ! -f backend-evidence/clippy-repair/first-failure.txt ]]; then
+                printf '%s discovery-roster %s\n' "$project" "$roster_exit" > backend-evidence/clippy-repair/first-failure.txt
+              fi
+              continue
+            fi
+            printf '%q ' just test --locked -p "$project" "${selection[@]}" "${retry_args[@]}" --test-threads 2 --status-level all --final-status-level all > "$output/test-command.txt"
+            test_exit=0
+            /usr/bin/time -q -f "$CI_TIME_FORMAT" -o "$output/test-time.json" \
+              just test --locked -p "$project" "${selection[@]}" "${retry_args[@]}" --test-threads 2 \
+              --status-level all --final-status-level all 2>&1 | tee "$output/tests.txt" || test_exit=$?
+            echo "$test_exit" > "$output/test-exit.txt"
+            if [[ "${SENSE19_CLIPPY_REPAIR:-false}" == true && "$test_exit" != 0 && ! -f backend-evidence/clippy-repair/first-failure.txt ]]; then
+              printf '%s test %s\n' "$project" "$test_exit" > backend-evidence/clippy-repair/first-failure.txt
+            fi
+            if [[ -s codex-rs/target/nextest/local/junit.xml ]]; then
+              cp codex-rs/target/nextest/local/junit.xml "$output/junit.xml"
+              roster_exit=0
+              python3 backend-evidence/clippy-repair/verify-roster.py "$project" junit \
+                > "$output/junit-validation.txt" 2>&1 || roster_exit=$?
+              echo "$roster_exit" > "$output/junit-validation-exit.txt"
+              if [[ "$roster_exit" != 0 ]]; then
+                failed=1
+                if [[ ! -f backend-evidence/clippy-repair/first-failure.txt ]]; then
+                  printf '%s junit-roster %s\n' "$project" "$roster_exit" > backend-evidence/clippy-repair/first-failure.txt
+                fi
+              fi
+            else
+              failed=1
+              if [[ "${SENSE19_CLIPPY_REPAIR:-false}" == true && ! -f backend-evidence/clippy-repair/first-failure.txt ]]; then
+                printf '%s missing-junit 1\n' "$project" > backend-evidence/clippy-repair/first-failure.txt
+              fi
+            fi
+            date -u +%FT%TZ > "$output/completed.txt"
+            if [[ "$test_exit" != 0 ]]; then failed=1; fi
+          done
+          exit "$failed"
+      - name: Retain repair result and reject all source writeback
+        if: always() && env.SENSE19_CLIPPY_REPAIR == 'true'
+        env:
+          STEPS_JSON: ${{ toJSON(steps) }}
+        run: |
+          set -euo pipefail
+          output="$GITHUB_WORKSPACE/backend-evidence/clippy-repair"
+          mkdir -p "$output"
+          printf '%s\n' "$STEPS_JSON" > "$output/steps.json"
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          root = Path('backend-evidence/clippy-repair')
+          phases = {}
+          for name in ('focused-clippy',):
+              path = root / name / 'exit.txt'
+              phases[name] = int(path.read_text()) if path.exists() else None
+          (root / 'phase-exits.json').write_text(json.dumps(phases, indent=2) + '\n')
+          PY
+          if [[ ! -f "$output/sense19-clippy-repair-input.json" ]]; then
+            echo 'Input not verified; no output source tree claimed.' > "$output/output-unavailable.txt"
+            exit 1
+          fi
+          code=0
+          bash -euxo pipefail > "$output/source-drift.stdout" 2> "$output/source-drift.stderr" <<'SH' || code=$?
+          output="$GITHUB_WORKSPACE/backend-evidence/clippy-repair"
+          index="$RUNNER_TEMP/sense19-clippy-repair-after.index"
+          trap 'rm -f "$index" "$index.lock"' EXIT
+          export GIT_INDEX_FILE="$index"
+          git read-tree '2fe97737e5a634acd76df09b1a845db80d5c60db'
+          git add -A -- . ':!backend-evidence' ':!.sccache'
+          tree="$(git write-tree)"
+          printf '%s\n' "$tree" > "$output/output-tree.txt"
+          git diff --cached --binary --full-index '2fe97737e5a634acd76df09b1a845db80d5c60db' > "$output/writeback.diff"
+          git diff --cached --name-status '2fe97737e5a634acd76df09b1a845db80d5c60db' > "$output/changed-paths.txt"
+          sha256sum "$output/writeback.diff" > "$output/writeback.sha256"
+          test "$(git rev-parse HEAD)" = '2fe97737e5a634acd76df09b1a845db80d5c60db'
+          test "$tree" = '7045fcb8348063d5561f97d036e7ac5f941ee8e1'
+          unset GIT_INDEX_FILE
+          git diff --cached --exit-code '2fe97737e5a634acd76df09b1a845db80d5c60db'
+          SH
+          printf '%s\n' "$code" > "$output/source-drift-exit.txt"
+          if [[ "$code" != 0 && ! -f "$output/first-failure.txt" ]]; then
+            printf 'source-drift %s\n' "$code" > "$output/first-failure.txt"
+          fi
+          exit "$code"
       - name: Build backend runtime test prerequisites
+        if: ${{ env.SENSE19_CLIPPY_REPAIR != 'true' }}
         working-directory: codex-rs
         run: |
           set -euo pipefail
@@ -399,6 +661,7 @@ jobs:
             fi
           done
       - name: Complete backend project tests
+        if: ${{ env.SENSE19_CLIPPY_REPAIR != 'true' }}
         run: |
           set -euo pipefail
           failed=0
@@ -432,6 +695,7 @@ jobs:
           done
           exit "$failed"
       - name: Scoped backend Clippy
+        if: ${{ env.SENSE19_CLIPPY_REPAIR != 'true' }}
         run: |
           set -euo pipefail
           failed=0
@@ -445,8 +709,10 @@ jobs:
           done
           exit "$failed"
       - name: Full formatter check (pinned Rust and locked Python tools)
+        if: ${{ env.SENSE19_CLIPPY_REPAIR != 'true' }}
         run: just fmt-check
       - name: Verify backend source unchanged
+        if: ${{ env.SENSE19_CLIPPY_REPAIR != 'true' }}
         run: |
           git diff --exit-code
           test -z "$(git ls-files --others --exclude-standard -- codex-rs .github scripts sdk tools justfile)"
@@ -547,7 +813,7 @@ jobs:
 
   required:
     name: smarty-ci
-    if: ${{ always() && github.repository == 'Smarty-Pants-Inc/codex' }}
+    if: ${{ always() && github.repository == 'Smarty-Pants-Inc/codex' && github.ref != 'refs/heads/ci/sense19-generators' }}
     needs: [maintenance-baseline, backend]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
