@@ -29,6 +29,18 @@ use audit::DecisionAudit;
 pub(crate) use audit::ObservationAttempt;
 pub use audit::ObservationOutcome;
 pub use audit::ObservationSubmitted;
+#[path = "observation_transport_lease.rs"]
+mod transport;
+pub(crate) use transport::ObservationTransportLease;
+#[path = "observation_pilot.rs"]
+mod pilot;
+pub use pilot::NativePilotIssuer;
+pub use pilot::PilotAttemptRecord;
+pub use pilot::PilotAuthorityError;
+pub use pilot::PilotGrantClaims;
+pub use pilot::PilotPermission;
+pub use pilot::PilotReport;
+pub use pilot::PilotRequestReservation;
 
 /// One atomic thread attachment shared by Core sampling and the owner relay.
 /// Constructing this value does not admit a host, connection or provider profile.
@@ -119,6 +131,7 @@ struct SlotState {
     expired: bool,
     revoked: bool,
     active_capture: Option<DecisionAudit>,
+    pilot: Option<pilot::PilotLedger>,
 }
 
 impl SlotState {
@@ -165,6 +178,7 @@ pub struct ObservationSlot {
     state: Mutex<SlotState>,
     events: mpsc::Sender<ObservationEvent>,
     clock: ClockSource,
+    transports: transport::ObservationTransportTracker,
 }
 
 impl ObservationSlot {
@@ -205,9 +219,11 @@ impl ObservationSlot {
                     expired: false,
                     revoked: false,
                     active_capture: None,
+                    pilot: None,
                 }),
                 events,
                 clock,
+                transports: transport::ObservationTransportTracker::default(),
             },
             receiver,
             owner,
@@ -362,6 +378,9 @@ impl ObservationSlot {
             .lock()
             .map_err(|_| ObservationError::Unavailable)?;
         state.revoked = true;
+        if let Some(pilot) = state.pilot.as_mut() {
+            pilot.revoke();
+        }
         Ok(())
     }
 }

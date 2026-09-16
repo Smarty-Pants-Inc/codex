@@ -161,11 +161,9 @@ impl PreparedTurnInputSettings {
                             if !kind.permits_settings(current, proposed) {
                                 return false;
                             }
-                            if self
-                                .idle_start_guard
-                                .as_ref()
-                                .is_some_and(TurnStartGuard::is_revoked)
-                            {
+                            if self.idle_start_guard.as_ref().is_some_and(|guard| {
+                                !guard.try_commit(&session.thread_id, &submission_id)
+                            }) {
                                 rejection = NotSubmittedReason::NotIdle;
                                 return false;
                             }

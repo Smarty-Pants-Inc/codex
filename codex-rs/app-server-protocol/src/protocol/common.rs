@@ -568,6 +568,30 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadSetNameResponse,
     },
+    #[experimental("thread/pilot/read")]
+    ThreadPilotRead => "thread/pilot/read" {
+        params: v2::ThreadPilotReadParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadPilotReadResponse,
+    },
+    #[experimental("thread/pilot/check")]
+    ThreadPilotCheck => "thread/pilot/check" {
+        params: v2::ThreadPilotCheckParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadPilotCheckResponse,
+    },
+    #[experimental("thread/pilot/start")]
+    ThreadPilotStart => "thread/pilot/start" {
+        params: v2::ThreadPilotStartParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadPilotStartResponse,
+    },
+    #[experimental("thread/pilot/retire")]
+    ThreadPilotRetire => "thread/pilot/retire" {
+        params: v2::ThreadPilotRetireParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadPilotRetireResponse,
+    },
     #[experimental("thread/observation/set")]
     ThreadObservationSet => "thread/observation/set" {
         params: v2::ThreadObservationSetParams,

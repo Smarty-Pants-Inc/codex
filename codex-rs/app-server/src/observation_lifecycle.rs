@@ -101,6 +101,18 @@ impl ThreadStateManager {
             .ok_or_else(|| rejected(ThreadObservationRejectionCode::Denied))
     }
 
+    pub(crate) async fn observation_startup_policy(
+        &self,
+        connection_id: ConnectionId,
+    ) -> Result<codex_core::ProviderStartupPolicy, JSONRPCErrorError> {
+        let admission = self.observation_admission(connection_id).await?;
+        Ok(if admission.selection.pilot.is_some() {
+            codex_core::ProviderStartupPolicy::NativePilot
+        } else {
+            codex_core::ProviderStartupPolicy::Ordinary
+        })
+    }
+
     pub(crate) async fn install_thread_observation(
         &self,
         thread_id: ThreadId,
@@ -127,16 +139,39 @@ impl ThreadStateManager {
         let mut state = entry.state.lock().await;
         let (bridge, events) =
             ObservationBridge::new(ConnectionOrigin::Stdio, connection_id, thread_id)?;
-        let owner_epoch = bridge.owner.epoch.to_string();
+        let owner = bridge.owner;
+        let owner_epoch = owner.epoch.to_string();
+        let pilot = admission
+            .selection
+            .pilot
+            .as_ref()
+            .map(|pilot| pilot.bind(owner, thread_id))
+            .transpose()
+            .map_err(|_| rejected(ThreadObservationRejectionCode::Denied))?;
         state
             .install_observation(
                 conversation,
-                bridge,
+                Arc::clone(&bridge),
                 events,
                 admission.selection.profile,
                 outgoing,
             )
             .await?;
+        if let Some((envelope, issuer)) = pilot
+            && conversation
+                .install_pilot_authority(owner, &envelope, issuer)
+                .await
+                .is_err()
+        {
+            state.clear_observation();
+            return Err(rejected(ThreadObservationRejectionCode::Denied));
+        }
+        if let Some(launch) = &admission.selection.pilot
+            && let Err(error) = launch.install_control(Arc::clone(conversation), &bridge)
+        {
+            state.clear_observation();
+            return Err(error);
+        }
         Ok(ThreadObservationCapabilities {
             protocol: 1,
             owner_epoch,

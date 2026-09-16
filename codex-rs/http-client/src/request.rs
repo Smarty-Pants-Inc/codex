@@ -109,6 +109,8 @@ pub struct Request {
     pub body: Option<RequestBody>,
     pub compression: RequestCompression,
     pub timeout: Option<Duration>,
+    /// In-process private provenance only; never serialized into headers or body.
+    pub extensions: http::Extensions,
 }
 
 impl Request {
@@ -120,6 +122,7 @@ impl Request {
             body: None,
             compression: RequestCompression::None,
             timeout: None,
+            extensions: http::Extensions::new(),
         }
     }
 

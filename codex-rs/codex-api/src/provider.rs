@@ -82,6 +82,7 @@ impl Provider {
             body: None,
             compression: RequestCompression::None,
             timeout: None,
+            extensions: http::Extensions::new(),
         }
     }
 

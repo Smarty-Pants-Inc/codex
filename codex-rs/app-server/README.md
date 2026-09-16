@@ -2986,6 +2986,43 @@ Core keeps the revoked binding so an old runtime cannot silently send unobserved
 requests. Model compatibility is checked at installation and each decision.
 Normal/experimental generated schema and native execution evidence are pending.
 
+### Original-owner pilot controls (experimental, under development)
+
+These methods require the original exclusively owned observation stdio connection
+and an installed launch issuer. A profile, persisted thread ID, subscription, or
+RPC field cannot install authority. Unknown request fields are rejected.
+
+- `thread/pilot/read {threadId}` returns the actual native identity plus the
+  original instruction, allocation ID and complete decision digest. These are
+  diagnostic bindings, not a transferable grant.
+- `thread/pilot/check {threadId, operation}` consumes one native source-operation
+  check. Operations are `prepareSource`, `sampleSource`, and `actOnSource`; the
+  native slot supplies scope and checks the installed rights. The returned
+  request ID is diagnostic, not reusable authority for another operation.
+- `thread/pilot/start {threadId, input}` attempts one automatic turn through the
+  native idle reservation and owner guard, not ordinary foreground submission.
+  Input is nonempty and at most 1024 UTF-8 bytes. There are no settings, model, tool,
+  limits or owner overrides. `{started:false, turnId:null}` means no commit; it is
+  not a promise that a later turn can start. Existing Plan-mode, trigger priority,
+  cooldown, revocation and finite-ledger checks apply at native commit.
+- `thread/pilot/retire {threadId}` derives the original owner and synchronously
+  fences its slot/issuer before retirement waits. It retains one original task
+  and body-free report across concurrent callers or a cancelled RPC waiter.
+  Disconnect also starts this original join. A failed join remains unknown;
+  it does not release or recreate credit.
+
+The retirement response matches the Foundation `PilotNativeReport` projection:
+identity, revoked, activeDecision, admittedTurns, reservedTokens, and attempts
+with request/decision/turn IDs, reservation receipts, response usage and conflicts.
+It does not certify audit-pipe delivery, observer/process/store closure, key-copy
+exclusion or remote settlement. The original outer owner must persist its report
+and join those resources. Transport loss may prevent report delivery and leaves
+outer debt unknown; a later session cannot recover it by substituting a new owner.
+
+These source interfaces do not enable `automaticAdmission` by themselves. Count
+and final-context qualification remain separate, fail-closed producers. Schema
+fixtures must be generated from the exact integrated source before qualification.
+
 ### Observation control rejections (protocol 1)
 
 The owner-bound observation path uses the existing JSON-RPC error envelope, not

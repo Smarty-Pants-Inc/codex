@@ -76,6 +76,9 @@ pub fn spawn_response_stream(
     let response_created = telemetry
         .as_ref()
         .and_then(|telemetry| telemetry.response_created_callback());
+    let response_completed = telemetry
+        .as_ref()
+        .and_then(|telemetry| telemetry.response_completed_callback());
     let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent, ApiError>>(1600);
     tokio::spawn(async move {
         if let Some(model) = server_model {
@@ -99,6 +102,7 @@ pub fn spawn_response_stream(
             telemetry,
             safety_buffering_treatment,
             response_created,
+            response_completed,
         )
         .await;
     });
@@ -566,6 +570,7 @@ pub async fn process_sse(
         telemetry,
         SafetyBufferingTreatment::default(),
         /*response_created*/ None,
+        /*response_completed*/ None,
     )
     .await;
 }
@@ -577,6 +582,7 @@ async fn process_sse_with_treatment(
     telemetry: Option<Arc<dyn SseTelemetry>>,
     safety_buffering_treatment: SafetyBufferingTreatment,
     response_created: Option<Arc<dyn Fn() + Send + Sync>>,
+    response_completed: Option<crate::ResponseCompletedCallback>,
 ) {
     let mut stream = stream.eventsource();
     let mut accepted = false;
@@ -585,7 +591,13 @@ async fn process_sse_with_treatment(
 
     loop {
         let start = Instant::now();
-        let response = timeout(idle_timeout, stream.next()).await;
+        let response = tokio::select! {
+            // Preserve already-buffered acceptance/usage before noticing a closed
+            // consumer. An idle decoder must not retain the original transport.
+            biased;
+            response = timeout(idle_timeout, stream.next()) => response,
+            _ = tx_event.closed() => return,
+        };
         if let Some(t) = telemetry.as_ref() {
             t.on_sse_poll(&response, start.elapsed());
         }
@@ -623,6 +635,9 @@ async fn process_sse_with_treatment(
                     payload_bytes = sse.data.len(),
                     "Failed to parse SSE event"
                 );
+                if tx_event.is_closed() {
+                    return;
+                }
                 continue;
             }
         };
@@ -637,6 +652,20 @@ async fn process_sse_with_treatment(
             if let Some(callback) = response_created.as_ref() {
                 callback();
             }
+        }
+
+        if let Ok(Some(ResponseEvent::Completed {
+            response_id,
+            token_usage,
+            ..
+        })) = &processed_event
+            && let Some(callback) = &response_completed
+        {
+            callback(response_id, token_usage.as_ref());
+        }
+
+        if tx_event.is_closed() {
+            return;
         }
 
         if let Some(model) = response_model

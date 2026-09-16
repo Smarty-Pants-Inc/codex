@@ -1,9 +1,13 @@
+#[path = "native_pilot_producers_tests.rs"]
+mod pilot;
+
 use codex_core::NotSubmittedReason;
 use codex_core::StartIfIdleSubmission;
 use codex_core::StartThreadOptions;
 use codex_core::TurnInput;
 use codex_core::TurnInputRequest;
 use codex_core::TurnInputSubmission;
+use codex_protocol::ThreadId;
 use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem;
 use codex_protocol::dynamic_tools::DynamicToolFunctionSpec;
 use codex_protocol::dynamic_tools::DynamicToolResponse;
@@ -11,6 +15,7 @@ use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
+use codex_protocol::turn_input::TurnStartAdmission;
 use codex_protocol::turn_input::TurnStartGuard;
 use codex_protocol::user_input::UserInput;
 use core_test_support::responses;
@@ -21,6 +26,10 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use test_case::test_case;
 use tokio::time::timeout;
@@ -226,6 +235,92 @@ async fn guarded_input_cannot_bypass_automatic_admission(
             .await
             .expect("request recording")
             .is_empty()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn owner_commit_receives_actual_native_identity_and_cannot_replay() -> anyhow::Result<()> {
+    // This fixture checks the production commit seam, not a real pilot grant issuer.
+    #[derive(Debug)]
+    struct OwnerAdmission {
+        thread_id: ThreadId,
+        allowed: AtomicBool,
+        commits: Mutex<Vec<(ThreadId, String)>>,
+    }
+    impl TurnStartAdmission for OwnerAdmission {
+        fn try_commit(&self, thread_id: &ThreadId, turn_id: &str) -> bool {
+            if thread_id != &self.thread_id || !self.allowed.load(Ordering::SeqCst) {
+                return false;
+            }
+            self.commits
+                .lock()
+                .unwrap()
+                .push((*thread_id, turn_id.to_owned()));
+            true
+        }
+    }
+    let server = responses::start_mock_server().await;
+    let mock = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            ev_response_created("owner-commit"),
+            ev_completed("owner-commit"),
+        ]),
+    )
+    .await;
+    let test = test_codex().build_with_auto_env(&server).await?;
+    let owner = Arc::new(OwnerAdmission {
+        thread_id: test.session_configured.session_id,
+        allowed: AtomicBool::new(/*v*/ false),
+        commits: Mutex::default(),
+    });
+    let guard = TurnStartGuard::with_admission(owner.clone());
+    let request = TurnInputRequest::new(TurnInput::ResponseItem(responses::user_message_item(
+        "native owner commit seam",
+    )))
+    .with_idle_start_guard(guard.clone());
+    let settings = test.codex.thread_settings_snapshot().await;
+    assert_eq!(
+        test.codex.start_turn_if_idle(request.clone()).await?,
+        StartIfIdleSubmission::NotSubmitted {
+            reason: NotSubmittedReason::NotIdle
+        },
+    );
+    assert_eq!(test.codex.thread_settings_snapshot().await, settings);
+    assert!(!test.codex.has_active_turn().await);
+    assert_eq!(*owner.commits.lock().unwrap(), Vec::new());
+    assert!(mock.requests().is_empty());
+
+    owner.allowed.store(/*val*/ true, Ordering::SeqCst);
+    let StartIfIdleSubmission::Started { turn_id } =
+        test.codex.start_turn_if_idle(request.clone()).await?
+    else {
+        anyhow::bail!("expected native owner admission");
+    };
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    timeout(Duration::from_secs(/*secs*/ 10), async {
+        while test.codex.has_active_turn().await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(
+        *owner.commits.lock().unwrap(),
+        vec![(test.session_configured.session_id, turn_id)],
+    );
+    assert_eq!(
+        test.codex.start_turn_if_idle(request).await?,
+        StartIfIdleSubmission::NotSubmitted {
+            reason: NotSubmittedReason::NotIdle
+        },
+    );
+    assert!(
+        mock.single_request()
+            .body_contains_text("native owner commit seam")
     );
     Ok(())
 }

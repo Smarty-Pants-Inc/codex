@@ -1089,6 +1089,28 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
+        self.resume_thread_with_history_and_init(
+            config,
+            initial_history,
+            auth_manager,
+            parent_trace,
+            client_mcp_extensions,
+            ExtensionDataInit::default(),
+        )
+        .await
+    }
+
+    /// Retain host-owned startup attachments before constructing a resumed session.
+    /// These attachments do not restore observation or pilot authority from history.
+    pub async fn resume_thread_with_history_and_init(
+        &self,
+        config: Config,
+        initial_history: InitialHistory,
+        auth_manager: Arc<AuthManager>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+        thread_extension_init: ExtensionDataInit,
+    ) -> CodexResult<NewThread> {
         let agent_control = self.agent_control_for_config(&config);
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
@@ -1107,6 +1129,7 @@ impl ThreadManager {
             thread_source,
             parent_trace,
             client_mcp_extensions,
+            thread_extension_init,
             ..StartThreadOptions::new(config)
         };
         Box::pin(self.state.spawn_thread(ThreadSpawnRequest::new(

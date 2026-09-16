@@ -607,29 +607,45 @@ impl Session {
         };
 
         let mut config = Arc::new(config);
+        let provider_startup_policy = thread_extension_init
+            .get::<crate::ProviderStartupPolicy>()
+            .map(|policy| *policy)
+            .unwrap_or_default();
         let refresh_strategy = if session_source.is_non_root_agent() {
             codex_models_manager::manager::RefreshStrategy::Offline
         } else {
             codex_models_manager::manager::RefreshStrategy::OnlineIfUncached
         };
-        if config.model.is_none()
-            || !matches!(
-                refresh_strategy,
-                codex_models_manager::manager::RefreshStrategy::Offline
-            )
-        {
-            let _ = models_manager
-                .list_models(refresh_strategy, config.http_client_factory())
-                .await;
-        }
-        let model = models_manager
-            .get_default_model(
-                &config.model,
-                allow_provider_model_fallback,
-                refresh_strategy,
-                config.http_client_factory(),
-            )
-            .await;
+        let model = if provider_startup_policy.permits_ambient_auth() {
+            if config.model.is_none()
+                || !matches!(
+                    refresh_strategy,
+                    codex_models_manager::manager::RefreshStrategy::Offline
+                )
+            {
+                let _ = models_manager
+                    .list_models(refresh_strategy, config.http_client_factory())
+                    .await;
+            }
+            models_manager
+                .get_default_model(
+                    &config.model,
+                    allow_provider_model_fallback,
+                    refresh_strategy,
+                    config.http_client_factory(),
+                )
+                .await
+        } else {
+            // Even Offline model discovery can inspect auth before reading cache.
+            // The admitted pilot must select its model explicitly, without discovery.
+            config
+                .model
+                .clone()
+                .filter(|model| !model.is_empty())
+                .ok_or_else(|| {
+                    CodexErr::InvalidRequest("native pilot requires an explicit model".into())
+                })?
+        };
         let trusted_guardian_reviewer = crate::guardian::is_basic_session_source(&session_source)
             && !matches!(conversation_history, InitialHistory::Resumed(_));
         if config
@@ -683,7 +699,18 @@ impl Session {
         let model_info = models_manager
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
-        let auth = auth_manager.auth_cached();
+        let auth = provider_startup_policy
+            .permits_ambient_auth()
+            .then(|| {
+                #[cfg(test)]
+                if let Some(probe) =
+                    thread_extension_init.get::<Arc<startup_auth_tests::StartupAuthProbe>>()
+                {
+                    return probe.read_cached_auth();
+                }
+                auth_manager.auth_cached()
+            })
+            .flatten();
         token_budget::apply_experimental_context(Arc::make_mut(&mut config), auth.as_ref())?;
         // Intentionally resolve `enabled` and `use_history_notes_extension` only at
         // thread startup. Both activation flags stay fixed for this thread runtime,
@@ -4675,3 +4702,7 @@ mod elicitation_holders_tests;
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "startup_auth_tests.rs"]
+pub(crate) mod startup_auth_tests;

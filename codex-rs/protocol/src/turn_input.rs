@@ -14,9 +14,11 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 use ts_rs::TS;
+
+mod admission;
+pub use admission::TurnStartAdmission;
 
 /// Result of stopping an unfinished root turn so another worker can recover it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -46,15 +48,54 @@ pub enum TurnInput {
 /// The owner revokes all clones on stop or when newer work supersedes the intent.
 /// Core checks it at idle admission; revocation never aborts an already admitted turn.
 #[derive(Clone, Debug, Default)]
-pub struct TurnStartGuard(Arc<AtomicBool>);
+pub struct TurnStartGuard(Arc<Mutex<TurnStartAuthority>>);
+
+#[derive(Debug, Default)]
+struct TurnStartAuthority {
+    revoked: bool,
+    admission: Option<Arc<dyn TurnStartAdmission>>,
+    committed: bool,
+}
 
 impl TurnStartGuard {
+    /// Attach a native owner's already acquired authority, not an external grant claim.
+    pub fn with_admission(admission: Arc<dyn TurnStartAdmission>) -> Self {
+        Self(Arc::new(Mutex::new(TurnStartAuthority {
+            admission: Some(admission),
+            ..TurnStartAuthority::default()
+        })))
+    }
+
     pub fn revoke(&self) {
-        self.0.store(/*val*/ true, Ordering::SeqCst);
+        if let Ok(mut authority) = self.0.lock() {
+            authority.revoked = true;
+        }
     }
 
     pub fn is_revoked(&self) -> bool {
-        self.0.load(Ordering::SeqCst)
+        match self.0.lock() {
+            Ok(authority) => authority.revoked,
+            Err(_) => true,
+        }
+    }
+
+    /// Linearize native owner admission against revocation at Core's commit boundary.
+    /// Legacy guards keep their existing revocation-only behavior.
+    pub fn try_commit(&self, thread_id: &crate::ThreadId, turn_id: &str) -> bool {
+        let Ok(mut authority) = self.0.lock() else {
+            return false;
+        };
+        if authority.revoked || authority.committed {
+            return false;
+        }
+        let Some(admission) = &authority.admission else {
+            return true;
+        };
+        if !admission.try_commit(thread_id, turn_id) {
+            return false;
+        }
+        authority.committed = true;
+        true
     }
 }
 

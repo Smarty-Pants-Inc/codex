@@ -1,5 +1,8 @@
 mod input_boundary;
 mod observation;
+mod pilot;
+pub use pilot::NativePilotRetirement;
+pub use pilot::PilotRetirementRemainder;
 
 use crate::agent::AgentStatus;
 use crate::config::ConstraintResult;

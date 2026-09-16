@@ -1,0 +1,163 @@
+//! Session-local reader seams: no global overrides or credential environment access.
+use crate::ProviderStartupPolicy;
+use codex_login::AuthManager;
+use codex_login::CodexAuth;
+use codex_login::auth_env_telemetry::AuthEnvTelemetry;
+use pretty_assertions::assert_eq;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+
+pub(crate) struct StartupAuthProbe {
+    policy: ProviderStartupPolicy,
+    auth_manager: Arc<AuthManager>,
+    metadata_reads: AtomicUsize,
+    cached_reads: AtomicUsize,
+}
+
+impl StartupAuthProbe {
+    pub(crate) fn read_metadata(&self) -> AuthEnvTelemetry {
+        self.metadata_reads.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(self.policy, ProviderStartupPolicy::Ordinary);
+        AuthEnvTelemetry::default()
+    }
+
+    pub(crate) fn read_cached_auth(&self) -> Option<CodexAuth> {
+        self.cached_reads.fetch_add(1, Ordering::SeqCst);
+        assert_eq!(self.policy, ProviderStartupPolicy::Ordinary);
+        self.auth_manager.auth_cached()
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn explicit_model_start_and_resume_fence_session_auth_readers() -> anyhow::Result<()> {
+    use crate::CodexAppsToolsCache;
+    use crate::StartThreadOptions;
+    use crate::ThreadManager;
+    use crate::config::test_config;
+    use crate::thread_manager::build_models_manager;
+    use crate::thread_manager::thread_store_from_config;
+    use codex_extension_api::ExtensionDataInit;
+    use codex_extension_api::empty_extension_registry;
+    use codex_features::Feature;
+    use codex_history::InitialHistory;
+    use codex_history::ResumedHistory;
+    use codex_models_manager::model_info::model_info_from_slug;
+    use codex_protocol::openai_models::ModelsResponse;
+    use codex_protocol::protocol::SessionSource;
+    use core_test_support::PathBufExt;
+
+    let server = wiremock::MockServer::start().await;
+    for policy in [
+        ProviderStartupPolicy::NativePilot,
+        ProviderStartupPolicy::Ordinary,
+    ] {
+        let home = tempfile::tempdir()?;
+        let mut config = test_config().await;
+        config.codex_home = home.path().join("codex-home").abs();
+        std::fs::create_dir_all(&config.codex_home)?;
+        config.cwd = config.codex_home.clone();
+        config.model = Some("gpt-oss-20b".into());
+        config.model_catalog = Some(ModelsResponse {
+            models: vec![model_info_from_slug("gpt-oss-20b")],
+        });
+        config.model_provider.name = "OpenAI".into();
+        config.model_provider.base_url = Some(format!("{}/backend-api/codex", server.uri()));
+        config.model_provider.requires_openai_auth = true;
+        config.model_provider.env_key = None;
+        config.model_provider.experimental_bearer_token = None;
+        config.model_provider.auth = None;
+        config.model_provider.aws = None;
+        config.model_provider.supports_websockets = false;
+        config.features.enable(Feature::ContextManagement)?;
+        config.features.disable(Feature::TokenBudget)?;
+        config.token_budget = None;
+        // Unsigned, local fixture claims only. Never loaded from a real auth file,
+        // environment variable or account, and never used for an inference turn.
+        let auth = CodexAuth::from_external_chatgpt_tokens(
+            "e30.eyJleHAiOjQxMDI0NDQ4MDB9.fixture",
+            "startup-fixture-account",
+            Some("plus"),
+        )?;
+        let auth_manager = AuthManager::from_auth_for_testing(auth);
+        let probe = Arc::new(StartupAuthProbe {
+            policy,
+            auth_manager: Arc::clone(&auth_manager),
+            metadata_reads: AtomicUsize::new(0),
+            cached_reads: AtomicUsize::new(0),
+        });
+        let manager = ThreadManager::new(
+            &config,
+            Arc::clone(&auth_manager),
+            build_models_manager(&config, Arc::clone(&auth_manager)),
+            CodexAppsToolsCache::default(),
+            SessionSource::Exec,
+            Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+            empty_extension_registry(),
+            Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+            /*analytics_events_client*/ None,
+            thread_store_from_config(&config, /*state_db*/ None),
+            /*agent_graph_store*/ None,
+            "11111111-1111-4111-8111-111111111111".into(),
+            /*attestation_provider*/ None,
+            /*external_time_provider*/ None,
+        );
+        let mut init = ExtensionDataInit::new();
+        init.insert(policy);
+        init.insert(Arc::clone(&probe));
+        let started = manager
+            .start_thread(StartThreadOptions {
+                environments: Some(Vec::new()),
+                thread_extension_init: init.clone(),
+                ..StartThreadOptions::new(config.clone())
+            })
+            .await?;
+        let expected = match policy {
+            ProviderStartupPolicy::NativePilot => (false, false, 0, 0),
+            ProviderStartupPolicy::Ordinary => (true, true, 1, 1),
+        };
+        let actual = started.thread.config().await;
+        assert_eq!(
+            (
+                actual.features.enabled(Feature::TokenBudget),
+                actual
+                    .token_budget
+                    .as_ref()
+                    .is_some_and(|budget| budget.use_history_notes_extension),
+                probe.metadata_reads.load(Ordering::SeqCst),
+                probe.cached_reads.load(Ordering::SeqCst),
+            ),
+            expected
+        );
+        started.thread.shutdown_and_wait().await?;
+        let resumed = manager
+            .resume_thread_with_history_and_init(
+                config,
+                InitialHistory::Resumed(ResumedHistory {
+                    conversation_id: started.thread_id,
+                    history: Arc::new(Vec::new()),
+                    rollout_path: None,
+                }),
+                auth_manager,
+                /*parent_trace*/ None,
+                Default::default(),
+                init,
+            )
+            .await?;
+        let actual = resumed.thread.config().await;
+        assert_eq!(
+            (
+                actual.features.enabled(Feature::TokenBudget),
+                actual
+                    .token_budget
+                    .as_ref()
+                    .is_some_and(|budget| budget.use_history_notes_extension),
+                probe.metadata_reads.load(Ordering::SeqCst),
+                probe.cached_reads.load(Ordering::SeqCst),
+            ),
+            (expected.0, expected.1, expected.2 * 2, expected.3 * 2)
+        );
+        resumed.thread.shutdown_and_wait().await?;
+    }
+    Ok(())
+}

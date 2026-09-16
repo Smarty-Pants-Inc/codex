@@ -295,6 +295,7 @@ pub struct ModelClient {
     agent_identity_policy: AgentIdentityAuthPolicy,
     prompt_cache_key_override: Option<String>,
     free_guardian_enabled: bool,
+    provider_startup_policy: ProviderStartupPolicy,
     event_sender: Option<Sender<ProtocolEvent>>,
     http_client_factory: HttpClientFactory,
 }
@@ -489,13 +490,68 @@ impl ModelClient {
         attestation_provider: Option<Arc<dyn AttestationProvider>>,
         http_client_factory: HttpClientFactory,
     ) -> Self {
-        let model_provider = create_model_provider(provider_info, auth_manager);
-        let codex_api_key_env_enabled = model_provider
-            .auth_manager()
-            .as_ref()
-            .is_some_and(|manager| manager.codex_api_key_env_enabled());
-        let auth_env_telemetry =
-            collect_auth_env_telemetry(model_provider.info(), codex_api_key_env_enabled);
+        Self::new_with_startup_policy(
+            auth_manager,
+            agent_identity_policy,
+            thread_id,
+            provider_info,
+            session_source,
+            originator,
+            model_verbosity,
+            content_item_kinds_enabled,
+            enable_request_compression,
+            include_timing_metrics,
+            beta_features_header,
+            concurrent_reasoning_summaries_enabled,
+            attestation_provider,
+            http_client_factory,
+            ProviderStartupPolicy::Ordinary,
+            /*session_auth_env_metadata*/ None,
+        )
+    }
+
+    /// Select denial before constructing a provider or reading ambient auth metadata.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_with_startup_policy(
+        auth_manager: Option<Arc<AuthManager>>,
+        agent_identity_policy: AgentIdentityAuthPolicy,
+        thread_id: ThreadId,
+        provider_info: ModelProviderInfo,
+        session_source: SessionSource,
+        originator: String,
+        model_verbosity: Option<VerbosityConfig>,
+        content_item_kinds_enabled: bool,
+        enable_request_compression: bool,
+        include_timing_metrics: bool,
+        beta_features_header: Option<String>,
+        concurrent_reasoning_summaries_enabled: bool,
+        attestation_provider: Option<Arc<dyn AttestationProvider>>,
+        http_client_factory: HttpClientFactory,
+        provider_startup_policy: ProviderStartupPolicy,
+        session_auth_env_metadata: Option<AuthEnvTelemetry>,
+    ) -> Self {
+        let model_provider = match provider_startup_policy {
+            ProviderStartupPolicy::Ordinary => create_model_provider(provider_info, auth_manager),
+            ProviderStartupPolicy::NativePilot => {
+                let mut transport = observation::pilot_transport_info(&provider_info);
+                // The general factory selects ambient backends by name. This is
+                // a transport label, never the independently admitted provider identity.
+                transport.name = "Native pilot".into();
+                create_model_provider(transport, /*auth_manager*/ None)
+            }
+        };
+        let auth_env_telemetry = provider_startup_policy.read_auth_env_metadata(|| {
+            // Session construction already sampled this under the same policy.
+            // Reuse that snapshot rather than read the environment a second time.
+            if let Some(metadata) = session_auth_env_metadata {
+                return metadata;
+            }
+            let codex_api_key_env_enabled = model_provider
+                .auth_manager()
+                .as_ref()
+                .is_some_and(|manager| manager.codex_api_key_env_enabled());
+            collect_auth_env_telemetry(model_provider.info(), codex_api_key_env_enabled)
+        });
         let include_attestation = model_provider.supports_attestation();
         Self {
             state: Arc::new(ModelClientState {
@@ -519,6 +575,7 @@ impl ModelClient {
             agent_identity_policy,
             prompt_cache_key_override: None,
             free_guardian_enabled: false,
+            provider_startup_policy,
             event_sender: None,
             http_client_factory,
         }
@@ -1040,7 +1097,8 @@ impl ModelClient {
     ///
     /// WebSocket use is controlled by provider capability and session-scoped fallback state.
     pub fn responses_websocket_enabled(&self) -> bool {
-        if !self.state.provider.info().supports_websockets
+        if !self.permits_ambient_provider_setup()
+            || !self.state.provider.info().supports_websockets
             || self.state.disable_websockets.load(Ordering::Relaxed)
         {
             return false;
@@ -1054,6 +1112,11 @@ impl ModelClient {
     /// This centralizes setup used by both prewarm and normal request paths so they stay in
     /// lockstep when auth/provider resolution changes.
     async fn current_client_setup(&self) -> Result<CurrentClientSetup> {
+        if !self.permits_ambient_provider_setup() {
+            return Err(CodexErr::InvalidRequest(
+                "native pilot requires original slot authentication".into(),
+            ));
+        }
         let auth = self.state.provider.auth().await;
         let api_provider = self.state.provider.api_provider().await?;
         let resolved_auth = self
@@ -1291,7 +1354,7 @@ impl ModelClientSession {
     ///
     /// Keeping option construction in one place ensures request-scoped headers are consistent
     /// regardless of transport choice.
-    async fn build_responses_options(
+    fn build_responses_options(
         &self,
         responses_metadata: &CodexResponsesMetadata,
         compression: Compression,
@@ -1311,9 +1374,6 @@ impl ModelClientSession {
                     self.client
                         .build_responses_compatibility_headers(responses_metadata),
                 );
-                if let Some(header_value) = self.client.generate_attestation_header_for().await {
-                    headers.insert(X_OAI_ATTESTATION_HEADER, header_value);
-                }
                 add_responses_lite_header(&mut headers, use_responses_lite);
                 headers
             },
@@ -1567,14 +1627,33 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
-        let auth_manager = self.client.state.provider.auth_manager();
+        let pilot_transport = match &self.observation_decision {
+            Some((slot, _)) => slot
+                .has_pilot_authority()
+                .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?,
+            None => false,
+        };
+        if !pilot_transport && !self.client.permits_ambient_provider_setup() {
+            return Err(CodexErr::InvalidRequest(
+                "native pilot requires original slot authentication".into(),
+            ));
+        }
+        let auth_manager = if pilot_transport {
+            None
+        } else {
+            self.client.state.provider.auth_manager()
+        };
         let mut auth_recovery = auth_manager
             .as_ref()
             .map(AuthManager::unauthorized_recovery);
         let mut provider_auth_recovery_attempted = false;
         let mut pending_retry = PendingUnauthorizedRetry::default();
         loop {
-            let client_setup = self.client.current_client_setup().await?;
+            let client_setup = if pilot_transport {
+                observation::pilot_client_setup(self.client.state.provider.info())?
+            } else {
+                self.client.current_client_setup().await?
+            };
             let endpoint = self
                 .client
                 .responses_endpoint(client_setup.auth.as_ref(), &model_info.slug);
@@ -1606,13 +1685,18 @@ impl ModelClientSession {
                     (request_telemetry, sse_telemetry)
                 };
             let compression = self.responses_request_compression(client_setup.auth.as_ref());
-            let mut options = self
-                .build_responses_options(
-                    responses_metadata,
-                    compression,
-                    model_info.use_responses_lite,
-                )
-                .await;
+            let mut options = self.build_responses_options(
+                responses_metadata,
+                compression,
+                model_info.use_responses_lite,
+            );
+            if !pilot_transport
+                && let Some(header_value) = self.client.generate_attestation_header_for().await
+            {
+                options
+                    .extra_headers
+                    .insert(X_OAI_ATTESTATION_HEADER, header_value);
+            }
 
             let mut request = self.client.build_responses_request(
                 prompt,
@@ -1671,11 +1755,12 @@ impl ModelClientSession {
                     return Ok(stream);
                 }
                 Err(ApiError::Transport(unauthorized_transport))
-                    if self
-                        .client
-                        .state
-                        .provider
-                        .is_recoverable_auth_error(&unauthorized_transport) =>
+                    if !pilot_transport
+                        && self
+                            .client
+                            .state
+                            .provider
+                            .is_recoverable_auth_error(&unauthorized_transport) =>
                 {
                     let response_debug_context =
                         extract_response_debug_context(&unauthorized_transport);
@@ -2749,6 +2834,7 @@ mod tests;
 
 #[path = "client/observation.rs"]
 mod observation;
+pub use observation::ProviderStartupPolicy;
 #[path = "client/observation_telemetry.rs"]
 mod observation_telemetry;
 #[path = "client/request_input.rs"]

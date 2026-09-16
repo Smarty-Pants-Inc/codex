@@ -79,6 +79,20 @@ async fn observation_start_and_admitted_resume_install_fresh_owned_relays() -> R
         let started: ThreadStartResponse = app.read_response(id).await?;
         let initial = started.observation.expect("installed start capability");
         let thread_id = started.thread.id;
+        // A real owned observation connection/profile still installs no pilot
+        // authority. These public methods must not resume or mint one from IDs.
+        for (method, extra) in [
+            ("thread/pilot/read", json!({})),
+            ("thread/pilot/retire", json!({})),
+            ("thread/pilot/check", json!({"operation":"prepareSource"})),
+            ("thread/pilot/start", json!({"input":"bounded automatic opportunity"})),
+        ] {
+            let mut params = extra;
+            params["threadId"] = json!(thread_id);
+            let id = app.send_request(method, Some(params)).await?;
+            assert_eq!(app.read_stream_until_error_message(RequestId::Integer(id)).await?.error,
+                rejection("DENIED"));
+        }
         let id = app.send_thread_resume_request(ThreadResumeParams {
             thread_id: thread_id.clone(), ..Default::default()
         }).await?;
