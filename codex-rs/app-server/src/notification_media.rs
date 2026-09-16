@@ -71,6 +71,8 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
         | ServerNotification::EnvironmentConnected(_)
         | ServerNotification::EnvironmentDisconnected(_)
         | ServerNotification::ThreadSettingsUpdated(_)
+        | ServerNotification::ThreadObservationCaptured(_)
+        | ServerNotification::ThreadObservationSubmitted(_)
         | ServerNotification::ThreadTokenUsageUpdated(_)
         | ServerNotification::TurnStarted(_)
         | ServerNotification::HookStarted(_)

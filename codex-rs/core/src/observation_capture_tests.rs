@@ -1,4 +1,5 @@
 use super::*;
+use pretty_assertions::assert_eq;
 
 #[test]
 fn capture_is_ordered_before_later_publication_and_immutable_until_release() {
