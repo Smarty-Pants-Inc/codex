@@ -1,0 +1,289 @@
+{
+  "groups": [
+    {
+      "id": "core-all",
+      "package": "codex-core",
+      "target_flags": [
+        "--test",
+        "all"
+      ],
+      "prefixes": [
+        "suite::native_control_boundary::",
+        "suite::turn_input_submission::"
+      ],
+      "required": [
+        "suite::native_control_boundary::turn_bound_response_and_idle_guard_preserve_native_admission"
+      ],
+      "required_family_counts": {
+        "suite::native_control_boundary::guarded_input_cannot_bypass_automatic_admission::": 3
+      },
+      "full_discovery_argv": [
+        "cargo",
+        "nextest",
+        "list",
+        "--locked",
+        "-p",
+        "codex-core",
+        "--test",
+        "all",
+        "--message-format",
+        "json"
+      ],
+      "selected_discovery_argv": [
+        "cargo",
+        "nextest",
+        "list",
+        "--locked",
+        "-p",
+        "codex-core",
+        "--test",
+        "all",
+        "-E",
+        "test(suite::native_control_boundary::) | test(suite::turn_input_submission::)",
+        "--message-format",
+        "json"
+      ],
+      "selected_discovery_when_no_filter": null,
+      "test_argv": [
+        "just",
+        "test",
+        "--locked",
+        "-p",
+        "codex-core",
+        "--test",
+        "all",
+        "-E",
+        "test(suite::native_control_boundary::) | test(suite::turn_input_submission::)",
+        "--retries",
+        "0",
+        "--test-threads",
+        "2",
+        "--status-level",
+        "all",
+        "--final-status-level",
+        "all"
+      ],
+      "evidence_directory": "backend-evidence/native-foundation/core-all",
+      "native_counts": null
+    },
+    {
+      "id": "core-lib",
+      "package": "codex-core",
+      "target_flags": [
+        "--lib"
+      ],
+      "prefixes": [
+        "session::turn_input::tests::",
+        "thread_rollout_truncation::tests::"
+      ],
+      "required": [
+        "session::turn_input::tests::revoked_idle_guard_is_checked_after_preview_without_mutation",
+        "thread_rollout_truncation::tests::terminal_interval_includes_items_before_the_next_native_start"
+      ],
+      "required_family_counts": {},
+      "full_discovery_argv": [
+        "cargo",
+        "nextest",
+        "list",
+        "--locked",
+        "-p",
+        "codex-core",
+        "--lib",
+        "--message-format",
+        "json"
+      ],
+      "selected_discovery_argv": [
+        "cargo",
+        "nextest",
+        "list",
+        "--locked",
+        "-p",
+        "codex-core",
+        "--lib",
+        "-E",
+        "test(session::turn_input::tests::) | test(thread_rollout_truncation::tests::)",
+        "--message-format",
+        "json"
+      ],
+      "selected_discovery_when_no_filter": null,
+      "test_argv": [
+        "just",
+        "test",
+        "--locked",
+        "-p",
+        "codex-core",
+        "--lib",
+        "-E",
+        "test(session::turn_input::tests::) | test(thread_rollout_truncation::tests::)",
+        "--retries",
+        "0",
+        "--test-threads",
+        "2",
+        "--status-level",
+        "all",
+        "--final-status-level",
+        "all"
+      ],
+      "evidence_directory": "backend-evidence/native-foundation/core-lib",
+      "native_counts": null
+    },
+    {
+      "id": "app-all",
+      "package": "codex-app-server",
+      "target_flags": [
+        "--test",
+        "all"
+      ],
+      "prefixes": [
+        "suite::v2::dynamic_tools::",
+        "suite::v2::thread_fork::",
+        "suite::v2::thread_rollback::"
+      ],
+      "required": [],
+      "required_family_counts": {},
+      "full_discovery_argv": [
+        "cargo",
+        "nextest",
+        "list",
+        "--locked",
+        "-p",
+        "codex-app-server",
+        "--test",
+        "all",
+        "--message-format",
+        "json"
+      ],
+      "selected_discovery_argv": [
+        "cargo",
+        "nextest",
+        "list",
+        "--locked",
+        "-p",
+        "codex-app-server",
+        "--test",
+        "all",
+        "-E",
+        "test(suite::v2::dynamic_tools::) | test(suite::v2::thread_fork::) | test(suite::v2::thread_rollback::)",
+        "--message-format",
+        "json"
+      ],
+      "selected_discovery_when_no_filter": null,
+      "test_argv": [
+        "just",
+        "test",
+        "--locked",
+        "-p",
+        "codex-app-server",
+        "--test",
+        "all",
+        "-E",
+        "test(suite::v2::dynamic_tools::) | test(suite::v2::thread_fork::) | test(suite::v2::thread_rollback::)",
+        "--retries",
+        "0",
+        "--test-threads",
+        "2",
+        "--status-level",
+        "all",
+        "--final-status-level",
+        "all"
+      ],
+      "evidence_directory": "backend-evidence/native-foundation/app-all",
+      "native_counts": null
+    },
+    {
+      "id": "protocol-all",
+      "package": "codex-protocol",
+      "target_flags": [],
+      "prefixes": [],
+      "required": [],
+      "required_family_counts": {},
+      "full_discovery_argv": [
+        "cargo",
+        "nextest",
+        "list",
+        "--locked",
+        "-p",
+        "codex-protocol",
+        "--message-format",
+        "json"
+      ],
+      "selected_discovery_argv": null,
+      "selected_discovery_when_no_filter": "same actual full discovery bytes; no duplicate command",
+      "test_argv": [
+        "just",
+        "test",
+        "--locked",
+        "-p",
+        "codex-protocol",
+        "--retries",
+        "0",
+        "--test-threads",
+        "2",
+        "--status-level",
+        "all",
+        "--final-status-level",
+        "all"
+      ],
+      "evidence_directory": "backend-evidence/native-foundation/protocol-all",
+      "native_counts": null
+    }
+  ],
+  "runtime_prerequisite_argv": [
+    "cargo",
+    "build",
+    "--locked",
+    "-p",
+    "codex-cli",
+    "--bin",
+    "codex",
+    "-p",
+    "codex-rmcp-client",
+    "--bin",
+    "test_stdio_server",
+    "--bin",
+    "test_streamable_http_server",
+    "-p",
+    "codex-code-mode-host",
+    "--bin",
+    "codex-code-mode-host",
+    "-p",
+    "codex-linux-sandbox",
+    "--bin",
+    "codex-linux-sandbox",
+    "-p",
+    "codex-shell-escalation",
+    "--bin",
+    "codex-execve-wrapper"
+  ],
+  "post_test_phases": [
+    {
+      "id": "scoped-fix",
+      "argv": [
+        "just",
+        "fix",
+        "-p",
+        "codex-core",
+        "-p",
+        "codex-app-server",
+        "-p",
+        "codex-protocol"
+      ]
+    },
+    {
+      "id": "fmt",
+      "argv": [
+        "just",
+        "fmt"
+      ]
+    },
+    {
+      "id": "fmt-check",
+      "argv": [
+        "just",
+        "fmt-check"
+      ]
+    }
+  ],
+  "source_commit": "8302be3707cfe83227c4688f40c9e2c015752971",
+  "source_tree": "5406f4eca10344a800968ae7e8c6dcd05edbfd78"
+}

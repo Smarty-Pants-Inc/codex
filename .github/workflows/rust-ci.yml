@@ -6,6 +6,7 @@ on:
 jobs:
   # --- Detect what changed so the fast PR workflow only runs relevant jobs ----
   changed:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/codex-native-foundation-5406-2') }}
     name: Detect changed areas
     runs-on: ubuntu-24.04
     outputs:
@@ -61,7 +62,7 @@ jobs:
     name: Format / etc
     runs-on: ubuntu-24.04
     needs: changed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/codex-native-foundation-5406-2') && (needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true') }}
     defaults:
       run:
         working-directory: codex-rs
@@ -86,7 +87,7 @@ jobs:
     name: cargo shear
     runs-on: ubuntu-24.04
     needs: changed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/codex-native-foundation-5406-2') && (needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true') }}
     defaults:
       run:
         working-directory: codex-rs
@@ -110,7 +111,7 @@ jobs:
     name: Argument comment lint package
     runs-on: ubuntu-24.04
     needs: changed
-    if: ${{ needs.changed.outputs.argument_comment_lint_package == 'true' }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/codex-native-foundation-5406-2') && (needs.changed.outputs.argument_comment_lint_package == 'true') }}
     env:
       CARGO_DYLINT_VERSION: 5.0.0
       DYLINT_LINK_VERSION: 5.0.0
@@ -162,6 +163,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   argument_comment_lint_prebuilt:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/codex-native-foundation-5406-2') }}
     name: Argument comment lint - ${{ matrix.name }}
     runs-on: ${{ matrix.runs_on || matrix.runner }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
@@ -226,7 +228,7 @@ jobs:
         argument_comment_lint_package,
         argument_comment_lint_prebuilt,
       ]
-    if: always()
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/codex-native-foundation-5406-2') && (always()) }}
     runs-on: ubuntu-24.04
     steps:
       - name: Summarize
@@ -261,3 +263,211 @@ jobs:
           NEEDS_CHANGED_OUTPUTS_CODEX: ${{ needs.changed.outputs.codex }}
           NEEDS_CHANGED_OUTPUTS_WORKFLOWS: ${{ needs.changed.outputs.workflows }}
           NEEDS_CHANGED_OUTPUTS_ARGUMENT_COMMENT_LINT_PACKAGE: ${{ needs.changed.outputs.argument_comment_lint_package }}
+
+  native_foundation:
+    if: ${{ github.repository == 'Smarty-Pants-Inc/codex' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/codex-native-foundation-5406-2' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_NET_GIT_FETCH_WITH_CLI: true
+      INSTA_UPDATE: 'no'
+      USE_SCCACHE: 'true'
+      CARGO_INCREMENTAL: '0'
+      SCCACHE_CACHE_SIZE: 10G
+      SCCACHE_IDLE_TIMEOUT: '0'
+      CI_TIME_FORMAT: '{"elapsed_seconds":%e,"user_seconds":%U,"system_seconds":%S,"max_rss_kib":%M}'
+      TARGET: x86_64-unknown-linux-gnu
+    defaults:
+      run:
+        shell: bash
+    steps:
+    - name: Set disposable backend build directory
+      run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/codex-native-foundation-target" >> "$GITHUB_ENV"
+    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      with:
+        ref: ${{ github.sha }}
+        persist-credentials: false
+        fetch-depth: 2
+    - name: Bind exact C and single-parent definition D before setup
+      run: python3 .github/scripts/native_foundation.py initialize
+    - name: Record backend initial resources
+      run: |
+        mkdir -p backend-evidence
+        {
+          date -u +%FT%TZ
+          nproc
+          free -b
+          df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+        } > backend-evidence/resources-start.txt 2>&1
+    - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+      with:
+        components: rustfmt, clippy, rust-src
+    - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532
+      with:
+        tool: just@1.51.0,nextest@0.9.103
+    - uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a
+    - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+      with:
+        version: 0.11.3
+        enable-cache: false
+    - name: Native Linux backend prerequisites (disposable runner only)
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev bubblewrap
+        sudo sysctl -w kernel.unprivileged_userns_clone=1
+        sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+    - name: Record backend source and toolchain
+      run: |-
+        set -euo pipefail
+        { rustc -Vv; cargo -V; just --version; cargo nextest --version; uv --version; /usr/bin/time --version; uname -a; } > backend-evidence/tools.txt
+        test "$(rustc -V | cut -d' ' -f2)" = 1.95.0
+        test "$(just --version)" = 'just 1.51.0'
+        nextest_version="$(cargo nextest --version)"
+        test "$(printf '%s\n' "$nextest_version" | sed -n 's/^release: //p')" = 0.9.103
+        test "$RUNNER_OS/$RUNNER_ARCH" = Linux/X64
+        sha256sum codex-rs/Cargo.lock codex-rs/rust-toolchain.toml codex-rs/.config/nextest.toml \
+          justfile scripts/just-shell.py scripts/format.py scripts/uv.lock sdk/python/uv.lock tools/buildifier \
+          .github/workflows/rust-ci.yml .github/scripts/native_foundation.py \
+          .github/scripts/native_foundation_recipe.json .github/actions/setup-rusty-v8/action.yml \
+          > backend-evidence/inputs.sha256
+    - name: Install sccache
+      if: ${{ env.USE_SCCACHE == 'true' }}
+      uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532
+      with:
+        tool: sccache@0.7.5
+    - name: Verify sccache version
+      if: ${{ env.USE_SCCACHE == 'true' }}
+      run: |
+        version="$(sccache --version)"
+        printf '%s\n' "$version" | tee backend-evidence/sccache-version.txt
+        test "$version" = 'sccache 0.7.5'
+    - name: Configure sccache backend
+      if: ${{ env.USE_SCCACHE == 'true' }}
+      run: |
+        set -euo pipefail
+        if [[ -n "${ACTIONS_CACHE_URL:-}" && -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
+          echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+          echo "Using sccache GitHub backend"
+        else
+          echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+          echo "SCCACHE_DIR=$RUNNER_TEMP/codex-native-foundation-sccache" >> "$GITHUB_ENV"
+          echo "Using sccache local disk + actions/cache fallback"
+        fi
+    - name: Enable sccache wrapper
+      if: ${{ env.USE_SCCACHE == 'true' }}
+      run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+    - name: Restore sccache cache (fallback)
+      if: ${{ env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true' }}
+      id: cache_sccache_restore
+      uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7
+      with:
+        path: ${{ runner.temp }}/codex-native-foundation-sccache/
+        key: sccache-smarty-v2-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.run_id }}
+        restore-keys: |
+          sccache-smarty-v2-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-
+    - name: Record compiler cache restore
+      if: always()
+      env:
+        CACHE_OUTCOME: ${{ steps.cache_sccache_restore.outcome }}
+        CACHE_PRIMARY_KEY: ${{ steps.cache_sccache_restore.outputs.cache-primary-key }}
+        CACHE_MATCHED_KEY: ${{ steps.cache_sccache_restore.outputs.cache-matched-key }}
+        CACHE_EXACT_HIT: ${{ steps.cache_sccache_restore.outputs.cache-hit }}
+      run: |
+        mkdir -p backend-evidence
+        jq -n '{event:env.GITHUB_EVENT_NAME,ref:env.GITHUB_REF,
+          gha_backend:env.SCCACHE_GHA_ENABLED,outcome:env.CACHE_OUTCOME,
+          primary_key:env.CACHE_PRIMARY_KEY,matched_key:env.CACHE_MATCHED_KEY,
+          exact_hit:env.CACHE_EXACT_HIT}' > backend-evidence/cache-restore.json
+    - name: Configure matching sandbox V8 artifacts
+      uses: ./.github/actions/setup-rusty-v8
+      with:
+        target: x86_64-unknown-linux-gnu
+    - name: Build backend runtime test prerequisites
+      working-directory: codex-rs
+      run: |
+        set -euo pipefail
+        sha256sum "$RUSTY_V8_ARCHIVE" "$RUSTY_V8_SRC_BINDING_PATH" \
+          > ../backend-evidence/rusty-v8.sha256
+        # Package-scoped nextest runs do not build sibling packages' executables.
+        cargo build --locked \
+          -p codex-cli --bin codex \
+          -p codex-rmcp-client --bin test_stdio_server --bin test_streamable_http_server \
+          -p codex-code-mode-host --bin codex-code-mode-host \
+          -p codex-linux-sandbox --bin codex-linux-sandbox \
+          -p codex-shell-escalation --bin codex-execve-wrapper \
+          2>&1 | tee ../backend-evidence/runtime-prerequisites.txt
+        for binary in codex test_stdio_server test_streamable_http_server codex-code-mode-host codex-linux-sandbox codex-execve-wrapper; do
+          path="$CARGO_TARGET_DIR/debug/$binary"
+          if [[ ! -x "$path" ]]; then
+            echo "Missing runtime test executable: $path" >&2
+            exit 1
+          fi
+          sha256sum "$path" >> ../backend-evidence/runtime-prerequisites.sha256
+          echo "CARGO_BIN_EXE_$binary=$path" >> "$GITHUB_ENV"
+          if [[ "$binary" == *-* ]]; then
+            echo "CARGO_BIN_EXE_${binary//-/_}=$path" >> "$GITHUB_ENV"
+          fi
+        done
+    - name: Four scoped discovery and test groups then fix fmt fmt-check
+      run: python3 .github/scripts/native_foundation.py run
+    - name: Always retain complete source inventory index and writeback bytes
+      if: always()
+      run: python3 .github/scripts/native_foundation.py finish
+    - name: Save sccache cache (fallback)
+      id: cache_sccache_save
+      if: always() && !cancelled() && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
+      continue-on-error: true
+      uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7
+      with:
+        path: ${{ runner.temp }}/codex-native-foundation-sccache/
+        key: sccache-smarty-v2-0.7.5-ubuntu24-x64-gnu-${{ github.job }}-${{ hashFiles('codex-rs/Cargo.lock', 'codex-rs/rust-toolchain.toml') }}-${{ github.run_id }}
+    - name: sccache stats
+      if: always() && env.USE_SCCACHE == 'true'
+      continue-on-error: true
+      env:
+        CACHE_SAVE_OUTCOME: ${{ steps.cache_sccache_save.outcome }}
+      run: |
+        mkdir -p backend-evidence
+        jq -n '{outcome:env.CACHE_SAVE_OUTCOME}' > backend-evidence/cache-save.json
+        sccache --show-stats 2>&1 | tee backend-evidence/sccache.txt || true
+    - name: sccache summary
+      if: always() && env.USE_SCCACHE == 'true'
+      run: "{\n  echo \"### sccache stats \u2014 x86_64-unknown-linux-gnu (native-foundation)\";\n  echo;\n  echo '```';\n  sccache --show-stats || true;\n  echo '```';\n} >> \"$GITHUB_STEP_SUMMARY\"\n"
+    - name: Record backend final resources
+      if: always()
+      run: |
+        mkdir -p backend-evidence
+        failed=0
+        {
+          date -u +%FT%TZ || failed=1
+          free -b || failed=1
+          df -B1 "$GITHUB_WORKSPACE" "$RUNNER_TEMP" || failed=1
+          if [[ ! -f backend-evidence/resources-start.txt ]]; then
+            echo 'Initial resource receipt absent; initial phase did not complete.'
+          fi
+          for path in "${CARGO_TARGET_DIR:-}" "$GITHUB_WORKSPACE/backend-evidence"; do
+            if [[ -e "$path" ]]; then
+              du -sxB1 "$path" || failed=1
+            else
+              printf 'Path absent (not measured): %s\n' "$path"
+            fi
+          done
+        } > backend-evidence/resources-final.txt 2>&1
+        exit "$failed"
+    - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+      if: always()
+      with:
+        name: codex-native-foundation-${{ github.sha }}-${{ github.run_attempt }}
+        path: backend-evidence/
+        retention-days: 1
+        if-no-files-found: error
+    name: Scoped native foundation (5406)
+    permissions:
+      contents: read
+    concurrency:
+      group: codex-native-foundation-5406-2
+      cancel-in-progress: false
