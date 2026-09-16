@@ -156,18 +156,20 @@ async fn observation_receipts_do_not_render_or_submit_operations() {
             terminal_decision: true,
         }),
     ];
-    for notification in notifications {
-        chat.handle_server_notification(notification, /*replay_kind*/ None);
-        assert_eq!(render_bottom_popup(&chat, /*width*/ 80), before);
-        let history = drain_insert_history(&mut rx)
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        insta::assert_snapshot!(lines_to_single_string(&history), @"");
-        assert_matches!(
-            op_rx.try_recv(),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
-        );
+    insta::allow_duplicates! {
+        for notification in notifications {
+            chat.handle_server_notification(notification, /*replay_kind*/ None);
+            assert_eq!(render_bottom_popup(&chat, /*width*/ 80), before);
+            let history = drain_insert_history(&mut rx)
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            insta::assert_snapshot!(lines_to_single_string(&history), @"");
+            assert_matches!(
+                op_rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            );
+        }
     }
 }
 
