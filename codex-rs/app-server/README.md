@@ -2110,6 +2110,8 @@ The server also emits item lifecycle notifications around the request:
 3. Client response.
 4. `item/completed` with `item.type = "dynamicToolCall"`, final `status`, and the returned `contentItems`/`success`.
 
+The server binds each response to the originating native turn before applying it in Core. A late response cannot resolve a matching call ID in a different turn. This protects native response delivery only: clients still own any external side effects already accepted before cancellation, and must settle them before claiming a safe transition or shutdown.
+
 The client must respond with content items. Use `inputText` for text, `inputImage` for inline image data URLs, and `inputAudio` for inline audio data URLs. Audio data URLs accept wav, mp3, m4a, webm, and ogg media types. Remote HTTP(S) image URLs and non-data audio URLs make the dynamic tool response invalid.
 
 ```json

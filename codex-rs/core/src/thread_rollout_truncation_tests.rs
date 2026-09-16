@@ -118,6 +118,34 @@ fn truncates_rollout_after_terminal_canonical_turn_id() {
 }
 
 #[test]
+fn terminal_interval_includes_items_before_the_next_native_start() {
+    let initial = response_item(developer_msg("initial interval"));
+    let rollout = vec![
+        initial.clone(),
+        turn_started("turn-1"),
+        turn_completed("turn-1"),
+        response_item(developer_msg("after completion, still turn-1 interval")),
+        turn_started("turn-2"),
+        turn_completed("turn-2"),
+    ];
+    let through = truncate_rollout_after_turn_id(rollout.clone(), "turn-1")
+        .expect("retain the full terminal interval");
+    let before_next = truncate_rollout_before_turn_id(rollout.clone(), "turn-2")
+        .expect("cut at the next persisted start");
+    let before_first = truncate_rollout_before_turn_id(rollout, "turn-1")
+        .expect("retain only the initial interval");
+    assert_eq!(
+        serde_json::to_value(&through).unwrap(),
+        serde_json::to_value(&before_next).unwrap(),
+    );
+    assert_eq!(through.len(), 4);
+    assert_eq!(
+        serde_json::to_value(&before_first).unwrap(),
+        serde_json::to_value(vec![initial]).unwrap(),
+    );
+}
+
+#[test]
 fn truncates_rollout_before_terminal_canonical_turn_id() {
     let rollout = vec![
         turn_started("turn-1"),

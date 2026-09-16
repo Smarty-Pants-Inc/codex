@@ -102,6 +102,10 @@ impl TurnInputRequest {
     }
 
     /// Fence automatic idle admission against stop or superseding work.
+    ///
+    /// Guarded requests must use start-if-idle with a response item, inter-agent
+    /// input, or empty user input. Human start/steer routes reject the guard
+    /// rather than silently bypassing automatic admission and Plan-mode checks.
     pub fn with_idle_start_guard(mut self, guard: TurnStartGuard) -> Self {
         self.idle_start_guard = Some(guard);
         self

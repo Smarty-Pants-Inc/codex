@@ -217,6 +217,16 @@ pub(super) async fn handle(
     mode: TurnInputMode,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
+    // A host guard must never be silently discarded by a human-input route.
+    // Automatic payloads use ResponseItem; empty user input only resumes sampling.
+    if request.idle_start_guard.is_some()
+        && (mode != TurnInputMode::StartIfIdle
+            || matches!(&request.input, SubmittedTurnInput::UserInput { content, .. } if !content.is_empty()))
+    {
+        return Err(CodexErr::InvalidRequest(
+            "automatic turn authority requires start-if-idle with automatic input".to_string(),
+        ));
+    }
     match mode {
         TurnInputMode::StartOrSteer => start_or_steer(session, request, submission_id).await,
         TurnInputMode::StartIfIdle => {
