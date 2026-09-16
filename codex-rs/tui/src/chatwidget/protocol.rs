@@ -266,6 +266,9 @@ impl ChatWidget {
             | ServerNotification::AccountLoginCompleted(_)
             | ServerNotification::ProjectChanged(_)
             | ServerNotification::ThreadProjectUpdated(_) => {}
+            // Observation receipts are for the admitted observation consumer, not TUI rendering.
+            ServerNotification::ThreadObservationCaptured(_)
+            | ServerNotification::ThreadObservationSubmitted(_) => {}
             ServerNotification::ContextCompacted(_) => {}
         }
         self.flush_realtime_transcripts();
