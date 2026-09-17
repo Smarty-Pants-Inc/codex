@@ -6,6 +6,7 @@ on:
 jobs:
   # --- Detect what changed so the fast PR workflow only runs relevant jobs ----
   changed:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/codex-startup-fa2f2a-1') }}
     name: Detect changed areas
     runs-on: ubuntu-24.04
     outputs:
@@ -61,7 +62,7 @@ jobs:
     name: Format / etc
     runs-on: ubuntu-24.04
     needs: changed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/codex-startup-fa2f2a-1') && (needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true') }}
     defaults:
       run:
         working-directory: codex-rs
@@ -86,7 +87,7 @@ jobs:
     name: cargo shear
     runs-on: ubuntu-24.04
     needs: changed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/codex-startup-fa2f2a-1') && (needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true') }}
     defaults:
       run:
         working-directory: codex-rs
@@ -110,7 +111,7 @@ jobs:
     name: Argument comment lint package
     runs-on: ubuntu-24.04
     needs: changed
-    if: ${{ needs.changed.outputs.argument_comment_lint_package == 'true' }}
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/codex-startup-fa2f2a-1') && needs.changed.outputs.argument_comment_lint_package == 'true' }}
     env:
       CARGO_DYLINT_VERSION: 5.0.0
       DYLINT_LINK_VERSION: 5.0.0
@@ -162,6 +163,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   argument_comment_lint_prebuilt:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/codex-startup-fa2f2a-1') }}
     name: Argument comment lint - ${{ matrix.name }}
     runs-on: ${{ matrix.runs_on || matrix.runner }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
@@ -226,7 +228,7 @@ jobs:
         argument_comment_lint_package,
         argument_comment_lint_prebuilt,
       ]
-    if: always()
+    if: ${{ always() && !(github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/codex-startup-fa2f2a-1') }}
     runs-on: ubuntu-24.04
     steps:
       - name: Summarize
@@ -261,3 +263,151 @@ jobs:
           NEEDS_CHANGED_OUTPUTS_CODEX: ${{ needs.changed.outputs.codex }}
           NEEDS_CHANGED_OUTPUTS_WORKFLOWS: ${{ needs.changed.outputs.workflows }}
           NEEDS_CHANGED_OUTPUTS_ARGUMENT_COMMENT_LINT_PACKAGE: ${{ needs.changed.outputs.argument_comment_lint_package }}
+
+  native_foundation:
+    permissions:
+      contents: read
+    if: ${{ github.repository == 'Smarty-Pants-Inc/codex' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/ci/codex-startup-fa2f2a-1' && github.run_attempt == 1 }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    concurrency:
+      group: codex-startup-fa2f2a-1
+      cancel-in-progress: false
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_NET_RETRY: '0'
+      CARGO_HTTP_TIMEOUT: '60'
+      CARGO_INCREMENTAL: '0'
+      INSTA_UPDATE: 'no'
+      USE_SCCACHE: 'true'
+      SCCACHE_CACHE_SIZE: 10G
+      SCCACHE_IDLE_TIMEOUT: '0'
+      SCCACHE_GHA_VERSION: smarty-startup-fa47688c65e86c48cc465d7e0d6195dc6338917f60a04893cf518eb171f7e2b4
+      TARGET: x86_64-unknown-linux-gnu
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Start original disposable clock before checkout
+        timeout-minutes: 1
+        run: |
+          /usr/bin/python3 -I -S -B - <<'PY'
+          import hashlib,json,os,pathlib,sys,time
+          p=pathlib.Path(os.environ['RUNNER_TEMP'])/'codex-startup-clock.json'
+          with p.open('x') as f:
+              json.dump({'start':time.monotonic(),'wall':time.time(),'python_path':sys.executable,'python_sha256':hashlib.sha256(pathlib.Path(sys.executable).read_bytes()).hexdigest()},f)
+          PY
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/codex-startup-target" >> "$GITHUB_ENV"
+      - name: Checkout exact focused definition
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        timeout-minutes: 2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Bind sole-parent H and exact definition before provisioning
+        timeout-minutes: 1
+        run: /usr/bin/python3 -I -S -B .github/scripts/startup_focused.py initialize
+      - name: Admit bounded Rust install step
+        run: /usr/bin/python3 -I -S -B .github/scripts/startup_focused.py guard 4
+      - name: Provision Rust 1.95.0
+        uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+        timeout-minutes: 4
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy, rust-src
+      - name: Admit bounded auxiliary tool install step
+        run: /usr/bin/python3 -I -S -B .github/scripts/startup_focused.py guard 3
+      - name: Provision just nextest and sccache
+        uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532
+        timeout-minutes: 3
+        with:
+          tool: just@1.51.0,nextest@0.9.103,sccache@0.7.5
+      - name: Admit bounded DotSlash install step
+        run: /usr/bin/python3 -I -S -B .github/scripts/startup_focused.py guard 1
+      - name: Provision DotSlash
+        uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a
+        timeout-minutes: 1
+      - name: Admit bounded uv install step
+        run: /usr/bin/python3 -I -S -B .github/scripts/startup_focused.py guard 1
+      - name: Provision uv 0.11.3
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        timeout-minutes: 1
+        with:
+          version: 0.11.3
+          enable-cache: false
+      - name: Admit bounded disposable package setup step
+        run: /usr/bin/python3 -I -S -B .github/scripts/startup_focused.py guard 2
+      - name: Disposable Linux prerequisites only
+        timeout-minutes: 2
+        run: |
+          sudo apt-get -o Acquire::Retries=0 update
+          sudo apt-get -o Acquire::Retries=0 install -y --no-install-recommends build-essential pkg-config libcap-dev bubblewrap
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Original sccache backend selection
+        timeout-minutes: 1
+        run: |
+          /usr/bin/python3 -I -S -B .github/scripts/startup_focused.py guard 1
+          if [[ -n "${ACTIONS_CACHE_URL:-}" && -n "${ACTIONS_RUNTIME_TOKEN:-}" ]]; then
+            echo 'SCCACHE_GHA_ENABLED=true' >> "$GITHUB_ENV"
+          else
+            echo 'SCCACHE_GHA_ENABLED=false' >> "$GITHUB_ENV"
+            echo "SCCACHE_DIR=$RUNNER_TEMP/codex-native-foundation-sccache" >> "$GITHUB_ENV"
+          fi
+      - name: Admit bounded cache restore step
+        run: /usr/bin/python3 -I -S -B .github/scripts/startup_focused.py guard 1
+      - name: Restore same-lock compiler cache
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7
+        id: cache_restore
+        if: ${{ env.SCCACHE_GHA_ENABLED != 'true' }}
+        timeout-minutes: 1
+        with:
+          path: ${{ runner.temp }}/codex-native-foundation-sccache/
+          key: sccache-smarty-v2-0.7.5-ubuntu24-x64-gnu-native_foundation-fa47688c65e86c48cc465d7e0d6195dc6338917f60a04893cf518eb171f7e2b4-${{ github.run_id }}
+          restore-keys: sccache-smarty-v2-0.7.5-ubuntu24-x64-gnu-native_foundation-fa47688c65e86c48cc465d7e0d6195dc6338917f60a04893cf518eb171f7e2b4-
+      - name: Admit bounded V8 provision step
+        run: /usr/bin/python3 -I -S -B .github/scripts/startup_focused.py guard 2
+      - name: Configure exact V8 artifact pair
+        timeout-minutes: 2
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
+      - name: Observe tools verify V8 fetch locked dependencies once
+        timeout-minutes: 20
+        run: /usr/bin/python3 -I -S -B .github/scripts/startup_focused.py provision
+      - name: One locked offline integration compile/discovery phase
+        timeout-minutes: 90
+        run: /usr/bin/python3 -I -S -B .github/scripts/startup_focused.py run
+      - name: Retain source index drift and UNRUN facts
+        if: always()
+        timeout-minutes: 3
+        run: /usr/bin/python3 -I -S -B .github/scripts/startup_focused.py finish
+      - name: Retain action outcomes and cache miss facts
+        if: always()
+        timeout-minutes: 1
+        env:
+          CACHE_OUTCOME: ${{ steps.cache_restore.outcome }}
+          CACHE_PRIMARY_KEY: ${{ steps.cache_restore.outputs.cache-primary-key }}
+          CACHE_MATCHED_KEY: ${{ steps.cache_restore.outputs.cache-matched-key }}
+          CACHE_EXACT_HIT: ${{ steps.cache_restore.outputs.cache-hit }}
+          ACTION_OUTCOMES: ${{ toJSON(steps) }}
+        run: |
+          /usr/bin/python3 -I -S -B - <<'PY'
+          import json,os,pathlib
+          p=pathlib.Path('backend-evidence');p.mkdir(exist_ok=True)
+          (p/'cache-restore.json').write_text(json.dumps({k:os.environ.get(k) for k in ('CACHE_OUTCOME','CACHE_PRIMARY_KEY','CACHE_MATCHED_KEY','CACHE_EXACT_HIT','SCCACHE_GHA_ENABLED')})+'\n')
+          (p/'action-outcomes.json').write_text(os.environ['ACTION_OUTCOMES']+'\n')
+          PY
+      - name: Retain focused evidence without cache promotion
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: codex-startup-focused-${{ github.sha }}-${{ github.run_attempt }}
+          path: backend-evidence/
+          retention-days: 1
+          if-no-files-found: error
