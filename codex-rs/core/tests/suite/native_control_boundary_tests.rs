@@ -271,7 +271,7 @@ async fn owner_commit_receives_actual_native_identity_and_cannot_replay() -> any
     .await;
     let test = test_codex().build_with_auto_env(&server).await?;
     let owner = Arc::new(OwnerAdmission {
-        thread_id: test.session_configured.session_id,
+        thread_id: test.session_configured.session_id.into(),
         allowed: AtomicBool::new(/*v*/ false),
         commits: Mutex::default(),
     });
@@ -310,7 +310,7 @@ async fn owner_commit_receives_actual_native_identity_and_cannot_replay() -> any
     .await?;
     assert_eq!(
         *owner.commits.lock().unwrap(),
-        vec![(test.session_configured.session_id, turn_id)],
+        vec![(ThreadId::from(test.session_configured.session_id), turn_id)],
     );
     assert_eq!(
         test.codex.start_turn_if_idle(request).await?,

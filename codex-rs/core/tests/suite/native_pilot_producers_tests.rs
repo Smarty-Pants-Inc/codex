@@ -7,6 +7,8 @@ use codex_core::PilotGrantClaims;
 use codex_core::PilotPermission;
 use codex_core::PilotRequestReservation;
 use codex_models_manager::model_info::model_info_from_slug;
+use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TokenUsage;
@@ -49,7 +51,7 @@ async fn host_startup_selection_fences_both_session_construction_routes() -> any
         })
         .await;
     assert!(
-        matches!(started, Err(codex_protocol::error::CodexErr::InvalidRequest(ref message))
+        matches!(started.as_ref().err().map(CodexErr::details), Some(CodexErrorDetails::InvalidRequest(message))
         if message == "native pilot requires an explicit model")
     );
     // The actual resume entry must pass the attachment before constructing the
@@ -60,7 +62,7 @@ async fn host_startup_selection_fences_both_session_construction_routes() -> any
         .resume_thread_with_history_and_init(
             config.clone(),
             codex_history::InitialHistory::Resumed(codex_history::ResumedHistory {
-                conversation_id: test.session_configured.session_id,
+                conversation_id: test.session_configured.session_id.into(),
                 history: Arc::new(vec![]),
                 rollout_path: None,
             }),
@@ -71,7 +73,7 @@ async fn host_startup_selection_fences_both_session_construction_routes() -> any
         )
         .await;
     assert!(
-        matches!(resumed, Err(codex_protocol::error::CodexErr::InvalidRequest(ref message))
+        matches!(resumed.as_ref().err().map(CodexErr::details), Some(CodexErrorDetails::InvalidRequest(message))
         if message == "native pilot requires an explicit model")
     );
     let ordinary = test
@@ -174,7 +176,7 @@ async fn original_thread_admission_send_usage_and_shutdown_share_native_custody(
             grant_id: Uuid::new_v4(),
             issuer_generation: 1,
             owner,
-            thread_id: test.session_configured.session_id,
+            thread_id: test.session_configured.session_id.into(),
             scope: "fixture-scope".into(),
             permissions: [PilotPermission::AutomaticTurn].into(),
             expires_at: chrono::Utc::now().timestamp() + 3600,
@@ -194,7 +196,7 @@ async fn original_thread_admission_send_usage_and_shutdown_share_native_custody(
         .await?;
     let before = codex_core::PilotReport {
         owner,
-        thread_id: test.session_configured.session_id,
+        thread_id: test.session_configured.session_id.into(),
         grant_id: issuer.claims.grant_id,
         revoked: false,
         active_decision: None,
