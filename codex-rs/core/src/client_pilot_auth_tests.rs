@@ -9,6 +9,7 @@ use codex_client::Request;
 use codex_client::RequestAuthentication;
 use codex_model_provider::ProviderAuthScope;
 use codex_model_provider::ResolvedProviderAuth;
+use pretty_assertions::assert_eq;
 use std::num::NonZeroU64;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;

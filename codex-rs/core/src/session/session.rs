@@ -837,9 +837,8 @@ impl Session {
             .map(|policy| *policy)
             .unwrap_or_default();
         #[cfg(test)]
-        let startup_auth_probe = thread_extension_init
-            .get::<Arc<super::startup_auth_tests::StartupAuthProbe>>()
-            .cloned();
+        let startup_auth_probe =
+            thread_extension_init.get::<Arc<super::startup_auth_tests::StartupAuthProbe>>();
         let mcp_thread_init = thread_extension_init.clone();
         let thread_extension_data = codex_extension_api::ExtensionData::new_with_init(
             thread_id.to_string(),
