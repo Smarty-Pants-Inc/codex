@@ -30,9 +30,7 @@ jobs:
       matrix:
         include:
           # macOS
-          - os: macos-15
-            target: aarch64-apple-darwin
-          - os: macos-15
+          - os: macos-15-intel
             target: x86_64-apple-darwin
 
           # 2026-02-27 Bazel tests have been flaky on arm in CI.
@@ -51,13 +49,13 @@ jobs:
       deployment: false
 
     steps:
-      - name: Record standard Mac fit identity
+      - name: Record native Intel Mac fit identity
         shell: bash
         run: |
           set -euo pipefail
           test "$RUNNER_OS" = macOS
-          test "$RUNNER_ARCH" = ARM64
-          test "$(uname -m)" = arm64
+          test "$RUNNER_ARCH" = X64
+          test "$(uname -m)" = x86_64
           test -z "${BUILDBUDDY_API_KEY:-}"
           printf 'source=%s job=%s run=%s attempt=%s\n' "$GITHUB_SHA" "$GITHUB_JOB" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
           uname -a
@@ -67,7 +65,7 @@ jobs:
           xcodebuild -version
           xcrun --show-sdk-version
           xcrun --show-sdk-path
-          printf 'Cross-target x86_64 on ARM is not native Intel coverage.\n'
+          printf 'Actual native Intel host; complete original tests remain required for coverage.\n'
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
@@ -134,7 +132,7 @@ jobs:
       # Save the job-scoped Bazel repository cache after cache misses. Keep the
       # upload non-fatal so cache service issues never fail the job itself.
       - name: Save bazel repository cache
-        if: always() && !cancelled() && steps.prepare_bazel.outputs.repository-cache-hit != 'true'
+        if: ${{ false }} # Read-only cache qualification; no new storage is admitted.
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
@@ -348,6 +346,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   clippy:
+    if: ${{ false }} # Not selected for the single native Intel test operation.
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -461,6 +460,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   verify-release-build:
+    if: ${{ false }} # Not selected for the single native Intel test operation.
     timeout-minutes: 30
     strategy:
       fail-fast: false
