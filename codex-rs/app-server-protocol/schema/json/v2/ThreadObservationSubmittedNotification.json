@@ -1,0 +1,94 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ObservationCaptureState": {
+      "enum": [
+        "current",
+        "cleared",
+        "expired",
+        "unavailable"
+      ],
+      "type": "string"
+    },
+    "ObservationSubmissionOutcome": {
+      "enum": [
+        "accepted",
+        "rejected",
+        "unknown"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "attemptId": {
+      "type": "string"
+    },
+    "capturedAt": {
+      "format": "int64",
+      "type": "integer"
+    },
+    "commitOrder": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "decisionId": {
+      "type": "string"
+    },
+    "frameHash": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "frameRevision": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "outcome": {
+      "$ref": "#/definitions/ObservationSubmissionOutcome"
+    },
+    "ownerEpoch": {
+      "type": "string"
+    },
+    "providerRequestId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "requestId": {
+      "description": "Native wire-request identity, not a fabricated upstream ID.",
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/definitions/ObservationCaptureState"
+    },
+    "terminalDecision": {
+      "type": "boolean"
+    },
+    "threadId": {
+      "type": "string"
+    },
+    "turnId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "attemptId",
+    "capturedAt",
+    "commitOrder",
+    "decisionId",
+    "frameRevision",
+    "outcome",
+    "ownerEpoch",
+    "requestId",
+    "state",
+    "terminalDecision",
+    "threadId",
+    "turnId"
+  ],
+  "title": "ThreadObservationSubmittedNotification",
+  "type": "object"
+}
