@@ -2,6 +2,7 @@ use super::*;
 use crate::IdleTurnAdmission;
 use crate::ObservationProfile;
 use codex_protocol::ThreadId;
+use pretty_assertions::assert_eq;
 
 #[derive(Debug)]
 struct OriginalPolicy;
