@@ -1029,12 +1029,14 @@ pub(crate) async fn apply_bespoke_event_handling(
                 outgoing.send_server_notification(notification).await;
             }
             if let Some(params) = dynamic_tool_call_params {
+                let turn_id = params.turn_id.clone();
                 let call_id = params.call_id.clone();
                 let (_pending_request_id, rx) = outgoing
                     .send_request(ServerRequestPayload::DynamicToolCall(params))
                     .await;
                 tokio::spawn(async move {
-                    crate::dynamic_tools::on_call_response(call_id, rx, conversation).await;
+                    crate::dynamic_tools::on_call_response(turn_id, call_id, rx, conversation)
+                        .await;
                 });
             }
         }

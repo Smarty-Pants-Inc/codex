@@ -104,10 +104,22 @@ impl<T: HttpTransport> EndpointSession<T> {
                 let transport = &self.transport;
                 let telemetry = self.request_telemetry.clone();
                 async move {
-                    let req = auth.apply_auth(req).await.map_err(TransportError::from)?;
+                    let mut req = req;
+                    let selection = telemetry
+                        .as_ref()
+                        .map(|hook| hook.authenticate_request(&mut req))
+                        .transpose()
+                        .map_err(TransportError::Build)?
+                        .unwrap_or(codex_client::RequestAuthentication::Provider);
+                    let req = match selection {
+                        codex_client::RequestAuthentication::Provider => {
+                            auth.apply_auth(req).await.map_err(TransportError::from)?
+                        }
+                        codex_client::RequestAuthentication::Prepared => req,
+                    };
                     if let Some(telemetry) = telemetry {
                         telemetry
-                            .on_request_start()
+                            .on_request_prepared(&req)
                             .map_err(TransportError::Build)?;
                     }
                     transport.execute(req).await
@@ -151,10 +163,22 @@ impl<T: HttpTransport> EndpointSession<T> {
                 let transport = &self.transport;
                 let telemetry = self.request_telemetry.clone();
                 async move {
-                    let req = auth.apply_auth(req).await.map_err(TransportError::from)?;
+                    let mut req = req;
+                    let selection = telemetry
+                        .as_ref()
+                        .map(|hook| hook.authenticate_request(&mut req))
+                        .transpose()
+                        .map_err(TransportError::Build)?
+                        .unwrap_or(codex_client::RequestAuthentication::Provider);
+                    let req = match selection {
+                        codex_client::RequestAuthentication::Provider => {
+                            auth.apply_auth(req).await.map_err(TransportError::from)?
+                        }
+                        codex_client::RequestAuthentication::Prepared => req,
+                    };
                     if let Some(telemetry) = telemetry {
                         telemetry
-                            .on_request_start()
+                            .on_request_prepared(&req)
                             .map_err(TransportError::Build)?;
                     }
                     transport.stream(req).await

@@ -1,5 +1,6 @@
 //! Trusted launch selection. RPC opt-in never creates this authority.
 
+use crate::observation_pilot_launch::PilotStartup;
 use crate::transport::AppServerTransport;
 use crate::transport::ConnectionOrigin;
 use codex_core::ObservationProfile;
@@ -19,6 +20,8 @@ pub struct ObservationStartup {
     /// Only this host-admitted persisted thread may resume with observations.
     /// The host must reconnect its approved dynamic-tool handler before resume.
     pub resume_thread: Option<ThreadId>,
+    /// Original descriptor custody; never reconstructed from thread/RPC data.
+    pub pilot: Option<PilotStartup>,
 }
 
 /// Explicit launch-only controls; these do not modify provider routing or config.
@@ -28,6 +31,14 @@ pub struct AppServerObservationArgs {
     observation_profile: Option<String>,
     #[arg(long, hide = true, requires = "observation_profile")]
     observation_resume_thread: Option<String>,
+    #[arg(long, hide = true, requires = "observation_profile", value_parser = ["3"])]
+    sense_pilot_launch_fd: Option<String>,
+    #[arg(long, hide = true, value_parser = ["4"], requires_all = ["sense_pilot_launch_fd", "sense_pilot_prepared_fd", "sense_pilot_prepared_sha256"])]
+    sense_pilot_credential_fd: Option<String>,
+    #[arg(long, hide = true, value_parser = ["5"], requires = "sense_pilot_credential_fd")]
+    sense_pilot_prepared_fd: Option<String>,
+    #[arg(long, hide = true, requires = "sense_pilot_credential_fd")]
+    sense_pilot_prepared_sha256: Option<String>,
 }
 
 impl AppServerObservationArgs {
@@ -35,8 +46,13 @@ impl AppServerObservationArgs {
         let Some(_profile) = self.observation_profile else {
             return Ok(None);
         };
+        let pilot = self
+            .sense_pilot_launch_fd
+            .map(|_| PilotStartup::receive(self.sense_pilot_prepared_sha256.as_deref()))
+            .transpose()?;
         Ok(Some(ObservationStartup {
             profile: ObservationProfile::HarmonyGptOss,
+            pilot,
             resume_thread: self
                 .observation_resume_thread
                 .as_deref()
@@ -64,6 +80,9 @@ impl ObservationStartup {
                 io::ErrorKind::InvalidInput,
                 "observation admission requires an exclusively owned stdio launch",
             ));
+        }
+        if let Some(pilot) = &self.pilot {
+            pilot.check_home(home)?;
         }
         let lock = OpenOptions::new()
             .read(true)

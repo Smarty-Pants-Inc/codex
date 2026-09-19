@@ -31,8 +31,8 @@ pub struct ObservationSubmitted {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ObservationAttempt {
-    decision_id: Uuid,
-    attempt_id: Uuid,
+    pub(super) decision_id: Uuid,
+    pub(super) attempt_id: Uuid,
 }
 
 pub(super) struct DecisionAudit {
@@ -76,6 +76,22 @@ impl ObservationSlot {
         &self,
         decision_id: Uuid,
     ) -> Result<ObservationAttempt, ObservationError> {
+        self.begin_attempt_inner(decision_id, /*request*/ None)
+    }
+
+    pub(crate) fn begin_attempt_for_request(
+        &self,
+        decision_id: Uuid,
+        request: &codex_client::Request,
+    ) -> Result<ObservationAttempt, ObservationError> {
+        self.begin_attempt_inner(decision_id, Some(request))
+    }
+
+    fn begin_attempt_inner(
+        &self,
+        decision_id: Uuid,
+        request: Option<&codex_client::Request>,
+    ) -> Result<ObservationAttempt, ObservationError> {
         let mut state = self.state.try_lock().map_err(|error| match error {
             std::sync::TryLockError::WouldBlock => ObservationError::ResourceLimit,
             std::sync::TryLockError::Poisoned(_) => ObservationError::Unavailable,
@@ -90,15 +106,32 @@ impl ObservationSlot {
         if audit.decision_id() != decision_id {
             return Err(ObservationError::RevisionMismatch);
         }
-        if audit.attempt_started {
+        let turn_id = audit.record.turn_id.clone();
+        let previous = if audit.attempt_started {
             if state.commit_order >= MAX_SEQUENCE - 1 {
                 return Err(ObservationError::ResourceLimit);
             }
-            let permit = self
-                .events
-                .try_reserve()
-                .map_err(|_| ObservationError::ResourceLimit)?;
-            let mut previous = audit.record.clone();
+            Some((
+                audit.record.clone(),
+                self.events
+                    .try_reserve()
+                    .map_err(|_| ObservationError::ResourceLimit)?,
+            ))
+        } else {
+            None
+        };
+        // Check all fallible native audit capacity before reserving a pilot send.
+        let reservation = if let Some(pilot) = state.pilot.as_mut() {
+            let request = request.ok_or(ObservationError::Unavailable)?;
+            Some(
+                pilot
+                    .reserve((self.clock)()?, &turn_id, request)
+                    .map_err(|_| ObservationError::Unavailable)?,
+            )
+        } else {
+            None
+        };
+        if let Some((mut previous, permit)) = previous {
             state.commit_order += 1;
             previous.commit_order = state.commit_order;
             permit.send(ObservationEvent::Submitted(previous));
@@ -112,10 +145,17 @@ impl ObservationSlot {
         audit.record.provider_request_id = None;
         audit.record.outcome = ObservationOutcome::Unknown;
         audit.attempt_started = true;
-        Ok(ObservationAttempt {
+        let attempt = ObservationAttempt {
             decision_id,
             attempt_id: audit.record.attempt_id,
-        })
+        };
+        let reserved_record = reservation.map(|reservation| (audit.record.clone(), reservation));
+        if let Some((record, reservation)) = reserved_record
+            && let Some(pilot) = state.pilot.as_mut()
+        {
+            pilot.record_attempt(&record, reservation);
+        }
+        Ok(attempt)
     }
 
     /// A concrete attempt token cannot update a later retry/decision. Header ID

@@ -20,6 +20,19 @@ use std::sync::Arc;
 /// to register higher-priority work. The callback must not block or await.
 pub trait IdleTurnAdmission: std::fmt::Debug + Send + Sync {
     fn reserve_if_allowed(&self, reserve: &mut dyn FnMut()) -> bool;
+
+    /// Reserve a concrete native turn while retaining the owner's synchronous
+    /// admission guard. Existing queue owners need no thread-specific authority.
+    /// Owners that bind a grant to a turn must invoke `reserve` before releasing
+    /// that same guard; returning true without invoking it never admits a turn.
+    fn reserve_turn_if_allowed(
+        &self,
+        _thread_id: &crate::ThreadId,
+        _turn_id: &str,
+        reserve: &mut dyn FnMut(),
+    ) -> bool {
+        self.reserve_if_allowed(reserve)
+    }
 }
 
 /// Result of stopping an unfinished root turn so another worker can recover it.

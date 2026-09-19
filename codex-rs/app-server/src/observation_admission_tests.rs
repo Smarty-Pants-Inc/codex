@@ -6,6 +6,7 @@ async fn connection_revocation_prevents_late_install_admission() -> anyhow::Resu
     let admission = ObservationStartup {
         profile: ObservationProfile::HarmonyGptOss,
         resume_thread: None,
+        pilot: None,
     }
     .acquire(home.path(), &AppServerTransport::Stdio)?;
     let manager = crate::thread_state::ThreadStateManager::new();
@@ -32,6 +33,7 @@ fn startup_lock_and_actual_origin_fence_admission() -> anyhow::Result<()> {
     let selection = ObservationStartup {
         profile: ObservationProfile::HarmonyGptOss,
         resume_thread: Some(thread_id),
+        pilot: None,
     };
     assert!(
         selection

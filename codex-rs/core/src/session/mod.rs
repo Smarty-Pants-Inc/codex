@@ -99,7 +99,6 @@ use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::WebSearchMode;
-use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::items::EnteredReviewModeItem;
 use codex_protocol::items::SubAgentActivityItem;
@@ -210,6 +209,7 @@ use codex_protocol::exec_output::StreamOutput;
 
 mod code_mode_warning;
 pub(crate) mod context_window;
+mod dynamic_tool_response;
 mod environment;
 pub(crate) mod extension_metrics;
 mod handlers;
@@ -585,29 +585,45 @@ impl Session {
         };
 
         let mut config = Arc::new(config);
+        let provider_startup_policy = thread_extension_init
+            .get::<crate::ProviderStartupPolicy>()
+            .map(|policy| *policy)
+            .unwrap_or_default();
         let refresh_strategy = if session_source.is_non_root_agent() {
             codex_models_manager::manager::RefreshStrategy::Offline
         } else {
             codex_models_manager::manager::RefreshStrategy::OnlineIfUncached
         };
-        if config.model.is_none()
-            || !matches!(
-                refresh_strategy,
-                codex_models_manager::manager::RefreshStrategy::Offline
-            )
-        {
-            let _ = models_manager
-                .list_models(refresh_strategy, config.http_client_factory())
-                .await;
-        }
-        let model = models_manager
-            .get_default_model(
-                &config.model,
-                allow_provider_model_fallback,
-                refresh_strategy,
-                config.http_client_factory(),
-            )
-            .await;
+        let model = if provider_startup_policy.permits_ambient_auth() {
+            if config.model.is_none()
+                || !matches!(
+                    refresh_strategy,
+                    codex_models_manager::manager::RefreshStrategy::Offline
+                )
+            {
+                let _ = models_manager
+                    .list_models(refresh_strategy, config.http_client_factory())
+                    .await;
+            }
+            models_manager
+                .get_default_model(
+                    &config.model,
+                    allow_provider_model_fallback,
+                    refresh_strategy,
+                    config.http_client_factory(),
+                )
+                .await
+        } else {
+            // Even Offline model discovery can inspect auth before reading cache.
+            // The admitted pilot must select its model explicitly, without discovery.
+            config
+                .model
+                .clone()
+                .filter(|model| !model.is_empty())
+                .ok_or_else(|| {
+                    CodexErr::InvalidRequest("native pilot requires an explicit model".into())
+                })?
+        };
         let trusted_guardian_reviewer = crate::guardian::is_basic_session_source(&session_source)
             && !matches!(conversation_history, InitialHistory::Resumed(_));
         if config
@@ -2966,31 +2982,6 @@ impl Session {
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
     )]
-    pub async fn notify_dynamic_tool_response(&self, call_id: &str, response: DynamicToolResponse) {
-        let entry = {
-            let mut active = self.active_turn.lock().await;
-            match active.as_mut() {
-                Some(at) => {
-                    let mut ts = at.turn_state.lock().await;
-                    ts.remove_pending_dynamic_tool(call_id)
-                }
-                None => None,
-            }
-        };
-        match entry {
-            Some(tx_response) => {
-                tx_response.send(response).ok();
-            }
-            None => {
-                warn!("No pending dynamic tool call found for call_id: {call_id}");
-            }
-        }
-    }
-
-    #[expect(
-        clippy::await_holding_invalid_type,
-        reason = "active turn checks and turn state updates must remain atomic"
-    )]
     pub async fn notify_approval(
         &self,
         approval_id: &str,
@@ -4340,3 +4331,7 @@ mod elicitation_holders_tests;
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "startup_auth_tests.rs"]
+pub(crate) mod startup_auth_tests;
