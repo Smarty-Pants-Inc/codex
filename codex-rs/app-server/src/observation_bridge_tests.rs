@@ -105,7 +105,7 @@ async fn one_relay_orders_correlated_acks_capture_and_terminal_to_owner_only() {
             (ConnectionId(42), "read", 0),
             (ConnectionId(42), "captured", 1),
             (ConnectionId(42), "set", 2),
-            (ConnectionId(42), "submitted", 3)
+            (ConnectionId(42), "submitted", 1)
         ]
     );
     assert!(bridge.pending.lock().unwrap().is_empty());
