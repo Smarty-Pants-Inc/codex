@@ -30,6 +30,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@a0b273b48ed29de4470960879e8381ff45632f26 # 1.93.0
         with:
           components: rustfmt
+      - name: Check bubblewrap netlink replies
+        working-directory: codex-rs/bwrap
+        run: |
+          test_binary="$(mktemp)"
+          trap 'rm -f "$test_binary"' EXIT
+          cc -std=gnu11 -Wall -Wextra -ffunction-sections -fdata-sections \
+            -I. -I../vendor/bubblewrap -Wl,--gc-sections \
+            tests/netlink_reply.c -o "$test_binary"
+          "$test_binary"
       - name: Check Rust formatting
         working-directory: codex-rs
         run: cargo fmt -- --config imports_granularity=Item --check
