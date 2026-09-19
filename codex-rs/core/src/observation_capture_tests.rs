@@ -103,3 +103,53 @@ fn clear_revoke_and_full_fifo_never_capture_an_old_body() {
         Some("Current observations unavailable.")
     );
 }
+
+#[test]
+fn captured_group_lease_expires_atomically_even_after_a_later_publication() {
+    let (slot, _events, owner, time) = setup();
+    let text = "original-group".repeat(2048);
+    slot.set(owner, /*revision*/ 1, frame(&text, /*expires_at*/ 160))
+        .unwrap();
+    let mut model = codex_models_manager::model_info::model_info_from_slug("gpt-oss-20b");
+    model.context_window = Some(131_072);
+    model.effective_context_window_percent = 100;
+    let mut items = Vec::new();
+    let captured = slot
+        .capture_checked("turn", Some(&model), |capture| {
+            items = crate::context::CurrentObservations::new(
+                crate::ObservationProfile::HarmonyGptOss,
+                &model,
+                capture,
+            )?
+            .unwrap()
+            .into_request_items();
+            ObservationSlot::request_input_digest(items.clone()).map(Some)
+        })
+        .unwrap();
+    assert!(items.len() > 1);
+    let request = codex_client::Request::new(http::Method::POST, "http://fixture/responses".into())
+        .with_json(&serde_json::json!({"input": items, "stream": true, "store": false}));
+    let now = *time.lock().unwrap();
+    *time.lock().unwrap() = later(now, /*seconds*/ 30);
+    slot.set(
+        owner,
+        /*revision*/ 2,
+        frame("new-group", /*expires_at*/ 190),
+    )
+    .unwrap();
+    // Monotonic expiry must fence the original group even if wall time regresses
+    // and the newly published slot still has an unexpired lease.
+    *time.lock().unwrap() = ObservationClock {
+        wall_seconds: 100,
+        ..later(now, /*seconds*/ 60)
+    };
+    assert_eq!(
+        slot.begin_attempt_for_request(captured.decision_id, &request),
+        Err(ObservationError::InvalidFrame)
+    );
+    slot.release(captured.decision_id).unwrap();
+    assert_eq!(
+        slot.capture("next").unwrap().text.as_deref(),
+        Some("new-group")
+    );
+}

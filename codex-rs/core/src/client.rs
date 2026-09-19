@@ -1572,7 +1572,12 @@ impl ModelClientSession {
                 } else {
                     (request_telemetry, sse_telemetry)
                 };
-            let compression = self.responses_request_compression(client_setup.auth.as_ref());
+            let compression = if self.observation_full_context {
+                // The observation audit binds the actual complete JSON input.
+                Compression::None
+            } else {
+                self.responses_request_compression(client_setup.auth.as_ref())
+            };
             let mut options = self.build_responses_options(
                 responses_metadata,
                 compression,
