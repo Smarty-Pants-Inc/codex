@@ -2,6 +2,7 @@ use super::*;
 use crate::ObservationProfile;
 use codex_models_manager::model_info::model_info_from_slug;
 use codex_protocol::openai_models::ModelInfo;
+use pretty_assertions::assert_eq;
 
 fn model() -> ModelInfo {
     let mut model = model_info_from_slug("gpt-oss-20b");
