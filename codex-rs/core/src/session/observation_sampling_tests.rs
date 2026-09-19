@@ -42,6 +42,12 @@ fn unchanged_retry_retains_a_and_changed_canonical_input_captures_b() {
     );
     let a = sampling.prepare(vec![], &model()).unwrap();
     let a_id = sampling.active.as_ref().unwrap().capture.decision_id;
+    let mut shrunken = model();
+    shrunken.context_window = Some(crate::observation::RESERVED_TOKENS);
+    assert_eq!(
+        sampling.prepare(vec![], &shrunken),
+        Err(ObservationError::Unavailable)
+    );
     slot.set(owner, /*revision*/ 2, Some(frame("view B")))
         .unwrap();
     assert_eq!(sampling.prepare(vec![], &model()).unwrap(), a);
@@ -74,7 +80,7 @@ fn unchanged_retry_retains_a_and_changed_canonical_input_captures_b() {
 }
 
 #[test]
-fn rejected_render_does_not_commit_or_publish_a_capture() {
+fn rejected_profile_does_not_commit_or_publish_a_capture() {
     let (slot, mut events, owner) = ObservationSlot::new(/*connection_id*/ 1);
     let slot = Arc::new(slot);
     let published = slot
@@ -89,9 +95,11 @@ fn rejected_render_does_not_commit_or_publish_a_capture() {
         ObservationProfile::HarmonyGptOss,
         "turn-a".into(),
     );
+    let mut unsupported = model();
+    unsupported.context_window = Some(crate::observation::RESERVED_TOKENS);
     assert_eq!(
-        sampling.prepare(vec![], &model()),
-        Err(ObservationError::InvalidFrame)
+        sampling.prepare(vec![], &unsupported),
+        Err(ObservationError::Unavailable)
     );
     assert!(events.try_recv().is_err());
     assert_eq!(slot.read(owner).unwrap(), published);

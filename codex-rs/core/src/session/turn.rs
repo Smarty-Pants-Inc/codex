@@ -1434,15 +1434,13 @@ async fn run_sampling_request(
         let observation_prompt = if let Some(observations) = observations.as_mut() {
             let mut canonical_input = prompt.input.clone();
             client_session.prepare_response_items_for_request(&mut canonical_input);
-            let (item, decision_id) = observations
+            let (items, decision_id) = observations
                 .prepare(canonical_input, &step_context.model_info)
                 .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
             client_session.observation_decision =
                 Some((Arc::clone(&observations.slot), decision_id));
             let mut request_prompt = prompt.clone();
-            if let Some(item) = item {
-                request_prompt.input.push(item);
-            }
+            request_prompt.input.extend(items);
             Some(request_prompt)
         } else {
             None
