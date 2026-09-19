@@ -36,6 +36,7 @@ assert_matches = { workspace = true }
 pretty_assertions = { workspace = true }
 tokio-test = { workspace = true }
 wiremock = { workspace = true }
+zstd = { workspace = true }
 
 [lints]
 workspace = true

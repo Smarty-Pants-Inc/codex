@@ -14,6 +14,10 @@ use tracing::Level;
 use tracing::enabled;
 use tracing::trace;
 
+#[cfg(test)]
+#[path = "body_trace_tests.rs"]
+mod body_trace_tests;
+
 pub type ByteStream = BoxStream<'static, Result<Bytes, TransportError>>;
 
 pub struct StreamResponse {
