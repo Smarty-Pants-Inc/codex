@@ -29,6 +29,7 @@ pub(crate) enum ControlOperation {
     Set {
         revision: u64,
         frame: Option<ObservationFrame>,
+        expected_budget_generation: u64,
     },
     Read,
 }
@@ -83,12 +84,7 @@ impl ObservationBridge {
         epoch: &str,
         operation: ControlOperation,
     ) -> Result<(), JSONRPCErrorError> {
-        if request.connection_id.0 != self.owner.connection_id {
-            return Err(rejected(Code::Denied));
-        }
-        if self.cancelled.is_cancelled() || Uuid::parse_str(epoch).ok() != Some(self.owner.epoch) {
-            return Err(rejected(Code::StaleOwner));
-        }
+        self.validate_owner(request.connection_id, epoch)?;
         let mut pending = self
             .pending
             .try_lock()
@@ -99,7 +95,11 @@ impl ObservationBridge {
         let id = Uuid::new_v4();
         // Only metadata/correlation remain pending: never retain the frame body.
         let result = match operation {
-            ControlOperation::Set { revision, frame } => {
+            ControlOperation::Set {
+                revision,
+                frame,
+                expected_budget_generation,
+            } => {
                 pending.insert(
                     id,
                     Pending {
@@ -107,7 +107,13 @@ impl ObservationBridge {
                         kind: ReplyKind::Set,
                     },
                 );
-                self.slot.set_for_request(self.owner, revision, frame, id)
+                self.slot.set_for_request_at_budget(
+                    self.owner,
+                    revision,
+                    frame,
+                    id,
+                    expected_budget_generation,
+                )
             }
             ControlOperation::Read => {
                 pending.insert(
@@ -123,6 +129,20 @@ impl ObservationBridge {
         if let Err(error) = result {
             pending.remove(&id);
             return Err(store_error(error));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_owner(
+        &self,
+        connection_id: ConnectionId,
+        epoch: &str,
+    ) -> Result<(), JSONRPCErrorError> {
+        if connection_id.0 != self.owner.connection_id {
+            return Err(rejected(Code::Denied));
+        }
+        if self.cancelled.is_cancelled() || Uuid::parse_str(epoch).ok() != Some(self.owner.epoch) {
+            return Err(rejected(Code::StaleOwner));
         }
         Ok(())
     }
@@ -169,12 +189,19 @@ impl ObservationBridge {
                                 ObservationStatus::Current => ObservationPublicationState::Current,
                                 ObservationStatus::Cleared => ObservationPublicationState::Cleared,
                                 ObservationStatus::Expired => ObservationPublicationState::Expired,
-                                ObservationStatus::Unavailable => return None,
+                                ObservationStatus::Unavailable => {
+                                    ObservationPublicationState::Unavailable
+                                }
                             };
                             if metadata.owner != bridge.owner {
                                 return None;
                             }
                             let response = ThreadObservationSetResponse {
+                                protocol: 2,
+                                native_reservation: crate::observation_notifications::reservation(
+                                    metadata.native_reservation?,
+                                ),
+                                frame_budget_generation: metadata.frame_budget_generation,
                                 owner_epoch: metadata.owner.epoch.to_string(),
                                 revision: metadata.revision,
                                 hash: metadata.hash,
@@ -195,8 +222,9 @@ impl ObservationBridge {
                                 .await
                                 .then_some(())?;
                         }
-                        event
-                        @ (ObservationEvent::Captured(_) | ObservationEvent::Submitted(_)) => {
+                        event @ (ObservationEvent::Captured(_)
+                        | ObservationEvent::Submitted(_)
+                        | ObservationEvent::Budget { .. }) => {
                             let notification = notification(bridge.thread_id, bridge.owner, event)?;
                             outgoing
                                 .send_server_notification_to_connections(
@@ -206,9 +234,7 @@ impl ObservationBridge {
                                 .await
                                 .then_some(())?;
                         }
-                        ObservationEvent::Published(_)
-                        | ObservationEvent::Read(_)
-                        | ObservationEvent::Budget { .. } => return None,
+                        ObservationEvent::Published(_) | ObservationEvent::Read(_) => return None,
                     }
                     Some(())
                 };

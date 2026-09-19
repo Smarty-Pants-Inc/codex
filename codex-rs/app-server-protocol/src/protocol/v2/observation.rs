@@ -25,6 +25,48 @@ pub struct ThreadObservationCapabilities {
     pub max_in_flight_decisions: u32,
     pub replacement: ObservationReplacement,
     pub automatic_admission: bool,
+    pub native_reservation: NativeReservation,
+}
+
+/// Native capacity preconditions only; never external model/framing qualification.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct NativeReservation {
+    pub generation: u64,
+    pub state: NativeReservationState,
+    pub model: Option<String>,
+    pub profile: NativeReservationProfile,
+    pub usable_context_tokens: Option<u64>,
+    pub reserved_tokens: u32,
+    pub max_frame_bytes: u32,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum NativeReservationState {
+    Valid,
+    Invalid,
+    Unsupported,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase", export_to = "v2/")]
+pub enum NativeReservationProfile {
+    HarmonyGptOss,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadObservationBudgetNotification {
+    pub protocol: u32,
+    pub thread_id: String,
+    pub owner_epoch: String,
+    pub commit_order: u64,
+    pub native_reservation: NativeReservation,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -62,6 +104,7 @@ pub struct ThreadObservationSetParams {
     /// JSON-safe, monotonically increasing, except active identical-frame renewal.
     pub revision: u64,
     pub frame: ObservationFrameUpdate,
+    pub expected_budget_generation: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -76,6 +119,10 @@ pub struct ThreadObservationReadParams {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadObservationSetResponse {
+    pub protocol: u32,
+    pub native_reservation: NativeReservation,
+    /// Original committed frame generation; never relabeled by revalidation.
+    pub frame_budget_generation: Option<u64>,
     pub owner_epoch: String,
     pub revision: u64,
     pub hash: Option<String>,
@@ -93,6 +140,7 @@ pub enum ObservationPublicationState {
     Current,
     Cleared,
     Expired,
+    Unavailable,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -109,6 +157,8 @@ pub enum ObservationCaptureState {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadObservationCapturedNotification {
+    pub protocol: u32,
+    pub budget_generation: u64,
     pub thread_id: String,
     pub turn_id: String,
     pub owner_epoch: String,
@@ -125,6 +175,8 @@ pub struct ThreadObservationCapturedNotification {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadObservationSubmittedNotification {
+    pub protocol: u32,
+    pub budget_generation: u64,
     pub thread_id: String,
     pub turn_id: String,
     pub owner_epoch: String,

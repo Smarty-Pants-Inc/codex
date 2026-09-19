@@ -48,6 +48,9 @@ pub(super) fn server_notification_thread_target(
     let thread_id = match notification {
         ServerNotification::Error(notification) => Some(notification.thread_id.as_str()),
         ServerNotification::ThreadStarted(notification) => Some(notification.thread.id.as_str()),
+        ServerNotification::ThreadObservationBudget(notification) => {
+            Some(notification.thread_id.as_str())
+        }
         ServerNotification::ThreadObservationCaptured(notification) => {
             Some(notification.thread_id.as_str())
         }
@@ -264,6 +267,8 @@ mod tests {
             let notifications = [
                 ServerNotification::ThreadObservationCaptured(
                     ThreadObservationCapturedNotification {
+                        protocol: 2,
+                        budget_generation: 1,
                         thread_id: id.clone(),
                         turn_id: "turn".to_string(),
                         owner_epoch: "owner".to_string(),
@@ -277,6 +282,8 @@ mod tests {
                 ),
                 ServerNotification::ThreadObservationSubmitted(
                     ThreadObservationSubmittedNotification {
+                        protocol: 2,
+                        budget_generation: 1,
                         thread_id: id,
                         turn_id: "turn".to_string(),
                         owner_epoch: "owner".to_string(),

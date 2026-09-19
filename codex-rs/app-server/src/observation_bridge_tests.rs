@@ -17,11 +17,47 @@ fn request(id: i64) -> ConnectionRequestId {
     }
 }
 
+// Real native initialization; these relay tests do not qualify a provider profile.
+async fn initialize_budget(
+    bridge: &ObservationBridge,
+) -> (
+    core_test_support::test_codex::TestCodex,
+    wiremock::MockServer,
+) {
+    let server = wiremock::MockServer::start().await;
+    let test = core_test_support::test_codex::test_codex()
+        .with_config(|config| {
+            config.model = Some("gpt-oss-20b".into());
+            let mut model = codex_models_manager::model_info::model_info_from_slug("gpt-oss-20b");
+            model.context_window = Some(131_072);
+            model.effective_context_window_percent = 100;
+            model.use_responses_lite = false;
+            config.model_catalog = Some(codex_protocol::openai_models::ModelsResponse {
+                models: vec![model],
+            });
+        })
+        .build_with_auto_env(&server)
+        .await
+        .unwrap();
+    test.codex
+        .install_budgeted_observation_binding(
+            codex_core::ObservationBinding {
+                slot: Arc::clone(&bridge.slot),
+                profile: codex_core::ObservationProfile::HarmonyGptOss,
+            },
+            bridge.owner,
+        )
+        .await
+        .unwrap();
+    (test, server)
+}
+
 #[tokio::test]
 async fn one_relay_orders_correlated_acks_capture_and_terminal_to_owner_only() {
     let thread_id = ThreadId::new();
     let (bridge, events) =
         ObservationBridge::new(ConnectionOrigin::Stdio, ConnectionId(42), thread_id).unwrap();
+    let (test, _server) = initialize_budget(&bridge).await;
     let epoch = bridge.owner.epoch.to_string();
     bridge
         .submit(request(1), &epoch, ControlOperation::Read)
@@ -33,19 +69,27 @@ async fn one_relay_orders_correlated_acks_capture_and_terminal_to_owner_only() {
             &epoch,
             ControlOperation::Set {
                 revision: 1,
+                expected_budget_generation: 1,
                 frame: None,
             },
         )
         .unwrap();
+    test.codex
+        .restore_thread_settings(codex_core::CodexThreadSettingsOverrides {
+            model: Some("gpt-5".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
     bridge.slot.release(capture.decision_id).unwrap();
-    let (tx, mut rx) = mpsc::channel(4);
+    let (tx, mut rx) = mpsc::channel(5);
     let outgoing = Arc::new(OutgoingMessageSender::new(
         tx,
         codex_analytics::AnalyticsEventsClient::disabled(),
     ));
     let relay = tokio::spawn(bridge.relay(events, outgoing));
     let mut order = Vec::new();
-    for _ in 0..4 {
+    for _ in 0..5 {
         let envelope = tokio::time::timeout(Duration::from_secs(1), rx.recv())
             .await
             .unwrap()
@@ -71,7 +115,20 @@ async fn one_relay_orders_correlated_acks_capture_and_terminal_to_owner_only() {
                 other => panic!("unexpected response: {other:?}"),
             },
             OutgoingMessage::AppServerNotification(envelope) => match envelope.notification {
+                ServerNotification::ThreadObservationBudget(notification) => {
+                    assert_eq!(notification.protocol, 2);
+                    assert_eq!(notification.native_reservation.generation, 2);
+                    assert_eq!(
+                        notification.native_reservation.state,
+                        codex_app_server_protocol::NativeReservationState::Invalid
+                    );
+                    ("budget", notification.commit_order)
+                }
                 ServerNotification::ThreadObservationCaptured(notification) => {
+                    assert_eq!(
+                        (notification.protocol, notification.budget_generation),
+                        (2, 1)
+                    );
                     assert_eq!(
                         (
                             notification.thread_id,
@@ -89,6 +146,10 @@ async fn one_relay_orders_correlated_acks_capture_and_terminal_to_owner_only() {
                     ("captured", notification.commit_order)
                 }
                 ServerNotification::ThreadObservationSubmitted(notification) => {
+                    assert_eq!(
+                        (notification.protocol, notification.budget_generation),
+                        (2, 1)
+                    );
                     assert!(notification.terminal_decision);
                     assert_eq!(notification.decision_id, capture.decision_id.to_string());
                     ("submitted", notification.commit_order)
@@ -105,6 +166,7 @@ async fn one_relay_orders_correlated_acks_capture_and_terminal_to_owner_only() {
             (ConnectionId(42), "read", 0),
             (ConnectionId(42), "captured", 1),
             (ConnectionId(42), "set", 2),
+            (ConnectionId(42), "budget", 3),
             (ConnectionId(42), "submitted", 1)
         ]
     );
@@ -113,8 +175,8 @@ async fn one_relay_orders_correlated_acks_capture_and_terminal_to_owner_only() {
     relay.await.unwrap();
 }
 
-#[test]
-fn foreign_origin_owner_and_capacity_reject_before_slot_mutation() {
+#[tokio::test]
+async fn foreign_origin_owner_and_capacity_reject_before_slot_mutation() {
     for origin in [
         ConnectionOrigin::InProcess,
         ConnectionOrigin::WebSocket,
@@ -129,6 +191,7 @@ fn foreign_origin_owner_and_capacity_reject_before_slot_mutation() {
     }
     let (bridge, _events) =
         ObservationBridge::new(ConnectionOrigin::Stdio, ConnectionId(42), ThreadId::new()).unwrap();
+    let (_test, _server) = initialize_budget(&bridge).await;
     let epoch = bridge.owner.epoch.to_string();
     let mut foreign = request(1);
     foreign.connection_id = ConnectionId(43);
@@ -146,6 +209,7 @@ fn foreign_origin_owner_and_capacity_reject_before_slot_mutation() {
             &epoch,
             ControlOperation::Set {
                 revision: 0,
+                expected_budget_generation: 1,
                 frame: None
             }
         ),
@@ -222,12 +286,14 @@ async fn closing_an_unsubscribed_owner_revokes_only_its_binding() {
 async fn cancelled_relay_does_not_issue_a_postcommit_rejection() {
     let (bridge, events) =
         ObservationBridge::new(ConnectionOrigin::Stdio, ConnectionId(42), ThreadId::new()).unwrap();
+    let (_test, _server) = initialize_budget(&bridge).await;
     bridge
         .submit(
             request(1),
             &bridge.owner.epoch.to_string(),
             ControlOperation::Set {
                 revision: 1,
+                expected_budget_generation: 1,
                 frame: None,
             },
         )
@@ -264,6 +330,7 @@ async fn closed_outgoing_queue_stops_ack_and_notification_relay() {
             let (bridge, events) =
                 ObservationBridge::new(ConnectionOrigin::Stdio, ConnectionId(42), ThreadId::new())
                     .unwrap();
+            let (_test, _server) = initialize_budget(&bridge).await;
             let epoch = bridge.owner.epoch.to_string();
             if matches!(closure, Closure::WhileBlocked) {
                 // This healthy ACK fills the one-envelope outgoing queue.
@@ -279,6 +346,7 @@ async fn closed_outgoing_queue_stops_ack_and_notification_relay() {
                             &epoch,
                             ControlOperation::Set {
                                 revision: 1,
+                                expected_budget_generation: 1,
                                 frame: None,
                             },
                         )
@@ -359,7 +427,7 @@ async fn closed_outgoing_queue_stops_ack_and_notification_relay() {
             // No active decision remains: refusal now fences a fresh capture.
             assert_eq!(
                 bridge.slot.capture("turn-after-failure"),
-                Err(ObservationError::ResourceLimit)
+                Err(ObservationError::StaleOwner)
             );
         }
     }

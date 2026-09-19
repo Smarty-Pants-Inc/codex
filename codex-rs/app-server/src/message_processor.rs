@@ -1267,6 +1267,7 @@ impl MessageProcessor {
                         crate::observation_bridge::ControlOperation::Set {
                             revision: params.revision,
                             frame,
+                            expected_budget_generation: params.expected_budget_generation,
                         },
                     )
                     .await

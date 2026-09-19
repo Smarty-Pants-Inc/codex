@@ -114,7 +114,7 @@ async fn listener_clear_replace_and_drop_keep_core_binding_revoked() -> anyhow::
         );
         assert_eq!(
             binding.slot.capture("old-turn"),
-            Err(ObservationError::ResourceLimit)
+            Err(ObservationError::StaleOwner)
         );
         test.codex
             .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {

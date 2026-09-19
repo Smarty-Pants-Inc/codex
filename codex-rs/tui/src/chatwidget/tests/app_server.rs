@@ -124,7 +124,26 @@ async fn observation_receipts_do_not_render_or_submit_operations() {
     while op_rx.try_recv().is_ok() {}
     let before = render_bottom_popup(&chat, /*width*/ 80);
     let notifications = [
+        ServerNotification::ThreadObservationBudget(
+            codex_app_server_protocol::ThreadObservationBudgetNotification {
+                protocol: 2,
+                thread_id: thread_id.to_string(),
+                owner_epoch: "owner".into(),
+                commit_order: 2,
+                native_reservation: codex_app_server_protocol::NativeReservation {
+                    generation: 2,
+                    state: codex_app_server_protocol::NativeReservationState::Invalid,
+                    model: Some("gpt-oss-20b".into()),
+                    profile: codex_app_server_protocol::NativeReservationProfile::HarmonyGptOss,
+                    usable_context_tokens: Some(131_072),
+                    reserved_tokens: 4608,
+                    max_frame_bytes: 4096,
+                },
+            },
+        ),
         ServerNotification::ThreadObservationCaptured(ThreadObservationCapturedNotification {
+            protocol: 2,
+            budget_generation: 1,
             thread_id: thread_id.to_string(),
             turn_id: "turn".to_string(),
             owner_epoch: "owner".to_string(),
@@ -136,6 +155,8 @@ async fn observation_receipts_do_not_render_or_submit_operations() {
             captured_at: 0,
         }),
         ServerNotification::ThreadObservationSubmitted(ThreadObservationSubmittedNotification {
+            protocol: 2,
+            budget_generation: 1,
             thread_id: thread_id.to_string(),
             turn_id: "turn".to_string(),
             owner_epoch: "owner".to_string(),

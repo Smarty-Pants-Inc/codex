@@ -1091,7 +1091,7 @@ pub async fn run_main_with_transport_options(
                                             connection_state.session.experimental_api_enabled();
                                         let is_initialized = connection_state.session.initialized();
                                         let observation_notifications_enabled = experimental_api_enabled
-                                            && !["thread/observation/captured", "thread/observation/submitted"]
+                                            && !["thread/observation/captured", "thread/observation/submitted", "thread/observation/budget"]
                                                 .iter().any(|method| opted_out_notification_methods_snapshot.contains(*method));
                                         if let Ok(mut opted_out_notification_methods) = connection_state
                                             .outbound_opted_out_notification_methods
