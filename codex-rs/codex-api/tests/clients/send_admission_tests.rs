@@ -11,7 +11,10 @@ struct Admission(Mutex<AdmissionState>);
 
 impl RequestTelemetry for Admission {
     fn on_request_start(&self) -> std::result::Result<(), String> {
-        let mut state = self.0.lock().unwrap();
+        let mut state = self
+            .0
+            .lock()
+            .expect("admission state should not be poisoned");
         if state.remaining == 0 {
             state.events.push("blocked");
             return Err("audit capacity unavailable".into());
@@ -28,7 +31,11 @@ impl RequestTelemetry for Admission {
         _error: Option<&TransportError>,
         _duration: Duration,
     ) {
-        self.0.lock().unwrap().events.push("outcome");
+        self.0
+            .lock()
+            .expect("admission state should not be poisoned")
+            .events
+            .push("outcome");
     }
 }
 
