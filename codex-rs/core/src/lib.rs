@@ -99,6 +99,7 @@ pub use observation::ObservationSubmitted;
 pub use observation::ObservationWakeIntent;
 pub use observation::ObservationWakeOutcome;
 pub use observation::ObservationWakeReceipt;
+pub use observation::ObservationWakeSnapshot;
 pub use observation::PilotAttemptRecord;
 pub use observation::PilotAuthorityError;
 pub use observation::PilotCountJournal;
