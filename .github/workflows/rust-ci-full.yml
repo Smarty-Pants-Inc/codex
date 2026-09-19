@@ -127,7 +127,7 @@ jobs:
         shell: bash
         run: |
           bazel_targets="$(./tools/argument-comment-lint/list-bazel-targets.sh)"
-          ./.github/scripts/run-bazel-ci.sh \
+          exec ./.github/scripts/run-bazel-ci.sh \
             -- \
             build \
             --config=argument-comment-lint \
@@ -141,7 +141,7 @@ jobs:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         shell: bash
         run: |
-          ./.github/scripts/run-argument-comment-lint-bazel.sh \
+          exec ./.github/scripts/run-argument-comment-lint-bazel.sh \
             --config=argument-comment-lint \
             --platforms=//:local_windows \
             --keep_going \

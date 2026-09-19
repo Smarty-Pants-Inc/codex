@@ -49,7 +49,7 @@ if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
   fi
 fi
 
-./.github/scripts/run-bazel-ci.sh \
+exec ./.github/scripts/run-bazel-ci.sh \
   -- \
   build \
   "${bazel_lint_args[@]}" \
