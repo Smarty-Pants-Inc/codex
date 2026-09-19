@@ -46,7 +46,7 @@ pub(crate) fn notification(
                     attempt_id: record.attempt_id.to_string(),
                     request_id: record.request_id.to_string(),
                     provider_request_id: record.provider_request_id,
-                    commit_order: record.commit_order,
+                    commit_order: record.metadata.commit_order,
                     frame_revision: record.metadata.revision,
                     frame_hash: record.metadata.hash,
                     state: capture_state(record.metadata.status),
