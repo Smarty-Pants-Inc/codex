@@ -16,8 +16,9 @@ fn admitted_slot() -> (
     Arc<ObservationSlot>,
     mpsc::Receiver<ObservationEvent>,
     ObservationOwner,
+    Arc<Mutex<ObservationClock>>,
 ) {
-    let (slot, events, owner, _) = setup();
+    let (slot, events, owner, time) = setup();
     let mut model = codex_models_manager::model_info::model_info_from_slug("gpt-oss-20b");
     model.context_window = Some(131_072);
     model.effective_context_window_percent = 100;
@@ -31,7 +32,7 @@ fn admitted_slot() -> (
         /*budget_generation*/ 1,
     )
     .unwrap();
-    (Arc::new(slot), events, owner)
+    (Arc::new(slot), events, owner, time)
 }
 
 fn intent(slot: &ObservationSlot, owner: ObservationOwner) -> ObservationWakeIntent {
@@ -47,7 +48,7 @@ fn intent(slot: &ObservationSlot, owner: ObservationOwner) -> ObservationWakeInt
 
 #[test]
 fn accepted_unfinalized_capture_and_later_finalization_both_fence_wake() {
-    let (slot, mut events, owner) = admitted_slot();
+    let (slot, mut events, owner, _time) = admitted_slot();
     let capture = slot.capture("turn").unwrap();
     let attempt = slot.begin_attempt(capture.decision_id).unwrap();
     slot.attempt_accepted(attempt).unwrap();
@@ -90,7 +91,7 @@ fn accepted_unfinalized_capture_and_later_finalization_both_fence_wake() {
 #[test]
 fn invalidation_before_reservation_suppresses_but_after_keeps_real_result() {
     for invalidate_first in [true, false] {
-        let (slot, _events, owner) = admitted_slot();
+        let (slot, _events, owner, _time) = admitted_slot();
         let original = intent(&slot, owner);
         let guard = slot
             .prepare_wake(owner, original.clone(), Arc::new(OriginalPolicy))
@@ -129,7 +130,7 @@ fn invalidation_before_reservation_suppresses_but_after_keeps_real_result() {
 
 #[test]
 fn exact_readback_does_not_redispatch_or_evict_uncertain_receipt() {
-    let (slot, _events, owner) = admitted_slot();
+    let (slot, _events, owner, _time) = admitted_slot();
     let original = intent(&slot, owner);
     let digest = original.operand_digest(owner);
     let guard = slot
@@ -181,7 +182,7 @@ fn exact_readback_does_not_redispatch_or_evict_uncertain_receipt() {
 
 #[test]
 fn reserved_is_not_started_and_owner_loss_never_reconstructs_receipt() {
-    let (slot, _events, owner) = admitted_slot();
+    let (slot, _events, owner, _time) = admitted_slot();
     let original = intent(&slot, owner);
     let digest = original.operand_digest(owner);
     let guard = slot
@@ -219,7 +220,7 @@ fn stale_frame_budget_and_audit_cut_never_reserve() {
         |intent| intent.expected_commit_order += 1,
     ];
     for change in changes {
-        let (slot, _events, owner) = admitted_slot();
+        let (slot, _events, owner, _time) = admitted_slot();
         let mut original = intent(&slot, owner);
         change(&mut original);
         let guard = slot
@@ -231,4 +232,36 @@ fn stale_frame_budget_and_audit_cut_never_reserve() {
             ))
         );
     }
+}
+
+#[test]
+fn prepared_guard_refuses_real_clock_expiry_without_publication_change() {
+    let (slot, _events, owner, time) = admitted_slot();
+    let original = intent(&slot, owner);
+    let guard = slot
+        .prepare_wake(owner, original, Arc::new(OriginalPolicy))
+        .unwrap();
+    let now = *time.lock().unwrap();
+    *time.lock().unwrap() = later(now, /*seconds*/ 61);
+    assert!(
+        !guard.reserve_turn_if_allowed(&ThreadId::new(), "turn", &mut || panic!(
+            "expired frame admitted"
+        ))
+    );
+    assert_eq!(slot.read(owner).unwrap().status, ObservationStatus::Expired);
+}
+
+#[test]
+fn prepared_guard_refuses_owner_revocation_before_reservation() {
+    let (slot, _events, owner, _time) = admitted_slot();
+    let original = intent(&slot, owner);
+    let guard = slot
+        .prepare_wake(owner, original, Arc::new(OriginalPolicy))
+        .unwrap();
+    slot.revoke().unwrap();
+    assert!(
+        !guard.reserve_turn_if_allowed(&ThreadId::new(), "turn", &mut || panic!(
+            "revoked owner admitted"
+        ))
+    );
 }
