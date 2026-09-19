@@ -4,7 +4,10 @@ use crate::ObservationCapture;
 use crate::ObservationError;
 use crate::observation::MAX_FRAME_BYTES;
 use crate::observation::RESERVED_TOKENS;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::InternalChatMessageMetadataPassthrough;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 
 /// An explicit encoding/framing contract, not authorization to use a provider.
@@ -62,6 +65,25 @@ impl CurrentObservations {
 
     pub(crate) fn token_count(&self) -> usize {
         self.tokens
+    }
+
+    /// Materialize only the request overlay, with the same user role we count.
+    pub(crate) fn into_request_item(self) -> ResponseItem {
+        // ponytail: ordinary contextual fragments normalize user to developer.
+        // Observations are untrusted data, not developer instructions; never use
+        // that conversion or change the shared role semantics for this overlay.
+        ResponseItem::Message {
+            id: None,
+            role: "user".into(),
+            content: vec![ContentItem::InputText { text: self.render() }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    content_item_kinds: Some(vec![self.content_kind()]),
+                    ..Default::default()
+                },
+            ),
+        }
     }
 }
 

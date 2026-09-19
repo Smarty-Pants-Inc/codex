@@ -2,7 +2,6 @@ use crate::ObservationCapture;
 use crate::ObservationError;
 use crate::ObservationProfile;
 use crate::ObservationSlot;
-use crate::context::ContextualUserFragment;
 use crate::context::CurrentObservations;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
@@ -56,7 +55,7 @@ impl ObservationSampling {
         let mut item = None;
         let capture = self.slot.capture_checked(&self.turn_id, |capture| {
             item = CurrentObservations::new(self.profile, model, capture)?
-                .map(ContextualUserFragment::into);
+                .map(CurrentObservations::into_request_item);
             Ok(())
         })?;
         let decision_id = capture.decision_id;
