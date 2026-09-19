@@ -111,6 +111,63 @@ fn safety_buffering_notification(
 }
 
 #[tokio::test]
+async fn observation_receipts_do_not_render_or_submit_operations() {
+    use codex_app_server_protocol::ObservationCaptureState;
+    use codex_app_server_protocol::ObservationSubmissionOutcome;
+    use codex_app_server_protocol::ThreadObservationCapturedNotification;
+    use codex_app_server_protocol::ThreadObservationSubmittedNotification;
+
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+    chat.thread_id = Some(thread_id);
+    drain_insert_history(&mut rx);
+    while op_rx.try_recv().is_ok() {}
+    let before = render_bottom_popup(&chat, /*width*/ 80);
+    let notifications = [
+        ServerNotification::ThreadObservationCaptured(ThreadObservationCapturedNotification {
+            thread_id: thread_id.to_string(),
+            turn_id: "turn".to_string(),
+            owner_epoch: "owner".to_string(),
+            decision_id: "decision".to_string(),
+            commit_order: 1,
+            frame_revision: 1,
+            frame_hash: None,
+            state: ObservationCaptureState::Cleared,
+            captured_at: 0,
+        }),
+        ServerNotification::ThreadObservationSubmitted(ThreadObservationSubmittedNotification {
+            thread_id: thread_id.to_string(),
+            turn_id: "turn".to_string(),
+            owner_epoch: "owner".to_string(),
+            decision_id: "decision".to_string(),
+            attempt_id: "attempt".to_string(),
+            request_id: "request".to_string(),
+            provider_request_id: None,
+            commit_order: 1,
+            frame_revision: 1,
+            frame_hash: None,
+            state: ObservationCaptureState::Cleared,
+            captured_at: 0,
+            outcome: ObservationSubmissionOutcome::Accepted,
+            terminal_decision: true,
+        }),
+    ];
+    for notification in notifications {
+        chat.handle_server_notification(notification, /*replay_kind*/ None);
+        assert_eq!(render_bottom_popup(&chat, /*width*/ 80), before);
+        let history = drain_insert_history(&mut rx)
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        insta::assert_snapshot!(lines_to_single_string(&history), @"");
+        assert_matches!(
+            op_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        );
+    }
+}
+
+#[tokio::test]
 async fn safety_buffering_offers_one_retry_with_app_wording() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let (thread_id, turn_id, _) = start_safety_buffering_test_turn(&mut chat, &mut op_rx);

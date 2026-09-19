@@ -532,13 +532,15 @@ impl OutgoingMessageSender {
             .await;
     }
 
+    /// Returns whether the local outgoing queue accepted the response, not
+    /// whether it was written or received by the client.
     pub(crate) async fn send_response_as(
         &self,
         request_id: ConnectionRequestId,
         response: ClientResponsePayload,
-    ) {
+    ) -> bool {
         self.send_response_as_inner(request_id, response, /*thread_originator*/ None)
-            .await;
+            .await
     }
 
     async fn send_response_as_inner(
@@ -546,7 +548,7 @@ impl OutgoingMessageSender {
         request_id: ConnectionRequestId,
         response: ClientResponsePayload,
         thread_originator: Option<String>,
-    ) {
+    ) -> bool {
         let connection_id = request_id.connection_id;
         let request_id_for_analytics = request_id.request_id.clone();
         match thread_originator {
@@ -579,7 +581,7 @@ impl OutgoingMessageSender {
             outgoing_message,
             "response",
         )
-        .await;
+        .await
     }
 
     pub(crate) async fn send_server_notification(&self, notification: ServerNotification) {
@@ -594,11 +596,13 @@ impl OutgoingMessageSender {
             .await;
     }
 
+    /// Returns whether every envelope entered the local outgoing queue. A false
+    /// result can follow partial enqueue; neither result certifies client receipt.
     pub(crate) async fn send_server_notification_to_connections(
         &self,
         connection_ids: &[ConnectionId],
         notification: ServerNotification,
-    ) {
+    ) -> bool {
         tracing::trace!(
             targeted_connections = connection_ids.len(),
             "app-server event: {notification}"
@@ -613,22 +617,25 @@ impl OutgoingMessageSender {
                 .await
             {
                 warn!("failed to send server notification to client: {err:?}");
+                return false;
             }
-            return;
+            return true;
         }
+        let mut enqueued = true;
         for connection_id in connection_ids {
-            if let Err(err) = self
-                .sender
-                .send(OutgoingEnvelope::ToConnection {
-                    connection_id: *connection_id,
-                    message: outgoing_message.clone(),
-                    write_complete_tx: None,
-                })
+            if !self
+                .send_outgoing_message_to_connection(
+                    /*request_context*/ None,
+                    *connection_id,
+                    outgoing_message.clone(),
+                    "server notification",
+                )
                 .await
             {
-                warn!("failed to send server notification to client: {err:?}");
+                enqueued = false;
             }
         }
+        enqueued
     }
 
     pub(crate) async fn send_server_notification_to_connection_and_wait(
@@ -704,7 +711,7 @@ impl OutgoingMessageSender {
         connection_id: ConnectionId,
         message: OutgoingMessage,
         message_kind: &'static str,
-    ) {
+    ) -> bool {
         let send_fut = self.sender.send(OutgoingEnvelope::ToConnection {
             connection_id,
             message,
@@ -718,7 +725,9 @@ impl OutgoingMessageSender {
 
         if let Err(err) = send_result {
             warn!("failed to send {message_kind} to client: {err:?}");
+            return false;
         }
+        true
     }
 }
 

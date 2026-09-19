@@ -791,6 +791,16 @@ Use `thread/goal/clear` to remove the current goal.
 { "method": "thread/goal/cleared", "params": { "threadId": "thr_123" } }
 ```
 
+### Ordinary continuation
+
+The model's `keep_working` decision applies only to the current operation. Submitted
+human input, steering, queue edits, manual compaction/review, cold resume/fork and
+runtime replacement require a fresh enable decision. A persisted ON flag is not
+restored authority. Queue persistence failure does not restore the prior decision.
+Clients must preserve unsent drafts verbatim: drafts are neither submitted input
+nor a veto. Explicit thread goals retain their pause/resume, storage and accounting
+semantics and remain mutually exclusive with ordinary continuation.
+
 ### Example: Queue a follow-up user turn (experimental)
 
 Queued turns require `capabilities.experimentalApi = true`. Use `thread/queue/add` to persist a follow-up while a turn is running. Each thread can queue up to 100 messages, and the server starts the next queued turn when the thread becomes idle.
@@ -2691,3 +2701,101 @@ For server-initiated request payloads, annotate the field the same way so schema
    ```bash
    just test -p codex-app-server-protocol
    ```
+
+### Observation method routing (under development)
+
+Experimental `thread/observation/set` and `thread/observation/read` use thread-keyed
+request serialization. They only look up an existing owner-bound bridge; they do
+not load, subscribe, resume or create a thread. Unbound/foreign probes are denied
+without thread metadata. `initialize.capabilities.experimentalApi` alone grants no ownership.
+A trusted host can select `--observation-profile harmony-gpt-oss` for its own
+private-home stdio launch. This does not discover or qualify a provider, change a
+provider endpoint, or modify persisted configuration. The host must independently
+qualify the controlled Responses/Harmony mapping and retain its process-tree and
+private-home ownership. The native home lock excludes other cooperating
+observation launches; it is not protection against another same-user process
+which ignores that lock. Remote control is disabled for this launch only.
+
+After experimental initialization, request `observation: { "protocol": 1 }` in
+`thread/start`. The response's experimental nullable `observation` capability is
+returned only after the same slot/profile is attached to the idle Core runtime
+and its sole relay task is retained by the native thread listener. Unsupported
+versions/profiles and non-stdio or unadmitted connections fail closed. Clients
+that opt out of captured/submitted notifications cannot acquire admission. Omission
+keeps the ordinary start path. This API does not start a model turn automatically.
+
+For cold resume, the host must also supply
+`--observation-resume-thread <admitted-thread-id>` at launch, after admitting its
+persisted thread and reconnecting the approved dynamic-tool handler. Only that
+ID can opt in on `thread/resume`; path/history substitutes and live-thread
+attachment cannot acquire observation authority. An already observed live runtime
+also rejects resume without opt-in rather than silently reporting a disabled
+capability while retaining its binding; use its existing handle or an admitted
+cold resume. Resume creates a fresh epoch
+and empty slot, not a restored body or publication revision. Fork does not inherit
+an observation binding. RPC fields and epochs cannot grant host admission.
+A failed start/resume is not a transaction rollback certificate for thread creation.
+
+Successful set/read ACKs share one slot FIFO with owner-only
+`thread/observation/captured` and `thread/observation/submitted` notifications.
+The method handler returns no success payload. A native UUID correlates the
+committed control event to its exact connection/request and reply kind. Pending
+correlations are bounded to32; slot capacity stays32 with one in-flight relay
+item and the existing bounded outgoing transport. This is not an aggregate
+32-message end-to-end dequeue/pressure qualification. Cancellation or lost relay
+output is uncertain, never a postcommit rejection certificate. Native connection
+close removes admission before RPC draining and revokes existing slots. Listener
+replacement/teardown revokes the old binding and cancels its retained relay;
+Core keeps the revoked binding so an old runtime cannot silently send unobserved
+requests. Model compatibility is checked at installation and each decision.
+Normal/experimental generated schema and native execution evidence are pending.
+
+### Observation control rejections (protocol 1)
+
+The owner-bound observation path uses the existing JSON-RPC error envelope, not
+an alternate rejected-success result. This contract does not itself enable
+observation methods or grant ownership. A definite domain rejection has all of:
+
+```json
+{
+  "id": "set-2",
+  "error": {
+    "code": -32002,
+    "message": "observation control request rejected",
+    "data": {
+      "type": "threadObservationRejected",
+      "protocol": 1,
+      "code": "REVISION_MISMATCH"
+    }
+  }
+}
+```
+
+Require the matching request ID, numeric error code, exact discriminator,
+protocol version and a known uppercase domain code. The data object has exactly
+the three members shown; unknown members are not accepted. The message is not parsed.
+`data.code` alone, another discriminator/version, an unknown code, a malformed
+error, a timeout or a lost response is not a no-commit certificate.
+
+| Domain code | Pre-commit condition |
+| --- | --- |
+| `INVALID_INPUT` | Invalid params or frame, including invalid text, raw-byte limit, hash or lease. |
+| `DENIED` | Native connection/origin/ownership admission denies access before the slot call. No slot existence or metadata is disclosed. |
+| `STALE_OWNER` | The slot owner fence fails, or an expired lease is used to publish another non-null frame. |
+| `REVISION_MISMATCH` | Revision ordering fails, or equal revision is not an active identical-frame lease extension. |
+| `RESOURCE_LIMIT` | Native sequence, in-flight or reserved FIFO capacity is unavailable before mutation. |
+| `UNSUPPORTED` | Protocol/profile/transport admission is unsupported before mutation. |
+| `INCOMPATIBLE_STATE` | Required local state or a valid native clock is unavailable before mutation. |
+
+For `thread/observation/set`, including clear and renewal, this certifies that the
+**correlated invocation did not commit the requested mutation**. Native expiry or
+revocation can still take effect; it is not a promise that every slot field stayed
+unchanged. A rejection of a retry does not disprove an earlier publication whose
+ACK was lost. A read rejection cannot reconcile an uncertain set.
+
+Once publication has committed, ACK/relay/connection failure must not produce this
+error. Keep that outcome uncertain and reconcile by owner-fenced readback,
+including exact lease expiry for renewal. Success ACKs still use the shared FIFO.
+Errors contain no frame body, hash, revision, owner epoch or other slot metadata.
+Standard `-32601`/`-32602` validation errors retain their existing meanings; generic
+server errors such as `-32001` or `-32603` do not acquire this domain guarantee.
