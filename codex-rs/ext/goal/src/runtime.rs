@@ -34,6 +34,7 @@ pub struct GoalRuntimeHandle {
 
 pub(crate) struct GoalRuntimeConfig {
     pub(crate) analytics: GoalAnalytics,
+    pub(crate) metrics: GoalMetrics,
     pub(crate) enabled: bool,
     pub(crate) tools_available_for_thread: bool,
     pub(crate) auto_continue_capability: GoalAutoContinueCapability,
@@ -92,7 +93,6 @@ impl GoalRuntimeHandle {
         thread_id: ThreadId,
         state_dbs: Arc<codex_state::StateRuntime>,
         event_emitter: GoalEventEmitter,
-        metrics: GoalMetrics,
         thread_manager: Weak<ThreadManager>,
         queue_service: Option<Arc<QueuedItemService>>,
         accounting_state: Arc<GoalAccountingState>,
@@ -104,7 +104,7 @@ impl GoalRuntimeHandle {
                 state_dbs,
                 analytics: config.analytics,
                 event_emitter,
-                metrics,
+                metrics: config.metrics,
                 thread_manager,
                 queue_service,
                 accounting_state,
