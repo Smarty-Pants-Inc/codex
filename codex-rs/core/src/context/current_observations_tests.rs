@@ -49,6 +49,21 @@ fn final_render_counts_harmony_framing_and_escaped_unicode_data() {
     // including this complete user message and the assistant prefill.
     assert_eq!(fragment.token_count(), 66);
     assert!(fragment.token_count() <= RESERVED_TOKENS as usize);
+    assert_eq!(
+        fragment.into_request_item(),
+        ResponseItem::Message {
+            id: None,
+            role: "user".into(),
+            content: vec![ContentItem::InputText { text: expected.into() }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    content_item_kinds: Some(vec![ContentItemKind("observation.current".into())]),
+                    ..Default::default()
+                },
+            ),
+        }
+    );
 }
 
 #[test]
