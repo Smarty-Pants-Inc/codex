@@ -1,4 +1,5 @@
 use super::*;
+use pretty_assertions::assert_eq;
 
 #[test]
 fn floor_snapshot_preserves_uncertain_receipt_and_survives_budget_invalidation() {
