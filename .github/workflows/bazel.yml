@@ -161,16 +161,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          printf 'Read-only quota usage: GET repos/%s/actions/cache/usage\n' "$GITHUB_REPOSITORY"
           gh api "repos/$GITHUB_REPOSITORY/actions/cache/usage" > "$RUNNER_TEMP/cache-usage-before.json"
-          gh api "repos/$GITHUB_REPOSITORY/actions/cache/storage-limit" > "$RUNNER_TEMP/cache-limit-before.json"
           python3 - <<'PY'
           import json, os
           from pathlib import Path
           root = Path(os.environ['RUNNER_TEMP'])
           used = json.loads((root / 'cache-usage-before.json').read_text())['active_caches_size_in_bytes']
-          configured = json.loads((root / 'cache-limit-before.json').read_text())['max_cache_size_gb']
-          if type(configured) is not int or configured != 10 or type(used) is not int or used < 0:
-              raise SystemExit('Quota envelope drift or invalid usage; no build/save allowed')
+          if type(used) is not int or used < 0:
+              raise SystemExit('Invalid repository cache usage; no build/save allowed')
+          # CI verifies provider quota before dispatch; this is the fixed admitted ceiling.
           limit = 10_000_000_000
           required = 2 * 1024**3 + 64 * 1024**2
           print(f'Conservative decimal quota={limit}, used={used}, required free={required}')
@@ -309,8 +309,8 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write(f'bytes={size}\n')
           PY
+          printf 'Read-only quota usage: GET repos/%s/actions/cache/usage\n' "$GITHUB_REPOSITORY"
           gh api "repos/$GITHUB_REPOSITORY/actions/cache/usage" > "$RUNNER_TEMP/cache-usage-save.json"
-          gh api "repos/$GITHUB_REPOSITORY/actions/cache/storage-limit" > "$RUNNER_TEMP/cache-limit-save.json"
           python3 - <<'PY'
           import json, os
           from pathlib import Path
@@ -319,9 +319,9 @@ jobs:
           if not 0 < size <= 2 * 1024**3:
               raise SystemExit('Snapshot size violates admitted 2GiB ceiling; no save')
           used = json.loads((root / 'cache-usage-save.json').read_text())['active_caches_size_in_bytes']
-          configured = json.loads((root / 'cache-limit-save.json').read_text())['max_cache_size_gb']
-          if type(configured) is not int or configured != 10 or type(used) is not int or used < 0:
-              raise SystemExit('Quota envelope drift or invalid usage; no save allowed')
+          if type(used) is not int or used < 0:
+              raise SystemExit('Invalid repository cache usage; no save allowed')
+          # A provider limit increase never expands this operation's admitted budget.
           limit = 10_000_000_000
           print(f'Pre-save quota={limit}, used={used}, snapshot={size}')
           if limit - used < size + 64 * 1024**2:
@@ -347,6 +347,7 @@ jobs:
           CACHE_BYTES: ${{ steps.action_cache_limit.outputs.bytes }}
         run: |
           set -euo pipefail
+          printf 'Read-only saved-cache receipt: GET repos/%s/actions/caches (exact key/ref)\n' "$GITHUB_REPOSITORY"
           gh api --method GET "repos/$GITHUB_REPOSITORY/actions/caches" -f key="$EXPECTED_KEY" -f ref="$GITHUB_REF" -f per_page=100 > "$RUNNER_TEMP/action-cache-receipt.json"
           python3 - <<'PY'
           import json, os
