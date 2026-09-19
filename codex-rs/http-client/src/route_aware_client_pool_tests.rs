@@ -404,51 +404,11 @@ async fn tls_fallback_pool_reselects_routes_for_each_redirect_hop() {
 
 #[tokio::test]
 async fn reqwest_default_route_preserves_transport_redirects() {
-    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("redirect listener should bind");
-    let address = listener
-        .local_addr()
-        .expect("redirect listener should have an address");
-    listener
-        .set_nonblocking(true)
-        .expect("redirect listener should become nonblocking");
-    let server = std::thread::spawn(move || {
-        let mut request_lines = Vec::new();
-        for response in [
-            "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-        ] {
-            let deadline = Instant::now() + Duration::from_secs(2);
-            let (mut stream, _) = loop {
-                match listener.accept() {
-                    Ok(connection) => break connection,
-                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                        assert!(
-                            Instant::now() < deadline,
-                            "redirect server should receive the next request"
-                        );
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(error) => panic!("redirect server should accept: {error}"),
-                }
-            };
-            let mut buffer = [0_u8; 1024];
-            let size = stream
-                .read(&mut buffer)
-                .expect("redirect server should read request");
-            let request = String::from_utf8_lossy(&buffer[..size]);
-            request_lines.push(
-                request
-                    .lines()
-                    .next()
-                    .expect("request should have a request line")
-                    .to_string(),
-            );
-            stream
-                .write_all(response.as_bytes())
-                .expect("redirect server should write response");
-        }
-        request_lines
-    });
+    let (address, server) = spawn_response_server(vec![
+        "HTTP/1.1 302 Found\r\nLocation: /final\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            .to_string(),
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_string(),
+    ]);
     let pool = RouteAwareClientPool::with_builder(
         HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
         ClientRouteClass::Api,
@@ -467,12 +427,14 @@ async fn reqwest_default_route_preserves_transport_redirects() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.url().as_str(), format!("http://{address}/final"));
+    let requests = server.join().expect("redirect server should finish");
+    let request_lines: Vec<_> = requests
+        .iter()
+        .map(|request| request.lines().next().expect("request should have a line"))
+        .collect();
     assert_eq!(
-        server.join().expect("redirect server should finish"),
-        vec![
-            "GET /start HTTP/1.1".to_string(),
-            "GET /final HTTP/1.1".to_string(),
-        ]
+        request_lines,
+        vec!["GET /start HTTP/1.1", "GET /final HTTP/1.1"]
     );
 }
 
