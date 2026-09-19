@@ -123,9 +123,11 @@ impl Drop for QueueEnqueueIntent {
             .pending_enqueues
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *pending = pending
-            .checked_sub(1)
-            .expect("pending enqueue intent count must not underflow");
+        assert!(
+            *pending > 0,
+            "pending enqueue intent count must not underflow"
+        );
+        *pending -= 1;
         let should_wake = self.wake_on_drop && *pending == 0;
         drop(pending);
 
