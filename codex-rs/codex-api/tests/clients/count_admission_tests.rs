@@ -68,7 +68,6 @@ async fn typed_native_wire_reaches_original_async_route_without_ordinary_send_or
         prompt_cache_key: None,
         text: None,
         client_metadata: None,
-        access_programs: None,
     };
     let expected = codex_api::prepare_response_count(&request, NonZeroU64::new(/*n*/ 17).unwrap())?;
     let result = client
