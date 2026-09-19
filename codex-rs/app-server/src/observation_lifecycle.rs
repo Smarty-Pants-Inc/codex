@@ -120,6 +120,9 @@ impl ThreadStateManager {
         conversation: &Arc<CodexThread>,
         outgoing: Arc<OutgoingMessageSender>,
     ) -> Result<ThreadObservationCapabilities, JSONRPCErrorError> {
+        // Capture the actual thread's effective routing; no ambient factory or
+        // provider/auth discovery is permitted in the count issuer.
+        let http_client_factory = conversation.config().await.http_client_factory();
         // Keep the existing connection registry locked through installation so
         // close cannot pass revocation and leave a newly installed live slot.
         let registry = self.state.lock().await;
@@ -145,7 +148,7 @@ impl ThreadStateManager {
             .selection
             .pilot
             .as_ref()
-            .map(|pilot| pilot.bind(owner, thread_id))
+            .map(|pilot| pilot.bind(owner, thread_id, http_client_factory))
             .transpose()
             .map_err(|_| rejected(ThreadObservationRejectionCode::Denied))?;
         state

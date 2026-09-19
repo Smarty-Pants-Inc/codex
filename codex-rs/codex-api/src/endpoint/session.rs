@@ -45,6 +45,15 @@ impl<T: HttpTransport> EndpointSession<T> {
         &self.provider
     }
 
+    pub(crate) fn native_output_limit(&self) -> Result<Option<std::num::NonZeroU64>, ApiError> {
+        self.request_telemetry
+            .as_ref()
+            .map(|hook| hook.native_output_limit())
+            .transpose()
+            .map(Option::flatten)
+            .map_err(|error| TransportError::Build(error).into())
+    }
+
     fn make_request(
         &self,
         method: &Method,
@@ -177,6 +186,13 @@ impl<T: HttpTransport> EndpointSession<T> {
                         codex_client::RequestAuthentication::Prepared => req,
                     };
                     if let Some(telemetry) = telemetry {
+                        if let Some(stream) = telemetry
+                            .stream_native_request(&req)
+                            .await
+                            .map_err(TransportError::Build)?
+                        {
+                            return Ok(stream);
+                        }
                         telemetry
                             .on_request_prepared(&req)
                             .map_err(TransportError::Build)?;

@@ -29,6 +29,8 @@ use uuid::Uuid;
 
 #[path = "observation_pilot_canonical.rs"]
 mod canonical;
+#[path = "observation_pilot_count.rs"]
+mod count;
 #[path = "observation_pilot_credential.rs"]
 mod credential;
 #[path = "observation_pilot_validation.rs"]
@@ -44,6 +46,7 @@ struct ReceivedLaunch {
     _descriptor: File,
     state: Mutex<LaunchState>,
     credential: Mutex<Option<credential::CredentialInput>>,
+    count: Option<count::ReceivedCount>,
 }
 
 struct LaunchState {
@@ -88,7 +91,10 @@ impl PilotStartup {
     /// and durable once claim are joined by Foundation before it spawns this image.
     /// No RPC or persisted thread state can call this receiver.
     #[cfg(target_os = "linux")]
-    pub(crate) fn receive(prepared_sha256: Option<&str>) -> io::Result<Self> {
+    pub(crate) fn receive(
+        prepared_sha256: Option<&str>,
+        count_pins: Option<(&str, &str)>,
+    ) -> io::Result<Self> {
         use std::os::unix::fs::FileExt;
         use std::os::unix::fs::MetadataExt;
 
@@ -105,6 +111,12 @@ impl PilotStartup {
                     credential::receive_fd(/*fd*/ 4)?,
                     credential::receive_fd(/*fd*/ 5)?,
                 ))
+            })
+            .transpose()?;
+        let count_inputs = count_pins
+            .map(|pins| {
+                let (input, receipt) = credential_files.as_ref().ok_or_else(denied)?;
+                count::HeldCount::receive(pins, [&descriptor, input, receipt])
             })
             .transpose()?;
         let before = descriptor.metadata()?;
@@ -137,12 +149,24 @@ impl PilotStartup {
         }
         validation::validate(&decision)?;
         let digest = format!("{:x}", Sha256::digest(&bytes));
-        validation::validate_native_target(&decision)?;
+        validation::validate_native_target(&decision, |binary| {
+            if let Some(held) = &count_inputs {
+                let (input, receipt) = credential_files.as_ref().ok_or_else(denied)?;
+                held.reject_aliases([&descriptor, input, receipt, binary])?;
+            }
+            Ok(())
+        })?;
         let received_at = Instant::now();
         let now = wall_ms()?;
         if now < decision.limits.not_before_ms || now >= decision.limits.expires_ms {
             return Err(denied());
         }
+        let count = count_inputs
+            .map(|held| {
+                let (input, receipt) = credential_files.as_ref().ok_or_else(denied)?;
+                held.qualify(&decision, &digest, [&descriptor, input, receipt])
+            })
+            .transpose()?;
         let credential = match (decision.version, credential_files, prepared_sha256) {
             (1, None, None) => None,
             (2, Some((input, receipt)), Some(pin)) => Some(credential::CredentialInput::receive(
@@ -158,6 +182,7 @@ impl PilotStartup {
             digest,
             _descriptor: descriptor,
             credential: Mutex::new(credential),
+            count,
             state: Mutex::new(LaunchState {
                 generation: 1,
                 bound: false,
@@ -169,7 +194,10 @@ impl PilotStartup {
     }
 
     #[cfg(not(target_os = "linux"))]
-    pub(crate) fn receive(_prepared_sha256: Option<&str>) -> io::Result<Self> {
+    pub(crate) fn receive(
+        _prepared_sha256: Option<&str>,
+        _count_pins: Option<(&str, &str)>,
+    ) -> io::Result<Self> {
         Err(denied())
     }
 
@@ -220,7 +248,12 @@ impl PilotStartup {
             && (now < state.last_wall_ms
                 || now >= self.0.decision.limits.expires_ms
                 || Instant::now() >= state.deadline
-                || generation != state.generation)
+                || generation != state.generation
+                || self.0.count.as_ref().is_some_and(|count| {
+                    now < count.not_before_ms
+                        || now >= count.expires_ms
+                        || Instant::now() >= count.deadline
+                }))
         {
             state.revoked = true;
             state.generation = state.generation.saturating_add(1);
@@ -248,6 +281,7 @@ impl PilotStartup {
         &self,
         owner: ObservationOwner,
         thread_id: ThreadId,
+        http_client_factory: codex_http_client::HttpClientFactory,
     ) -> Result<(Vec<u8>, Arc<dyn NativePilotIssuer>), PilotAuthorityError> {
         self.recheck(/*generation*/ 1)?;
         let mut state = self
@@ -296,6 +330,7 @@ impl PilotStartup {
                 launch: self.clone(),
                 claims,
                 verified: AtomicBool::new(false),
+                http_client_factory,
             }),
         ))
     }
@@ -309,6 +344,20 @@ struct LaunchIssuer {
     launch: PilotStartup,
     claims: PilotGrantClaims,
     verified: AtomicBool,
+    http_client_factory: codex_http_client::HttpClientFactory,
+}
+
+impl LaunchIssuer {
+    fn count_inputs(
+        &self,
+        claims: &PilotGrantClaims,
+    ) -> Result<Option<&count::ReceivedCount>, PilotAuthorityError> {
+        self.recheck_grant(claims)?;
+        if !self.verified.load(Ordering::Acquire) {
+            return Err(PilotAuthorityError::Denied);
+        }
+        Ok(self.launch.0.count.as_ref())
+    }
 }
 
 impl NativePilotIssuer for LaunchIssuer {
@@ -357,6 +406,103 @@ impl NativePilotIssuer for LaunchIssuer {
             .map_err(|_| PilotAuthorityError::Denied)?;
         self.recheck_grant(claims)?;
         Ok(codex_core::PilotRequestAuthentication::Prepared)
+    }
+
+    fn take_count_journal(
+        &self,
+        claims: &PilotGrantClaims,
+    ) -> Result<Option<codex_core::PilotCountJournal>, PilotAuthorityError> {
+        self.count_inputs(claims)?
+            .map(|count| {
+                count
+                    .journal
+                    .lock()
+                    .map_err(|_| PilotAuthorityError::Unavailable)?
+                    .take()
+                    .ok_or(PilotAuthorityError::Replay)
+            })
+            .transpose()
+    }
+
+    fn count_scope(
+        &self,
+        claims: &PilotGrantClaims,
+    ) -> Result<Option<codex_core::PilotCountScope>, PilotAuthorityError> {
+        Ok(self.count_inputs(claims)?.map(|count| count.scope.clone()))
+    }
+
+    fn count_transport_factory(
+        &self,
+        claims: &PilotGrantClaims,
+    ) -> Result<codex_http_client::HttpClientFactory, PilotAuthorityError> {
+        self.count_inputs(claims)?
+            .ok_or(PilotAuthorityError::Unavailable)?;
+        Ok(self.http_client_factory.clone())
+    }
+
+    fn validate_count_inference(
+        &self,
+        claims: &PilotGrantClaims,
+        request: &Request,
+    ) -> Result<(), PilotAuthorityError> {
+        let count = self
+            .count_inputs(claims)?
+            .ok_or(PilotAuthorityError::Unavailable)?;
+        let credential = self
+            .launch
+            .0
+            .credential
+            .lock()
+            .map_err(|_| PilotAuthorityError::Unavailable)?;
+        if request.url != count.scope.inference_url
+            || request.method.as_str() != "POST"
+            || !credential
+                .as_ref()
+                .is_some_and(|credential| credential.matches(request))
+            || ["proxy-authorization", "api-key", "x-api-key", "cookie"]
+                .iter()
+                .any(|header| request.headers.contains_key(*header))
+        {
+            return Err(PilotAuthorityError::Denied);
+        }
+        // Exact immutable CountWire/body/model/output joins belong to the same
+        // PilotLedger's prepare and once-use final gate, not a new receipt here.
+        self.recheck_grant(claims)
+    }
+
+    fn authenticate_count_request(
+        &self,
+        claims: &PilotGrantClaims,
+        request: &mut Request,
+    ) -> Result<(), PilotAuthorityError> {
+        let count = self
+            .count_inputs(claims)?
+            .ok_or(PilotAuthorityError::Unavailable)?;
+        if request.url != count.scope.count_url
+            || request.method.as_str() != "POST"
+            || ["proxy-authorization", "api-key", "x-api-key", "cookie"]
+                .iter()
+                .any(|header| request.headers.contains_key(*header))
+        {
+            return Err(PilotAuthorityError::Denied);
+        }
+        let credential = self
+            .launch
+            .0
+            .credential
+            .lock()
+            .map_err(|_| PilotAuthorityError::Unavailable)?;
+        let credential = credential
+            .as_ref()
+            .ok_or(PilotAuthorityError::Unavailable)?;
+        // Revalidation at the actual send boundary is idempotent ONLY for the
+        // same private credential marker AND unchanged original bearer bytes.
+        if !credential.matches(request) {
+            credential
+                .attach(request, &count.scope.count_url)
+                .map_err(|_| PilotAuthorityError::Denied)?;
+        }
+        self.recheck_grant(claims)
     }
 
     fn qualify_request(

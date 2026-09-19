@@ -91,8 +91,21 @@ impl<T: HttpTransport> ResponsesClient<T> {
             turn_state,
         } = options;
 
-        let body = EncodedJsonBody::encode(&request)
-            .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
+        let native_wire = self
+            .session
+            .native_output_limit()?
+            .map(|output| {
+                crate::response_count::prepare_response_count(&request, output)
+                    .map(Arc::new)
+                    .map_err(|_| ApiError::Stream("native count wire unavailable".into()))
+            })
+            .transpose()?;
+        let body = match &native_wire {
+            Some(wire) => wire.inference_body().clone(),
+            None => EncodedJsonBody::encode(&request).map_err(|e| {
+                ApiError::Stream(format!("failed to encode responses request: {e}"))
+            })?,
+        };
 
         let mut headers = extra_headers;
         if let Some(ref thread_id) = thread_id {
@@ -103,7 +116,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
             insert_header(&mut headers, "x-openai-subagent", &subagent);
         }
 
-        self.stream_encoded(body, headers, compression, turn_state)
+        self.stream_encoded(body, headers, compression, turn_state, native_wire)
             .await
     }
 
@@ -131,8 +144,14 @@ impl<T: HttpTransport> ResponsesClient<T> {
     ) -> Result<ResponseStream, ApiError> {
         let body = EncodedJsonBody::encode(&body)
             .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
-        self.stream_encoded(body, extra_headers, compression, turn_state)
-            .await
+        self.stream_encoded(
+            body,
+            extra_headers,
+            compression,
+            turn_state,
+            /*native_wire*/ None,
+        )
+        .await
     }
 
     async fn stream_encoded(
@@ -141,6 +160,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
         extra_headers: HeaderMap,
         compression: Compression,
         turn_state: Option<Arc<OnceLock<String>>>,
+        native_wire: Option<Arc<crate::response_count::CountWire>>,
     ) -> Result<ResponseStream, ApiError> {
         let body = if self.redact_body_trace {
             body.without_body_trace()
@@ -165,6 +185,11 @@ impl<T: HttpTransport> ResponsesClient<T> {
                         HeaderValue::from_static("text/event-stream"),
                     );
                     req.compression = request_compression;
+                    if let Some(wire) = &native_wire {
+                        req.extensions.insert(Arc::clone(wire));
+                        // Exact counted bytes cannot be compressed/re-encoded later.
+                        req.compression = RequestCompression::None;
+                    }
                 },
             )
             .await?;

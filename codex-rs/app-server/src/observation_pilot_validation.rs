@@ -108,7 +108,10 @@ pub(super) fn validate(policy: &PilotLaunchDecision) -> io::Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-pub(super) fn validate_native_target(policy: &PilotLaunchDecision) -> io::Result<()> {
+pub(super) fn validate_native_target(
+    policy: &PilotLaunchDecision,
+    exclude_artifact: impl FnOnce(&std::fs::File) -> io::Result<()>,
+) -> io::Result<()> {
     use sha2::Digest;
     use sha2::Sha256;
     use std::fs::File;
@@ -125,6 +128,9 @@ pub(super) fn validate_native_target(policy: &PilotLaunchDecision) -> io::Result
     // Open the executing image, not its replaceable pathname. The launcher joins
     // this independently pinned binary to the admitted source/closure and target.
     let mut binary = File::open("/proc/self/exe")?;
+    // New protected count inputs must not alias the actual artifact reader.
+    // The original no-count launch keeps its previous validation path.
+    exclude_artifact(&binary)?;
     let mut digest = Sha256::new();
     let mut buffer = [0; 32_768];
     loop {

@@ -11,8 +11,30 @@ pub enum RequestAuthentication {
     Prepared,
 }
 
+/// Original-owner optional stream operation; errors never select fallback transport.
+pub type NativeStreamFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<Option<codex_http_client::StreamResponse>, String>>
+            + Send
+            + 'a,
+    >,
+>;
+
 /// API specific telemetry.
 pub trait RequestTelemetry: Send + Sync {
+    /// A native count route requires an explicit admitted output ceiling. None
+    /// preserves the ordinary serializer and transport; errors must not fall back.
+    fn native_output_limit(&self) -> Result<Option<std::num::NonZeroU64>, String> {
+        Ok(None)
+    }
+
+    /// Optional original-owner transport path after authentication. It owns all
+    /// count/inference admission and returns the actual stream, not a permit to
+    /// retry via the ordinary transport. Errors are terminal build refusals.
+    fn stream_native_request<'a>(&'a self, _request: &'a Request) -> NativeStreamFuture<'a> {
+        Box::pin(async { Ok(None) })
+    }
+
     /// Runs before auth resolution. An installed native launch must either attach
     /// its prepared credential or fail; it must never fall back to ambient auth.
     fn authenticate_request(

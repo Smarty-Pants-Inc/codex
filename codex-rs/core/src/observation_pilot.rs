@@ -17,6 +17,15 @@ use std::time::Duration;
 use std::time::Instant;
 use uuid::Uuid;
 
+#[path = "observation_pilot_journal.rs"]
+mod journal;
+pub use journal::PilotCountJournal;
+pub use journal::PilotLedgerIdentity;
+
+#[path = "observation_pilot_count.rs"]
+pub(super) mod count;
+pub use count::PilotCountScope;
+
 #[path = "observation_pilot_usage.rs"]
 mod usage;
 pub use usage::PilotAttemptRecord;
@@ -77,6 +86,46 @@ pub trait NativePilotIssuer: Send + Sync {
     /// Fence local issuer generation before native retirement can await anything.
     /// Like recheck, this must not perform IO or re-enter the slot.
     fn revoke(&self);
+    /// Transfer the already validated original journal once, without IO or a
+    /// replacement handle. Absence supplies no count permission.
+    fn take_count_journal(
+        &self,
+        _claims: &PilotGrantClaims,
+    ) -> Result<Option<PilotCountJournal>, PilotAuthorityError> {
+        Ok(None)
+    }
+    /// Return independently qualified native semantics and count scope. This is
+    /// trusted launch input, not parsed model/RPC data or inferred permission.
+    fn count_scope(
+        &self,
+        _claims: &PilotGrantClaims,
+    ) -> Result<Option<PilotCountScope>, PilotAuthorityError> {
+        Ok(None)
+    }
+    /// Validate the original inference credential provenance independently of
+    /// count qualification. Neither a copied header nor a receipt ID suffices.
+    fn validate_count_inference(
+        &self,
+        _claims: &PilotGrantClaims,
+        _request: &Request,
+    ) -> Result<(), PilotAuthorityError> {
+        Err(PilotAuthorityError::Unavailable)
+    }
+    /// Original session's effective routing configuration, never ambient fallback.
+    fn count_transport_factory(
+        &self,
+        _claims: &PilotGrantClaims,
+    ) -> Result<codex_http_client::HttpClientFactory, PilotAuthorityError> {
+        Err(PilotAuthorityError::Unavailable)
+    }
+    /// Attach the original credential only to the separately admitted count URL.
+    fn authenticate_count_request(
+        &self,
+        _claims: &PilotGrantClaims,
+        _request: &mut Request,
+    ) -> Result<(), PilotAuthorityError> {
+        Err(PilotAuthorityError::Unavailable)
+    }
     /// Attach the original prepared credential before provider auth resolution.
     /// No ambient fallback is allowed when an installed issuer returns an error.
     fn authenticate_request(
@@ -118,6 +167,8 @@ pub(super) struct PilotLedger {
     reserved_tokens: u64,
     consumed: BTreeSet<Uuid>,
     records: Vec<PilotAttemptRecord>,
+    count_journal: Option<Arc<PilotCountJournal>>,
+    pending_counts: Vec<count::PendingCount>,
 }
 
 impl PilotLedger {
@@ -135,6 +186,10 @@ impl PilotLedger {
         self.expired |=
             now.monotonic >= self.deadline || now.wall_seconds >= self.claims.expires_at;
         self.expired |= self.issuer.recheck_grant(&self.claims).is_err();
+        self.expired |= self
+            .count_journal
+            .as_ref()
+            .is_some_and(|journal| journal.failed());
         if self.expired {
             return Err(PilotAuthorityError::Expired);
         }
@@ -164,6 +219,10 @@ impl PilotLedger {
         self.expired |=
             now.monotonic >= self.deadline || now.wall_seconds >= self.claims.expires_at;
         self.expired |= self.issuer.recheck_grant(&self.claims).is_err();
+        self.expired |= self
+            .count_journal
+            .as_ref()
+            .is_some_and(|journal| journal.failed());
         if self.expired {
             return Err(PilotAuthorityError::Expired);
         }
@@ -220,6 +279,10 @@ impl ObservationSlot {
         match &mut state.pilot {
             Some(pilot) => {
                 pilot.expired |= pilot.issuer.recheck_grant(&pilot.claims).is_err();
+                pilot.expired |= pilot
+                    .count_journal
+                    .as_ref()
+                    .is_some_and(|journal| journal.failed());
                 if pilot.expired {
                     return Err(PilotAuthorityError::Expired);
                 }
@@ -275,6 +338,7 @@ impl ObservationSlot {
             .monotonic
             .checked_add(Duration::from_secs(remaining as u64))
             .ok_or(PilotAuthorityError::Denied)?;
+        let count_journal = issuer.take_count_journal(&claims)?.map(Arc::new);
         state.pilot = Some(PilotLedger {
             claims,
             issuer,
@@ -286,6 +350,8 @@ impl ObservationSlot {
             reserved_tokens: 0,
             consumed: BTreeSet::new(),
             records: Vec::new(),
+            count_journal,
+            pending_counts: Vec::new(),
         });
         Ok(())
     }

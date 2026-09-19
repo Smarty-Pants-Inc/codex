@@ -316,6 +316,113 @@ fn auth_first_generation_failure_permanently_fences_auth_checks_and_admission() 
     ));
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn journal_failure_fences_original_allocation_without_refunding_unknown_spend() -> anyhow::Result<()>
+{
+    use std::io::Write;
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let fixture = Fixture::new();
+    fixture.install();
+    let home = tempfile::tempdir()?;
+    let path = home.path().join("ledger");
+    let file = std::fs::OpenOptions::new()
+        .create_new(true)
+        .append(true)
+        .mode(0o600)
+        .open(&path)?;
+    let metadata = file.metadata()?;
+    let inputs: Vec<_> = (0..5)
+        .map(|_| tempfile::tempfile())
+        .collect::<Result<_, _>>()?;
+    let journal = Arc::new(PilotCountJournal::receive(
+        file,
+        PilotLedgerIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            uid: metadata.uid(),
+            gid: metadata.gid(),
+        },
+        [&inputs[0], &inputs[1], &inputs[2], &inputs[3], &inputs[4]],
+    )?);
+    // Fixture attachment only, in the already installed original ledger. This
+    // does not qualify a scope, credential, semantics artifact or count result.
+    fixture
+        .slot
+        .state
+        .lock()
+        .unwrap()
+        .pilot
+        .as_mut()
+        .unwrap()
+        .count_journal = Some(Arc::clone(&journal));
+    assert!(fixture.guard(Uuid::new_v4()).reserve_turn_if_allowed(
+        &fixture.issuer.claims.thread_id,
+        "native-turn",
+        &mut || {}
+    ));
+    let capture = fixture.slot.capture("native-turn")?;
+    let mut request = Request::new(
+        http::Method::POST,
+        "https://fixture.invalid/responses".into(),
+    );
+    request.headers.insert(
+        "x-fixture-context",
+        http::HeaderValue::from_static("qualified-fixture"),
+    );
+    fixture
+        .slot
+        .begin_attempt_for_request(capture.decision_id, &request)?;
+    let mut expected = fixture.slot.pilot_report(fixture.owner)?;
+    assert_eq!(expected.reserved_tokens, 1000);
+
+    let mut outside = std::fs::OpenOptions::new().append(true).open(&path)?;
+    outside.write_all(b"uncertain external append\n")?;
+    let record = journal::CountJournalRecord::Complete(journal::CountComplete {
+        version: 1,
+        kind: "complete",
+        operation: 1,
+        decision_id: "fixture".into(),
+        attempt_id: "fixture".into(),
+        request_id: "fixture".into(),
+        input_tokens: "0".into(),
+        response_sha256: "a".repeat(/*n*/ 64),
+    });
+    assert_eq!(journal.append(&record), Err(PilotAuthorityError::Denied));
+    expected.revoked = true;
+    assert_eq!(fixture.slot.pilot_report(fixture.owner)?, expected);
+    assert_eq!(
+        fixture.slot.authenticate_pilot_request(&mut request),
+        Err(PilotAuthorityError::Expired)
+    );
+    assert_eq!(
+        fixture.slot.check_pilot_grant(
+            fixture.owner,
+            "fixture-scope",
+            PilotPermission::SampleSource,
+            Uuid::new_v4()
+        ),
+        Err(PilotAuthorityError::Expired)
+    );
+    fixture.clock.lock().unwrap().monotonic += Duration::from_secs(/*secs*/ 2);
+    assert!(!fixture.guard(Uuid::new_v4()).reserve_turn_if_allowed(
+        &fixture.issuer.claims.thread_id,
+        "second-turn",
+        &mut || {}
+    ));
+    assert_eq!(
+        fixture
+            .slot
+            .begin_attempt_for_request(capture.decision_id, &request),
+        Err(ObservationError::Unavailable)
+    );
+    assert_eq!(fixture.slot.pilot_report(fixture.owner)?, expected);
+    assert_eq!(std::fs::read(&path)?, b"uncertain external append\n");
+    Ok(())
+}
+
 #[test]
 fn actual_attempts_require_qualification_keep_unknown_spend_and_bind_late_usage() {
     let mut fixture = Fixture::new();

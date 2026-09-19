@@ -16,7 +16,7 @@ pub(crate) struct ObservationTransportLease {
 }
 
 impl ObservationTransportLease {
-    pub(crate) fn slot(&self) -> &ObservationSlot {
+    pub(crate) fn slot(&self) -> &Arc<ObservationSlot> {
         &self.slot
     }
 }

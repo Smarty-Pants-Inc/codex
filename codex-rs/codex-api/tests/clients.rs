@@ -32,6 +32,8 @@ use serde_json::value::RawValue;
 
 #[path = "clients/body_trace_tests.rs"]
 mod body_trace;
+#[path = "clients/count_admission_tests.rs"]
+mod count_admission;
 #[path = "clients/send_admission_tests.rs"]
 mod send_admission;
 
