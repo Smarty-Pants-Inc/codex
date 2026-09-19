@@ -22,7 +22,7 @@ jobs:
   smarty-ci:
     name: smarty-ci
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
@@ -32,10 +32,10 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - name: Record generation source
+      - name: Record Core source
         run: |
-          mkdir -p "$RUNNER_TEMP/transport-generation"
-          git show -s --format='%H %T %P' HEAD | tee "$RUNNER_TEMP/transport-generation/source-before.txt"
+          mkdir -p "$RUNNER_TEMP/observation-capacity"
+          git show -s --format='%H %T %P' HEAD | tee "$RUNNER_TEMP/observation-capacity/source-before.txt"
           git diff --exit-code
           git diff --cached --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
@@ -45,29 +45,22 @@ jobs:
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
           tool: just@1.51.0,nextest@0.9.103
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
-        with:
-          bazelisk-version: 1.28.1
       - uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: "0.11.3"
           enable-cache: false
-      - name: Record generation tools
+      - name: Record Core tools
         run: |
           set -euo pipefail
           {
-            test "$(cat .bazelversion)" = 9.0.0
-            bazel_version="$(bazel --version)"
-            echo "$bazel_version"
-            test "$bazel_version" = 'bazel 9.0.0'
             rustc -Vv
             cargo --version
             just --version
             cargo nextest --version
             dotslash --version
             uv --version
-          } 2>&1 | tee "$RUNNER_TEMP/transport-generation/tools.log"
+          } 2>&1 | tee "$RUNNER_TEMP/observation-capacity/tools.log"
       - name: Install Linux sandbox build dependencies
         run: |
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
@@ -89,84 +82,109 @@ jobs:
         run: |
           # The crate has no Rust tests; C29 above supplies behavioral coverage.
           just test -p codex-bwrap --locked --no-tests=pass --retries 0 --test-threads 2
-      - name: Generate and check Bazel lock
+      - name: Record native Linux resource and dependency identity
         run: |
           set -euo pipefail
-          just bazel-lock-update 2>&1 | tee "$RUNNER_TEMP/transport-generation/bazel-lock-update.log"
-          just bazel-lock-check 2>&1 | tee "$RUNNER_TEMP/transport-generation/bazel-lock-check.log"
-      - name: Generate normal and experimental protocol schemas
+          {
+            test "$(uname -m)" = x86_64
+            . /etc/os-release
+            test "$ID" = ubuntu
+            test "$VERSION_ID" = 24.04
+            uname -a
+            df -Pk "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+            free -m
+            sha256sum MODULE.bazel MODULE.bazel.lock codex-rs/Cargo.lock codex-rs/Cargo.toml
+          } 2>&1 | tee "$RUNNER_TEMP/observation-capacity/resources.log"
+      - name: Supply integrity-bound readonly capacity DATA
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, stat
+          source = pathlib.Path('codex-rs/core/tests/fixtures/observation_capacity')
+          target = pathlib.Path(os.environ['RUNNER_TEMP']) / 'observation-capacity-input'
+          target.mkdir(mode=0o700)
+          manifest = (source / 'MANIFEST.json').read_bytes()
+          assert hashlib.sha256(manifest).hexdigest() == '14cea29a0d559b5424e8ab0c53b3e22adf561353e6eceb0e9c07ea2d59c05c8b'
+          records = json.loads(manifest)['cases']
+          expected = {f'{label}-{watches}x2048.frame.txt' for label in ('apostrophe', 'quote', 'backslash', 'ampersand') for watches in (4, 8)}
+          assert len(records) == 8 and {case['text']['name'] for case in records} == expected
+          members = []
+          for name, length, digest in [('MANIFEST.json', len(manifest), hashlib.sha256(manifest).hexdigest())] + [(c['text']['name'], c['text']['bytes'], c['text']['sha256']) for c in records]:
+              path = source / name
+              metadata = path.lstat()
+              assert stat.S_ISREG(metadata.st_mode) and metadata.st_size == length and length <= 35000
+              data = path.read_bytes()
+              assert len(data) == length and hashlib.sha256(data).hexdigest() == digest
+              with (target / name).open('xb') as output:
+                  output.write(data)
+              (target / name).chmod(0o400)
+              members.append({'name': name, 'bytes': length, 'sha256': digest})
+          target.chmod(0o500)
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'observation-capacity'
+          (evidence / 'fixtures.json').write_text(json.dumps(members, indent=2) + '\n')
+          PY
+      - name: Compile Core library and execute exact ignored native capacity probe
         working-directory: codex-rs
         run: |
           set -euo pipefail
-          export CODEX_APP_SERVER_SCHEMA_ROOT="$PWD/app-server-protocol/schema"
-          CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL=0 just test -p codex-app-server-protocol --lib \
-            -E 'test(=schema_fixtures_tests::write_schema_fixtures_from_env)' --run-ignored only \
-            --locked --retries 0 --test-threads 2 2>&1 | tee "$RUNNER_TEMP/transport-generation/schema-normal.log"
-          CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL=1 just test -p codex-app-server-protocol --lib \
-            -E 'test(=schema_fixtures_tests::write_schema_fixtures_from_env)' --run-ignored only \
-            --locked --retries 0 --test-threads 2 2>&1 | tee "$RUNNER_TEMP/transport-generation/schema-experimental.log"
-      - name: Test protocol packages
-        working-directory: codex-rs
+          test ! -e "$RUNNER_TEMP/observation-capacity/report.json"
+          export CODEX_OBSERVATION_CAPACITY_FIXTURES="$RUNNER_TEMP/observation-capacity-input"
+          export CODEX_OBSERVATION_CAPACITY_REPORT="$RUNNER_TEMP/observation-capacity/report.json"
+          just test -p codex-core --lib \
+            -E 'test(=context::current_observations::tests::capacity_probe_tests::original_multiview_serializer_native_framing_counterexamples)' \
+            --run-ignored only --locked --retries 0 --test-threads 1 \
+            2>&1 | tee "$RUNNER_TEMP/observation-capacity/core-test.log"
+      - name: Validate complete finite count report
         run: |
           set -euo pipefail
-          just test -p codex-protocol -p codex-app-server-protocol --locked --retries 0 --test-threads 2 \
-            2>&1 | tee "$RUNNER_TEMP/transport-generation/package-tests.log"
-      - name: Fix protocol lint and format
-        working-directory: codex-rs
-        run: |
-          set -euo pipefail
-          just fix -p codex-protocol -p codex-app-server-protocol --locked \
-            2>&1 | tee "$RUNNER_TEMP/transport-generation/scoped-fix.log"
-          just fmt 2>&1 | tee "$RUNNER_TEMP/transport-generation/fmt.log"
-      - name: Return generation evidence and validate changed paths
+          python3 - <<'PY'
+          import json, os, pathlib, re
+          evidence = pathlib.Path(os.environ['RUNNER_TEMP']) / 'observation-capacity'
+          report = evidence / 'report.json'
+          assert report.stat().st_size <= 16384
+          rows = json.loads(report.read_bytes())
+          expected = {f'{label}-{watches}x2048.frame.txt' for label in ('apostrophe', 'quote', 'backslash', 'ampersand') for watches in (4, 8)}
+          assert len(rows) == 8 and {r['fixture'] for r in rows} == expected
+          for row in rows:
+              assert set(row) == {'fixture', 'rawBytes', 'renderedBytes', 'framedBytes', 'framedSha256', 'tokens', 'below10000', 'productionAdmission', 'positiveUniversalBound'}
+              assert all(type(row[key]) is int and 0 < row[key] <= 1000000 for key in ('rawBytes', 'renderedBytes', 'framedBytes', 'tokens'))
+              assert re.fullmatch('[0-9a-f]{64}', row['framedSha256'])
+              assert type(row['below10000']) is bool and row['below10000'] == (row['tokens'] < 10000)
+              assert row['productionAdmission'] == 'rejected-unchanged4096' and row['positiveUniversalBound'] is False
+          # Retain actual named output, not merely a zero exit or zero-tests pass.
+          log = re.sub(r'\x1b\[[0-9;]*m', '', (evidence / 'core-test.log').read_text())
+          name = 'context::current_observations::tests::capacity_probe_tests::original_multiview_serializer_native_framing_counterexamples'
+          assert len([line for line in log.splitlines() if 'PASS' in line and name in line]) == 1
+          assert re.search(r'1 test run: 1 passed', log)
+          PY
+      - name: Return complete Core source and test evidence
         if: always()
         run: |
           set -euo pipefail
-          evidence="$RUNNER_TEMP/transport-generation"
+          evidence="$RUNNER_TEMP/observation-capacity"
           mkdir -p "$evidence"
           git show -s --format='%H %T %P' HEAD > "$evidence/source-after.txt"
-          export GIT_INDEX_FILE="$RUNNER_TEMP/transport-generation-index"
-          git read-tree HEAD
-          git add --update
-          git add --all -- codex-rs/app-server-protocol/schema
-          git write-tree >> "$evidence/source-after.txt"
-          git diff --cached --binary HEAD > "$evidence/generated.patch"
-          git diff --cached --binary HEAD -- MODULE.bazel.lock > "$evidence/bazel-lock.patch"
-          git diff --cached --binary HEAD -- codex-rs/app-server-protocol/schema > "$evidence/schemas.patch"
-          git diff --cached --binary HEAD -- codex-rs/protocol/src codex-rs/app-server-protocol/src > "$evidence/scoped-fix.patch"
-          rm "$GIT_INDEX_FILE"
-          unset GIT_INDEX_FILE
+          git diff --binary > "$evidence/source.patch"
+          git diff --cached --binary > "$evidence/index.patch"
           git status --porcelain=v1 --untracked-files=all > "$evidence/status-after.txt"
           cp MODULE.bazel.lock "$evidence/MODULE.bazel.lock"
           sha256sum MODULE.bazel.lock codex-rs/Cargo.lock .github/workflows/smarty-ci.yml > "$evidence/source-after.sha256"
-          if test -s "$evidence/generated.patch"; then
-            echo 'GENERATED DELTA: NOT FINAL CLEAN QUALIFICATION; source-owner integration and review required.' | tee "$evidence/qualification.txt" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'No tracked generated delta. Qualification still requires every job step to pass.' | tee "$evidence/qualification.txt" >> "$GITHUB_STEP_SUMMARY"
-          fi
           python3 - <<'PY'
-          import subprocess
-          paths = subprocess.check_output(["git", "diff", "--no-renames", "--name-only", "-z", "HEAD"]).decode().split("\0")
-          untracked = subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "-z"]).decode().split("\0")
-          schema = "codex-rs/app-server-protocol/schema/"
-          def schema_output(p):
-              return (p.startswith(schema + "typescript/") and p.endswith(".ts")
-                      or p.startswith(schema + "json/") and p.endswith(".json")
-                      or p in (schema + "precomputed/app-server-exports-stable.json.zst",
-                               schema + "precomputed/app-server-exports-experimental.json.zst"))
-          prefixes = ("codex-rs/protocol/src/", "codex-rs/app-server-protocol/src/")
-          unexpected = [p for p in paths if p and p != "MODULE.bazel.lock" and not schema_output(p) and not (p.startswith(prefixes) and p.endswith(".rs"))]
-          unexpected += [p for p in untracked if p and not schema_output(p)]
-          if unexpected:
-              raise SystemExit(f"Undeclared generated changes: {unexpected}")
+          import hashlib, json, os, pathlib
+          root = pathlib.Path(os.environ['RUNNER_TEMP']) / 'observation-capacity'
+          allowed = {'source-before.txt', 'tools.log', 'resources.log', 'fixtures.json', 'core-test.log', 'report.json', 'source-after.txt', 'source.patch', 'index.patch', 'status-after.txt', 'MODULE.bazel.lock', 'source-after.sha256'}
+          paths = list(root.iterdir())
+          assert all(p.name in allowed and p.is_file() and not p.is_symlink() for p in paths)
+          assert sum(p.stat().st_size for p in paths) <= 24 * 1024 * 1024
+          members = [{'name': p.name, 'bytes': p.stat().st_size, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(paths)]
+          (root / 'members.json').write_text(json.dumps(members, indent=2) + '\n')
           PY
-          git diff --cached --exit-code
-      - name: Upload generation evidence (not final qualification)
+      - name: Upload Core capacity evidence (not runtime qualification)
         if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: full-observation-generation-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/transport-generation/
+          name: observation-core-capacity-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/observation-capacity/
           if-no-files-found: error
           retention-days: 7
       - name: Check source remains unchanged

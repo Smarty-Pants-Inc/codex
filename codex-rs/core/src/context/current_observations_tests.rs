@@ -124,3 +124,6 @@ fn unknown_model_and_unknown_or_shrunken_window_fail_closed_even_after_clear() {
         Some(ObservationError::Unavailable)
     );
 }
+
+#[path = "observation_capacity_probe_tests.rs"]
+mod capacity_probe_tests;

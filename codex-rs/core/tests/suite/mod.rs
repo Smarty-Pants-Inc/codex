@@ -114,6 +114,7 @@ mod native_pilot_producers;
 mod network_approval;
 mod observation_retry;
 mod observation_transport;
+mod observation_wake;
 mod openai_file_mcp;
 mod otel;
 mod override_updates;

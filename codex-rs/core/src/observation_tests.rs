@@ -4,6 +4,9 @@ use std::sync::Barrier;
 use std::sync::OnceLock;
 use std::sync::Weak;
 
+#[path = "observation_wake_tests.rs"]
+mod wake_tests;
+
 #[path = "observation_budget_tests.rs"]
 mod budget_tests;
 
