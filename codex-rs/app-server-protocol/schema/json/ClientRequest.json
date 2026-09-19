@@ -2227,6 +2227,38 @@
       ],
       "type": "string"
     },
+    "ObservationFrame": {
+      "properties": {
+        "expiresAt": {
+          "description": "Unix seconds. Native admission validates the bounded active lease.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "hash": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expiresAt",
+        "hash",
+        "text"
+      ],
+      "type": "object"
+    },
+    "ObservationFrameUpdate": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ObservationFrame"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Required nullable value: omitting `frame` must not silently clear a slot."
+    },
     "PermissionProfileListParams": {
       "properties": {
         "cursor": {
@@ -2260,6 +2292,14 @@
         "none",
         "friendly",
         "pragmatic"
+      ],
+      "type": "string"
+    },
+    "PilotSourceOperation": {
+      "enum": [
+        "prepareSource",
+        "sampleSource",
+        "actOnSource"
       ],
       "type": "string"
     },
@@ -4450,6 +4490,19 @@
       },
       "required": [
         "threadId"
+      ],
+      "type": "object"
+    },
+    "ThreadObservationOptions": {
+      "properties": {
+        "protocol": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "protocol"
       ],
       "type": "object"
     },
