@@ -6,10 +6,14 @@ use crate::request_processors::thread_settings_from_config_snapshot;
 use crate::transport::ConnectionOrigin;
 use codex_app_server_protocol::RequestId;
 use codex_core::ObservationError;
+use codex_core::TurnInputRequest;
 use codex_file_watcher::WatchRegistration;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::user_input::UserInput;
 use core_test_support::responses;
 use core_test_support::test_codex::test_codex;
+use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use tokio::sync::oneshot;
 use tokio::time::Duration;
@@ -110,7 +114,31 @@ async fn listener_clear_replace_and_drop_keep_core_binding_revoked() -> anyhow::
         );
         assert_eq!(
             binding.slot.capture("old-turn"),
-            Err(ObservationError::StaleOwner)
+            Err(ObservationError::ResourceLimit)
+        );
+        test.codex
+            .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "must not send after observation owner teardown".into(),
+                text_elements: Vec::new(),
+            }]))
+            .await?;
+        let EventMsg::TurnComplete(completed) = wait_for_event(&test.codex, |event| {
+            matches!(event, EventMsg::TurnComplete(_))
+        })
+        .await
+        else {
+            unreachable!("terminal predicate")
+        };
+        assert!(completed.error.is_some());
+        assert_eq!(
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|request| request.url.path().ends_with("/responses"))
+                .count(),
+            0,
         );
         assert!(Arc::ptr_eq(
             &binding,
@@ -184,7 +212,7 @@ async fn conflicting_install_cannot_replace_core_binding() -> anyhow::Result<()>
     ));
     assert_eq!(
         candidate.slot.capture("candidate"),
-        Err(ObservationError::StaleOwner)
+        Err(ObservationError::ResourceLimit)
     );
     let capture = owner.slot.capture("current")?;
     owner.slot.release(capture.decision_id)?;
