@@ -81,6 +81,22 @@ impl DecisionAudit {
     }
 }
 
+impl super::SlotState {
+    fn active_budget_valid(&self) -> bool {
+        self.budget.as_ref().is_none_or(|budget| {
+            budget.snapshot.state == super::ObservationReservationState::Valid
+                && self.active_capture.as_ref().is_some_and(|audit| {
+                    audit
+                        .record
+                        .metadata
+                        .native_reservation
+                        .as_ref()
+                        .is_some_and(|captured| captured.generation == budget.snapshot.generation)
+                })
+        })
+    }
+}
+
 impl ObservationSlot {
     /// Reserve room for the preceding attempt's nonterminal outcome before a new
     /// send. The terminal outcome's capacity/order were reserved at capture time.
@@ -156,6 +172,7 @@ impl ObservationSlot {
         let original = &plan.original;
         if state.revoked
             || self.events.is_closed()
+            || !state.active_budget_valid()
             || !state.active_capture.as_ref().is_some_and(|audit| {
                 !audit.attempt_started
                     && audit.record.decision_id == original.decision_id
@@ -189,6 +206,7 @@ impl ObservationSlot {
             .map_err(|_| PilotAuthorityError::Unavailable)?;
         if state.revoked
             || self.events.is_closed()
+            || !state.active_budget_valid()
             || !state.active_capture.as_ref().is_some_and(|audit| {
                 audit.matches_pending_count(plan.decision_id, plan.attempt_id, plan.request_id)
             })
@@ -232,6 +250,9 @@ impl ObservationSlot {
     > {
         if state.revoked || self.events.is_closed() {
             return Err(ObservationError::Unavailable);
+        }
+        if !state.active_budget_valid() {
+            return Err(ObservationError::BudgetInvalid);
         }
         let audit = state
             .active_capture

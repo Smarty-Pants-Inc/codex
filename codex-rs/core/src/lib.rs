@@ -91,6 +91,8 @@ pub use observation::ObservationFrame;
 pub use observation::ObservationMetadata;
 pub use observation::ObservationOutcome;
 pub use observation::ObservationOwner;
+pub use observation::ObservationReservation;
+pub use observation::ObservationReservationState;
 pub use observation::ObservationSlot;
 pub use observation::ObservationStatus;
 pub use observation::ObservationSubmitted;

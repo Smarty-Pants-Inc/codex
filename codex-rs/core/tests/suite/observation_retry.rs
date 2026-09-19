@@ -160,7 +160,8 @@ async fn unchanged_retry_retains_a_and_completed_tool_retry_captures_b() -> anyh
         match event {
             ObservationEvent::Captured(capture) => captures.push(capture),
             ObservationEvent::Submitted(record) => submitted.push(record),
-            ObservationEvent::Published(_)
+            ObservationEvent::Budget { .. }
+            | ObservationEvent::Published(_)
             | ObservationEvent::Read(_)
             | ObservationEvent::Control { .. } => {}
         }

@@ -46,7 +46,11 @@ pub(crate) fn store_error(error: ObservationError) -> JSONRPCErrorError {
         ObservationError::StaleOwner => ThreadObservationRejectionCode::StaleOwner,
         ObservationError::RevisionMismatch => ThreadObservationRejectionCode::RevisionMismatch,
         ObservationError::ResourceLimit => ThreadObservationRejectionCode::ResourceLimit,
-        ObservationError::Unavailable => ThreadObservationRejectionCode::IncompatibleState,
+        ObservationError::Unavailable
+        | ObservationError::BudgetInvalid
+        | ObservationError::BudgetGenerationMismatch => {
+            ThreadObservationRejectionCode::IncompatibleState
+        }
     })
 }
 
