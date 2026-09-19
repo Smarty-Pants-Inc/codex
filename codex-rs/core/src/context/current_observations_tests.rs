@@ -54,7 +54,9 @@ fn final_render_counts_harmony_framing_and_escaped_unicode_data() {
         ResponseItem::Message {
             id: None,
             role: "user".into(),
-            content: vec![ContentItem::InputText { text: expected.into() }],
+            content: vec![ContentItem::InputText {
+                text: expected.into()
+            }],
             phase: None,
             internal_chat_message_metadata_passthrough: Some(
                 InternalChatMessageMetadataPassthrough {
