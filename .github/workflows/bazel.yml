@@ -64,12 +64,13 @@ jobs:
           cache-scope: bazel-${{ github.job }}
 
       - name: Verify native macOS test architecture
-        if: runner.os == 'macOS'
+        if: endsWith(matrix.target, '-apple-darwin')
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
+          test "$RUNNER_OS" = macOS
           case "$TARGET" in
             x86_64-apple-darwin)
               test "$RUNNER_ARCH" = X64
