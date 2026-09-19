@@ -4418,6 +4418,26 @@
           "properties": {
             "method": {
               "enum": [
+                "thread/observation/budget"
+              ],
+              "title": "Thread/observation/budgetNotificationMethod",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/definitions/v2/ThreadObservationBudgetNotification"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "title": "Thread/observation/budgetNotification",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
+              "enum": [
                 "thread/observation/submitted"
               ],
               "title": "Thread/observation/submittedNotificationMethod",
@@ -15043,6 +15063,68 @@
         ],
         "type": "string"
       },
+      "NativeReservation": {
+        "description": "Native capacity preconditions only; never external model/framing qualification.",
+        "properties": {
+          "generation": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "maxFrameBytes": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "profile": {
+            "$ref": "#/definitions/v2/NativeReservationProfile"
+          },
+          "reservedTokens": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "state": {
+            "$ref": "#/definitions/v2/NativeReservationState"
+          },
+          "usableContextTokens": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "generation",
+          "maxFrameBytes",
+          "profile",
+          "reservedTokens",
+          "state"
+        ],
+        "type": "object"
+      },
+      "NativeReservationProfile": {
+        "enum": [
+          "harmonyGptOss"
+        ],
+        "type": "string"
+      },
+      "NativeReservationState": {
+        "enum": [
+          "valid",
+          "invalid",
+          "unsupported"
+        ],
+        "type": "string"
+      },
       "NetworkAccess": {
         "enum": [
           "restricted",
@@ -15272,7 +15354,8 @@
         "enum": [
           "current",
           "cleared",
-          "expired"
+          "expired",
+          "unavailable"
         ],
         "type": "string"
       },
@@ -21773,6 +21856,39 @@
         "title": "ThreadNameUpdatedNotification",
         "type": "object"
       },
+      "ThreadObservationBudgetNotification": {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "properties": {
+          "commitOrder": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "nativeReservation": {
+            "$ref": "#/definitions/v2/NativeReservation"
+          },
+          "ownerEpoch": {
+            "type": "string"
+          },
+          "protocol": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "threadId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "commitOrder",
+          "nativeReservation",
+          "ownerEpoch",
+          "protocol",
+          "threadId"
+        ],
+        "title": "ThreadObservationBudgetNotification",
+        "type": "object"
+      },
       "ThreadObservationCapabilities": {
         "properties": {
           "automaticAdmission": {
@@ -21792,6 +21908,9 @@
             "format": "uint32",
             "minimum": 0.0,
             "type": "integer"
+          },
+          "nativeReservation": {
+            "$ref": "#/definitions/v2/NativeReservation"
           },
           "ownerEpoch": {
             "type": "string"
@@ -21815,6 +21934,7 @@
           "maxFrameBytes",
           "maxInFlightDecisions",
           "maxLeaseSeconds",
+          "nativeReservation",
           "ownerEpoch",
           "protocol",
           "replacement",
@@ -21825,6 +21945,11 @@
       "ThreadObservationCapturedNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
+          "budgetGeneration": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
+          },
           "capturedAt": {
             "description": "Native per-decision capture time, in Unix seconds; not host composition time.",
             "format": "int64",
@@ -21852,6 +21977,11 @@
           "ownerEpoch": {
             "type": "string"
           },
+          "protocol": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
           "state": {
             "$ref": "#/definitions/v2/ObservationCaptureState"
           },
@@ -21863,11 +21993,13 @@
           }
         },
         "required": [
+          "budgetGeneration",
           "capturedAt",
           "commitOrder",
           "decisionId",
           "frameRevision",
           "ownerEpoch",
+          "protocol",
           "state",
           "threadId",
           "turnId"
@@ -21893,6 +22025,11 @@
         "properties": {
           "attemptId": {
             "type": "string"
+          },
+          "budgetGeneration": {
+            "format": "uint64",
+            "minimum": 0.0,
+            "type": "integer"
           },
           "capturedAt": {
             "format": "int64",
@@ -21923,6 +22060,11 @@
           "ownerEpoch": {
             "type": "string"
           },
+          "protocol": {
+            "format": "uint32",
+            "minimum": 0.0,
+            "type": "integer"
+          },
           "providerRequestId": {
             "type": [
               "string",
@@ -21948,12 +22090,14 @@
         },
         "required": [
           "attemptId",
+          "budgetGeneration",
           "capturedAt",
           "commitOrder",
           "decisionId",
           "frameRevision",
           "outcome",
           "ownerEpoch",
+          "protocol",
           "requestId",
           "state",
           "terminalDecision",

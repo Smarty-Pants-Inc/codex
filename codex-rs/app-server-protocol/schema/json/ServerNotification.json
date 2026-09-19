@@ -2915,6 +2915,68 @@
         }
       ]
     },
+    "NativeReservation": {
+      "description": "Native capacity preconditions only; never external model/framing qualification.",
+      "properties": {
+        "generation": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxFrameBytes": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profile": {
+          "$ref": "#/definitions/NativeReservationProfile"
+        },
+        "reservedTokens": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/definitions/NativeReservationState"
+        },
+        "usableContextTokens": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "generation",
+        "maxFrameBytes",
+        "profile",
+        "reservedTokens",
+        "state"
+      ],
+      "type": "object"
+    },
+    "NativeReservationProfile": {
+      "enum": [
+        "harmonyGptOss"
+      ],
+      "type": "string"
+    },
+    "NativeReservationState": {
+      "enum": [
+        "valid",
+        "invalid",
+        "unsupported"
+      ],
+      "type": "string"
+    },
     "NetworkAccess": {
       "enum": [
         "restricted",
@@ -5044,8 +5106,44 @@
       ],
       "type": "object"
     },
+    "ThreadObservationBudgetNotification": {
+      "properties": {
+        "commitOrder": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "nativeReservation": {
+          "$ref": "#/definitions/NativeReservation"
+        },
+        "ownerEpoch": {
+          "type": "string"
+        },
+        "protocol": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "threadId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "commitOrder",
+        "nativeReservation",
+        "ownerEpoch",
+        "protocol",
+        "threadId"
+      ],
+      "type": "object"
+    },
     "ThreadObservationCapturedNotification": {
       "properties": {
+        "budgetGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "capturedAt": {
           "description": "Native per-decision capture time, in Unix seconds; not host composition time.",
           "format": "int64",
@@ -5073,6 +5171,11 @@
         "ownerEpoch": {
           "type": "string"
         },
+        "protocol": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "state": {
           "$ref": "#/definitions/ObservationCaptureState"
         },
@@ -5084,11 +5187,13 @@
         }
       },
       "required": [
+        "budgetGeneration",
         "capturedAt",
         "commitOrder",
         "decisionId",
         "frameRevision",
         "ownerEpoch",
+        "protocol",
         "state",
         "threadId",
         "turnId"
@@ -5099,6 +5204,11 @@
       "properties": {
         "attemptId": {
           "type": "string"
+        },
+        "budgetGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
         },
         "capturedAt": {
           "format": "int64",
@@ -5129,6 +5239,11 @@
         "ownerEpoch": {
           "type": "string"
         },
+        "protocol": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
         "providerRequestId": {
           "type": [
             "string",
@@ -5154,12 +5269,14 @@
       },
       "required": [
         "attemptId",
+        "budgetGeneration",
         "capturedAt",
         "commitOrder",
         "decisionId",
         "frameRevision",
         "outcome",
         "ownerEpoch",
+        "protocol",
         "requestId",
         "state",
         "terminalDecision",
@@ -6622,6 +6739,26 @@
         "params"
       ],
       "title": "Thread/observation/capturedNotification",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "method": {
+          "enum": [
+            "thread/observation/budget"
+          ],
+          "title": "Thread/observation/budgetNotificationMethod",
+          "type": "string"
+        },
+        "params": {
+          "$ref": "#/definitions/ThreadObservationBudgetNotification"
+        }
+      },
+      "required": [
+        "method",
+        "params"
+      ],
+      "title": "Thread/observation/budgetNotification",
       "type": "object"
     },
     {

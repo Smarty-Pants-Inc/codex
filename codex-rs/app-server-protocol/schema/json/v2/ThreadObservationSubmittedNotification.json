@@ -23,6 +23,11 @@
     "attemptId": {
       "type": "string"
     },
+    "budgetGeneration": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
     "capturedAt": {
       "format": "int64",
       "type": "integer"
@@ -52,6 +57,11 @@
     "ownerEpoch": {
       "type": "string"
     },
+    "protocol": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    },
     "providerRequestId": {
       "type": [
         "string",
@@ -77,12 +87,14 @@
   },
   "required": [
     "attemptId",
+    "budgetGeneration",
     "capturedAt",
     "commitOrder",
     "decisionId",
     "frameRevision",
     "outcome",
     "ownerEpoch",
+    "protocol",
     "requestId",
     "state",
     "terminalDecision",

@@ -757,6 +757,68 @@
         }
       ]
     },
+    "NativeReservation": {
+      "description": "Native capacity preconditions only; never external model/framing qualification.",
+      "properties": {
+        "generation": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "maxFrameBytes": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "model": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "profile": {
+          "$ref": "#/definitions/NativeReservationProfile"
+        },
+        "reservedTokens": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "state": {
+          "$ref": "#/definitions/NativeReservationState"
+        },
+        "usableContextTokens": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "generation",
+        "maxFrameBytes",
+        "profile",
+        "reservedTokens",
+        "state"
+      ],
+      "type": "object"
+    },
+    "NativeReservationProfile": {
+      "enum": [
+        "harmonyGptOss"
+      ],
+      "type": "string"
+    },
+    "NativeReservationState": {
+      "enum": [
+        "valid",
+        "invalid",
+        "unsupported"
+      ],
+      "type": "string"
+    },
     "NetworkAccess": {
       "enum": [
         "restricted",
@@ -2124,6 +2186,9 @@
           "minimum": 0.0,
           "type": "integer"
         },
+        "nativeReservation": {
+          "$ref": "#/definitions/NativeReservation"
+        },
         "ownerEpoch": {
           "type": "string"
         },
@@ -2146,6 +2211,7 @@
         "maxFrameBytes",
         "maxInFlightDecisions",
         "maxLeaseSeconds",
+        "nativeReservation",
         "ownerEpoch",
         "protocol",
         "replacement",

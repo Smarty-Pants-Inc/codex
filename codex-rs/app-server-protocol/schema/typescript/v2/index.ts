@@ -311,6 +311,9 @@ export type { ModelVerification } from "./ModelVerification";
 export type { ModelVerificationNotification } from "./ModelVerificationNotification";
 export type { ModelsRequirements } from "./ModelsRequirements";
 export type { MultiAgentVersion } from "./MultiAgentVersion";
+export type { NativeReservation } from "./NativeReservation";
+export type { NativeReservationProfile } from "./NativeReservationProfile";
+export type { NativeReservationState } from "./NativeReservationState";
 export type { NetworkAccess } from "./NetworkAccess";
 export type { NetworkApprovalContext } from "./NetworkApprovalContext";
 export type { NetworkApprovalProtocol } from "./NetworkApprovalProtocol";
@@ -497,6 +500,7 @@ export type { ThreadMetadataGitInfoUpdateParams } from "./ThreadMetadataGitInfoU
 export type { ThreadMetadataUpdateParams } from "./ThreadMetadataUpdateParams";
 export type { ThreadMetadataUpdateResponse } from "./ThreadMetadataUpdateResponse";
 export type { ThreadNameUpdatedNotification } from "./ThreadNameUpdatedNotification";
+export type { ThreadObservationBudgetNotification } from "./ThreadObservationBudgetNotification";
 export type { ThreadObservationCapabilities } from "./ThreadObservationCapabilities";
 export type { ThreadObservationCapturedNotification } from "./ThreadObservationCapturedNotification";
 export type { ThreadObservationOptions } from "./ThreadObservationOptions";

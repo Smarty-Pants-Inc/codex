@@ -12,6 +12,11 @@
     }
   },
   "properties": {
+    "budgetGeneration": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
     "capturedAt": {
       "description": "Native per-decision capture time, in Unix seconds; not host composition time.",
       "format": "int64",
@@ -39,6 +44,11 @@
     "ownerEpoch": {
       "type": "string"
     },
+    "protocol": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    },
     "state": {
       "$ref": "#/definitions/ObservationCaptureState"
     },
@@ -50,11 +60,13 @@
     }
   },
   "required": [
+    "budgetGeneration",
     "capturedAt",
     "commitOrder",
     "decisionId",
     "frameRevision",
     "ownerEpoch",
+    "protocol",
     "state",
     "threadId",
     "turnId"

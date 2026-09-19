@@ -4,7 +4,7 @@
 import type { ObservationCaptureState } from "./ObservationCaptureState";
 import type { ObservationSubmissionOutcome } from "./ObservationSubmissionOutcome";
 
-export type ThreadObservationSubmittedNotification = { threadId: string, turnId: string, ownerEpoch: string, decisionId: string, attemptId: string,
+export type ThreadObservationSubmittedNotification = { protocol: number, budgetGeneration: bigint, threadId: string, turnId: string, ownerEpoch: string, decisionId: string, attemptId: string,
 /**
  * Native wire-request identity, not a fabricated upstream ID.
  */
