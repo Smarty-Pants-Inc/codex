@@ -145,9 +145,12 @@ jobs:
           if [[ "$HIT" == true ]]; then
             test "$MATCHED" = "$EXPECTED"
             echo 'Exact cache hit: original full command, inner30/outer30. No retry.'
-          else
+          elif [[ "$HIT" == false || -z "$HIT" ]]; then
             test -z "$MATCHED"
             echo 'Cold cache miss: original full command, inner20/outer30. Incomplete remains failure.'
+          else
+            echo 'Malformed cache-hit value; no build allowed.' >&2
+            exit 1
           fi
 
       - name: Require real repository cache headroom
@@ -165,7 +168,10 @@ jobs:
           from pathlib import Path
           root = Path(os.environ['RUNNER_TEMP'])
           used = json.loads((root / 'cache-usage-before.json').read_text())['active_caches_size_in_bytes']
-          limit = json.loads((root / 'cache-limit-before.json').read_text())['max_cache_size_gb'] * 1_000_000_000
+          configured = json.loads((root / 'cache-limit-before.json').read_text())['max_cache_size_gb']
+          if type(configured) is not int or configured != 10 or type(used) is not int or used < 0:
+              raise SystemExit('Quota envelope drift or invalid usage; no build/save allowed')
+          limit = 10_000_000_000
           required = 4 * 1024**3 + 64 * 1024**2
           print(f'Conservative decimal quota={limit}, used={used}, required free={required}')
           if limit - used < required:
@@ -310,7 +316,10 @@ jobs:
           root = Path(os.environ['RUNNER_TEMP'])
           size = int((root / 'bazel-cache-size.txt').read_text())
           used = json.loads((root / 'cache-usage-save.json').read_text())['active_caches_size_in_bytes']
-          limit = json.loads((root / 'cache-limit-save.json').read_text())['max_cache_size_gb'] * 1_000_000_000
+          configured = json.loads((root / 'cache-limit-save.json').read_text())['max_cache_size_gb']
+          if type(configured) is not int or configured != 10 or type(used) is not int or used < 0:
+              raise SystemExit('Quota envelope drift or invalid usage; no save allowed')
+          limit = 10_000_000_000
           print(f'Pre-save quota={limit}, used={used}, snapshot={size}')
           if limit - used < size + 64 * 1024**2:
               raise SystemExit('Insufficient current cache headroom; no save/automatic eviction')
@@ -341,7 +350,9 @@ jobs:
           from pathlib import Path
           data = json.loads((Path(os.environ['RUNNER_TEMP']) / 'action-cache-receipt.json').read_text())
           rows = [row for row in data['actions_caches'] if row['key'] == os.environ['EXPECTED_KEY'] and row['ref'] == os.environ['GITHUB_REF']]
-          if len(rows) != 1 or not 0 < rows[0]['size_in_bytes'] <= 4 * 1024**3:
+          if (len(rows) != 1 or type(rows[0].get('id')) is not int or rows[0]['id'] <= 0
+                  or type(rows[0].get('size_in_bytes')) is not int
+                  or not 0 < rows[0]['size_in_bytes'] <= 4 * 1024**3):
               raise SystemExit('No unique bounded exact-key service receipt; do not admit continuation')
           print(json.dumps(dict(source=os.environ['GITHUB_SHA'], run=os.environ['GITHUB_RUN_ID'], attempt=os.environ['GITHUB_RUN_ATTEMPT'], uncompressed_bytes=int(os.environ['CACHE_BYTES']), cache=rows[0]), sort_keys=True))
           PY
