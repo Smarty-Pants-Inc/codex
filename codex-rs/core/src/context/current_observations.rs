@@ -75,7 +75,9 @@ impl CurrentObservations {
         ResponseItem::Message {
             id: None,
             role: "user".into(),
-            content: vec![ContentItem::InputText { text: self.render() }],
+            content: vec![ContentItem::InputText {
+                text: self.render(),
+            }],
             phase: None,
             internal_chat_message_metadata_passthrough: Some(
                 InternalChatMessageMetadataPassthrough {
