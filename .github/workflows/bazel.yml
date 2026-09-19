@@ -352,9 +352,12 @@ jobs:
           rows = [row for row in data['actions_caches'] if row['key'] == os.environ['EXPECTED_KEY'] and row['ref'] == os.environ['GITHUB_REF']]
           if (len(rows) != 1 or type(rows[0].get('id')) is not int or rows[0]['id'] <= 0
                   or type(rows[0].get('size_in_bytes')) is not int
-                  or not 0 < rows[0]['size_in_bytes'] <= 4 * 1024**3):
+                  or not 0 < rows[0]['size_in_bytes'] <= 4 * 1024**3
+                  or not isinstance(rows[0].get('version'), str) or not rows[0]['version']
+                  or not isinstance(rows[0].get('created_at'), str) or not rows[0]['created_at']):
               raise SystemExit('No unique bounded exact-key service receipt; do not admit continuation')
-          print(json.dumps(dict(source=os.environ['GITHUB_SHA'], run=os.environ['GITHUB_RUN_ID'], attempt=os.environ['GITHUB_RUN_ATTEMPT'], uncompressed_bytes=int(os.environ['CACHE_BYTES']), cache=rows[0]), sort_keys=True))
+          print(json.dumps(dict(observer_source=os.environ['GITHUB_SHA'], observer_run=os.environ['GITHUB_RUN_ID'], observer_attempt=os.environ['GITHUB_RUN_ATTEMPT'], uncompressed_bytes=int(os.environ['CACHE_BYTES']), cache=rows[0]), sort_keys=True))
+          print('Receiving must join provider created_at/version/ID to actual save logs, cold absence and no competing writer; observer fields alone do not prove origin.')
           PY
 
       - name: Check final qualification source remains unchanged
