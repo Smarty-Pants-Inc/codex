@@ -28,14 +28,14 @@ impl ObservationSlot {
     /// Capture after canonical history/tool-result assembly. Publication, time
     /// sampling and this event share one critical section. Failure means no send.
     pub fn capture(&self, turn_id: &str) -> Result<ObservationCapture, ObservationError> {
-        self.capture_checked(turn_id, /*model*/ None, |_| Ok(()))
+        self.capture_checked(turn_id, /*model*/ None, |_| Ok(None))
     }
 
     pub(crate) fn capture_checked(
         &self,
         turn_id: &str,
         model: Option<&codex_protocol::openai_models::ModelInfo>,
-        validate: impl FnOnce(&ObservationCapture) -> Result<(), ObservationError>,
+        validate: impl FnOnce(&ObservationCapture) -> Result<Option<[u8; 32]>, ObservationError>,
     ) -> Result<ObservationCapture, ObservationError> {
         if turn_id.is_empty()
             || turn_id.len() > 128
@@ -88,9 +88,17 @@ impl ObservationSlot {
             captured_at: now.wall_seconds,
             text,
         };
-        validate(&capture)?;
+        let request_input = validate(&capture)?;
         state.commit_order = capture.metadata.commit_order;
-        state.active_capture = Some(DecisionAudit::new(&capture, terminal));
+        let deadline = (capture.metadata.status == ObservationStatus::Current)
+            .then_some(state.deadline)
+            .flatten();
+        state.active_capture = Some(DecisionAudit::new(
+            &capture,
+            terminal,
+            request_input,
+            deadline,
+        ));
         permit.send(ObservationEvent::Captured(capture.clone()));
         Ok(capture)
     }

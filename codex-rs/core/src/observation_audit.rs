@@ -4,6 +4,11 @@ use super::ObservationError;
 use super::ObservationEvent;
 use super::ObservationMetadata;
 use super::ObservationSlot;
+use codex_client::RequestBody;
+use codex_client::RequestCompression;
+use codex_protocol::models::ResponseItem;
+use sha2::Digest;
+use sha2::Sha256;
 use tokio::sync::mpsc::OwnedPermit;
 use uuid::Uuid;
 
@@ -39,12 +44,16 @@ pub(super) struct DecisionAudit {
     record: ObservationSubmitted,
     attempt_started: bool,
     terminal: OwnedPermit<ObservationEvent>,
+    request_input: Option<[u8; 32]>,
+    deadline: Option<std::time::Instant>,
 }
 
 impl DecisionAudit {
     pub(super) fn new(
         capture: &ObservationCapture,
         terminal: OwnedPermit<ObservationEvent>,
+        request_input: Option<[u8; 32]>,
+        deadline: Option<std::time::Instant>,
     ) -> Self {
         Self {
             record: ObservationSubmitted {
@@ -61,7 +70,64 @@ impl DecisionAudit {
             },
             attempt_started: false,
             terminal,
+            request_input,
+            deadline,
         }
+    }
+
+    fn validate_request(
+        &self,
+        request: Option<&codex_client::Request>,
+    ) -> Result<(), ObservationError> {
+        let Some(expected) = self.request_input else {
+            // Store-only captures do not claim a rendered request overlay.
+            return Ok(());
+        };
+        let request = request.ok_or(ObservationError::InvalidFrame)?;
+        if request.method != http::Method::POST
+            || request.compression != RequestCompression::None
+            || request.headers.contains_key(http::header::CONTENT_ENCODING)
+        {
+            return Err(ObservationError::InvalidFrame);
+        }
+        let body = match request.body.as_ref() {
+            Some(RequestBody::Json(body)) => body.clone(),
+            Some(RequestBody::EncodedJson(body)) => serde_json::from_slice(body.as_bytes())
+                .map_err(|_| ObservationError::InvalidFrame)?,
+            Some(RequestBody::Raw(_)) | None => return Err(ObservationError::InvalidFrame),
+        };
+        if body.get("previous_response_id").is_some()
+            || body.get("stream") != Some(&serde_json::Value::Bool(true))
+            || body.get("store") != Some(&serde_json::Value::Bool(false))
+        {
+            return Err(ObservationError::InvalidFrame);
+        }
+        let input = body
+            .get("input")
+            .filter(|input| input.is_array())
+            .cloned()
+            .ok_or(ObservationError::InvalidFrame)?;
+        if input_digest(input)? != expected {
+            return Err(ObservationError::InvalidFrame);
+        }
+        Ok(())
+    }
+
+    fn validate_lease(&self, now: super::ObservationClock) -> Result<(), ObservationError> {
+        if self.request_input.is_some()
+            && self.deadline.is_some()
+            && (self
+                .deadline
+                .is_some_and(|deadline| now.monotonic >= deadline)
+                || self
+                    .record
+                    .metadata
+                    .expires_at
+                    .is_some_and(|expiry| now.wall_seconds >= expiry))
+        {
+            return Err(ObservationError::InvalidFrame);
+        }
+        Ok(())
     }
 
     pub(super) fn decision_id(&self) -> Uuid {
@@ -97,7 +163,23 @@ impl super::SlotState {
     }
 }
 
+fn input_digest(mut input: serde_json::Value) -> Result<[u8; 32], ObservationError> {
+    // Compare JSON objects independent of key order without deserializing into
+    // ResponseItem: that would discard warehouse-only/unknown wire fields.
+    input.sort_all_objects();
+    let bytes = serde_json::to_vec(&input).map_err(|_| ObservationError::InvalidFrame)?;
+    Ok(Sha256::digest(bytes).into())
+}
+
 impl ObservationSlot {
+    /// Bind the complete ordered sender-normalized input, including annotations,
+    /// not a marker search or a subset of group parts.
+    pub(crate) fn request_input_digest(
+        input: Vec<ResponseItem>,
+    ) -> Result<[u8; 32], ObservationError> {
+        input_digest(serde_json::to_value(input).map_err(|_| ObservationError::InvalidFrame)?)
+    }
+
     /// Reserve room for the preceding attempt's nonterminal outcome before a new
     /// send. The terminal outcome's capacity/order were reserved at capture time.
     pub(crate) fn begin_attempt(
@@ -127,7 +209,7 @@ impl ObservationSlot {
             std::sync::TryLockError::WouldBlock => ObservationError::ResourceLimit,
             std::sync::TryLockError::Poisoned(_) => ObservationError::Unavailable,
         })?;
-        let previous = self.reserve_previous_attempt(&state, decision_id)?;
+        let previous = self.reserve_previous_attempt(&state, decision_id, Some(request))?;
         let turn_id = state
             .active_capture
             .as_ref()
@@ -213,6 +295,16 @@ impl ObservationSlot {
         {
             return Err(PilotAuthorityError::Denied);
         }
+        let audit = state
+            .active_capture
+            .as_ref()
+            .ok_or(PilotAuthorityError::Unavailable)?;
+        audit
+            .validate_request(Some(actual))
+            .map_err(|_| PilotAuthorityError::Denied)?;
+        audit
+            .validate_lease((self.clock)().map_err(|_| PilotAuthorityError::Unavailable)?)
+            .map_err(|_| PilotAuthorityError::Denied)?;
         let reservation = state
             .pilot
             .as_mut()
@@ -241,6 +333,7 @@ impl ObservationSlot {
         &self,
         state: &super::SlotState,
         decision_id: Uuid,
+        request: Option<&codex_client::Request>,
     ) -> Result<
         Option<(
             ObservationSubmitted,
@@ -261,6 +354,8 @@ impl ObservationSlot {
         if audit.decision_id() != decision_id {
             return Err(ObservationError::RevisionMismatch);
         }
+        audit.validate_request(request)?;
+        audit.validate_lease((self.clock)()?)?;
         if !audit.attempt_started {
             return Ok(None);
         }
@@ -283,7 +378,7 @@ impl ObservationSlot {
             std::sync::TryLockError::WouldBlock => ObservationError::ResourceLimit,
             std::sync::TryLockError::Poisoned(_) => ObservationError::Unavailable,
         })?;
-        let previous = self.reserve_previous_attempt(&state, decision_id)?;
+        let previous = self.reserve_previous_attempt(&state, decision_id, request)?;
         let turn_id = state
             .active_capture
             .as_ref()
