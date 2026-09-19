@@ -94,35 +94,12 @@ jobs:
           set -euo pipefail
           just bazel-lock-update 2>&1 | tee "$RUNNER_TEMP/transport-generation/bazel-lock-update.log"
           just bazel-lock-check 2>&1 | tee "$RUNNER_TEMP/transport-generation/bazel-lock-check.log"
-      - name: Record TLS selection inputs
-        working-directory: codex-rs
-        run: |
-          set -euo pipefail
-          python3 - <<'PY' | tee "$RUNNER_TEMP/transport-generation/tls-ca-presence.json"
-          import json
-          import os
-          print(json.dumps({name: bool(os.environ.get(name)) for name in ["CODEX_CA_CERTIFICATE", "SSL_CERT_FILE"]}))
-          PY
-          cargo tree --locked -p codex-http-client -p codex-client -p codex-api -e features -i reqwest@0.12.28 \
-            2>&1 | tee "$RUNNER_TEMP/transport-generation/reqwest-features.log"
       - name: Test transport packages
-        id: transport_tests
         working-directory: codex-rs
         run: |
           set -euo pipefail
           just test -p codex-http-client -p codex-client -p codex-api --locked --retries 0 --test-threads 2 \
             2>&1 | tee "$RUNNER_TEMP/transport-generation/package-tests.log"
-      - name: Diagnose native TLS fixtures without ambient CA overrides
-        if: failure() && steps.transport_tests.outcome == 'failure'
-        timeout-minutes: 1
-        working-directory: codex-rs
-        run: |
-          set -euo pipefail
-          # Diagnostic comparison only: the original full-package failure remains red.
-          env -u CODEX_CA_CERTIFICATE -u SSL_CERT_FILE \
-            just test -p codex-http-client -p codex-client -p codex-api \
-            -E 'test(route_aware_client_pool::tls_fallback_tests)' --locked --retries 0 --test-threads 2 \
-            2>&1 | tee "$RUNNER_TEMP/transport-generation/native-tls-comparison.log"
       - name: Fix transport lint and format
         working-directory: codex-rs
         run: |
