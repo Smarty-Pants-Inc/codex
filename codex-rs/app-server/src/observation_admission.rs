@@ -39,6 +39,16 @@ pub struct AppServerObservationArgs {
     sense_pilot_prepared_fd: Option<String>,
     #[arg(long, hide = true, requires = "sense_pilot_credential_fd")]
     sense_pilot_prepared_sha256: Option<String>,
+    #[arg(long, hide = true, value_parser = ["14"], requires_all = ["sense_pilot_credential_fd", "sense_pilot_count_scope_sha256", "sense_pilot_count_semantics_fd", "sense_pilot_count_semantics_sha256", "sense_pilot_count_ledger_fd"])]
+    sense_pilot_count_scope_fd: Option<String>,
+    #[arg(long, hide = true, requires = "sense_pilot_count_scope_fd")]
+    sense_pilot_count_scope_sha256: Option<String>,
+    #[arg(long, hide = true, value_parser = ["15"], requires = "sense_pilot_count_scope_fd")]
+    sense_pilot_count_semantics_fd: Option<String>,
+    #[arg(long, hide = true, requires = "sense_pilot_count_scope_fd")]
+    sense_pilot_count_semantics_sha256: Option<String>,
+    #[arg(long, hide = true, value_parser = ["16"], requires = "sense_pilot_count_scope_fd")]
+    sense_pilot_count_ledger_fd: Option<String>,
 }
 
 impl AppServerObservationArgs {
@@ -46,9 +56,27 @@ impl AppServerObservationArgs {
         let Some(_profile) = self.observation_profile else {
             return Ok(None);
         };
+        let count_pins = match (
+            self.sense_pilot_count_scope_fd.as_deref(),
+            self.sense_pilot_count_scope_sha256.as_deref(),
+            self.sense_pilot_count_semantics_fd.as_deref(),
+            self.sense_pilot_count_semantics_sha256.as_deref(),
+            self.sense_pilot_count_ledger_fd.as_deref(),
+        ) {
+            (None, None, None, None, None) => None,
+            (Some("14"), Some(scope), Some("15"), Some(semantics), Some("16"))
+                if self.sense_pilot_launch_fd.as_deref() == Some("3")
+                    && self.sense_pilot_credential_fd.as_deref() == Some("4")
+                    && self.sense_pilot_prepared_fd.as_deref() == Some("5")
+                    && self.sense_pilot_prepared_sha256.is_some() =>
+            {
+                Some((scope, semantics))
+            }
+            _ => anyhow::bail!("incomplete native count descriptor extension"),
+        };
         let pilot = self
             .sense_pilot_launch_fd
-            .map(|_| PilotStartup::receive(self.sense_pilot_prepared_sha256.as_deref()))
+            .map(|_| PilotStartup::receive(self.sense_pilot_prepared_sha256.as_deref(), count_pins))
             .transpose()?;
         Ok(Some(ObservationStartup {
             profile: ObservationProfile::HarmonyGptOss,

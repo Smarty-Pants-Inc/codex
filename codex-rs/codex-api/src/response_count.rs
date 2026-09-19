@@ -26,9 +26,19 @@ pub struct CountWireError;
 pub struct CountWire {
     inference: EncodedJsonBody,
     count: EncodedJsonBody,
+    model: String,
+    output_tokens: NonZeroU64,
 }
 
 impl CountWire {
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    pub fn output_tokens(&self) -> NonZeroU64 {
+        self.output_tokens
+    }
+
     pub fn inference_body(&self) -> &EncodedJsonBody {
         &self.inference
     }
@@ -172,7 +182,12 @@ pub fn prepare_response_count(
     if count.as_bytes().len() > MAX_BODY_BYTES {
         return Err(CountWireError);
     }
-    Ok(CountWire { inference, count })
+    Ok(CountWire {
+        inference,
+        count,
+        model: request.model.clone(),
+        output_tokens,
+    })
 }
 
 /// Parse data only, not an authenticated CountResult. The native producer must

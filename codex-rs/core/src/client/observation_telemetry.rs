@@ -61,6 +61,61 @@ impl ObservationTelemetry {
 }
 
 impl RequestTelemetry for ObservationTelemetry {
+    fn native_output_limit(&self) -> Result<Option<std::num::NonZeroU64>, String> {
+        self.lease
+            .slot()
+            .native_count_output_limit()
+            .map_err(|_| "native count scope unavailable".to_owned())
+    }
+
+    fn stream_native_request<'a>(
+        &'a self,
+        request: &'a codex_client::Request,
+    ) -> codex_client::NativeStreamFuture<'a> {
+        Box::pin(async move {
+            if !self
+                .lease
+                .slot()
+                .has_pilot_authority()
+                .map_err(|_| "native pilot unavailable".to_owned())?
+            {
+                return self.request.stream_native_request(request).await;
+            }
+            if self
+                .lease
+                .slot()
+                .native_count_output_limit()
+                .map_err(|_| "native count scope unavailable".to_owned())?
+                .is_none()
+            {
+                if request
+                    .extensions
+                    .get::<Arc<codex_api::CountWire>>()
+                    .is_some()
+                {
+                    return Err("native count scope changed".to_owned());
+                }
+                // No count capability: retain the original synchronous qualifier.
+                // The launch issuer still refuses missing whole-request authority.
+                return Ok(None);
+            }
+            self.request
+                .on_request_prepared(request)
+                .map_err(|_| "native upstream admission unavailable".to_owned())?;
+            let (response, attempt) = self
+                .lease
+                .slot()
+                .stream_counted_request(self.decision_id, request)
+                .await
+                .map_err(|_| "native counted request unavailable".to_owned())?;
+            *self
+                .attempt
+                .lock()
+                .map_err(|_| "native attempt unavailable".to_owned())? = Some(attempt);
+            Ok(Some(response))
+        })
+    }
+
     fn authenticate_request(
         &self,
         request: &mut codex_client::Request,

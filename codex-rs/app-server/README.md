@@ -2789,6 +2789,23 @@ These source interfaces do not enable `automaticAdmission` by themselves. Count
 and final-context qualification remain separate, fail-closed producers. Schema
 fixtures must be generated from the exact integrated source before qualification.
 
+The trusted v2 launcher can supply an optional, complete count descriptor group:
+`--sense-pilot-count-scope-fd 14`, `--sense-pilot-count-scope-sha256 <pin>`,
+`--sense-pilot-count-semantics-fd 15`,
+`--sense-pilot-count-semantics-sha256 <pin>`, and
+`--sense-pilot-count-ledger-fd 16`. These extend original decision/credential/
+prepared descriptors 3/4/5, not an RPC or arbitrary-path loader. Scope and semantics
+are protected readonly canonical JSON; the ledger is the original empty append
+handle transferred once to the same native allocation. No recovery or replacement
+balance is supported. Unknown or unsupported semantics fail closed. A qualified
+artifact must join the original application's binary/source pins, native codec,
+endpoints, model, shapes, limits and independently admitted evidence identity.
+Matching hashes or a status string alone do not establish qualification. Current
+native semantics explicitly refuse `client_metadata` (including an empty object),
+`stream_options` and `access_programs`; these fields are never silently stripped.
+Descriptor survival, independent semantic evidence and native execution remain
+separate qualification requirements; these flags alone do not permit effects.
+
 ### Observation control rejections (protocol 1)
 
 The owner-bound observation path uses the existing JSON-RPC error envelope, not

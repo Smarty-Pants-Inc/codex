@@ -32,6 +32,7 @@ fn fixture_launch() -> anyhow::Result<PilotStartup> {
         decision,
         digest: "fixture-selector-not-authority".to_owned(),
         credential: Mutex::new(None),
+        count: None,
         _descriptor: tempfile::tempfile()?,
         state: Mutex::new(LaunchState {
             generation: 1,
@@ -51,12 +52,17 @@ fn original_binding_is_one_use_and_revocation_fences_issuer_generation() -> anyh
         epoch: Uuid::now_v7(),
     };
     let thread = ThreadId::new();
-    let (selector, issuer) = launch.bind(owner, thread)?;
+    let factory = codex_http_client::HttpClientFactory::new(
+        codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+    );
+    let (selector, issuer) = launch.bind(owner, thread, factory.clone())?;
     assert!(matches!(
-        launch.bind(owner, thread),
+        launch.bind(owner, thread, factory.clone()),
         Err(PilotAuthorityError::Replay)
     ));
     let claims = issuer.verify_grant(&selector)?;
+    assert!(issuer.count_scope(&claims)?.is_none());
+    assert!(issuer.take_count_journal(&claims)?.is_none());
     assert_eq!(
         (claims.owner, claims.thread_id, claims.issuer_generation),
         (owner, thread, 1)
@@ -72,7 +78,7 @@ fn original_binding_is_one_use_and_revocation_fences_issuer_generation() -> anyh
     );
     assert_eq!(launch.0.state.lock().unwrap().generation, 2);
     assert!(matches!(
-        launch.bind(owner, ThreadId::new()),
+        launch.bind(owner, ThreadId::new(), factory),
         Err(PilotAuthorityError::Expired)
     ));
     Ok(())

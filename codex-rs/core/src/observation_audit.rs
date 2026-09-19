@@ -67,6 +67,18 @@ impl DecisionAudit {
     pub(super) fn decision_id(&self) -> Uuid {
         self.record.decision_id
     }
+
+    pub(in crate::observation) fn matches_pending_count(
+        &self,
+        decision: Uuid,
+        attempt: Uuid,
+        request: Uuid,
+    ) -> bool {
+        !self.attempt_started
+            && self.record.decision_id == decision
+            && self.record.attempt_id == attempt
+            && self.record.request_id == request
+    }
 }
 
 impl ObservationSlot {
@@ -87,15 +99,137 @@ impl ObservationSlot {
         self.begin_attempt_inner(decision_id, Some(request))
     }
 
-    fn begin_attempt_inner(
+    /// Allocate the original audit IDs and charge the existing ledger before
+    /// count IO. This is a pending request, NOT an inference transport start.
+    pub(in crate::observation) fn prepare_count_attempt(
         &self,
         decision_id: Uuid,
-        request: Option<&codex_client::Request>,
-    ) -> Result<ObservationAttempt, ObservationError> {
+        request: &codex_client::Request,
+        wire: std::sync::Arc<codex_api::CountWire>,
+    ) -> Result<super::pilot::count::CountPlan, ObservationError> {
         let mut state = self.state.try_lock().map_err(|error| match error {
             std::sync::TryLockError::WouldBlock => ObservationError::ResourceLimit,
             std::sync::TryLockError::Poisoned(_) => ObservationError::Unavailable,
         })?;
+        let previous = self.reserve_previous_attempt(&state, decision_id)?;
+        let turn_id = state
+            .active_capture
+            .as_ref()
+            .ok_or(ObservationError::Unavailable)?
+            .record
+            .turn_id
+            .clone();
+        let plan = state
+            .pilot
+            .as_mut()
+            .ok_or(ObservationError::Unavailable)?
+            .prepare_count((self.clock)()?, &turn_id, decision_id, request, wire)
+            .map_err(|_| ObservationError::Unavailable)?;
+        if let Some((mut previous, permit)) = previous {
+            state.commit_order += 1;
+            previous.commit_order = state.commit_order;
+            permit.send(ObservationEvent::Submitted(previous));
+        }
+        let audit = state
+            .active_capture
+            .as_mut()
+            .ok_or(ObservationError::Unavailable)?;
+        audit.record.attempt_id = plan.attempt_id;
+        audit.record.request_id = plan.request_id;
+        audit.record.provider_request_id = None;
+        audit.record.outcome = ObservationOutcome::Rejected;
+        audit.attempt_started = false;
+        Ok(plan)
+    }
+
+    /// Rejoin the original still-pending audit after durable IO. The ledger
+    /// additionally checks its private operation identity, scope and generation.
+    pub(in crate::observation) fn acknowledge_count_debit(
+        &self,
+        plan: &super::pilot::count::DurableCountPlan,
+    ) -> Result<(), super::pilot::PilotAuthorityError> {
+        use super::pilot::PilotAuthorityError;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| PilotAuthorityError::Unavailable)?;
+        let original = &plan.original;
+        if state.revoked
+            || self.events.is_closed()
+            || !state.active_capture.as_ref().is_some_and(|audit| {
+                !audit.attempt_started
+                    && audit.record.decision_id == original.decision_id
+                    && audit.record.attempt_id == original.attempt_id
+                    && audit.record.request_id == original.request_id
+            })
+        {
+            return Err(PilotAuthorityError::Denied);
+        }
+        state
+            .pilot
+            .as_mut()
+            .ok_or(PilotAuthorityError::Unavailable)?
+            .acknowledge_count_debit(
+                (self.clock)().map_err(|_| PilotAuthorityError::Unavailable)?,
+                plan,
+            )
+    }
+
+    /// Atomically consume one final receipt and mark only its original pending
+    /// audit as an inference attempt. The reservation was already charged.
+    pub(in crate::observation) fn consume_count_receipt(
+        &self,
+        plan: &super::pilot::count::CountPlan,
+        actual: &codex_client::Request,
+    ) -> Result<(), super::pilot::PilotAuthorityError> {
+        use super::pilot::PilotAuthorityError;
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| PilotAuthorityError::Unavailable)?;
+        if state.revoked
+            || self.events.is_closed()
+            || !state.active_capture.as_ref().is_some_and(|audit| {
+                audit.matches_pending_count(plan.decision_id, plan.attempt_id, plan.request_id)
+            })
+        {
+            return Err(PilotAuthorityError::Denied);
+        }
+        let reservation = state
+            .pilot
+            .as_mut()
+            .ok_or(PilotAuthorityError::Unavailable)?
+            .consume_count_plan(
+                (self.clock)().map_err(|_| PilotAuthorityError::Unavailable)?,
+                plan,
+                actual,
+            )?;
+        let audit = state
+            .active_capture
+            .as_mut()
+            .ok_or(PilotAuthorityError::Denied)?;
+        audit.attempt_started = true;
+        audit.record.outcome = ObservationOutcome::Unknown;
+        let record = audit.record.clone();
+        state
+            .pilot
+            .as_mut()
+            .ok_or(PilotAuthorityError::Unavailable)?
+            .record_attempt(&record, reservation);
+        Ok(())
+    }
+
+    fn reserve_previous_attempt(
+        &self,
+        state: &super::SlotState,
+        decision_id: Uuid,
+    ) -> Result<
+        Option<(
+            ObservationSubmitted,
+            tokio::sync::mpsc::Permit<'_, ObservationEvent>,
+        )>,
+        ObservationError,
+    > {
         if state.revoked || self.events.is_closed() {
             return Err(ObservationError::Unavailable);
         }
@@ -106,20 +240,36 @@ impl ObservationSlot {
         if audit.decision_id() != decision_id {
             return Err(ObservationError::RevisionMismatch);
         }
-        let turn_id = audit.record.turn_id.clone();
-        let previous = if audit.attempt_started {
-            if state.commit_order >= MAX_SEQUENCE - 1 {
-                return Err(ObservationError::ResourceLimit);
-            }
-            Some((
-                audit.record.clone(),
-                self.events
-                    .try_reserve()
-                    .map_err(|_| ObservationError::ResourceLimit)?,
-            ))
-        } else {
-            None
-        };
+        if !audit.attempt_started {
+            return Ok(None);
+        }
+        if state.commit_order >= MAX_SEQUENCE - 1 {
+            return Err(ObservationError::ResourceLimit);
+        }
+        let permit = self
+            .events
+            .try_reserve()
+            .map_err(|_| ObservationError::ResourceLimit)?;
+        Ok(Some((audit.record.clone(), permit)))
+    }
+
+    fn begin_attempt_inner(
+        &self,
+        decision_id: Uuid,
+        request: Option<&codex_client::Request>,
+    ) -> Result<ObservationAttempt, ObservationError> {
+        let mut state = self.state.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::WouldBlock => ObservationError::ResourceLimit,
+            std::sync::TryLockError::Poisoned(_) => ObservationError::Unavailable,
+        })?;
+        let previous = self.reserve_previous_attempt(&state, decision_id)?;
+        let turn_id = state
+            .active_capture
+            .as_ref()
+            .ok_or(ObservationError::Unavailable)?
+            .record
+            .turn_id
+            .clone();
         // Check all fallible native audit capacity before reserving a pilot send.
         let reservation = if let Some(pilot) = state.pilot.as_mut() {
             let request = request.ok_or(ObservationError::Unavailable)?;

@@ -86,17 +86,28 @@ impl ObservationSlot {
         let valid_id = !response_id.is_empty()
             && response_id.len() <= 256
             && response_id.bytes().all(|byte| byte.is_ascii_graphic());
+        let counted = ledger
+            .pending_counts
+            .iter()
+            .find(|pending| pending.attempt_id == attempt.attempt_id);
         let valid_usage = usage.is_none_or(|usage| {
-            [
-                usage.input_tokens,
-                usage.cached_input_tokens,
-                usage.cache_write_input_tokens,
-                usage.output_tokens,
-                usage.reasoning_output_tokens,
-                usage.total_tokens,
-            ]
-            .into_iter()
-            .all(|count| count >= 0)
+            let counted_limits_hold = counted.is_none_or(|pending| {
+                pending.input_tokens.is_some_and(|input| {
+                    u64::try_from(usage.input_tokens).is_ok_and(|actual| actual <= input)
+                }) && u64::try_from(usage.output_tokens)
+                    .is_ok_and(|output| output <= pending.output_tokens)
+            });
+            counted_limits_hold
+                && [
+                    usage.input_tokens,
+                    usage.cached_input_tokens,
+                    usage.cache_write_input_tokens,
+                    usage.output_tokens,
+                    usage.reasoning_output_tokens,
+                    usage.total_tokens,
+                ]
+                .into_iter()
+                .all(|count| count >= 0)
                 && usage
                     .input_tokens
                     .checked_add(usage.output_tokens)
@@ -143,7 +154,12 @@ impl ObservationSlot {
             owner,
             thread_id: ledger.claims.thread_id,
             grant_id: ledger.claims.grant_id,
-            revoked: state.revoked || ledger.expired,
+            revoked: state.revoked
+                || ledger.expired
+                || ledger
+                    .count_journal
+                    .as_ref()
+                    .is_some_and(|journal| journal.failed()),
             active_decision: state
                 .active_capture
                 .as_ref()
