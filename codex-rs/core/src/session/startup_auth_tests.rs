@@ -39,9 +39,11 @@ async fn explicit_model_start_and_resume_fence_session_auth_readers() -> anyhow:
     use core_test_support::PathBufExt;
 
     let server = wiremock::MockServer::start().await;
-    for policy in [
-        ProviderStartupPolicy::NativePilot,
-        ProviderStartupPolicy::Ordinary,
+    for (policy, provider_name) in [
+        (ProviderStartupPolicy::NativePilot, "Amazon Bedrock"),
+        (ProviderStartupPolicy::NativePilot, "Amazon Bedrock Runtime"),
+        (ProviderStartupPolicy::NativePilot, "OpenAI"),
+        (ProviderStartupPolicy::Ordinary, "OpenAI"),
     ] {
         let home = tempfile::tempdir()?;
         let mut config = test_config().await;
@@ -88,6 +90,10 @@ async fn explicit_model_start_and_resume_fence_session_auth_readers() -> anyhow:
             /*attestation_provider*/ None,
             /*external_time_provider*/ None,
         );
+        // Supply an ordinary, fixture-only models manager above. Select the
+        // adversarial backend only for the actual start/resume session factory,
+        // so test setup itself cannot construct an ambient Bedrock provider.
+        config.model_provider.name = provider_name.into();
         let mut init = ExtensionDataInit::new();
         init.insert(policy);
         init.insert(Arc::clone(&probe));
@@ -103,6 +109,23 @@ async fn explicit_model_start_and_resume_fence_session_auth_readers() -> anyhow:
             ProviderStartupPolicy::Ordinary => 1,
         };
         assert_eq!(probe.metadata_reads.load(Ordering::SeqCst), expected);
+        let expected_provider = match policy {
+            ProviderStartupPolicy::NativePilot => ("Native pilot", false),
+            ProviderStartupPolicy::Ordinary => (provider_name, true),
+        };
+        {
+            let state = started.thread.session.state.lock().await;
+            let provider = &state.session_configuration.provider;
+            // Inspect the actual session provider, not the later ModelClient.
+            // A Bedrock factory here would already have sampled ambient auth.
+            assert_eq!(
+                (
+                    provider.info().name.as_str(),
+                    provider.auth_manager().is_some()
+                ),
+                expected_provider,
+            );
+        }
         started.thread.shutdown_and_wait().await?;
         let resumed = manager
             .resume_thread_with_history_and_init(
@@ -119,6 +142,17 @@ async fn explicit_model_start_and_resume_fence_session_auth_readers() -> anyhow:
             )
             .await?;
         assert_eq!(probe.metadata_reads.load(Ordering::SeqCst), expected * 2);
+        {
+            let state = resumed.thread.session.state.lock().await;
+            let provider = &state.session_configuration.provider;
+            assert_eq!(
+                (
+                    provider.info().name.as_str(),
+                    provider.auth_manager().is_some()
+                ),
+                expected_provider,
+            );
+        }
         resumed.thread.shutdown_and_wait().await?;
     }
     Ok(())

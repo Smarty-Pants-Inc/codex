@@ -129,7 +129,6 @@ use codex_model_provider::AgentIdentitySessionFallback;
 use codex_model_provider::ProviderAuthScope;
 use codex_model_provider::ProviderUnauthorizedRecovery;
 use codex_model_provider::SharedModelProvider;
-use codex_model_provider::create_model_provider;
 #[cfg(test)]
 use codex_model_provider_info::DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
 use codex_model_provider_info::ModelProviderInfo;
@@ -488,16 +487,8 @@ impl ModelClient {
         provider_startup_policy: ProviderStartupPolicy,
         session_auth_env_metadata: Option<AuthEnvTelemetry>,
     ) -> Self {
-        let model_provider = match provider_startup_policy {
-            ProviderStartupPolicy::Ordinary => create_model_provider(provider_info, auth_manager),
-            ProviderStartupPolicy::NativePilot => {
-                let mut transport = observation::pilot_transport_info(&provider_info);
-                // The general factory selects ambient backends by name. This is
-                // a transport label, never the independently admitted provider identity.
-                transport.name = "Native pilot".into();
-                create_model_provider(transport, /*auth_manager*/ None)
-            }
-        };
+        let model_provider =
+            provider_startup_policy.create_model_provider(provider_info, auth_manager);
         let auth_env_telemetry = provider_startup_policy.read_auth_env_metadata(|| {
             // Session construction already sampled this under the same policy.
             // Reuse that snapshot rather than read the environment a second time.

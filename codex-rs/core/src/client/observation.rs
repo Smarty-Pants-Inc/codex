@@ -4,6 +4,9 @@ use super::ModelClientSession;
 use codex_api::AuthError;
 use codex_api::AuthProvider;
 use codex_api::AuthProviderFuture;
+use codex_login::AuthManager;
+use codex_model_provider::SharedModelProvider;
+use codex_model_provider::create_model_provider;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
@@ -20,6 +23,23 @@ pub enum ProviderStartupPolicy {
 }
 
 impl ProviderStartupPolicy {
+    pub(crate) fn create_model_provider(
+        self,
+        info: ModelProviderInfo,
+        auth_manager: Option<Arc<AuthManager>>,
+    ) -> SharedModelProvider {
+        match self {
+            Self::Ordinary => create_model_provider(info, auth_manager),
+            Self::NativePilot => {
+                let mut transport = pilot_transport_info(&info);
+                // The factory selects ambient backends by name. Sanitize before
+                // either session or client construction can invoke that factory.
+                transport.name = "Native pilot".into();
+                create_model_provider(transport, /*auth_manager*/ None)
+            }
+        }
+    }
+
     /// Keep the reader lazy: even presence telemetry otherwise reads credential
     /// environment values before the first session-owned request exists.
     pub(crate) fn read_auth_env_metadata(
