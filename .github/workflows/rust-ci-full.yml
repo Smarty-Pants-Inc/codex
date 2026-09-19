@@ -187,18 +187,18 @@ jobs:
           [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
           [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
           [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
-          Get-CimInstance Win32_ComputerSystem | Select-Object TotalPhysicalMemory, NumberOfLogicalProcessors
-          Get-Volume | Select-Object DriveLetter, FileSystem, Size, SizeRemaining
+          Get-CimInstance Win32_ComputerSystem | Select-Object TotalPhysicalMemory, NumberOfLogicalProcessors | ConvertTo-Json -Compress
+          Get-Volume | Select-Object DriveLetter, FileSystem, Size, SizeRemaining | ConvertTo-Json -Compress
           foreach ($name in 'New-VHD', 'Mount-VHD', 'Format-Volume') {
             $command = Get-Command $name -ErrorAction SilentlyContinue
-            if ($command) { $command | Select-Object Name, Source, Version } else { Write-Output "$name unavailable; unchanged setup-dev-drive decides whether required" }
+            if ($command) { $command | Select-Object Name, Source, Version | ConvertTo-Json -Compress } else { Write-Output "$name unavailable; unchanged setup-dev-drive decides whether required" }
           }
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-ci
       - name: Install Linux build dependencies
-        if: ${{ false }} # Product phase not selected.
+        if: ${{ runner.os == 'Linux' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -211,7 +211,7 @@ jobs:
           targets: ${{ matrix.target }}
           components: clippy
 
-      - if: ${{ false }} # Product phase not selected.
+      - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
         name: Use hermetic Cargo home (musl)
         shell: bash
         run: |
@@ -223,7 +223,6 @@ jobs:
           : > "${cargo_home}/config.toml"
 
       - name: Compute lockfile hash
-        if: ${{ false }} # Product phase not selected.
         id: lockhash
         working-directory: codex-rs
         shell: bash
@@ -235,7 +234,6 @@ jobs:
       # Explicit cache restore: split cargo home vs target, so we can
       # avoid caching the large target dir on the gnu-dev job.
       - name: Restore cargo home cache
-        if: ${{ false }} # Product phase not selected.
         id: cache_cargo_home_restore
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
@@ -254,14 +252,14 @@ jobs:
 
       # Install and restore sccache cache
       - name: Install sccache
-        if: ${{ false }} # Product phase not selected.
+        if: ${{ env.USE_SCCACHE == 'true' }}
         uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
           tool: sccache
           version: 0.7.5
 
       - name: Configure sccache backend
-        if: ${{ false }} # Product phase not selected.
+        if: ${{ env.USE_SCCACHE == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -275,12 +273,12 @@ jobs:
           fi
 
       - name: Enable sccache wrapper
-        if: ${{ false }} # Product phase not selected.
+        if: ${{ env.USE_SCCACHE == 'true' }}
         shell: bash
         run: echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
 
       - name: Restore sccache cache (fallback)
-        if: ${{ false }} # Product phase not selected.
+        if: ${{ env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true' }}
         id: cache_sccache_restore
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
@@ -290,7 +288,7 @@ jobs:
             sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-
             sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-
 
-      - if: ${{ false }} # Product phase not selected.
+      - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
         name: Prepare APT cache directories (musl)
         shell: bash
         run: |
@@ -298,7 +296,7 @@ jobs:
           sudo mkdir -p /var/cache/apt/archives /var/lib/apt/lists
           sudo chown -R "$USER:$USER" /var/cache/apt /var/lib/apt/lists
 
-      - if: ${{ false }} # Product phase not selected.
+      - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
         name: Restore APT cache (musl)
         id: cache_apt_restore
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
@@ -307,13 +305,13 @@ jobs:
             /var/cache/apt
           key: apt-${{ matrix.runner }}-${{ matrix.target }}-v1
 
-      - if: ${{ false }} # Product phase not selected.
+      - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
         name: Install Zig
         uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.14.0
 
-      - if: ${{ false }} # Product phase not selected.
+      - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
         name: Install musl build tools
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -324,20 +322,19 @@ jobs:
         run: bash "${GITHUB_WORKSPACE}/.github/scripts/install-musl-build-tools.sh"
 
       - name: Configure rusty_v8 artifact overrides and verify checksums
-        if: ${{ false }} # Product phase not selected.
         uses: ./.github/actions/setup-rusty-v8
         with:
           target: ${{ matrix.target }}
 
       - name: Install cargo-chef
-        if: ${{ false }} # Product phase not selected.
+        if: ${{ matrix.profile == 'release' }}
         uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
           tool: cargo-chef
           version: 0.1.71
 
       - name: Pre-warm dependency cache (cargo-chef)
-        if: ${{ false }} # Product phase not selected.
+        if: ${{ matrix.profile == 'release' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -346,11 +343,10 @@ jobs:
           cargo chef cook --recipe-path "$RECIPE" --target ${{ matrix.target }} --release
 
       - name: cargo clippy
-        if: ${{ false }} # Product phase not selected.
         run: cargo clippy --target ${{ matrix.target }} --tests --profile ${{ matrix.profile }} --timings -- -D warnings
 
       - name: Upload Cargo timings (clippy)
-        if: ${{ false }} # Product phase not selected.
+        if: always()
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: cargo-timings-rust-ci-clippy-${{ matrix.target }}-${{ matrix.profile }}
@@ -360,7 +356,7 @@ jobs:
       # Save caches explicitly; make non-fatal so cache packaging
       # never fails the overall job. Only save when key wasn't hit.
       - name: Save cargo home cache
-        if: ${{ false }} # Product phase not selected.
+        if: always() && !cancelled() && steps.cache_cargo_home_restore.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
@@ -376,7 +372,7 @@ jobs:
           key: cargo-home-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
 
       - name: Save sccache cache (fallback)
-        if: ${{ false }} # Product phase not selected.
+        if: always() && !cancelled() && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
@@ -384,12 +380,12 @@ jobs:
           key: sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
 
       - name: sccache stats
-        if: ${{ false }} # Product phase not selected.
+        if: always() && env.USE_SCCACHE == 'true'
         continue-on-error: true
         run: sccache --show-stats || true
 
       - name: sccache summary
-        if: ${{ false }} # Product phase not selected.
+        if: always() && env.USE_SCCACHE == 'true'
         shell: bash
         run: |
           {
@@ -401,7 +397,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Save APT cache (musl)
-        if: ${{ false }} # Product phase not selected.
+        if: always() && !cancelled() && (matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl') && steps.cache_apt_restore.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
@@ -409,7 +405,7 @@ jobs:
             /var/cache/apt
           key: apt-${{ matrix.runner }}-${{ matrix.target }}-v1
 
-      - name: Record installed prerequisite tools without compilation
+      - name: Record native product tools and final resource state
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -430,14 +426,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Visual Studio version lookup failed' }
           $tools = Get-ChildItem "$install\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
           foreach ($name in 'cl.exe', 'link.exe') {
-            Get-Item "$($tools.FullName)\bin\Hostarm64\arm64\$name" | Select-Object FullName, VersionInfo
+            Get-Item "$($tools.FullName)\bin\Hostarm64\arm64\$name" | Select-Object FullName, VersionInfo | ConvertTo-Json -Depth 3 -Compress
           }
           $sdk = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\Lib\*\um\arm64\kernel32.lib" -ErrorAction Stop
           if (!$sdk) { throw 'ARM64 Windows SDK library required' }
-          $sdk | Select-Object FullName
-          Write-Output 'Tool inventory only; no MSVC environment/linker wrapper or product compile invoked.'
-          Get-Volume | Select-Object DriveLetter, FileSystem, Size, SizeRemaining
-          Write-Output 'Prerequisites only: no product compilation, archive or native test execution.'
+          $sdk | Select-Object FullName | ConvertTo-Json -Compress
+          Write-Output 'MSVC environment/linker wrapper and native runtime tests are not qualified by Clippy.'
+          Get-Volume | Select-Object DriveLetter, FileSystem, Size, SizeRemaining | ConvertTo-Json -Compress
+          Write-Output 'Only this original full native dev Clippy phase is selected; release/archive/native tests remain unrun.'
       - name: Check qualification source remains unchanged
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
