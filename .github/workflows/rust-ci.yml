@@ -1,11 +1,16 @@
 name: rust-ci
 on:
-  workflow_call:
   workflow_dispatch:
+
+# Qualification-only snapshot: not for ordinary PR or landing.
+# Unselected jobs are explicitly unrun; no aggregate is awarded.
+env:
+  BUILDBUDDY_API_KEY: ""
 
 jobs:
   # --- Detect what changed so the fast PR workflow only runs relevant jobs ----
   changed:
+    if: ${{ false }} # Unselected; no ordinary CI result award.
     name: Detect changed areas
     runs-on: ubuntu-24.04
     outputs:
@@ -58,10 +63,10 @@ jobs:
 
   # --- Fast Cargo-native PR checks -------------------------------------------
   general:
+    if: ${{ false }} # Unselected; no ordinary CI result award.
     name: Format / etc
     runs-on: ubuntu-24.04
     needs: changed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' }}
     defaults:
       run:
         working-directory: codex-rs
@@ -83,10 +88,10 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   cargo_shear:
+    if: ${{ false }} # Unselected; no ordinary CI result award.
     name: cargo shear
     runs-on: ubuntu-24.04
     needs: changed
-    if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' }}
     defaults:
       run:
         working-directory: codex-rs
@@ -107,10 +112,10 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   argument_comment_lint_package:
+    if: ${{ false }} # Unselected; no ordinary CI result award.
     name: Argument comment lint package
     runs-on: ubuntu-24.04
     needs: changed
-    if: ${{ needs.changed.outputs.argument_comment_lint_package == 'true' }}
     env:
       CARGO_DYLINT_VERSION: 5.0.0
       DYLINT_LINK_VERSION: 5.0.0
@@ -165,7 +170,6 @@ jobs:
     name: Argument comment lint - ${{ matrix.name }}
     runs-on: ${{ matrix.runs_on || matrix.runner }}
     timeout-minutes: ${{ matrix.timeout_minutes }}
-    needs: changed
     environment:
       name: bazel
       deployment: false
@@ -173,23 +177,33 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: Linux
-            runner: ubuntu-24.04
-            timeout_minutes: 30
           - name: macOS
-            runner: macos-15-xlarge
+            runner: macos-15
             timeout_minutes: 30
-          - name: Windows
-            runner: windows-x64
-            timeout_minutes: 30
-            runs_on: windows-2025
     steps:
+      - name: Record standard Mac fit identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$RUNNER_OS" = macOS
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = arm64
+          test -z "${BUILDBUDDY_API_KEY:-}"
+          printf 'source=%s job=%s run=%s attempt=%s\n' "$GITHUB_SHA" "$GITHUB_JOB" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          uname -a
+          sw_vers
+          sysctl hw.ncpu hw.memsize
+          df -h
+          xcodebuild -version
+          xcrun --show-sdk-version
+          xcrun --show-sdk-path
+          printf 'Cross-target x86_64 on ARM is not native Intel coverage.\n'
       - name: Check whether argument comment lint should run
         id: argument_comment_lint_gate
         shell: bash
         env:
-          ARGUMENT_COMMENT_LINT: ${{ needs.changed.outputs.argument_comment_lint }}
-          WORKFLOWS: ${{ needs.changed.outputs.workflows }}
+          ARGUMENT_COMMENT_LINT: "true"
+          WORKFLOWS: "true"
         run: |
           if [[ "$ARGUMENT_COMMENT_LINT" == "true" || "$WORKFLOWS" == "true" ]]; then
             echo "run=true" >> "$GITHUB_OUTPUT"
@@ -207,7 +221,7 @@ jobs:
         uses: ./.github/actions/run-argument-comment-lint
         with:
           target: ${{ runner.os }}
-          buildbuddy-api-key: ${{ secrets.BUILDBUDDY_API_KEY }}
+          buildbuddy-api-key: ${{ env.BUILDBUDDY_API_KEY }}
 
       - name: Check for a clean worktree
         if: always() && !cancelled() && steps.argument_comment_lint_gate.outputs.run == 'true'
@@ -215,6 +229,7 @@ jobs:
 
   # --- Gatherer job that you mark as the ONLY required status -----------------
   results:
+    if: ${{ false }} # Unselected; no ordinary CI result award.
     name: CI results (required)
     needs:
       [
@@ -224,7 +239,6 @@ jobs:
         argument_comment_lint_package,
         argument_comment_lint_prebuilt,
       ]
-    if: always()
     runs-on: ubuntu-24.04
     steps:
       - name: Summarize
