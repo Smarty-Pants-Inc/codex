@@ -330,11 +330,12 @@ async fn original_async_count_syncs_before_each_send_and_consumes_exact_final_by
     let report = fixture.slot.pilot_report(fixture.owner)?;
     assert_eq!(
         (
+            report.revoked,
             report.reserved_tokens,
             report.attempts.len(),
             report.attempts[0].attempt_id
         ),
-        (100, 1, attempt.attempt_id)
+        (false, 100, 1, attempt.attempt_id)
     );
     drop(stream);
     // Unknown inference completion does not authorize an automatic replay.
