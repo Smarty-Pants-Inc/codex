@@ -8,7 +8,8 @@ fn clear_requires_explicit_null_and_survives_serialization() {
     let mut request = json!({
         "threadId": "owned-thread",
         "ownerEpoch": "native-epoch",
-        "revision": 2
+        "revision": 2,
+        "expectedBudgetGeneration": 4
     });
     assert!(serde_json::from_value::<ThreadObservationSetParams>(request.clone()).is_err());
     request["frame"] = serde_json::Value::Null;
@@ -19,6 +20,7 @@ fn clear_requires_explicit_null_and_survives_serialization() {
             thread_id: "owned-thread".to_string(),
             owner_epoch: "native-epoch".to_string(),
             revision: 2,
+            expected_budget_generation: 4,
             frame: ObservationFrameUpdate::Clear(()),
         }
     );

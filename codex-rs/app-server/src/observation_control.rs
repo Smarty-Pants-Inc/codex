@@ -19,7 +19,7 @@ pub(crate) fn rejected(code: ThreadObservationRejectionCode) -> JSONRPCErrorErro
         // Serialization failure must degrade to uncertainty, never manufacture
         // another no-commit certificate or turn a committed operation into Err.
         data: serde_json::to_value(ThreadObservationErrorData::ThreadObservationRejected {
-            protocol: 1,
+            protocol: 2,
             code,
         })
         .ok(),
@@ -46,10 +46,10 @@ pub(crate) fn store_error(error: ObservationError) -> JSONRPCErrorError {
         ObservationError::StaleOwner => ThreadObservationRejectionCode::StaleOwner,
         ObservationError::RevisionMismatch => ThreadObservationRejectionCode::RevisionMismatch,
         ObservationError::ResourceLimit => ThreadObservationRejectionCode::ResourceLimit,
-        ObservationError::Unavailable
-        | ObservationError::BudgetInvalid
-        | ObservationError::BudgetGenerationMismatch => {
-            ThreadObservationRejectionCode::IncompatibleState
+        ObservationError::Unavailable => ThreadObservationRejectionCode::IncompatibleState,
+        ObservationError::BudgetInvalid => ThreadObservationRejectionCode::BudgetInvalid,
+        ObservationError::BudgetGenerationMismatch => {
+            ThreadObservationRejectionCode::BudgetGenerationMismatch
         }
     })
 }

@@ -27,7 +27,7 @@ fn rejection(code: &str) -> JSONRPCErrorError {
     JSONRPCErrorError {
         code: -32002,
         message: "observation control request rejected".into(),
-        data: Some(json!({"type":"threadObservationRejected", "protocol":1, "code":code})),
+        data: Some(json!({"type":"threadObservationRejected", "protocol":2, "code":code})),
     }
 }
 
@@ -51,7 +51,7 @@ async fn observation_start_and_admitted_resume_install_fresh_owned_relays() -> R
         let mut app = TestAppServer::builder().with_codex_home(home.path())
             .without_managed_config().build_initialized().await?;
         let id = app.send_thread_start_request_with_auto_env(ThreadStartParams {
-            observation: Some(ThreadObservationOptions { protocol: 1 }), ..Default::default()
+            observation: Some(ThreadObservationOptions { protocol: 2 }), ..Default::default()
         }).await?;
         assert_eq!(app.read_stream_until_error_message(RequestId::Integer(id)).await?.error, rejection("DENIED"));
         app.shutdown_gracefully().await?;
@@ -66,7 +66,7 @@ async fn observation_start_and_admitted_resume_install_fresh_owned_relays() -> R
             ..Default::default()
         })).await?;
         let id = app.send_thread_start_request_with_auto_env(ThreadStartParams {
-            observation: Some(ThreadObservationOptions { protocol: 1 }), ..Default::default()
+            observation: Some(ThreadObservationOptions { protocol: 2 }), ..Default::default()
         }).await?;
         assert_eq!(app.read_stream_until_error_message(RequestId::Integer(id)).await?.error, rejection("DENIED"));
         app.shutdown_gracefully().await?;
@@ -74,7 +74,7 @@ async fn observation_start_and_admitted_resume_install_fresh_owned_relays() -> R
         let mut app = TestAppServer::builder().with_codex_home(home.path()).without_managed_config()
             .with_args(&["--observation-profile", "harmony-gpt-oss"]).build_initialized().await?;
         let id = app.send_thread_start_request_with_auto_env(ThreadStartParams {
-            observation: Some(ThreadObservationOptions { protocol: 1 }), ..Default::default()
+            observation: Some(ThreadObservationOptions { protocol: 2 }), ..Default::default()
         }).await?;
         let started: ThreadStartResponse = app.read_response(id).await?;
         let initial = started.observation.expect("installed start capability");
@@ -106,21 +106,69 @@ async fn observation_start_and_admitted_resume_install_fresh_owned_relays() -> R
         let expires_at = i64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs())? + 60;
         let id = app.send_request("thread/observation/set", Some(json!({
             "threadId":thread_id, "ownerEpoch":initial.owner_epoch, "revision":1,
+            "expectedBudgetGeneration":first.native_reservation.generation,
             "frame":{"text":text, "hash":format!("{:x}", Sha256::digest(text.as_bytes())), "expiresAt":expires_at},
         }))).await?;
-        let _: ThreadObservationSetResponse = app.read_response(id).await?;
+        let published: ThreadObservationSetResponse = app.read_response(id).await?;
         app.start_turn_and_wait_for_completion(TurnStartParams {
             thread_id: thread_id.clone(),
             input: vec![UserInput::Text { text: "record one completed turn".into(), text_elements: vec![] }],
             ..Default::default()
         }).await?;
+        let captured: codex_app_server_protocol::ThreadObservationCapturedNotification = serde_json::from_value(
+            app.read_stream_until_notification_message("thread/observation/captured").await?.params.expect("capture params"))?;
+        let submitted: codex_app_server_protocol::ThreadObservationSubmittedNotification = serde_json::from_value(
+            app.read_stream_until_notification_message("thread/observation/submitted").await?.params.expect("submission params"))?;
+        assert_eq!((submitted.protocol, &submitted.decision_id, submitted.commit_order, submitted.budget_generation),
+            (captured.protocol, &captured.decision_id, captured.commit_order, captured.budget_generation));
+        assert_eq!(captured.budget_generation, first.native_reservation.generation);
+        let mut generation = first.native_reservation.generation;
+        for selected_model in ["gpt-5", "gpt-oss-20b"] {
+            let id = app.send_request("thread/settings/update", Some(json!({"threadId":thread_id, "model":selected_model}))).await?;
+            let _: codex_app_server_protocol::ThreadSettingsUpdateResponse = app.read_response(id).await?;
+            app.read_stream_until_notification_message("thread/settings/updated").await?;
+            let id = app.send_request("thread/observation/read", Some(json!({"threadId":thread_id, "ownerEpoch":initial.owner_epoch}))).await?;
+            let read: ThreadObservationReadResponse = app.read_response(id).await?;
+            assert!(read.native_reservation.generation > generation);
+            generation = read.native_reservation.generation;
+            if selected_model == "gpt-5" {
+                assert_eq!(read.native_reservation.state, codex_app_server_protocol::NativeReservationState::Unsupported);
+                assert_eq!(read.state, codex_app_server_protocol::ObservationPublicationState::Unavailable);
+                assert_eq!((&read.owner_epoch, read.revision, &read.hash, read.expires_at, read.frame_budget_generation),
+                    (&published.owner_epoch, published.revision, &published.hash, published.expires_at, published.frame_budget_generation));
+                assert!(read.commit_order > published.commit_order);
+                let id = app.send_request("thread/observation/set", Some(json!({
+                    "threadId":thread_id, "ownerEpoch":initial.owner_epoch, "revision":2, "frame":null,
+                    "expectedBudgetGeneration":first.native_reservation.generation,
+                }))).await?;
+                assert_eq!(app.read_stream_until_error_message(RequestId::Integer(id)).await?.error, rejection("BUDGET_GENERATION_MISMATCH"));
+                let id = app.send_request("thread/observation/set", Some(json!({
+                    "threadId":thread_id, "ownerEpoch":initial.owner_epoch, "revision":2, "frame":null,
+                    "expectedBudgetGeneration":generation,
+                }))).await?;
+                let cleared: ThreadObservationSetResponse = app.read_response(id).await?;
+                assert_eq!((cleared.state, cleared.frame_budget_generation, cleared.native_reservation),
+                    (codex_app_server_protocol::ObservationPublicationState::Cleared, None, read.native_reservation));
+            } else {
+                assert_eq!(read.native_reservation.state, codex_app_server_protocol::NativeReservationState::Valid);
+                assert_eq!(read.state, codex_app_server_protocol::ObservationPublicationState::Cleared);
+                let id = app.send_request("thread/observation/set", Some(json!({
+                    "threadId":thread_id, "ownerEpoch":initial.owner_epoch, "revision":3,
+                    "expectedBudgetGeneration":generation,
+                    "frame":{"text":text,"hash":published.hash,"expiresAt":expires_at},
+                }))).await?;
+                let replaced: ThreadObservationSetResponse = app.read_response(id).await?;
+                assert_eq!((replaced.state, replaced.frame_budget_generation),
+                    (codex_app_server_protocol::ObservationPublicationState::Current, Some(generation)));
+            }
+        }
         app.shutdown_gracefully().await?;
 
         // A selected profile still cannot resume an arbitrary persisted thread.
         let mut app = TestAppServer::builder().with_codex_home(home.path()).without_managed_config()
             .with_args(&["--observation-profile", "harmony-gpt-oss"]).build_initialized().await?;
         let id = app.send_thread_resume_request(ThreadResumeParams {
-            thread_id: thread_id.clone(), observation: Some(ThreadObservationOptions { protocol: 1 }),
+            thread_id: thread_id.clone(), observation: Some(ThreadObservationOptions { protocol: 2 }),
             ..Default::default()
         }).await?;
         assert_eq!(app.read_stream_until_error_message(RequestId::Integer(id)).await?.error, rejection("DENIED"));
@@ -130,7 +178,7 @@ async fn observation_start_and_admitted_resume_install_fresh_owned_relays() -> R
             .with_args(&["--observation-profile", "harmony-gpt-oss", "--observation-resume-thread", &thread_id])
             .build_initialized().await?;
         let id = app.send_thread_resume_request(ThreadResumeParams {
-            thread_id: thread_id.clone(), observation: Some(ThreadObservationOptions { protocol: 1 }),
+            thread_id: thread_id.clone(), observation: Some(ThreadObservationOptions { protocol: 2 }),
             ..Default::default()
         }).await?;
         let resumed: ThreadResumeResponse = app.read_response(id).await?;

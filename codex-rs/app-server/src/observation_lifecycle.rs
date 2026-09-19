@@ -59,7 +59,7 @@ impl ThreadState {
             profile,
         };
         if conversation
-            .install_observation_binding(binding)
+            .install_budgeted_observation_binding(binding, bridge.owner)
             .await
             .is_err()
         {
@@ -160,6 +160,13 @@ impl ThreadStateManager {
                 outgoing,
             )
             .await?;
+        let native_reservation = match bridge.slot.native_reservation(owner) {
+            Ok(snapshot) => crate::observation_notifications::reservation(snapshot),
+            Err(error) => {
+                state.clear_observation();
+                return Err(crate::observation_control::store_error(error));
+            }
+        };
         if let Some((envelope, issuer)) = pilot
             && conversation
                 .install_pilot_authority(owner, &envelope, issuer)
@@ -176,7 +183,8 @@ impl ThreadStateManager {
             return Err(error);
         }
         Ok(ThreadObservationCapabilities {
-            protocol: 1,
+            protocol: 2,
+            native_reservation,
             owner_epoch,
             max_frame_bytes: 4096,
             reserved_tokens: 4608,
