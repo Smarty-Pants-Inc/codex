@@ -172,7 +172,7 @@ jobs:
           if type(configured) is not int or configured != 10 or type(used) is not int or used < 0:
               raise SystemExit('Quota envelope drift or invalid usage; no build/save allowed')
           limit = 10_000_000_000
-          required = 4 * 1024**3 + 64 * 1024**2
+          required = 2 * 1024**3 + 64 * 1024**2
           print(f'Conservative decimal quota={limit}, used={used}, required free={required}')
           if limit - used < required:
               raise SystemExit('Insufficient actual cache headroom; no compile/save/automatic eviction')
@@ -284,6 +284,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          df -h "$HOME/.cache"
           python3 - <<'PY'
           import os, stat
           from pathlib import Path
@@ -298,16 +299,16 @@ jobs:
                       raise SystemExit('Non-regular cache entry: no snapshot')
                   if stat.S_ISREG(entry.st_mode):
                       size += entry.st_size
-                  if size > 4 * 1024**3:
-                      raise SystemExit('Cache exceeds 4GiB uncompressed: no snapshot')
+          print(f'Observed full cache: {size} uncompressed bytes (limit 2147483648)', flush=True)
+          if size > 2 * 1024**3:
+              raise SystemExit('Cache exceeds 2GiB uncompressed: no snapshot; no trimming')
           if size == 0:
               raise SystemExit('Empty cache: no snapshot')
-          print(f'Bounded cache snapshot: {size} uncompressed bytes (limit 4294967296)')
+          print(f'Bounded cache snapshot: {size} uncompressed bytes (limit 2147483648)')
           (Path(os.environ['RUNNER_TEMP']) / 'bazel-cache-size.txt').write_text(str(size))
           with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
               out.write(f'bytes={size}\n')
           PY
-          df -h "$HOME/.cache/bazel-disk-cache"
           gh api "repos/$GITHUB_REPOSITORY/actions/cache/usage" > "$RUNNER_TEMP/cache-usage-save.json"
           gh api "repos/$GITHUB_REPOSITORY/actions/cache/storage-limit" > "$RUNNER_TEMP/cache-limit-save.json"
           python3 - <<'PY'
@@ -315,6 +316,8 @@ jobs:
           from pathlib import Path
           root = Path(os.environ['RUNNER_TEMP'])
           size = int((root / 'bazel-cache-size.txt').read_text())
+          if not 0 < size <= 2 * 1024**3:
+              raise SystemExit('Snapshot size violates admitted 2GiB ceiling; no save')
           used = json.loads((root / 'cache-usage-save.json').read_text())['active_caches_size_in_bytes']
           configured = json.loads((root / 'cache-limit-save.json').read_text())['max_cache_size_gb']
           if type(configured) is not int or configured != 10 or type(used) is not int or used < 0:
@@ -352,7 +355,7 @@ jobs:
           rows = [row for row in data['actions_caches'] if row['key'] == os.environ['EXPECTED_KEY'] and row['ref'] == os.environ['GITHUB_REF']]
           if (len(rows) != 1 or type(rows[0].get('id')) is not int or rows[0]['id'] <= 0
                   or type(rows[0].get('size_in_bytes')) is not int
-                  or not 0 < rows[0]['size_in_bytes'] <= 4 * 1024**3
+                  or not 0 < rows[0]['size_in_bytes'] <= 2 * 1024**3
                   or not isinstance(rows[0].get('version'), str) or not rows[0]['version']
                   or not isinstance(rows[0].get('created_at'), str) or not rows[0]['created_at']):
               raise SystemExit('No unique bounded exact-key service receipt; do not admit continuation')
