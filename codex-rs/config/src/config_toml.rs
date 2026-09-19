@@ -164,6 +164,9 @@ pub struct ConfigToml {
     /// Size of the context window for the model, in tokens.
     pub model_context_window: Option<i64>,
 
+    /// Explicit output ceiling for the controlled observation profile. No default.
+    pub observation_max_output_tokens: Option<std::num::NonZeroU64>,
+
     /// Token usage threshold triggering auto-compaction of conversation history.
     pub model_auto_compact_token_limit: Option<i64>,
 

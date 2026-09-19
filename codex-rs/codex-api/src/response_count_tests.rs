@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 fn request() -> ResponsesApiRequest {
     ResponsesApiRequest {
+        max_output_tokens: None,
         model: "fixture-model".into(),
         instructions: "Complete instructions".into(),
         input: vec![

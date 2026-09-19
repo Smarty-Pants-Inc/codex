@@ -23,6 +23,8 @@ use codex_protocol::protocol::AskForApproval;
 #[schemars(deny_unknown_fields)]
 pub struct ConfigProfile {
     pub model: Option<String>,
+    /// Explicit output ceiling for the controlled observation profile. No default.
+    pub observation_max_output_tokens: Option<std::num::NonZeroU64>,
     /// Optional explicit service tier request id for new turns (for example
     /// `default`, `priority`, or `flex`; legacy `fast` also works).
     pub service_tier: Option<String>,

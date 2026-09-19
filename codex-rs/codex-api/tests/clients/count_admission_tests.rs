@@ -53,6 +53,7 @@ async fn typed_native_wire_reaches_original_async_route_without_ordinary_send_or
     let client = ResponsesClient::new(transport.clone(), provider, auth.clone())
         .with_telemetry(Some(route.clone()), /*sse*/ None);
     let request = ResponsesApiRequest {
+        max_output_tokens: None,
         model: "fixture-model".into(),
         instructions: "all fixture instructions".into(),
         input: vec![],

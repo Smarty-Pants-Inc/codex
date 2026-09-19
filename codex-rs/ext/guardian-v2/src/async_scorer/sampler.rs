@@ -477,6 +477,7 @@ impl LunaSampler {
             internal_chat_message_metadata_passthrough: None,
         });
         let mut request = ResponsesApiRequest {
+            max_output_tokens: None,
             model: MODEL.to_owned(),
             instructions: String::new(),
             input,
