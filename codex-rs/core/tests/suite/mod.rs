@@ -108,6 +108,8 @@ mod multi_agent_resume;
 #[cfg(unix)]
 mod multi_exec_server_sandbox;
 mod network_approval;
+mod observation_retry;
+mod observation_transport;
 mod openai_file_mcp;
 mod otel;
 mod override_updates;

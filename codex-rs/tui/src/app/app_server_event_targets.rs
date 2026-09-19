@@ -48,6 +48,12 @@ pub(super) fn server_notification_thread_target(
     let thread_id = match notification {
         ServerNotification::Error(notification) => Some(notification.thread_id.as_str()),
         ServerNotification::ThreadStarted(notification) => Some(notification.thread.id.as_str()),
+        ServerNotification::ThreadObservationCaptured(notification) => {
+            Some(notification.thread_id.as_str())
+        }
+        ServerNotification::ThreadObservationSubmitted(notification) => {
+            Some(notification.thread_id.as_str())
+        }
         ServerNotification::ThreadStatusChanged(notification) => {
             Some(notification.thread_id.as_str())
         }
@@ -236,6 +242,63 @@ mod tests {
     use codex_protocol::config_types::Settings;
     use codex_protocol::openai_models::ReasoningEffort;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn observation_receipts_preserve_thread_target_and_reject_invalid_ids() {
+        use codex_app_server_protocol::ObservationCaptureState;
+        use codex_app_server_protocol::ObservationSubmissionOutcome;
+        use codex_app_server_protocol::ThreadObservationCapturedNotification;
+        use codex_app_server_protocol::ThreadObservationSubmittedNotification;
+
+        let thread_id = ThreadId::new();
+        for (id, expected) in [
+            (
+                thread_id.to_string(),
+                ServerNotificationThreadTarget::Thread(thread_id),
+            ),
+            (
+                "invalid-thread-id".to_string(),
+                ServerNotificationThreadTarget::InvalidThreadId("invalid-thread-id".to_string()),
+            ),
+        ] {
+            let notifications = [
+                ServerNotification::ThreadObservationCaptured(
+                    ThreadObservationCapturedNotification {
+                        thread_id: id.clone(),
+                        turn_id: "turn".to_string(),
+                        owner_epoch: "owner".to_string(),
+                        decision_id: "decision".to_string(),
+                        commit_order: 1,
+                        frame_revision: 1,
+                        frame_hash: None,
+                        state: ObservationCaptureState::Cleared,
+                        captured_at: 0,
+                    },
+                ),
+                ServerNotification::ThreadObservationSubmitted(
+                    ThreadObservationSubmittedNotification {
+                        thread_id: id,
+                        turn_id: "turn".to_string(),
+                        owner_epoch: "owner".to_string(),
+                        decision_id: "decision".to_string(),
+                        attempt_id: "attempt".to_string(),
+                        request_id: "request".to_string(),
+                        provider_request_id: None,
+                        commit_order: 1,
+                        frame_revision: 1,
+                        frame_hash: None,
+                        state: ObservationCaptureState::Cleared,
+                        captured_at: 0,
+                        outcome: ObservationSubmissionOutcome::Accepted,
+                        terminal_decision: true,
+                    },
+                ),
+            ];
+            for notification in notifications {
+                assert_eq!(server_notification_thread_target(&notification), expected);
+            }
+        }
+    }
 
     fn test_thread_settings() -> ThreadSettings {
         ThreadSettings {

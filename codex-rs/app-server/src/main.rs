@@ -21,6 +21,8 @@ const DISABLE_MANAGED_CONFIG_ENV_VAR: &str = "CODEX_APP_SERVER_DISABLE_MANAGED_C
 #[command(version)]
 struct AppServerArgs {
     #[command(flatten)]
+    observation: codex_app_server::AppServerObservationArgs,
+    #[command(flatten)]
     config_overrides: CliConfigOverrides,
 
     #[command(flatten)]
@@ -71,6 +73,7 @@ fn main() -> anyhow::Result<()> {
     let remote_control_disabled = codex_app_server::take_remote_control_disabled_env();
     arg0_dispatch_or_else(move |arg0_paths: Arg0DispatchPaths| async move {
         let AppServerArgs {
+            observation,
             config_overrides,
             code_mode_host,
             listen,
@@ -92,7 +95,10 @@ fn main() -> anyhow::Result<()> {
         };
         let transport = listen;
         let auth = auth.try_into_settings()?;
+        let observation_startup = observation.into_startup()?;
+        let observation_enabled = observation_startup.is_some();
         let mut runtime_options = AppServerRuntimeOptions {
+            observation_startup,
             code_mode_host_transport: code_mode_host.into(),
             ..Default::default()
         };
@@ -104,12 +110,14 @@ fn main() -> anyhow::Result<()> {
         if enable_goal_auto_continue_for_tests {
             runtime_options.goal_auto_continue_enabled = true;
         }
-        runtime_options.remote_control_startup_mode =
-            match (remote_control, remote_control_disabled) {
-                (true, _) => codex_app_server::RemoteControlStartupMode::EnabledEphemeral,
-                (false, true) => codex_app_server::RemoteControlStartupMode::DisabledEphemeral,
-                (false, false) => codex_app_server::RemoteControlStartupMode::ResolvePersisted,
-            };
+        runtime_options.remote_control_startup_mode = match (
+            remote_control,
+            remote_control_disabled || observation_enabled,
+        ) {
+            (true, _) => codex_app_server::RemoteControlStartupMode::EnabledEphemeral,
+            (false, true) => codex_app_server::RemoteControlStartupMode::DisabledEphemeral,
+            (false, false) => codex_app_server::RemoteControlStartupMode::ResolvePersisted,
+        };
 
         run_main_with_transport_options(
             arg0_paths,

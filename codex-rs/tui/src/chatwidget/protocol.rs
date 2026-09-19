@@ -260,6 +260,9 @@ impl ChatWidget {
             | ServerNotification::AccountLoginCompleted(_)
             | ServerNotification::ProjectChanged(_)
             | ServerNotification::ThreadProjectUpdated(_) => {}
+            // Observation receipts are for the admitted observation consumer, not TUI rendering.
+            ServerNotification::ThreadObservationCaptured(_)
+            | ServerNotification::ThreadObservationSubmitted(_) => {}
             ServerNotification::ContextCompacted(_) => {}
         }
         self.thread_usage.replaying_turn_completion = was_replaying_turn_completion;

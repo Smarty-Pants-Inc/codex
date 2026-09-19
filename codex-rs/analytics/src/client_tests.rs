@@ -620,6 +620,7 @@ fn sample_thread(thread_id: &str) -> Thread {
 
 fn sample_thread_start_response() -> ClientResponsePayload {
     ClientResponsePayload::ThreadStart(ThreadStartResponse {
+        observation: None,
         thread: sample_thread("thread-1"),
         model: "gpt-5".to_string(),
         model_provider: "openai".to_string(),
@@ -638,6 +639,7 @@ fn sample_thread_start_response() -> ClientResponsePayload {
 
 fn sample_thread_resume_response() -> ClientResponsePayload {
     ClientResponsePayload::ThreadResume(ThreadResumeResponse {
+        observation: None,
         thread: sample_thread("thread-2"),
         model: "gpt-5".to_string(),
         model_provider: "openai".to_string(),

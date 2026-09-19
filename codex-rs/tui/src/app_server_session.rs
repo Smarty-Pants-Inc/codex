@@ -3646,6 +3646,7 @@ mod tests {
         let forked_from_id = ThreadId::new();
         let read_only_profile = PermissionProfile::read_only();
         let response = ThreadResumeResponse {
+            observation: None,
             thread: codex_app_server_protocol::Thread {
                 id: thread_id.to_string(),
                 extra: None,
