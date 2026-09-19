@@ -25,6 +25,7 @@ pub use runtime::SandboxState;
 pub use runtime::apply_http_headers_helper;
 pub use tool_catalog_cache::McpToolCatalogCache;
 pub use tools::ToolInfo;
+pub use trusted_access::TrustedAccessContext;
 
 /// Backward-compatible name for the shared Codex Apps tools runtime.
 pub type CodexAppsToolsCache = codex_connectors::ConnectorRuntimeManager<ToolInfo>;
@@ -83,6 +84,7 @@ pub use mcp::ResolvedMcpOAuthScopes;
 pub use mcp::compute_auth_statuses;
 pub use mcp::discover_supported_scopes;
 pub use mcp::oauth_login_support;
+pub use mcp::resolve_oauth_callback;
 pub use mcp::resolve_oauth_scopes;
 pub use mcp::should_retry_without_scopes;
 
@@ -111,3 +113,4 @@ pub(crate) mod runtime;
 pub(crate) mod server;
 mod tool_catalog_cache;
 pub(crate) mod tools;
+mod trusted_access;

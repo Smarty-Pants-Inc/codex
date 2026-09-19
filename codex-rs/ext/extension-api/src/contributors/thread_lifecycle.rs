@@ -59,6 +59,8 @@ pub struct ThreadResumeInput<'a> {
 pub enum ThreadIdleCause {
     /// The previous turn completed and automatic follow-up work can run.
     Completed,
+    /// The runtime was restored without completing a turn.
+    Restored,
     /// The user interrupted the previous turn.
     Interrupted,
     /// The previous turn ended with a terminal error.

@@ -3,6 +3,7 @@ use codex_extension_api::ThreadIdleCause;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TurnAbortReason;
+use codex_protocol::turn_input::IdleTurnAdmission;
 
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -68,7 +69,11 @@ impl Session {
                 cause
             }
         };
-        if self.input_queue.has_trigger_turn_mailbox_items().await {
+        let queue_admission = self
+            .services
+            .thread_extension_data
+            .get::<std::sync::Arc<dyn IdleTurnAdmission>>();
+        if self.input_queue.has_trigger_turn_mailbox_items().await && queue_admission.is_none() {
             return;
         }
         for contributor in self.services.extensions.thread_lifecycle_contributors() {
@@ -79,6 +84,12 @@ impl Session {
                     thread_store: &self.services.thread_extension_data,
                 })
                 .await;
+            if queue_admission.is_some()
+                && (self.active_turn.lock().await.is_some()
+                    || self.input_queue.has_trigger_turn_mailbox_items().await)
+            {
+                return;
+            }
         }
     }
 

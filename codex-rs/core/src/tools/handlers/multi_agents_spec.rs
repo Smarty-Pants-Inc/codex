@@ -1,5 +1,6 @@
 use super::multi_agents_common::MAX_SPAWN_AGENT_MODEL_OVERRIDES;
 use super::multi_agents_common::model_supports_multi_agent_backend;
+use crate::tools::spec_plan::effective_v2_child_capability;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::JsonSchema;
@@ -21,6 +22,18 @@ const SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION: &str =
 const SPAWN_AGENT_SERVICE_TIER_OVERRIDE_DESCRIPTION: &str =
     "Service tier override for the new agent. Omit unless explicitly requested.";
 const MAX_REASONING_EFFORT_CHARS_IN_SPAWN_AGENT_DESCRIPTION: usize = 64;
+const SPAWN_AGENT_TOOL_DESCRIPTION_V2: &str = r#"Spawn an agent for one concrete, bounded task.
+
+The selected agent has one effective capability tier:
+
+- `collaborative`: receives collaboration tools, may message allowed running agents, and may spawn subagents within host limits;
+- `leaf`: receives no collaboration tools and returns its result to its parent.
+
+The capability is resolved from the effective session runtime and selected model metadata and is reported by this tool. Current model names are examples, not policy.
+
+Prefer a leaf for bounded independent work that does not need further orchestration. Use a collaborative agent when the delegated task itself is likely to benefit from legitimate decomposition or peer coordination.
+
+The new agent receives the declared assignment, selected history, workspace, sandbox, permissions, and relevant context. Its canonical task name is returned. `fork_turns="none"` passes no surrounding turn history; `fork_turns="all"` passes the available surrounding history."#;
 
 #[derive(Debug, Clone)]
 pub struct SpawnAgentToolOptions {
@@ -415,9 +428,10 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
                     "type": "string",
                     "description": "Canonical task name for the spawned agent."
                 },
-                "model": {
+                "capability": {
                     "type": "string",
-                    "description": "Effective model selected for the spawned agent."
+                    "enum": ["collaborative", "leaf"],
+                    "description": "Effective collaboration capability of the spawned agent."
                 },
                 "multi_agent_version": {
                     "type": "string",
@@ -425,7 +439,7 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
                     "description": "Resolved multi-agent runtime available to the spawned agent."
                 }
             },
-            "required": ["task_name", "model", "multi_agent_version"],
+            "required": ["task_name", "capability", "multi_agent_version"],
             "additionalProperties": false
         });
     }
@@ -441,7 +455,12 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
                 "type": ["string", "null"],
                 "description": "User-facing nickname for the spawned agent when available."
             },
-            "model": {
+            "capability": {
+                "type": "string",
+                "enum": ["collaborative", "leaf"],
+                "description": "Effective collaboration capability of the spawned agent."
+            },
+            "effective_model": {
                 "type": "string",
                 "description": "Effective model selected for the spawned agent."
             },
@@ -451,7 +470,7 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
                 "description": "Resolved multi-agent runtime available to the spawned agent."
             }
         },
-        "required": ["task_name", "nickname", "model", "multi_agent_version"],
+        "required": ["task_name", "nickname", "capability", "effective_model", "multi_agent_version"],
         "additionalProperties": false
     })
 }
@@ -487,17 +506,22 @@ fn list_agents_output_schema() -> Value {
                             "description": "Last known status of the agent.",
                             "allOf": [agent_status_output_schema()]
                         },
-                        "model": {
+                        "capability": {
+                            "type": "string",
+                            "enum": ["collaborative", "leaf"],
+                            "description": "Effective collaboration capability of the agent."
+                        },
+                        "effective_model": {
                             "type": "string",
                             "description": "Effective model selected for the agent."
                         },
                         "multi_agent_version": {
-                            "type": ["string", "null"],
-                            "enum": ["disabled", "v1", "v2", null],
-                            "description": "Resolved multi-agent runtime available to the agent, when initialized."
+                            "type": "string",
+                            "enum": ["disabled", "v1", "v2"],
+                            "description": "Resolved multi-agent runtime available to the agent."
                         }
                     },
-                    "required": ["agent_name", "agent_status", "model", "multi_agent_version"],
+                    "required": ["agent_name", "agent_status", "capability", "effective_model", "multi_agent_version"],
                     "additionalProperties": false
                 },
                 "description": "Live agents visible in the current root thread tree."
@@ -778,31 +802,17 @@ fn spawn_agent_tool_description_v2(
     inherited_model_guidance: Option<&str>,
     usage_hint_text: Option<String>,
 ) -> String {
-    let agent_role_guidance = available_models_description.unwrap_or_default();
-    let inherited_model_guidance = inherited_model_guidance.unwrap_or_default();
-
-    let tool_description = format!(
-        r#"
-        {agent_role_guidance}
-        Spawns an agent to work on the specified task. If your current task is `/root/task1` and you spawn_agent with task_name "task_3" the agent will have canonical task name `/root/task1/task_3`.
-You are then able to refer to this agent as `task_3` or `/root/task1/task_3` interchangeably. However an agent `/root/task2/task_3` would only be able to communicate with this agent via its canonical name `/root/task1/task_3`.
-The spawned agent receives the tools and delegation capabilities granted by the host for its role; do not assume they match yours or include recursive spawning.
-{inherited_model_guidance}
-Only call this tool for a concrete, bounded subtask that can run independently alongside useful local work; otherwise continue locally.
-Its final answer is returned when it finishes.
-The new agent's canonical task name will be provided to it along with the message.
-
-Note that passing `fork_turns="none"` will not pass any surrounding context to the spawned subagent, which may cause the agent to lack the context it needs to complete its task, whereas `fork_turns="all"` will provide the subagent with all surrounding context."#
-    );
-
-    if let Some(usage_hint_text) = usage_hint_text {
-        return format!(
-            r#"
-        {tool_description}
-{usage_hint_text}"#
-        );
+    let mut sections = vec![SPAWN_AGENT_TOOL_DESCRIPTION_V2.to_string()];
+    if let Some(available_models_description) = available_models_description {
+        sections.push(available_models_description.to_string());
     }
-    tool_description
+    if let Some(inherited_model_guidance) = inherited_model_guidance {
+        sections.push(inherited_model_guidance.to_string());
+    }
+    if let Some(usage_hint_text) = usage_hint_text {
+        sections.push(usage_hint_text);
+    }
+    sections.join("\n\n")
 }
 
 fn spawn_agent_models_description(
@@ -861,8 +871,16 @@ fn spawn_agent_models_description(
             };
             let model_slug = &model.model;
             let description = &model.description;
+            let capability_suffix = if multi_agent_version == MultiAgentVersion::V2 {
+                format!(
+                    " [{}]",
+                    effective_v2_child_capability(model.multi_agent_version).as_str()
+                )
+            } else {
+                String::new()
+            };
             format!(
-                "- `{model_slug}`: {description}{reasoning_efforts_suffix}{service_tiers_suffix}"
+                "- `{model_slug}`{capability_suffix}: {description}{reasoning_efforts_suffix}{service_tiers_suffix}"
             )
         })
         .collect::<Vec<_>>()
