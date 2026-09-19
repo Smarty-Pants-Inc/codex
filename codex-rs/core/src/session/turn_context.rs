@@ -772,6 +772,9 @@ impl Session {
                             .turn_environments
                             .update_thread_config(&environment_config);
                     }
+                    if state.session_configuration.collaboration_mode != next.collaboration_mode {
+                        self.invalidate_observation_budget();
+                    }
                     state.session_configuration = next.clone();
                     let new_config = notify_config_contributors
                         .then(|| self.build_effective_session_config(&state.session_configuration));
