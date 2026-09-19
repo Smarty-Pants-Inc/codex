@@ -1,4 +1,5 @@
 use super::*;
+use pretty_assertions::assert_eq;
 use crate::ObservationProfile;
 use codex_models_manager::model_info::model_info_from_slug;
 use codex_protocol::openai_models::ModelInfo;
