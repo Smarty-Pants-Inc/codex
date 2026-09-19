@@ -10,7 +10,7 @@ use std::sync::Arc;
 struct Active {
     canonical_input: Vec<ResponseItem>,
     capture: ObservationCapture,
-    item: Option<ResponseItem>,
+    items: Vec<ResponseItem>,
 }
 
 /// One guard per run_sampling_request: step/model/tools/base instructions are
@@ -43,31 +43,33 @@ impl ObservationSampling {
         &mut self,
         canonical_input: Vec<ResponseItem>,
         model: &ModelInfo,
-    ) -> Result<(Option<ResponseItem>, uuid::Uuid), ObservationError> {
+    ) -> Result<(Vec<ResponseItem>, uuid::Uuid), ObservationError> {
         self.slot.check_budget_model(model)?;
+        self.profile.validate_model(model)?;
         if let Some(active) = &self.active
             && active.canonical_input == canonical_input
         {
-            return Ok((active.item.clone(), active.capture.decision_id));
+            return Ok((active.items.clone(), active.capture.decision_id));
         }
         if let Some(previous) = self.active.take() {
             self.slot.release(previous.capture.decision_id)?;
         }
-        let mut item = None;
+        let mut items = Vec::new();
         let capture = self
             .slot
             .capture_checked(&self.turn_id, Some(model), |capture| {
-                item = CurrentObservations::new(self.profile, model, capture)?
-                    .map(CurrentObservations::into_request_item);
+                items = CurrentObservations::new(self.profile, model, capture)?
+                    .map(CurrentObservations::into_request_items)
+                    .unwrap_or_default();
                 Ok(())
             })?;
         let decision_id = capture.decision_id;
         self.active = Some(Active {
             canonical_input,
             capture,
-            item: item.clone(),
+            items: items.clone(),
         });
-        Ok((item, decision_id))
+        Ok((items, decision_id))
     }
 }
 

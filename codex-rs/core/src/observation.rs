@@ -13,9 +13,24 @@ use std::time::UNIX_EPOCH;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-// This is an allocation, not a tokenizer or wire-framing qualification.
-pub(crate) const RESERVED_TOKENS: i64 = 4608;
-pub(crate) const MAX_FRAME_BYTES: usize = 4096;
+// Sense's full reference allocation: 8 views, 2048 UTF-8 body bytes each,
+// six-byte JSON escaping, 2048 metadata/error bytes per view, 1024 frame bytes.
+// Native code treats this envelope as opaque; it does not parse watches.
+pub(crate) const MAX_FRAME_BYTES: usize = 1024 + 8 * (6 * 2048 + 2048);
+pub(crate) const OBSERVATION_HEADER_BYTES: usize = 128;
+pub(crate) const OBSERVATION_PART_BYTES: usize = 7168;
+pub(crate) const OBSERVATION_MARKER_BYTES: usize = 96;
+pub(crate) const OBSERVATION_FRAMING_TOKENS: usize = 8;
+// A UTF-8 split can leave at most three bytes unused in a nonfinal part.
+pub(crate) const MAX_OBSERVATION_ITEMS: usize =
+    (MAX_FRAME_BYTES + OBSERVATION_HEADER_BYTES).div_ceil(OBSERVATION_PART_BYTES - 3);
+// Ordinary byte-level BPE uses at most one token per UTF-8 byte. Include every
+// marker and conservatively charge the assistant prefill for every message.
+// This allocation is not qualification of an external provider's rendering.
+pub(crate) const RESERVED_TOKENS: i64 = (MAX_FRAME_BYTES
+    + OBSERVATION_HEADER_BYTES
+    + MAX_OBSERVATION_ITEMS * (OBSERVATION_MARKER_BYTES + OBSERVATION_FRAMING_TOKENS))
+    as i64;
 const MAX_LEASE_SECONDS: i64 = 60;
 const MAX_SEQUENCE: u64 = (1_u64 << 53) - 1;
 // Sense receives Unix seconds as safe JSON integers within the JavaScript Date range.

@@ -5,7 +5,6 @@ use super::ObservationError;
 use super::ObservationEvent;
 use super::ObservationOwner;
 use super::ObservationSlot;
-use super::RESERVED_TOKENS;
 use super::SlotState;
 use crate::ObservationProfile;
 use codex_protocol::openai_models::ModelInfo;
@@ -260,7 +259,7 @@ fn reservation(
             .map(|window| window / 100)
             .and_then(|window| u64::try_from(window).ok())
             .filter(|window| *window <= MAX_SEQUENCE),
-        reserved_tokens: RESERVED_TOKENS as u32,
+        reserved_tokens: profile.group_reservation() as u32,
         max_frame_bytes: MAX_FRAME_BYTES as u32,
     }
 }
