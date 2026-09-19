@@ -19,6 +19,9 @@ env:
 
 jobs:
   test:
+    permissions:
+      contents: read
+      actions: read
     # PRs use the sharded Windows cross-compiled test jobs below. Post-merge
     # pushes to main also run the native Windows test job for broader Windows
     # signal without putting PR latency back on the critical path. When
@@ -32,8 +35,6 @@ jobs:
           # macOS
           - os: macos-15
             target: aarch64-apple-darwin
-          - os: macos-15
-            target: x86_64-apple-darwin
 
           # 2026-02-27 Bazel tests have been flaky on arm in CI.
           # Disable until we can investigate and stabilize them.
@@ -73,6 +74,7 @@ jobs:
           persist-credentials: false
 
       - name: Prepare Bazel CI
+        timeout-minutes: 5
         id: prepare_bazel
         uses: ./.github/actions/prepare-bazel-ci
         with:
@@ -91,7 +93,88 @@ jobs:
         shell: bash
         run: ./scripts/check-module-bazel-lock.sh
 
+      - name: Identify exact native action cache
+        id: action_cache_identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REF_NAME" = qualify/observation-transport-macos-cache-stage1
+          test "$RUNNER_ARCH" = ARM64
+          test "$(uname -m)" = arm64
+          test "$ImageVersion" = 20260907.0337.1
+          test "$(xcodebuild -version | head -n 1)" = 'Xcode 16.4'
+          test "$(xcrun --show-sdk-version)" = 15.5
+          test "$(bazel --version)" = 'bazel 9.0.0'
+          test -z "${BUILDBUDDY_API_KEY:-}"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+          source = subprocess.check_output(['git', 'rev-parse', 'HEAD^{tree}'], text=True).strip()
+          graph = hashlib.sha256(b''.join(Path(p).read_bytes() for p in ('.bazelrc', '.bazelversion', 'MODULE.bazel', 'MODULE.bazel.lock', '.github/workflows/bazel.yml'))).hexdigest()
+          identity = {k: os.environ[k] for k in ('GITHUB_SHA', 'GITHUB_REF_NAME', 'RUNNER_OS', 'RUNNER_ARCH', 'ImageVersion')}
+          identity.update(tree=source, graph=graph, xcode='16.4', sdk='15.5', bazel='9.0.0', command='original-full-bazel-test-no-key-v1')
+          body = json.dumps(identity, sort_keys=True)
+          key = 'codex-trusted-macos-action-v1-' + hashlib.sha256(body.encode()).hexdigest()
+          print(body)
+          print('cache-key=' + key)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('key=' + key + '\n')
+          PY
+
+      - name: Restore exact native action cache
+        id: restore_action_cache
+        timeout-minutes: 5
+        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ~/.cache/bazel-disk-cache
+          key: ${{ steps.action_cache_identity.outputs.key }}
+
+      - name: Validate exact cache and command budget
+        id: action_cache_gate
+        shell: bash
+        env:
+          EXPECTED: ${{ steps.action_cache_identity.outputs.key }}
+          PRIMARY: ${{ steps.restore_action_cache.outputs.cache-primary-key }}
+          MATCHED: ${{ steps.restore_action_cache.outputs.cache-matched-key }}
+          HIT: ${{ steps.restore_action_cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          test -n "$EXPECTED" && test "$PRIMARY" = "$EXPECTED"
+          if [[ "$HIT" == true ]]; then
+            test "$MATCHED" = "$EXPECTED"
+            echo 'Exact cache hit: original full command, inner30/outer30. No retry.'
+          else
+            test -z "$MATCHED"
+            echo 'Cold cache miss: original full command, inner20/outer30. Incomplete remains failure.'
+          fi
+
+      - name: Require real repository cache headroom
+        if: steps.restore_action_cache.outputs.cache-hit != 'true'
+        timeout-minutes: 1
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/cache/usage" > "$RUNNER_TEMP/cache-usage-before.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/cache/storage-limit" > "$RUNNER_TEMP/cache-limit-before.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          used = json.loads((root / 'cache-usage-before.json').read_text())['active_caches_size_in_bytes']
+          limit = json.loads((root / 'cache-limit-before.json').read_text())['max_cache_size_gb'] * 1_000_000_000
+          required = 4 * 1024**3 + 64 * 1024**2
+          print(f'Conservative decimal quota={limit}, used={used}, required free={required}')
+          if limit - used < required:
+              raise SystemExit('Insufficient actual cache headroom; no compile/save/automatic eviction')
+          PY
+
       - name: bazel test //...
+        id: full_test
+        timeout-minutes: ${{ steps.restore_action_cache.outputs.cache-hit == 'true' && 30 || 20 }}
         env:
           BUILDBUDDY_API_KEY: ${{ env.BUILDBUDDY_API_KEY }}
         shell: bash
@@ -122,6 +205,45 @@ jobs:
             -- \
             "${bazel_targets[@]}"
 
+      - name: Stop Bazel before cache snapshot
+        id: stop_bazel
+        if: always() && !cancelled() && steps.action_cache_gate.outcome == 'success' && steps.full_test.outcome != 'skipped'
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          set -euo pipefail
+          pidfile="$BAZEL_OUTPUT_BASE/server/server.pid.txt"
+          server_pid=''
+          if [[ -f "$pidfile" ]]; then server_pid="$(<"$pidfile")"; fi
+          export SNAPSHOT_SERVER_PID="$server_pid"
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          root = os.environ['SNAPSHOT_SERVER_PID']
+          processes = [line.split(None, 2) for line in subprocess.check_output(['ps', '-axo', 'pid=,ppid=,command='], text=True).splitlines()]
+          owned = {root} if root else set()
+          while True:
+              children = {pid for pid, parent, command in processes if parent in owned}
+              if children <= owned:
+                  break
+              owned |= children
+          record = {pid: command for pid, parent, command in processes if pid in owned}
+          if root not in record:
+              raise SystemExit('Cannot identify live Bazel server before shutdown; no cache snapshot')
+          (Path(os.environ['RUNNER_TEMP']) / 'bazel-owned-processes.json').write_text(json.dumps(record))
+          print('Recorded Bazel server/worker PIDs:', sorted(record))
+          PY
+          bazel --output_user_root="$BAZEL_OUTPUT_USER_ROOT" --output_base="$BAZEL_OUTPUT_BASE" shutdown
+          python3 - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          owned = json.loads((Path(os.environ['RUNNER_TEMP']) / 'bazel-owned-processes.json').read_text())
+          live = {line.split(None, 1)[0] for line in subprocess.check_output(['ps', '-axo', 'pid=,command='], text=True).splitlines()}
+          if live & owned.keys():
+              raise SystemExit('Original Bazel server/workers remain; no cache snapshot allowed')
+          print('Bazel shutdown completed; recorded server/workers exited. No live-writer snapshot.')
+          PY
+
       - name: Upload Bazel execution logs
         if: always() && !cancelled()
         continue-on-error: true
@@ -134,7 +256,8 @@ jobs:
       # Save the job-scoped Bazel repository cache after cache misses. Keep the
       # upload non-fatal so cache service issues never fail the job itself.
       - name: Save bazel repository cache
-        if: always() && !cancelled() && steps.prepare_bazel.outputs.repository-cache-hit != 'true'
+        timeout-minutes: 5
+        if: ${{ false }} # Only the bounded action cache may write in this qualification.
         continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
@@ -142,6 +265,88 @@ jobs:
           key: ${{ steps.prepare_bazel.outputs.repository-cache-key }}
 
       - name: Check for a clean worktree
+        id: clean_before_cache
+        if: always() && !cancelled()
+        uses: ./.github/actions/check-clean-worktree
+
+      - name: Enforce action cache snapshot limit
+        id: action_cache_limit
+        if: always() && !cancelled() && steps.action_cache_gate.outcome == 'success' && steps.stop_bazel.outcome == 'success' && steps.clean_before_cache.outcome == 'success' && steps.restore_action_cache.outputs.cache-hit != 'true'
+        timeout-minutes: 1
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, stat
+          from pathlib import Path
+          root = Path.home() / '.cache/bazel-disk-cache'
+          if not root.is_dir() or root.is_symlink():
+              raise SystemExit('Missing or symlinked cache root: no snapshot')
+          size = 0
+          for directory, dirs, files in os.walk(root, followlinks=False):
+              for name in dirs + files:
+                  entry = (Path(directory) / name).lstat()
+                  if not (stat.S_ISREG(entry.st_mode) or stat.S_ISDIR(entry.st_mode)):
+                      raise SystemExit('Non-regular cache entry: no snapshot')
+                  if stat.S_ISREG(entry.st_mode):
+                      size += entry.st_size
+                  if size > 4 * 1024**3:
+                      raise SystemExit('Cache exceeds 4GiB uncompressed: no snapshot')
+          if size == 0:
+              raise SystemExit('Empty cache: no snapshot')
+          print(f'Bounded cache snapshot: {size} uncompressed bytes (limit 4294967296)')
+          (Path(os.environ['RUNNER_TEMP']) / 'bazel-cache-size.txt').write_text(str(size))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'bytes={size}\n')
+          PY
+          df -h "$HOME/.cache/bazel-disk-cache"
+          gh api "repos/$GITHUB_REPOSITORY/actions/cache/usage" > "$RUNNER_TEMP/cache-usage-save.json"
+          gh api "repos/$GITHUB_REPOSITORY/actions/cache/storage-limit" > "$RUNNER_TEMP/cache-limit-save.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP'])
+          size = int((root / 'bazel-cache-size.txt').read_text())
+          used = json.loads((root / 'cache-usage-save.json').read_text())['active_caches_size_in_bytes']
+          limit = json.loads((root / 'cache-limit-save.json').read_text())['max_cache_size_gb'] * 1_000_000_000
+          print(f'Pre-save quota={limit}, used={used}, snapshot={size}')
+          if limit - used < size + 64 * 1024**2:
+              raise SystemExit('Insufficient current cache headroom; no save/automatic eviction')
+          PY
+
+      - name: Save bounded exact native action cache
+        id: save_action_cache
+        if: always() && !cancelled() && steps.action_cache_limit.outcome == 'success'
+        timeout-minutes: 5
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ~/.cache/bazel-disk-cache
+          key: ${{ steps.action_cache_identity.outputs.key }}
+
+      - name: Verify actual saved cache service receipt
+        if: always() && !cancelled() && steps.save_action_cache.outcome == 'success'
+        timeout-minutes: 1
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_KEY: ${{ steps.action_cache_identity.outputs.key }}
+          CACHE_BYTES: ${{ steps.action_cache_limit.outputs.bytes }}
+        run: |
+          set -euo pipefail
+          gh api --method GET "repos/$GITHUB_REPOSITORY/actions/caches" -f key="$EXPECTED_KEY" -f ref="$GITHUB_REF" -f per_page=100 > "$RUNNER_TEMP/action-cache-receipt.json"
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          data = json.loads((Path(os.environ['RUNNER_TEMP']) / 'action-cache-receipt.json').read_text())
+          rows = [row for row in data['actions_caches'] if row['key'] == os.environ['EXPECTED_KEY'] and row['ref'] == os.environ['GITHUB_REF']]
+          if len(rows) != 1 or not 0 < rows[0]['size_in_bytes'] <= 4 * 1024**3:
+              raise SystemExit('No unique bounded exact-key service receipt; do not admit continuation')
+          print(json.dumps(dict(source=os.environ['GITHUB_SHA'], run=os.environ['GITHUB_RUN_ID'], attempt=os.environ['GITHUB_RUN_ATTEMPT'], uncompressed_bytes=int(os.environ['CACHE_BYTES']), cache=rows[0]), sort_keys=True))
+          PY
+
+      - name: Check final qualification source remains unchanged
         if: always() && !cancelled()
         uses: ./.github/actions/check-clean-worktree
 
@@ -348,6 +553,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   clippy:
+    if: ${{ false }} # Not selected for the one-job cache operation.
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -461,6 +667,7 @@ jobs:
         uses: ./.github/actions/check-clean-worktree
 
   verify-release-build:
+    if: ${{ false }} # Not selected for the one-job cache operation.
     timeout-minutes: 30
     strategy:
       fail-fast: false
