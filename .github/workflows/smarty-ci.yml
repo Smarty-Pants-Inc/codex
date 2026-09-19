@@ -98,13 +98,13 @@ jobs:
         working-directory: codex-rs
         run: |
           set -euo pipefail
-          just test -p codex-http-client -p codex-client -p codex-api --locked --retries 0 --test-threads 2 \
+          just test -p codex-http-client -p codex-client -p codex-api -p codex-tui --locked --retries 0 --test-threads 2 \
             2>&1 | tee "$RUNNER_TEMP/transport-generation/package-tests.log"
       - name: Fix transport lint and format
         working-directory: codex-rs
         run: |
           set -euo pipefail
-          just fix -p codex-http-client -p codex-client -p codex-api --locked \
+          just fix -p codex-http-client -p codex-client -p codex-api -p codex-tui --locked \
             2>&1 | tee "$RUNNER_TEMP/transport-generation/scoped-fix.log"
           just fmt 2>&1 | tee "$RUNNER_TEMP/transport-generation/fmt.log"
       - name: Return generation evidence and validate changed paths
@@ -123,7 +123,7 @@ jobs:
           git status --porcelain=v1 --untracked-files=all > "$evidence/status-after.txt"
           git diff --binary HEAD > "$evidence/generated.patch"
           git diff --binary HEAD -- MODULE.bazel.lock > "$evidence/bazel-lock.patch"
-          git diff --binary HEAD -- codex-rs/http-client codex-rs/codex-client codex-rs/codex-api > "$evidence/scoped-fix.patch"
+          git diff --binary HEAD -- codex-rs/http-client codex-rs/codex-client codex-rs/codex-api codex-rs/tui > "$evidence/scoped-fix.patch"
           cp MODULE.bazel.lock "$evidence/MODULE.bazel.lock"
           sha256sum MODULE.bazel.lock codex-rs/Cargo.lock .github/workflows/smarty-ci.yml > "$evidence/source-after.sha256"
           if test -s "$evidence/generated.patch"; then
@@ -134,7 +134,7 @@ jobs:
           python3 - <<'PY'
           import subprocess
           paths = subprocess.check_output(["git", "diff", "--no-renames", "--name-only", "-z", "HEAD"]).decode().split("\0")
-          prefixes = ("codex-rs/http-client/", "codex-rs/codex-client/", "codex-rs/codex-api/")
+          prefixes = ("codex-rs/http-client/", "codex-rs/codex-client/", "codex-rs/codex-api/", "codex-rs/tui/")
           unexpected = [p for p in paths if p and p != "MODULE.bazel.lock" and not (p.startswith(prefixes) and p.endswith(".rs"))]
           if unexpected:
               raise SystemExit(f"Undeclared generated changes: {unexpected}")
