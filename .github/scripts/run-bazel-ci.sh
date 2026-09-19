@@ -53,11 +53,10 @@ fi
 
 run_bazel() {
   if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
-    MSYS2_ARG_CONV_EXCL='*' "$(dirname "${BASH_SOURCE[0]}")/run_bazel_with_buildbuddy.py" "$@"
-    return
+    MSYS2_ARG_CONV_EXCL='*' exec "$(dirname "${BASH_SOURCE[0]}")/run_bazel_with_buildbuddy.py" "$@"
   fi
 
-  "$(dirname "${BASH_SOURCE[0]}")/run_bazel_with_buildbuddy.py" "$@"
+  exec "$(dirname "${BASH_SOURCE[0]}")/run_bazel_with_buildbuddy.py" "$@"
 }
 
 run_bazel_with_startup_args() {
@@ -397,13 +396,67 @@ set +e
 # failures seen in CI (for example "is not a symlink" or permission errors
 # while materializing external repos such as rules_perl). This only disables
 # the startup-level repo contents cache; keyed runs still use BuildBuddy.
-run_bazel_with_startup_args \
-  --noexperimental_remote_repo_contents_cache \
-  "${bazel_run_args[@]}" \
-  -- \
-  "${bazel_targets[@]}" \
-  2>&1 | tee "$bazel_console_log"
-bazel_status=${PIPESTATUS[0]}
+if [[ "${RUNNER_OS:-}" == "Windows" ]]; then
+  run_bazel_with_startup_args \
+    --noexperimental_remote_repo_contents_cache \
+    "${bazel_run_args[@]}" \
+    -- \
+    "${bazel_targets[@]}" \
+    2>&1 | tee "$bazel_console_log"
+  bazel_status=${PIPESTATUS[0]}
+else
+  bazel_pid=
+  cancel_requested=0
+  cancel_sent=0
+  wait_interrupted=0
+  cancel_original_bazel() {
+    wait_interrupted=1
+    cancel_requested=1
+    if [[ -n "$bazel_pid" && $cancel_sent -eq 0 ]]; then
+      cancel_sent=1
+      echo "Cancelling owned Bazel job group $bazel_pid; waiting for completion." >&2
+      # Bazelisk ignores INT and expects its client to receive the same group
+      # signal. This group belongs only to our launch, never the runner/harness.
+      # Repeated interrupts can kill the server, so never escalate.
+      kill -INT -- "-$bazel_pid" 2>/dev/null || true
+    fi
+  }
+  trap cancel_original_bazel INT TERM
+
+  # Keep the launcher, not the last process in a tee pipeline. Job control gives
+  # this single background launch its own group, including Bazelisk and its client.
+  exec 3> >(tee "$bazel_console_log")
+  bazel_log_pid=$!
+  set -m
+  run_bazel_with_startup_args \
+    --noexperimental_remote_repo_contents_cache \
+    "${bazel_run_args[@]}" \
+    -- \
+    "${bazel_targets[@]}" \
+    >&3 2>&1 3>&- &
+  bazel_pid=$!
+  set +m
+  exec 3>&-
+  if [[ $cancel_requested -eq 1 ]]; then
+    cancel_original_bazel
+  fi
+  while true; do
+    wait_interrupted=0
+    wait "$bazel_pid"
+    bazel_status=$?
+    [[ $wait_interrupted -eq 0 ]] && break
+  done
+  bazel_pid=
+  while true; do
+    wait_interrupted=0
+    wait "$bazel_log_pid"
+    [[ $wait_interrupted -eq 0 ]] && break
+  done
+  if [[ $cancel_requested -eq 1 ]]; then
+    # Do not issue another Bazel command for diagnostics during cancellation.
+    exit 130
+  fi
+fi
 set -e
 
 if [[ ${bazel_status:-0} -ne 0 ]]; then

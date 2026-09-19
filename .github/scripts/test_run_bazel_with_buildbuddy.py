@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 
+import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
+import textwrap
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -284,6 +288,212 @@ class RunBazelWithBuildBuddyTest(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 37, result.stderr)
+
+
+@unittest.skipUnless(os.name == "posix", "POSIX client cancellation contract")
+class RunBazelCiCancellationTest(unittest.TestCase):
+    @contextlib.contextmanager
+    def client(self, mode):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            fake = root / "owned-client"
+            fake.write_text(
+                f"#!{sys.executable}\n"
+                + textwrap.dedent("""\
+                    import json, os, signal, subprocess, sys, time
+                    from pathlib import Path
+                    root = Path(os.environ['FIXTURE_ROOT'])
+                    mode = os.environ['FIXTURE_MODE']
+                    if '--fixture-child' not in sys.argv:
+                        # Bazelisk1.28.1 test/build starts the client and ignores
+                        # terminal signals while waiting, rather than execing it.
+                        signal.signal(signal.SIGINT, signal.SIG_IGN)
+                        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+                        if mode == 'launch':
+                            (root / 'launching').touch()
+                            deadline = time.monotonic() + 10
+                            while not (root / 'start').exists():
+                                if time.monotonic() >= deadline:
+                                    sys.exit(99)
+                                time.sleep(0.01)
+                        child = subprocess.Popen([sys.executable, __file__,
+                                                  '--fixture-child', *sys.argv[1:]])
+                        status = child.wait()
+                        (root / 'leader_joined').touch()
+                        sys.exit(status)
+                    interrupted = False
+                    def interrupt(signum, frame):
+                        global interrupted
+                        interrupted = True
+                        with (root / 'signals').open('a') as out:
+                            out.write(str(signum) + '\\n')
+                    signal.signal(signal.SIGINT, interrupt)
+                    (root / 'ready.tmp').write_text(json.dumps({
+                        'pid': os.getpid(), 'parent': os.getppid(),
+                        'group': os.getpgrp(), 'args': sys.argv[2:]}))
+                    (root / 'ready.tmp').replace(root / 'ready')
+                    print('client stdout', flush=True)
+                    print('client stderr', file=sys.stderr, flush=True)
+                    if mode in ('cancel', 'unresponsive', 'launch'):
+                        deadline = time.monotonic() + 10
+                        while not (root / 'release').exists():
+                            if mode in ('cancel', 'launch') and interrupted:
+                                time.sleep(0.1)
+                                break
+                            if time.monotonic() >= deadline:
+                                sys.exit(99)
+                            time.sleep(0.01)
+                    print('client final log', flush=True)
+                    if mode == 'failure':
+                        print('ERROR: fixture action failed:', flush=True)
+                        sys.exit(37)
+                    sys.exit(0)
+                    """),
+                encoding="utf-8",
+            )
+            fake.chmod(0o700)
+            env = {key: os.environ[key] for key in ("PATH", "HOME", "TMPDIR") if key in os.environ}
+            env.update(
+                CODEX_BAZEL_BIN=str(fake),
+                RUNNER_OS="macOS",
+                FIXTURE_ROOT=str(root),
+                FIXTURE_MODE=mode,
+            )
+            if mode == 'logger':
+                logger = root / 'tee'
+                logger.write_text(
+                    f'#!{sys.executable}\n' + textwrap.dedent("""\
+                        import os, sys, time
+                        from pathlib import Path
+                        root = Path(os.environ['FIXTURE_ROOT'])
+                        with open(sys.argv[1], 'w') as log:
+                            for line in sys.stdin:
+                                log.write(line)
+                                print(line, end='', flush=True)
+                        (root / 'logger_eof').touch()
+                        deadline = time.monotonic() + 10
+                        while not (root / 'release').exists():
+                            if time.monotonic() >= deadline:
+                                sys.exit(99)
+                            time.sleep(0.01)
+                        """), encoding='utf-8')
+                logger.chmod(0o700)
+                env['PATH'] = str(root) + os.pathsep + env['PATH']
+            script = Path(__file__).with_name("run-bazel-ci.sh").resolve()
+            process = subprocess.Popen(
+                ["bash", "-c", 'exec "$@"', "fixture", str(script),
+                 "--print-failed-action-summary", "--", "test",
+                 "--test_env=VALUE=with spaces", "--", "//fixture:target"],
+                env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            )
+            try:
+                yield process, root
+            finally:
+                # Only this fixture owns these children; release even an intentionally
+                # unresponsive client before joining. No Bazel server is launched.
+                (root / "release").touch()
+                try:
+                    process.communicate(timeout=12)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.communicate(timeout=2)
+
+    def await_file(self, path, process):
+        deadline = time.monotonic() + 5
+        while not path.exists():
+            self.assertIsNone(process.poll(), "owner exited before fixture readiness")
+            self.assertLess(time.monotonic(), deadline, "fixture readiness timed out")
+            time.sleep(0.01)
+        return path.read_text()
+
+    def test_success_and_failure_preserve_arguments_logs_and_status(self):
+        for mode, status in (("success", 0), ("failure", 37)):
+            with self.subTest(mode=mode), self.client(mode) as (process, root):
+                stdout, stderr = process.communicate(timeout=5)
+                self.assertEqual(process.returncode, status, stderr)
+                ready = json.loads((root / "ready").read_text())
+                self.assertEqual(ready['group'], ready['parent'])
+                self.assertNotEqual(ready['group'], os.getpgrp())
+                self.assertTrue((root / 'leader_joined').exists())
+                self.assertEqual(ready['args'], [
+                    '--noexperimental_remote_repo_contents_cache', 'test',
+                    '--test_env=VALUE=with spaces', '--', '//fixture:target'])
+                for line in ('client stdout', 'client stderr', 'client final log'):
+                    self.assertIn(line, stdout)
+                if mode == 'failure':
+                    self.assertIn('Bazel failed action diagnostics:', stdout)
+
+    def test_cancel_reaches_original_client_and_is_not_success(self):
+        with self.client('cancel') as (process, root):
+            ready = json.loads(self.await_file(root / 'ready', process))
+            self.assertEqual(ready['group'], ready['parent'])
+            self.assertNotEqual(ready['group'], os.getpgid(process.pid))
+            process.send_signal(signal.SIGINT)
+            stdout, stderr = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 130, stderr)
+            self.assertEqual((root / 'signals').read_text(), f'{signal.SIGINT}\n')
+            self.assertIn(f'owned Bazel job group {ready["group"]}', stderr)
+            self.assertTrue((root / 'leader_joined').exists())
+            self.assertIn('client final log', stdout)
+            self.assertNotIn('Bazel failed action diagnostics:', stdout)
+
+    def test_cancellation_before_shim_launch_is_retained_not_false_success(self):
+        with self.client('launch') as (process, root):
+            self.await_file(root / 'launching', process)
+            process.send_signal(signal.SIGTERM)
+            time.sleep(0.05)
+            self.assertIsNone(process.poll())
+            (root / 'start').touch()
+            self.await_file(root / 'ready', process)
+            # A shim that has not forked its client can ignore the one signal.
+            # We must retain cancellation and ownership, never invent quiescence
+            # or escalate to a second signal or an unrelated process.
+            self.assertIsNone(process.poll())
+            (root / 'release').touch()
+            stdout, stderr = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 130, stderr)
+            self.assertIn('client final log', stdout)
+            self.assertTrue((root / 'leader_joined').exists())
+            self.assertEqual(stderr.count('Cancelling owned Bazel job group'), 1)
+
+    def test_owner_joins_logger_after_client_exits(self):
+        with self.client('logger') as (process, root):
+            self.await_file(root / 'logger_eof', process)
+            self.assertIsNone(process.poll(), 'owner must join its logger')
+            (root / 'release').touch()
+            stdout, stderr = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 0, stderr)
+            self.assertIn('client final log', stdout)
+
+    def test_unresponsive_client_keeps_owner_until_join_without_escalation(self):
+        with self.client('unresponsive') as (process, root):
+            ready = json.loads(self.await_file(root / 'ready', process))
+            sentinel = subprocess.Popen([
+                sys.executable, '-c',
+                'import signal,time; signal.signal(signal.SIGINT, lambda *args: exit(77)); time.sleep(10)',
+            ], start_new_session=True)
+            try:
+                self.assertNotEqual(ready['group'], os.getpgid(sentinel.pid))
+                self.assertNotEqual(ready['group'], os.getpgid(process.pid))
+                self.assertNotEqual(ready['group'], os.getpgrp())
+                process.send_signal(signal.SIGTERM)
+                self.await_file(root / 'signals', process)
+                self.assertIsNone(sentinel.poll(), 'unrelated sentinel received cancellation')
+            finally:
+                sentinel.terminate()
+                sentinel.wait(timeout=2)
+            self.await_file(root / 'signals', process)
+            process.send_signal(signal.SIGINT)
+            process.send_signal(signal.SIGTERM)
+            time.sleep(0.1)
+            self.assertIsNone(process.poll(), 'cancellation must not claim quiescence')
+            self.assertEqual((root / 'signals').read_text(), f'{signal.SIGINT}\n')
+            (root / 'release').touch()
+            stdout, stderr = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 130, stderr)
+            self.assertIn('client final log', stdout)
+            self.assertEqual(stderr.count('Cancelling owned Bazel job group'), 1)
+            self.assertTrue((root / 'leader_joined').exists())
 
 
 if __name__ == "__main__":

@@ -99,7 +99,7 @@ jobs:
             --test_verbose_timeout_warnings
             --build_metadata=COMMIT_SHA=${GITHUB_SHA}
           )
-          ./.github/scripts/run-bazel-ci.sh \
+          exec ./.github/scripts/run-bazel-ci.sh \
             "${bazel_wrapper_args[@]}" \
             -- \
             "${bazel_test_args[@]}" \
@@ -213,7 +213,7 @@ jobs:
             --build_metadata=TAG_windows_test_shard=${BAZEL_TEST_SHARD}
           )
 
-          ./.github/scripts/run-bazel-ci.sh \
+          exec ./.github/scripts/run-bazel-ci.sh \
             --print-failed-action-summary \
             --print-failed-test-logs \
             --windows-cross-compile \
@@ -302,7 +302,7 @@ jobs:
             --build_metadata=TAG_windows_native_main=true
           )
 
-          ./.github/scripts/run-bazel-ci.sh \
+          exec ./.github/scripts/run-bazel-ci.sh \
             --print-failed-action-summary \
             --print-failed-test-logs \
             --windows-msvc-host-platform \
@@ -405,7 +405,7 @@ jobs:
             bazel_targets+=("${target}")
           done <<< "${bazel_target_lines}"
 
-          ./.github/scripts/run-bazel-ci.sh \
+          exec ./.github/scripts/run-bazel-ci.sh \
             --print-failed-action-summary \
             "${bazel_wrapper_args[@]}" \
             -- \
@@ -506,7 +506,7 @@ jobs:
             bazel_targets+=("${target}")
           done <<< "${bazel_target_lines}"
 
-          ./.github/scripts/run-bazel-ci.sh \
+          exec ./.github/scripts/run-bazel-ci.sh \
             "${bazel_wrapper_args[@]}" \
             -- \
             build \
@@ -520,7 +520,7 @@ jobs:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         shell: bash
         run: |
-          ./.github/scripts/run-bazel-ci.sh \
+          exec ./.github/scripts/run-bazel-ci.sh \
             --remote-download-toplevel \
             --print-failed-action-summary \
             -- \
