@@ -405,6 +405,17 @@ jobs:
             /var/cache/apt
           key: apt-${{ matrix.runner }}-${{ matrix.target }}-v1
 
+      - name: Record final native resources after product failure or success
+        if: always() && !cancelled()
+        working-directory: ${{ runner.temp }}
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Write-Output "ImageOS=$env:ImageOS ImageVersion=$env:ImageVersion"
+          Get-CimInstance Win32_ComputerSystem | Select-Object TotalPhysicalMemory, NumberOfLogicalProcessors | ConvertTo-Json -Compress
+          Get-Volume | Select-Object DriveLetter, FileSystem, Size, SizeRemaining | ConvertTo-Json -Compress
+          Write-Output 'Resource receipt only; no compiler or product success is inferred.'
+
       - name: Record native product tools and final resource state
         shell: pwsh
         run: |
