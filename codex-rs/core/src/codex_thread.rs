@@ -1,4 +1,5 @@
 mod observation;
+mod observation_wake;
 mod pilot;
 pub use pilot::NativePilotRetirement;
 pub use pilot::PilotRetirementRemainder;

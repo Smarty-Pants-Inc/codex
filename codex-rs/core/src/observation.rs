@@ -22,6 +22,12 @@ const MAX_SEQUENCE: u64 = (1_u64 << 53) - 1;
 const MAX_TIMESTAMP: i64 = 8_640_000_000_000;
 const EVENT_CAPACITY: usize = 32;
 
+#[path = "observation_wake.rs"]
+mod wake;
+pub use wake::ObservationWakeIntent;
+pub use wake::ObservationWakeOutcome;
+pub use wake::ObservationWakeReceipt;
+
 #[path = "observation_budget.rs"]
 mod budget;
 pub use budget::ObservationReservation;
@@ -155,6 +161,7 @@ struct SlotState {
     pilot: Option<pilot::PilotLedger>,
     budget: Option<budget::BudgetState>,
     frame_budget_generation: Option<u64>,
+    wake: wake::WakeState,
 }
 
 impl SlotState {
@@ -249,6 +256,7 @@ impl ObservationSlot {
                     pilot: None,
                     budget: None,
                     frame_budget_generation: None,
+                    wake: wake::WakeState::default(),
                 }),
                 events,
                 clock: Box::new(move || {

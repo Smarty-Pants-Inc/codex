@@ -3,6 +3,7 @@ use crate::observation::ObservationError;
 use crate::observation::ObservationEvent;
 use codex_protocol::protocol::TokenUsage;
 use pretty_assertions::assert_eq;
+use sha2::Digest;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -522,4 +523,64 @@ fn actual_attempts_require_qualification_keep_unknown_spend_and_bind_late_usage(
         }
     }
     assert_eq!(terminal, vec![false, true]);
+}
+
+#[test]
+fn pilot_installation_after_ordinary_prepare_fences_ordinary_reservation() {
+    #[derive(Debug)]
+    struct OriginalPolicy;
+    impl IdleTurnAdmission for OriginalPolicy {
+        fn reserve_if_allowed(&self, reserve: &mut dyn FnMut()) -> bool {
+            reserve();
+            true
+        }
+    }
+    let fixture = Fixture::new();
+    let mut model = codex_models_manager::model_info::model_info_from_slug("gpt-oss-20b");
+    model.context_window = Some(131_072);
+    model.effective_context_window_percent = 100;
+    fixture
+        .slot
+        .initialize_budget(
+            fixture.owner,
+            &model,
+            crate::ObservationProfile::HarmonyGptOss,
+        )
+        .unwrap();
+    let frame = crate::ObservationFrame {
+        text: Arc::from("A"),
+        hash: format!("{:x}", sha2::Sha256::digest(b"A")),
+        expires_at: 1060,
+    };
+    fixture
+        .slot
+        .set_for_request_at_budget(
+            fixture.owner,
+            /*revision*/ 1,
+            Some(frame),
+            Uuid::new_v4(),
+            /*budget_generation*/ 1,
+        )
+        .unwrap();
+    let snapshot = fixture.slot.read(fixture.owner).unwrap();
+    let intent = crate::ObservationWakeIntent {
+        sequence: 1,
+        frame_revision: snapshot.revision,
+        frame_hash: snapshot.hash.clone().unwrap(),
+        budget_generation: 1,
+        expected_commit_order: snapshot.commit_order,
+    };
+    let guard = fixture
+        .slot
+        .prepare_wake(fixture.owner, intent, Arc::new(OriginalPolicy))
+        .unwrap();
+    fixture.install(); // Actual native installation, not a fabricated pilot flag.
+    assert_eq!(fixture.slot.read(fixture.owner).unwrap(), snapshot);
+    let report = fixture.slot.pilot_report(fixture.owner).unwrap();
+    assert!(!guard.reserve_turn_if_allowed(
+        &fixture.issuer.claims.thread_id,
+        "turn",
+        &mut || panic!("ordinary admission bypassed pilot")
+    ));
+    assert_eq!(fixture.slot.pilot_report(fixture.owner).unwrap(), report);
 }
