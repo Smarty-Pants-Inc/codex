@@ -4,6 +4,9 @@ use std::sync::Barrier;
 use std::sync::OnceLock;
 use std::sync::Weak;
 
+#[path = "observation_budget_tests.rs"]
+mod budget_tests;
+
 #[path = "observation_capture_tests.rs"]
 mod capture_tests;
 
@@ -91,6 +94,8 @@ fn renewal_readback_and_clear_keep_revision_and_fifo_order() {
             hash: None,
             expires_at: None,
             status: ObservationStatus::Cleared,
+            native_reservation: None,
+            frame_budget_generation: None,
         }
     );
 }

@@ -60,7 +60,8 @@ pub(crate) fn notification(
                 },
             ))
         }
-        ObservationEvent::Published(_)
+        ObservationEvent::Budget { .. }
+        | ObservationEvent::Published(_)
         | ObservationEvent::Read(_)
         | ObservationEvent::Control { .. } => None,
     }

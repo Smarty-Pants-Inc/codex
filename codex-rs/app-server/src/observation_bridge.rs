@@ -206,7 +206,9 @@ impl ObservationBridge {
                                 .await
                                 .then_some(())?;
                         }
-                        ObservationEvent::Published(_) | ObservationEvent::Read(_) => return None,
+                        ObservationEvent::Published(_)
+                        | ObservationEvent::Read(_)
+                        | ObservationEvent::Budget { .. } => return None,
                     }
                     Some(())
                 };
