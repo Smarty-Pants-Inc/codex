@@ -102,6 +102,44 @@ async fn observation_start_and_admitted_resume_install_fresh_owned_relays() -> R
         }))).await?;
         let first: ThreadObservationReadResponse = app.read_response(id).await?;
         assert_eq!((&first.owner_epoch, first.revision, &first.hash), (&initial.owner_epoch, 0, &None));
+        // Cleanup/fence remains available without an automatic policy, while
+        // ordinary launch ownership alone never enables automatic start.
+        assert!(!initial.automatic_admission);
+        let id = app.send_request("thread/observation/wake/start", Some(json!({
+            "threadId":thread_id, "ownerEpoch":initial.owner_epoch,
+            "intent":{"sequence":1,"frameRevision":1,"frameHash":"a".repeat(64),
+                "budgetGeneration":1,"expectedCommitOrder":1}, "operandDigest":"b".repeat(64),
+        }))).await?;
+        assert_eq!(app.read_stream_until_error_message(RequestId::Integer(id)).await?.error, rejection("UNSUPPORTED"));
+        for (epoch, code) in [(initial.owner_epoch.replace('-', ""), "DENIED"), ("00000000-0000-0000-0000-000000000000".into(), "STALE_OWNER")] {
+            let id = app.send_request("thread/observation/wake/read", Some(json!({
+                "threadId":thread_id, "ownerEpoch":epoch, "query":{"type":"fence","sequence":1},
+            }))).await?;
+            assert_eq!(app.read_stream_until_error_message(RequestId::Integer(id)).await?.error, rejection(code));
+        }
+        for sequence in [0_u64, 1_u64 << 53] {
+            let id = app.send_request("thread/observation/wake/invalidate", Some(json!({
+                "threadId":thread_id, "ownerEpoch":initial.owner_epoch, "sequence":sequence,
+            }))).await?;
+            assert_eq!(app.read_stream_until_error_message(RequestId::Integer(id)).await?.error, rejection("INVALID_INPUT"));
+        }
+        let id = app.send_request("thread/observation/wake/invalidate", Some(json!({
+            "threadId":thread_id, "ownerEpoch":initial.owner_epoch, "sequence":2,
+        }))).await?;
+        assert_eq!(app.read_response::<serde_json::Value>(id).await?, json!({"protocol":1,"intentFloor":2}));
+        let id = app.send_request("thread/observation/wake/read", Some(json!({
+            "threadId":thread_id, "ownerEpoch":initial.owner_epoch, "query":{"type":"fence","sequence":2},
+        }))).await?;
+        assert_eq!(app.read_response::<serde_json::Value>(id).await?, json!({"protocol":1,"type":"fence","intentFloor":2}));
+        let id = app.send_request("thread/observation/wake/read", Some(json!({
+            "threadId":thread_id, "ownerEpoch":initial.owner_epoch,
+            "query":{"type":"attempt","sequence":1,"operandDigest":"a".repeat(64)},
+        }))).await?;
+        assert_eq!(app.read_response::<serde_json::Value>(id).await?, json!({"protocol":1,"type":"attempt","intentFloor":2,"receipt":null}));
+        let id = app.send_request("thread/observation/wake/retire", Some(json!({
+            "threadId":thread_id, "ownerEpoch":initial.owner_epoch,"sequence":1,"operandDigest":"a".repeat(64),
+        }))).await?;
+        assert_eq!(app.read_stream_until_error_message(RequestId::Integer(id)).await?.error, rejection("REVISION_MISMATCH"));
         let text = "SOURCE19_OWNER_ONLY";
         let expires_at = i64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs())? + 60;
         let id = app.send_request("thread/observation/set", Some(json!({

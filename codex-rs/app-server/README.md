@@ -1,5 +1,37 @@
 # codex-app-server
 
+## Experimental owner-bound observation wake controls
+
+`thread/observation/wake/{start,read,invalidate,retire}` use the original admitted
+stdio thread and owner epoch. They do not install policy or enable
+`automaticAdmission`. Start requires a trusted native `ObservationWakeHostPolicy`
+matching both the original thread and owner. Without it, start is unsupported.
+Context/profile qualification and original host admission policy remain required.
+
+Start takes `intent` (`sequence`, `frameRevision`, `frameHash`, `budgetGeneration`,
+`expectedCommitOrder`) and `operandDigest`. All integers are positive safe JSON
+integers. Digest: SHA256 of UTF-8 `codex-observation-wake-v1` plus NUL, raw16 UUID
+owner bytes, four big-endian u64 values (sequence, frameRevision, budgetGeneration,
+expectedCommitOrder), then64 lowercase ASCII frameHash bytes. Persist the original
+sequence/digest/cooldown before dispatch; never replay a lost-ACK start.
+
+Read takes `query:{type:"attempt",sequence,operandDigest}` or
+`query:{type:"fence",sequence}`. Responses have `protocol:1`, query type and
+`intentFloor`; attempt responses also contain a nullable `receipt`. A receipt has
+sequence, operandDigest and tagged outcome: `pending` with nullable turnId,
+`started` with actual turnId, `suppressed`, or `unknown`. Pending is not Started;
+Started is not exposure. Missing history is Unknown, not retry permission.
+
+Invalidate takes sequence; retire takes sequence/operandDigest. Both return
+`protocol:1,intentFloor`. A higher invalidation floor fences lower unreserved
+attempts, not an already reserved turn. Retire only after durably recording the
+terminal Started/Suppressed result; Pending/Unknown cannot retire. The floor
+survives retirement. Read/cleanup stay available after budget invalidation but
+never grant send/start authority. Close completion joins the native fence and
+original admission outcome; connection loss is Unknown. Same-owner rollback must
+carry the whole original writer's floor, not rewind it to selected ancestry.
+
+
 `codex app-server` is the interface Codex uses to power rich interfaces such as the [Codex VS Code extension](https://marketplace.visualstudio.com/items?itemName=openai.chatgpt).
 
 ## Table of Contents

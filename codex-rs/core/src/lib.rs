@@ -96,6 +96,7 @@ pub use observation::ObservationReservationState;
 pub use observation::ObservationSlot;
 pub use observation::ObservationStatus;
 pub use observation::ObservationSubmitted;
+pub use observation::ObservationWakeHostPolicy;
 pub use observation::ObservationWakeIntent;
 pub use observation::ObservationWakeOutcome;
 pub use observation::ObservationWakeReceipt;

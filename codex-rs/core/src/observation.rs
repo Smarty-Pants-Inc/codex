@@ -24,6 +24,7 @@ const EVENT_CAPACITY: usize = 32;
 
 #[path = "observation_wake.rs"]
 mod wake;
+pub use wake::ObservationWakeHostPolicy;
 pub use wake::ObservationWakeIntent;
 pub use wake::ObservationWakeOutcome;
 pub use wake::ObservationWakeReceipt;

@@ -3,6 +3,16 @@ use super::*;
 use codex_protocol::ThreadId;
 use codex_protocol::turn_input::IdleTurnAdmission;
 
+/// Installed only by the original trusted native host in thread extension data.
+/// No RPC may create or replace this policy. The host supplies qualification and
+/// the original synchronized admission guard; this binding invents no defaults.
+#[derive(Clone, Debug)]
+pub struct ObservationWakeHostPolicy {
+    pub thread_id: ThreadId,
+    pub owner: ObservationOwner,
+    pub admission: Arc<dyn IdleTurnAdmission>,
+}
+
 /// Immutable operands from the original owner's ordered observation read.
 /// Identity is (owner epoch, sequence); sequences are persisted before dispatch.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -135,7 +145,7 @@ impl ObservationSlot {
         &self,
         owner: ObservationOwner,
         sequence: u64,
-    ) -> Result<(), ObservationError> {
+    ) -> Result<u64, ObservationError> {
         let mut state = self
             .state
             .lock()
@@ -145,7 +155,7 @@ impl ObservationSlot {
             return Err(ObservationError::RevisionMismatch);
         }
         state.wake.floor = sequence;
-        Ok(())
+        Ok(state.wake.floor)
     }
 
     /// Exact historical result only; never revalidates eligibility or restarts work.
@@ -187,7 +197,7 @@ impl ObservationSlot {
         owner: ObservationOwner,
         sequence: u64,
         operand_digest: &str,
-    ) -> Result<(), ObservationError> {
+    ) -> Result<u64, ObservationError> {
         let mut state = self
             .state
             .lock()
@@ -208,7 +218,7 @@ impl ObservationSlot {
             }
         }
         state.wake.receipt = None;
-        Ok(())
+        Ok(state.wake.floor)
     }
 }
 

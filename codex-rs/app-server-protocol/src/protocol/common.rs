@@ -592,6 +592,30 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadPilotRetireResponse,
     },
+    #[experimental("thread/observation/wake/start")]
+    ThreadObservationWakeStart => "thread/observation/wake/start" {
+        params: v2::ThreadObservationWakeStartParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadObservationWakeStartResponse,
+    },
+    #[experimental("thread/observation/wake/read")]
+    ThreadObservationWakeRead => "thread/observation/wake/read" {
+        params: v2::ThreadObservationWakeReadParams,
+        serialization: None,
+        response: v2::ThreadObservationWakeReadResponse,
+    },
+    #[experimental("thread/observation/wake/invalidate")]
+    ThreadObservationWakeInvalidate => "thread/observation/wake/invalidate" {
+        params: v2::ThreadObservationWakeInvalidateParams,
+        serialization: None,
+        response: v2::ThreadObservationWakeInvalidateResponse,
+    },
+    #[experimental("thread/observation/wake/retire")]
+    ThreadObservationWakeRetire => "thread/observation/wake/retire" {
+        params: v2::ThreadObservationWakeRetireParams,
+        serialization: None,
+        response: v2::ThreadObservationWakeRetireResponse,
+    },
     #[experimental("thread/observation/set")]
     ThreadObservationSet => "thread/observation/set" {
         params: v2::ThreadObservationSetParams,
