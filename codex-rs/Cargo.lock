@@ -2070,6 +2070,7 @@ dependencies = [
  "futures",
  "hmac 0.12.1",
  "http 1.4.0",
+ "libc",
  "opentelemetry",
  "opentelemetry_sdk",
  "pretty_assertions",
@@ -2858,12 +2859,14 @@ dependencies = [
  "serde_json",
  "serial_test",
  "sha1 0.10.6",
+ "sha2 0.10.9",
  "shlex",
  "similar",
  "tempfile",
  "test-case",
  "test-log",
  "thiserror 2.0.18",
+ "tiktoken-rs",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
@@ -6309,6 +6312,17 @@ name = "fancy-regex"
 version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "998b056554fbe42e03ae0e152895cd1a7e1002aec800fdc6635d20270260c46f"
+dependencies = [
+ "bit-set 0.8.0",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "fancy-regex"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72cf461f865c862bb7dc573f643dd6a2b6842f7c30b07882b56bd148cc2761b8"
 dependencies = [
  "bit-set 0.8.0",
  "regex-automata",
@@ -14026,6 +14040,21 @@ dependencies = [
  "quick-error",
  "weezl",
  "zune-jpeg 0.4.21",
+]
+
+[[package]]
+name = "tiktoken-rs"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "027853bbf8c7763b77c5c595f1c271c7d536ced7d6f83452911b944621e57fc2"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "bstr",
+ "fancy-regex 0.17.0",
+ "lazy_static",
+ "regex",
+ "rustc-hash 2.1.1",
 ]
 
 [[package]]

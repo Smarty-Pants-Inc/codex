@@ -376,7 +376,7 @@ async fn start_if_idle(
         };
         let admitted = if is_automatic_idle_work {
             if let Some(admission) = idle_turn_admission.as_ref() {
-                admission.reserve_if_allowed(&mut reserve)
+                admission.reserve_turn_if_allowed(&session.thread_id, &submission_id, &mut reserve)
             } else {
                 reserve();
                 true

@@ -1,5 +1,7 @@
 #[path = "thread_observation.rs"]
 mod observation;
+#[path = "thread_pilot.rs"]
+mod pilot;
 use codex_app_server_protocol::ThreadObservationOptions;
 
 use super::persisted_resume_settings::PersistedResumeSettings;
@@ -1410,6 +1412,14 @@ impl ThreadRequestProcessor {
             })
             .sum();
         let mut thread_extension_init = ExtensionDataInit::new();
+        if observation.is_some() {
+            thread_extension_init.insert(
+                listener_task_context
+                    .thread_state_manager
+                    .observation_startup_policy(request_id.connection_id)
+                    .await?,
+            );
+        }
         if !selected_capability_roots.is_empty() {
             thread_extension_init.insert(selected_capability_roots);
         }
@@ -3817,15 +3827,24 @@ impl ThreadRequestProcessor {
         }
 
         let response_history = thread_history.clone();
+        let mut thread_extension_init = ExtensionDataInit::new();
+        if observation.is_some() {
+            thread_extension_init.insert(
+                self.thread_state_manager
+                    .observation_startup_policy(request_id.connection_id)
+                    .await?,
+            );
+        }
 
         match self
             .thread_manager
-            .resume_thread_with_history(
+            .resume_thread_with_history_and_init(
                 config,
                 thread_history,
                 self.auth_manager.clone(),
                 self.request_trace_context(&request_id).await,
                 client_mcp_extensions,
+                thread_extension_init,
             )
             .await
         {

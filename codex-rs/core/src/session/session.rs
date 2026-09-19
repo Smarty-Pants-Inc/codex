@@ -841,6 +841,13 @@ impl Session {
         thread_extension_init.insert(codex_extension_api::ThreadOriginator(
             session_configuration.originator.clone(),
         ));
+        let provider_startup_policy = thread_extension_init
+            .get::<crate::ProviderStartupPolicy>()
+            .map(|policy| *policy)
+            .unwrap_or_default();
+        #[cfg(test)]
+        let startup_auth_probe =
+            thread_extension_init.get::<Arc<super::startup_auth_tests::StartupAuthProbe>>();
         let mcp_thread_init = thread_extension_init.clone();
         let thread_extension_data = codex_extension_api::ExtensionData::new_with_init(
             thread_id.to_string(),
@@ -969,7 +976,11 @@ impl Session {
             .map(|cwd| cwd.to_path_buf())
             .unwrap_or_else(|| session_configuration.cwd().to_path_buf());
         let auth_and_mcp_fut = async move {
-            let auth = auth_manager_clone.auth().await;
+            let auth = if provider_startup_policy.permits_ambient_auth() {
+                auth_manager_clone.auth().await
+            } else {
+                None
+            };
             let mcp_projection = mcp_manager_for_mcp
                 .runtime_config_for_step(
                     &config_for_mcp,
@@ -1082,10 +1093,16 @@ impl Session {
             let originator = session_configuration.originator.clone();
             let terminal_type = user_agent();
             let session_model = session_configuration.collaboration_mode.model().to_string();
-            let auth_env_telemetry = collect_auth_env_telemetry(
-                session_configuration.provider.info(),
-                auth_manager.codex_api_key_env_enabled(),
-            );
+            let auth_env_telemetry = provider_startup_policy.read_auth_env_metadata(|| {
+                #[cfg(test)]
+                if let Some(probe) = &startup_auth_probe {
+                    return probe.read_metadata();
+                }
+                collect_auth_env_telemetry(
+                    session_configuration.provider.info(),
+                    auth_manager.codex_api_key_env_enabled(),
+                )
+            });
             let mut session_telemetry = SessionTelemetry::new(
                 thread_id,
                 session_model.as_str(),
@@ -1436,7 +1453,7 @@ impl Session {
                 thread_store: Arc::clone(&thread_store),
                 attestation_provider: attestation_provider.clone(),
                 time_provider,
-                model_client: ModelClient::new(
+                model_client: ModelClient::new_with_startup_policy(
                     Some(Arc::clone(&auth_manager)),
                     if config.features.enabled(Feature::UseAgentIdentity) {
                         AgentIdentityAuthPolicy::ChatGptAuth
@@ -1457,6 +1474,8 @@ impl Session {
                         .enabled(Feature::ConcurrentReasoningSummaries),
                     attestation_provider,
                     config.http_client_factory(),
+                    provider_startup_policy,
+                    Some(auth_env_telemetry),
                 )
                 .with_prompt_cache_key_override(
                     crate::guardian::prompt_cache_key_override_for_review_session(
@@ -1547,7 +1566,11 @@ impl Session {
             if startup_auth_changed {
                 mcp_auth_changes.mark_unchanged();
             }
-            let latest_auth = sess.services.auth_manager.auth().await;
+            let latest_auth = if provider_startup_policy.permits_ambient_auth() {
+                sess.services.auth_manager.auth().await
+            } else {
+                None
+            };
             let mcp_projection = if startup_auth_changed
                 || mcp_auth_changes.has_changed().unwrap_or(false)
             {

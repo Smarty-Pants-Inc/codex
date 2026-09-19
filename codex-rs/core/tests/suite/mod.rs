@@ -107,6 +107,10 @@ mod multi_agent_mode;
 mod multi_agent_resume;
 #[cfg(unix)]
 mod multi_exec_server_sandbox;
+#[path = "native_control_boundary_tests.rs"]
+mod native_control_boundary;
+#[path = "native_pilot_producers_tests.rs"]
+mod native_pilot_producers;
 mod network_approval;
 mod observation_retry;
 mod observation_transport;

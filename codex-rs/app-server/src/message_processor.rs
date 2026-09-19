@@ -1208,6 +1208,46 @@ impl MessageProcessor {
                     .thread_set_name(request_id.clone(), params)
                     .await
             }
+            ClientRequest::ThreadPilotRead { params, .. } => self
+                .thread_processor
+                .pilot_control(request_id.connection_id, &params.thread_id)
+                .await
+                .map(|control| Some(control.binding.clone().into())),
+            ClientRequest::ThreadPilotCheck { params, .. } => {
+                match self
+                    .thread_processor
+                    .pilot_control(request_id.connection_id, &params.thread_id)
+                    .await
+                {
+                    Ok(control) => control
+                        .check(params.operation)
+                        .map(|response| Some(response.into())),
+                    Err(error) => Err(error),
+                }
+            }
+            ClientRequest::ThreadPilotStart { params, .. } => {
+                match self
+                    .thread_processor
+                    .pilot_control(request_id.connection_id, &params.thread_id)
+                    .await
+                {
+                    Ok(control) => control
+                        .start(params.input)
+                        .await
+                        .map(|response| Some(response.into())),
+                    Err(error) => Err(error),
+                }
+            }
+            ClientRequest::ThreadPilotRetire { params, .. } => {
+                match self
+                    .thread_processor
+                    .pilot_control(request_id.connection_id, &params.thread_id)
+                    .await
+                {
+                    Ok(control) => control.retire().await.map(|response| Some(response.into())),
+                    Err(error) => Err(error),
+                }
+            }
             ClientRequest::ThreadObservationSet { params, .. } => {
                 let frame = match params.frame {
                     codex_app_server_protocol::ObservationFrameUpdate::Frame(frame) => {

@@ -16,6 +16,7 @@ use crate::server_request_error::is_turn_transition_server_request_error;
 const INVALID_AUDIO_URL_ERROR: &str = "audio URLs must use an inline data URL";
 
 pub(crate) async fn on_call_response(
+    turn_id: String,
     call_id: String,
     receiver: oneshot::Receiver<ClientRequestResult>,
     conversation: Arc<CodexThread>,
@@ -46,7 +47,8 @@ pub(crate) async fn on_call_response(
         success,
     };
     if let Err(err) = conversation
-        .submit(Op::DynamicToolResponse {
+        .submit(Op::DynamicToolResponseForTurn {
+            turn_id,
             id: call_id.clone(),
             response: core_response,
         })

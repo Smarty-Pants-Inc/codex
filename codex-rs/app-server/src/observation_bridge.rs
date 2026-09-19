@@ -47,6 +47,7 @@ pub(crate) struct ObservationBridge {
     pub(crate) slot: Arc<ObservationSlot>,
     pub(crate) owner: ObservationOwner,
     pub(crate) thread_id: ThreadId,
+    pub(crate) pilot: std::sync::OnceLock<Arc<crate::observation_pilot_control::PilotControl>>,
     pending: Mutex<HashMap<Uuid, Pending>>,
     cancelled: CancellationToken,
 }
@@ -66,6 +67,7 @@ impl ObservationBridge {
                 slot: Arc::new(slot),
                 owner,
                 thread_id,
+                pilot: std::sync::OnceLock::new(),
                 pending: Mutex::new(HashMap::new()),
                 cancelled: CancellationToken::new(),
             }),
@@ -126,6 +128,11 @@ impl ObservationBridge {
     }
 
     pub(crate) fn revoke(&self) {
+        if let Some(pilot) = self.pilot.get()
+            && pilot.begin_retirement().is_err()
+        {
+            tracing::warn!("native pilot retirement unavailable");
+        }
         self.cancelled.cancel();
         if let Err(error) = self.slot.revoke() {
             tracing::warn!(%error, "observation revoke unavailable");

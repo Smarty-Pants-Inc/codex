@@ -95,6 +95,8 @@ const TEST_INSTALLATION_ID: &str = "11111111-1111-4111-8111-111111111111";
 
 #[path = "client_observation_tests.rs"]
 mod observation;
+#[path = "client_pilot_auth_tests.rs"]
+mod pilot_auth;
 
 fn test_model_client(session_source: SessionSource) -> ModelClient {
     test_model_client_with_thread_id(ThreadId::new(), session_source)
