@@ -22,14 +22,43 @@ jobs:
     name: smarty-ci
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@a0b273b48ed29de4470960879e8381ff45632f26 # 1.93.0
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
           components: rustfmt
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: just@1.51.0,nextest@0.9.103
+      - name: Install Linux sandbox build dependencies
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+      - name: Check bubblewrap netlink replies
+        working-directory: codex-rs/bwrap
+        run: |
+          test_binary="$(mktemp)"
+          trap 'rm -f "$test_binary"' EXIT
+          cc -std=gnu11 -Wall -Wextra -ffunction-sections -fdata-sections \
+            -I. -I../vendor/bubblewrap -Wl,--gc-sections \
+            tests/netlink_reply.c -o "$test_binary"
+          "$test_binary"
       - name: Check Rust formatting
         working-directory: codex-rs
         run: cargo fmt -- --config imports_granularity=Item --check
+      - name: Test codex-bwrap
+        working-directory: codex-rs
+        run: |
+          # The crate has no Rust tests; C29 above supplies behavioral coverage.
+          just test -p codex-bwrap --locked --no-tests=pass --retries 0 --test-threads 2
+      - name: Check source remains unchanged
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
