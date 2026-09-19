@@ -27,6 +27,7 @@ mod wake;
 pub use wake::ObservationWakeIntent;
 pub use wake::ObservationWakeOutcome;
 pub use wake::ObservationWakeReceipt;
+pub use wake::ObservationWakeSnapshot;
 
 #[path = "observation_budget.rs"]
 mod budget;

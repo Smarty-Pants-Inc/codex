@@ -51,6 +51,14 @@ pub struct ObservationWakeReceipt {
     pub outcome: ObservationWakeOutcome,
 }
 
+/// One atomic original-owner read. A missing receipt is unknown history;
+/// the floor fences only lower-sequence attempts that have not reserved yet.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservationWakeSnapshot {
+    pub intent_floor: u64,
+    pub receipt: Option<ObservationWakeReceipt>,
+}
+
 #[derive(Default)]
 pub(super) struct WakeState {
     floor: u64,
@@ -147,20 +155,29 @@ impl ObservationSlot {
         sequence: u64,
         operand_digest: &str,
     ) -> Result<ObservationWakeReceipt, ObservationError> {
+        self.observation_wake_snapshot(owner)?
+            .receipt
+            .filter(|receipt| {
+                receipt.sequence == sequence && receipt.operand_digest == operand_digest
+            })
+            .ok_or(ObservationError::RevisionMismatch)
+    }
+
+    /// Read the existing floor and optional receipt at one native lock boundary.
+    /// This neither revalidates the observation budget nor dispatches a turn.
+    pub fn observation_wake_snapshot(
+        &self,
+        owner: ObservationOwner,
+    ) -> Result<ObservationWakeSnapshot, ObservationError> {
         let state = self
             .state
             .lock()
             .map_err(|_| ObservationError::Unavailable)?;
         state.authorize(owner)?;
-        state
-            .wake
-            .receipt
-            .as_ref()
-            .filter(|receipt| {
-                receipt.sequence == sequence && receipt.operand_digest == operand_digest
-            })
-            .cloned()
-            .ok_or(ObservationError::RevisionMismatch)
+        Ok(ObservationWakeSnapshot {
+            intent_floor: state.wake.floor,
+            receipt: state.wake.receipt.clone(),
+        })
     }
 
     /// Original owner calls this only after durably recording the terminal result.

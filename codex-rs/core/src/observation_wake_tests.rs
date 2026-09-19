@@ -3,6 +3,9 @@ use crate::IdleTurnAdmission;
 use crate::ObservationProfile;
 use codex_protocol::ThreadId;
 
+#[path = "observation_wake_snapshot_tests.rs"]
+mod snapshot_tests;
+
 #[derive(Debug)]
 struct OriginalPolicy;
 impl IdleTurnAdmission for OriginalPolicy {
