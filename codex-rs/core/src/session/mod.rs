@@ -220,6 +220,7 @@ mod mcp_prewarm;
 mod mcp_refresh;
 mod mcp_runtime;
 pub(crate) mod multi_agents;
+mod observation_sampling;
 mod review;
 mod rollout_budget;
 mod rollout_reconstruction;

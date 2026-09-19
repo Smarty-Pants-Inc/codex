@@ -1,0 +1,384 @@
+//! Owner-fenced, transient observation storage. This does not enable observation
+//! requests: the app-server must first admit an exclusive owner and Core must
+//! separately qualify the rendered token budget and provider transport.
+
+use sha2::Digest;
+use sha2::Sha256;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::time::Instant;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+use tokio::sync::mpsc;
+use uuid::Uuid;
+
+// This is an allocation, not a tokenizer or wire-framing qualification.
+pub(crate) const RESERVED_TOKENS: i64 = 4608;
+pub(crate) const MAX_FRAME_BYTES: usize = 4096;
+const MAX_LEASE_SECONDS: i64 = 60;
+const MAX_SEQUENCE: u64 = (1_u64 << 53) - 1;
+// Sense receives Unix seconds as safe JSON integers within the JavaScript Date range.
+const MAX_TIMESTAMP: i64 = 8_640_000_000_000;
+const EVENT_CAPACITY: usize = 32;
+
+#[path = "observation_capture.rs"]
+mod capture;
+pub use capture::ObservationCapture;
+#[path = "observation_audit.rs"]
+mod audit;
+use audit::DecisionAudit;
+pub(crate) use audit::ObservationAttempt;
+pub use audit::ObservationOutcome;
+pub use audit::ObservationSubmitted;
+
+/// One atomic thread attachment shared by Core sampling and the owner relay.
+/// Constructing this value does not admit a host, connection or provider profile.
+/// The app-server installs it only after its trusted lifecycle admission.
+pub struct ObservationBinding {
+    pub slot: Arc<ObservationSlot>,
+    pub profile: crate::ObservationProfile,
+}
+
+/// Connection identity is supplied by native transport, never by tool input.
+/// The epoch fences this admission; it cannot authorize another connection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ObservationOwner {
+    pub connection_id: u64,
+    pub epoch: Uuid,
+}
+
+/// Sampled by the slot's supplier inside the publication/capture critical section.
+#[derive(Clone, Copy)]
+struct ObservationClock {
+    wall_seconds: i64,
+    monotonic: Instant,
+}
+
+type ClockSource = Box<dyn Fn() -> Result<ObservationClock, ObservationError> + Send + Sync>;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservationFrame {
+    pub text: Arc<str>,
+    pub hash: String,
+    pub expires_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ObservationStatus {
+    Current,
+    Cleared,
+    Expired,
+    Unavailable,
+}
+
+/// Body-free publication/readback metadata. Expiry retains the publication hash.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ObservationMetadata {
+    pub owner: ObservationOwner,
+    pub revision: u64,
+    pub commit_order: u64,
+    pub hash: Option<String>,
+    pub expires_at: Option<i64>,
+    pub status: ObservationStatus,
+}
+
+/// The app-server must forward this FIFO before sending corresponding set/read
+/// ACKs. Sending ACKs directly from the method return would break capture ordering.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ObservationEvent {
+    Published(ObservationMetadata),
+    Read(ObservationMetadata),
+    Captured(ObservationCapture),
+    Submitted(ObservationSubmitted),
+    /// Native RPC correlation token, never a client-supplied ownership claim.
+    Control {
+        request_id: Uuid,
+        metadata: ObservationMetadata,
+    },
+}
+
+#[derive(Debug, thiserror::Error, Eq, PartialEq)]
+pub enum ObservationError {
+    #[error("stale observation owner")]
+    StaleOwner,
+    #[error("invalid observation frame or lease")]
+    InvalidFrame,
+    #[error("observation revision mismatch")]
+    RevisionMismatch,
+    #[error("observation resource limit")]
+    ResourceLimit,
+    #[error("observation state unavailable")]
+    Unavailable,
+}
+
+struct SlotState {
+    owner: ObservationOwner,
+    revision: u64,
+    commit_order: u64,
+    frame: Option<ObservationFrame>,
+    deadline: Option<Instant>,
+    expired: bool,
+    revoked: bool,
+    active_capture: Option<DecisionAudit>,
+}
+
+impl SlotState {
+    fn expire(&mut self, now: ObservationClock) {
+        self.expired |= self
+            .deadline
+            .is_some_and(|deadline| now.monotonic >= deadline)
+            || self
+                .frame
+                .as_ref()
+                .is_some_and(|frame| now.wall_seconds >= frame.expires_at);
+    }
+
+    fn authorize(&self, owner: ObservationOwner) -> Result<(), ObservationError> {
+        if self.revoked || self.owner != owner {
+            return Err(ObservationError::StaleOwner);
+        }
+        Ok(())
+    }
+
+    fn metadata(&self) -> ObservationMetadata {
+        ObservationMetadata {
+            owner: self.owner,
+            revision: self.revision,
+            commit_order: self.commit_order,
+            hash: self.frame.as_ref().map(|frame| frame.hash.clone()),
+            expires_at: self.frame.as_ref().map(|frame| frame.expires_at),
+            status: if self.revoked {
+                ObservationStatus::Unavailable
+            } else if self.frame.is_none() {
+                ObservationStatus::Cleared
+            } else if self.expired {
+                ObservationStatus::Expired
+            } else {
+                ObservationStatus::Current
+            },
+        }
+    }
+}
+
+/// One slot per admitted thread. No persistence, timer, owner takeover, observer,
+/// model request, or token-capacity claim is implemented by this store.
+pub struct ObservationSlot {
+    state: Mutex<SlotState>,
+    events: mpsc::Sender<ObservationEvent>,
+    clock: ClockSource,
+}
+
+impl ObservationSlot {
+    pub fn new(connection_id: u64) -> (Self, mpsc::Receiver<ObservationEvent>, ObservationOwner) {
+        Self::with_clock(
+            connection_id,
+            Box::new(|| {
+                let wall_seconds = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .ok()
+                    .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+                    .ok_or(ObservationError::Unavailable)?;
+                Ok(ObservationClock {
+                    wall_seconds,
+                    monotonic: Instant::now(),
+                })
+            }),
+        )
+    }
+
+    fn with_clock(
+        connection_id: u64,
+        clock: ClockSource,
+    ) -> (Self, mpsc::Receiver<ObservationEvent>, ObservationOwner) {
+        let owner = ObservationOwner {
+            connection_id,
+            epoch: Uuid::new_v4(),
+        };
+        let (events, receiver) = mpsc::channel(EVENT_CAPACITY);
+        (
+            Self {
+                state: Mutex::new(SlotState {
+                    owner,
+                    revision: 0,
+                    commit_order: 0,
+                    frame: None,
+                    deadline: None,
+                    expired: false,
+                    revoked: false,
+                    active_capture: None,
+                }),
+                events,
+                clock: Box::new(move || {
+                    let now = clock()?;
+                    if !(0..=MAX_TIMESTAMP).contains(&now.wall_seconds) {
+                        return Err(ObservationError::Unavailable);
+                    }
+                    Ok(now)
+                }),
+            },
+            receiver,
+            owner,
+        )
+    }
+
+    /// Equal revisions only extend an active, byte-identical frame's lease.
+    /// Publication and its FIFO record commit under the slot lock.
+    pub fn set(
+        &self,
+        owner: ObservationOwner,
+        revision: u64,
+        frame: Option<ObservationFrame>,
+    ) -> Result<ObservationMetadata, ObservationError> {
+        self.set_inner(owner, revision, frame, /*request_id*/ None)
+    }
+
+    /// The same publication boundary, with one correlated FIFO ACK instead of
+    /// an uncorrelated Published event. No additional queue or postcommit step.
+    pub fn set_for_request(
+        &self,
+        owner: ObservationOwner,
+        revision: u64,
+        frame: Option<ObservationFrame>,
+        request_id: Uuid,
+    ) -> Result<(), ObservationError> {
+        self.set_inner(owner, revision, frame, Some(request_id))
+            .map(|_| ())
+    }
+
+    fn set_inner(
+        &self,
+        owner: ObservationOwner,
+        revision: u64,
+        frame: Option<ObservationFrame>,
+        request_id: Option<Uuid>,
+    ) -> Result<ObservationMetadata, ObservationError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ObservationError::Unavailable)?;
+        state.authorize(owner)?;
+        let now = (self.clock)()?;
+        state.expire(now);
+        if revision > MAX_SEQUENCE
+            || state.commit_order + u64::from(state.active_capture.is_some()) >= MAX_SEQUENCE
+        {
+            return Err(ObservationError::ResourceLimit);
+        }
+        if revision < state.revision {
+            return Err(ObservationError::RevisionMismatch);
+        }
+        let deadline = if let Some(frame) = &frame {
+            if state.expired {
+                return Err(ObservationError::StaleOwner);
+            }
+            let seconds = frame
+                .expires_at
+                .checked_sub(now.wall_seconds)
+                .filter(|seconds| (1..=MAX_LEASE_SECONDS).contains(seconds))
+                .ok_or(ObservationError::InvalidFrame)?;
+            if !(0..=MAX_TIMESTAMP).contains(&frame.expires_at)
+                || frame.text.len() > MAX_FRAME_BYTES
+                || frame
+                    .text
+                    .chars()
+                    .any(|c| c.is_control() && c != '\n' && c != '\t')
+                || frame.hash != format!("{:x}", Sha256::digest(frame.text.as_bytes()))
+            {
+                return Err(ObservationError::InvalidFrame);
+            }
+            if revision == state.revision
+                && !state.frame.as_ref().is_some_and(|current| {
+                    current.text == frame.text
+                        && current.hash == frame.hash
+                        && frame.expires_at > current.expires_at
+                })
+            {
+                return Err(ObservationError::RevisionMismatch);
+            }
+            Some(
+                now.monotonic
+                    .checked_add(Duration::from_secs(seconds as u64))
+                    .ok_or(ObservationError::InvalidFrame)?,
+            )
+        } else {
+            if revision == state.revision {
+                return Err(ObservationError::RevisionMismatch);
+            }
+            None
+        };
+        let permit = self
+            .events
+            .try_reserve()
+            .map_err(|_| ObservationError::ResourceLimit)?;
+        state.revision = revision;
+        state.commit_order += 1;
+        state.frame = frame;
+        state.deadline = deadline;
+        let metadata = state.metadata();
+        permit.send(match request_id {
+            Some(request_id) => ObservationEvent::Control {
+                request_id,
+                metadata: metadata.clone(),
+            },
+            None => ObservationEvent::Published(metadata.clone()),
+        });
+        Ok(metadata)
+    }
+
+    pub fn read(&self, owner: ObservationOwner) -> Result<ObservationMetadata, ObservationError> {
+        self.read_inner(owner, /*request_id*/ None)
+    }
+
+    pub fn read_for_request(
+        &self,
+        owner: ObservationOwner,
+        request_id: Uuid,
+    ) -> Result<(), ObservationError> {
+        self.read_inner(owner, Some(request_id)).map(|_| ())
+    }
+
+    fn read_inner(
+        &self,
+        owner: ObservationOwner,
+        request_id: Option<Uuid>,
+    ) -> Result<ObservationMetadata, ObservationError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ObservationError::Unavailable)?;
+        state.authorize(owner)?;
+        state.expire((self.clock)()?);
+        let permit = self
+            .events
+            .try_reserve()
+            .map_err(|_| ObservationError::ResourceLimit)?;
+        let metadata = state.metadata();
+        permit.send(match request_id {
+            Some(request_id) => ObservationEvent::Control {
+                request_id,
+                metadata: metadata.clone(),
+            },
+            None => ObservationEvent::Read(metadata.clone()),
+        });
+        Ok(metadata)
+    }
+
+    /// Disconnect is terminal for this owner, independent of frame expiry.
+    pub fn revoke(&self) -> Result<(), ObservationError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| ObservationError::Unavailable)?;
+        state.revoked = true;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[path = "observation_control_event_tests.rs"]
+mod control_event_tests;
+
+#[cfg(test)]
+#[path = "observation_tests.rs"]
+mod tests;
