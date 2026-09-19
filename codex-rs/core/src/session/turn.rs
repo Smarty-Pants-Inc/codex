@@ -1435,7 +1435,7 @@ async fn run_sampling_request(
             let mut canonical_input = prompt.input.clone();
             client_session.prepare_response_items_for_request(&mut canonical_input);
             let (item, decision_id) = observations
-                .prepare(canonical_input, &step_context.settings.model_info)
+                .prepare(canonical_input, &step_context.model_info)
                 .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
             client_session.observation_decision =
                 Some((Arc::clone(&observations.slot), decision_id));
