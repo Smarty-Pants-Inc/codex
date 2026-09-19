@@ -85,7 +85,7 @@ impl ObservationSlot {
             .map_err(|_| PilotAuthorityError::Denied)?;
         // Move the guard INTO blocking work. If the awaiting task disappears,
         // the durable writer remains owned, then fences when its result drops.
-        let (durable, mut guard) =
+        let (durable, guard) =
             tokio::task::spawn_blocking(move || plan.persist().map(|plan| (plan, guard)))
                 .await
                 .map_err(|_| PilotAuthorityError::Unavailable)??;
@@ -146,7 +146,7 @@ impl ObservationSlot {
             input_tokens,
             response_sha256: format!("{:x}", Sha256::digest(&response_bytes)),
         };
-        let (result, returned_guard) = tokio::task::spawn_blocking(move || {
+        let (result, mut guard) = tokio::task::spawn_blocking(move || {
             let record = super::super::journal::CountJournalRecord::Complete(
                 super::super::journal::CountComplete {
                     version: 1,
@@ -167,7 +167,6 @@ impl ObservationSlot {
         })
         .await
         .map_err(|_| PilotAuthorityError::Unavailable)??;
-        guard = returned_guard;
         self.recheck_count_plan(&result.plan, inference, CountBoundary::Inference)?;
         {
             let mut state = self
