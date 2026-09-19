@@ -1,6 +1,7 @@
 name: smarty-ci
 
 on:
+  workflow_dispatch:
   pull_request:
     branches:
       - main
@@ -25,17 +26,48 @@ jobs:
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
+      CARGO_NET_RETRY: "0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Record generation source
+        run: |
+          mkdir -p "$RUNNER_TEMP/transport-generation"
+          git show -s --format='%H %T %P' HEAD | tee "$RUNNER_TEMP/transport-generation/source-before.txt"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
-          components: rustfmt
+          components: rustfmt,clippy
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
           tool: just@1.51.0,nextest@0.9.103
+      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+        with:
+          bazelisk-version: 1.28.1
+      - uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.3"
+          enable-cache: false
+      - name: Record generation tools
+        run: |
+          set -euo pipefail
+          {
+            test "$(cat .bazelversion)" = 9.0.0
+            bazel_version="$(bazel --version)"
+            echo "$bazel_version"
+            test "$bazel_version" = 'bazel 9.0.0'
+            rustc -Vv
+            cargo --version
+            just --version
+            cargo nextest --version
+            dotslash --version
+            uv --version
+          } 2>&1 | tee "$RUNNER_TEMP/transport-generation/tools.log"
       - name: Install Linux sandbox build dependencies
         run: |
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
@@ -57,7 +89,88 @@ jobs:
         run: |
           # The crate has no Rust tests; C29 above supplies behavioral coverage.
           just test -p codex-bwrap --locked --no-tests=pass --retries 0 --test-threads 2
+      - name: Generate and check Bazel lock
+        run: |
+          set -euo pipefail
+          just bazel-lock-update 2>&1 | tee "$RUNNER_TEMP/transport-generation/bazel-lock-update.log"
+          just bazel-lock-check 2>&1 | tee "$RUNNER_TEMP/transport-generation/bazel-lock-check.log"
+      - name: Generate normal and experimental protocol schemas
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+          export CODEX_APP_SERVER_SCHEMA_ROOT="$PWD/app-server-protocol/schema"
+          CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL=0 just test -p codex-app-server-protocol --lib \
+            -E 'test(=schema_fixtures_tests::write_schema_fixtures_from_env)' --run-ignored only \
+            --locked --retries 0 --test-threads 2 2>&1 | tee "$RUNNER_TEMP/transport-generation/schema-normal.log"
+          CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL=1 just test -p codex-app-server-protocol --lib \
+            -E 'test(=schema_fixtures_tests::write_schema_fixtures_from_env)' --run-ignored only \
+            --locked --retries 0 --test-threads 2 2>&1 | tee "$RUNNER_TEMP/transport-generation/schema-experimental.log"
+      - name: Test protocol packages
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+          just test -p codex-protocol -p codex-app-server-protocol --locked --retries 0 --test-threads 2 \
+            2>&1 | tee "$RUNNER_TEMP/transport-generation/package-tests.log"
+      - name: Fix protocol lint and format
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+          just fix -p codex-protocol -p codex-app-server-protocol --locked \
+            2>&1 | tee "$RUNNER_TEMP/transport-generation/scoped-fix.log"
+          just fmt 2>&1 | tee "$RUNNER_TEMP/transport-generation/fmt.log"
+      - name: Return generation evidence and validate changed paths
+        if: always()
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/transport-generation"
+          mkdir -p "$evidence"
+          git show -s --format='%H %T %P' HEAD > "$evidence/source-after.txt"
+          export GIT_INDEX_FILE="$RUNNER_TEMP/transport-generation-index"
+          git read-tree HEAD
+          git add --update
+          git add --all -- codex-rs/app-server-protocol/schema
+          git write-tree >> "$evidence/source-after.txt"
+          git diff --cached --binary HEAD > "$evidence/generated.patch"
+          git diff --cached --binary HEAD -- MODULE.bazel.lock > "$evidence/bazel-lock.patch"
+          git diff --cached --binary HEAD -- codex-rs/app-server-protocol/schema > "$evidence/schemas.patch"
+          git diff --cached --binary HEAD -- codex-rs/protocol/src codex-rs/app-server-protocol/src > "$evidence/scoped-fix.patch"
+          rm "$GIT_INDEX_FILE"
+          unset GIT_INDEX_FILE
+          git status --porcelain=v1 --untracked-files=all > "$evidence/status-after.txt"
+          cp MODULE.bazel.lock "$evidence/MODULE.bazel.lock"
+          sha256sum MODULE.bazel.lock codex-rs/Cargo.lock .github/workflows/smarty-ci.yml > "$evidence/source-after.sha256"
+          if test -s "$evidence/generated.patch"; then
+            echo 'GENERATED DELTA: NOT FINAL CLEAN QUALIFICATION; source-owner integration and review required.' | tee "$evidence/qualification.txt" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'No tracked generated delta. Qualification still requires every job step to pass.' | tee "$evidence/qualification.txt" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          python3 - <<'PY'
+          import subprocess
+          paths = subprocess.check_output(["git", "diff", "--no-renames", "--name-only", "-z", "HEAD"]).decode().split("\0")
+          untracked = subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "-z"]).decode().split("\0")
+          schema = "codex-rs/app-server-protocol/schema/"
+          def schema_output(p):
+              return (p.startswith(schema + "typescript/") and p.endswith(".ts")
+                      or p.startswith(schema + "json/") and p.endswith(".json")
+                      or p in (schema + "precomputed/app-server-exports-stable.json.zst",
+                               schema + "precomputed/app-server-exports-experimental.json.zst"))
+          prefixes = ("codex-rs/protocol/src/", "codex-rs/app-server-protocol/src/")
+          unexpected = [p for p in paths if p and p != "MODULE.bazel.lock" and not schema_output(p) and not (p.startswith(prefixes) and p.endswith(".rs"))]
+          unexpected += [p for p in untracked if p and not schema_output(p)]
+          if unexpected:
+              raise SystemExit(f"Undeclared generated changes: {unexpected}")
+          PY
+          git diff --cached --exit-code
+      - name: Upload generation evidence (not final qualification)
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: full-observation-generation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/transport-generation/
+          if-no-files-found: error
+          retention-days: 7
       - name: Check source remains unchanged
+        if: always()
         run: |
           git diff --exit-code
           git diff --cached --exit-code
