@@ -558,6 +558,7 @@ mod thread_enrichment;
 mod thread_fork_goal;
 mod thread_input;
 mod thread_processor;
+pub(crate) use thread_processor::observation_wake::WakeOperation;
 mod thread_queue_processor;
 mod thread_sections;
 mod token_usage_replay;

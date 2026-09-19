@@ -48,18 +48,13 @@ impl ThreadRequestProcessor {
         operation: ControlOperation,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         let denied = || rejected(ThreadObservationRejectionCode::Denied);
-        let thread_id = ThreadId::from_string(thread_id).map_err(|_| denied())?;
-        // Lookup only. Never load/create/subscribe a thread for a control probe.
         let bridge = self
-            .thread_state_manager
-            .observation_bridge(thread_id, request.connection_id)
-            .await
-            .ok_or_else(denied)?;
-        bridge.validate_owner(request.connection_id, epoch)?;
+            .observation_bridge_for_request(&request, thread_id, epoch)
+            .await?;
         if matches!(operation, ControlOperation::Read) {
             let thread = self
                 .thread_manager
-                .get_thread(thread_id)
+                .get_thread(bridge.thread_id)
                 .await
                 .map_err(|_| denied())?;
             thread
@@ -69,6 +64,25 @@ impl ThreadRequestProcessor {
         }
         bridge.submit(request, epoch, operation)?;
         Ok(None) // The ordered relay, not this method return, sends success.
+    }
+
+    pub(super) async fn observation_bridge_for_request(
+        &self,
+        request: &ConnectionRequestId,
+        thread_id: &str,
+        epoch: &str,
+    ) -> Result<std::sync::Arc<crate::observation_bridge::ObservationBridge>, JSONRPCErrorError>
+    {
+        let denied = || rejected(ThreadObservationRejectionCode::Denied);
+        let thread_id = ThreadId::from_string(thread_id).map_err(|_| denied())?;
+        // Lookup only: never load/create/subscribe for either control surface.
+        let bridge = self
+            .thread_state_manager
+            .observation_bridge(thread_id, request.connection_id)
+            .await
+            .ok_or_else(denied)?;
+        bridge.validate_owner(request.connection_id, epoch)?;
+        Ok(bridge)
     }
 
     pub(crate) async fn revoke_observation_connection(&self, connection_id: ConnectionId) {

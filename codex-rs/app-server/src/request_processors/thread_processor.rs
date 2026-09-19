@@ -1,5 +1,7 @@
 #[path = "thread_observation.rs"]
 mod observation;
+#[path = "thread_observation_wake.rs"]
+pub(crate) mod observation_wake;
 #[path = "thread_pilot.rs"]
 mod pilot;
 use codex_app_server_protocol::ThreadObservationOptions;

@@ -1248,6 +1248,38 @@ impl MessageProcessor {
                     Err(error) => Err(error),
                 }
             }
+            ClientRequest::ThreadObservationWakeStart { params, .. } => {
+                self.thread_processor
+                    .observation_wake_request(
+                        request_id.clone(),
+                        crate::request_processors::WakeOperation::Start(params),
+                    )
+                    .await
+            }
+            ClientRequest::ThreadObservationWakeRead { params, .. } => {
+                self.thread_processor
+                    .observation_wake_request(
+                        request_id.clone(),
+                        crate::request_processors::WakeOperation::Read(params),
+                    )
+                    .await
+            }
+            ClientRequest::ThreadObservationWakeInvalidate { params, .. } => {
+                self.thread_processor
+                    .observation_wake_request(
+                        request_id.clone(),
+                        crate::request_processors::WakeOperation::Invalidate(params),
+                    )
+                    .await
+            }
+            ClientRequest::ThreadObservationWakeRetire { params, .. } => {
+                self.thread_processor
+                    .observation_wake_request(
+                        request_id.clone(),
+                        crate::request_processors::WakeOperation::Retire(params),
+                    )
+                    .await
+            }
             ClientRequest::ThreadObservationSet { params, .. } => {
                 let frame = match params.frame {
                     codex_app_server_protocol::ObservationFrameUpdate::Frame(frame) => {
