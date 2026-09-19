@@ -103,7 +103,8 @@ jobs:
           test "$RUNNER_ARCH" = ARM64
           test "$(uname -m)" = arm64
           test "$ImageVersion" = 20260907.0337.1
-          test "$(xcodebuild -version | head -n 1)" = 'Xcode 16.4'
+          xcode_version="$(xcodebuild -version)"
+          test "${xcode_version%%$'\n'*}" = 'Xcode 16.4'
           test "$(xcrun --show-sdk-version)" = 15.5
           test "$(bazel --version)" = 'bazel 9.0.0'
           test -z "${BUILDBUDDY_API_KEY:-}"
@@ -239,7 +240,7 @@ jobs:
           (Path(os.environ['RUNNER_TEMP']) / 'bazel-owned-processes.json').write_text(json.dumps(record))
           print('Recorded Bazel server/worker PIDs:', sorted(record))
           PY
-          bazel --output_user_root="$BAZEL_OUTPUT_USER_ROOT" --output_base="$BAZEL_OUTPUT_BASE" shutdown
+          bazel --noexperimental_remote_repo_contents_cache --output_user_root="$BAZEL_OUTPUT_USER_ROOT" --output_base="$BAZEL_OUTPUT_BASE" shutdown
           python3 - <<'PY'
           import json, os, subprocess
           from pathlib import Path
