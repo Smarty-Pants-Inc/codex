@@ -1584,25 +1584,25 @@ pub async fn mount_sse_sequence(server: &MockServer, bodies: Vec<String>) -> Res
 
 /// Mounts a sequence of responses for each POST to `/v1/responses`.
 /// Panics if more requests are received than responses provided.
-pub async fn mount_response_sequence(
+pub async fn mount_response_sequence<R: Respond + 'static>(
     server: &MockServer,
-    responses: Vec<ResponseTemplate>,
+    responses: Vec<R>,
 ) -> ResponseMock {
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
 
-    struct SeqResponder {
+    struct SeqResponder<R> {
         num_calls: AtomicUsize,
-        responses: Vec<ResponseTemplate>,
+        responses: Vec<R>,
     }
 
-    impl Respond for SeqResponder {
-        fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+    impl<R: Respond> Respond for SeqResponder<R> {
+        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
             let call_num = self.num_calls.fetch_add(1, Ordering::SeqCst);
             self.responses
                 .get(call_num)
                 .expect("missing response for call")
-                .clone()
+                .respond(request)
         }
     }
 

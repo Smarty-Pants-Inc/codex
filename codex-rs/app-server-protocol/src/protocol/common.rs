@@ -568,6 +568,19 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadSetNameResponse,
     },
+    #[experimental("thread/observation/set")]
+    ThreadObservationSet => "thread/observation/set" {
+        params: v2::ThreadObservationSetParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadObservationSetResponse,
+    },
+    #[experimental("thread/observation/read")]
+    ThreadObservationRead => "thread/observation/read" {
+        params: v2::ThreadObservationReadParams,
+        serialization: thread_id(params.thread_id),
+        manual_payload_conversion: manual,
+        response: v2::ThreadObservationReadResponse,
+    },
     ThreadGoalSet => "thread/goal/set" {
         params: v2::ThreadGoalSetParams,
         serialization: thread_id(params.thread_id),
@@ -1834,6 +1847,10 @@ server_notification_definitions! {
     /// NEW NOTIFICATIONS
     Error => "error" (v2::ErrorNotification),
     ThreadStarted => "thread/started" (v2::ThreadStartedNotification),
+    #[experimental("thread/observation/captured")]
+    ThreadObservationCaptured => "thread/observation/captured" (v2::ThreadObservationCapturedNotification),
+    #[experimental("thread/observation/submitted")]
+    ThreadObservationSubmitted => "thread/observation/submitted" (v2::ThreadObservationSubmittedNotification),
     ThreadStatusChanged => "thread/status/changed" (v2::ThreadStatusChangedNotification),
     ThreadArchived => "thread/archived" (v2::ThreadArchivedNotification),
     ThreadDeleted => "thread/deleted" (v2::ThreadDeletedNotification),
@@ -3108,6 +3125,7 @@ mod tests {
         let response = ClientResponse::ThreadStart {
             request_id: RequestId::Integer(7),
             response: v2::ThreadStartResponse {
+                observation: None,
                 thread: v2::Thread {
                     id: "67e55044-10b1-426f-9247-bb680e5fe0c8".to_string(),
                     extra: None,
@@ -3163,6 +3181,7 @@ mod tests {
                 "method": "thread/start",
                 "id": 7,
                 "response": {
+                    "observation": null,
                     "thread": {
                         "id": "67e55044-10b1-426f-9247-bb680e5fe0c8",
                         "extra": null,

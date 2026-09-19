@@ -57,6 +57,8 @@ mod model_auto_review;
 mod model_list;
 mod model_provider_capabilities_read;
 mod multi_agent_v2_developer_instructions;
+#[path = "observation_lifecycle_tests.rs"]
+mod observation_lifecycle;
 mod otel;
 mod output_schema;
 mod permission_profile_list;
