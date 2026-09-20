@@ -35,6 +35,61 @@ impl IdleTurnAdmission for FixturePolicy {
 }
 
 #[tokio::test]
+async fn bound_session_without_output_ceiling_refuses_before_post() -> anyhow::Result<()> {
+    let server = wiremock::MockServer::start().await;
+    let test = test_codex()
+        .with_config(|config| {
+            config.model = Some("gpt-oss-20b".into());
+            config.observation_max_output_tokens = None;
+            let mut model = model_info_from_slug("gpt-oss-20b");
+            model.context_window = Some(131_072);
+            model.effective_context_window_percent = 100;
+            config.model_catalog = Some(ModelsResponse {
+                models: vec![model],
+            });
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let (slot, _events, owner) = ObservationSlot::new(/*connection_id*/ 1);
+    test.codex
+        .install_budgeted_observation_binding(
+            ObservationBinding {
+                slot: Arc::new(slot),
+                profile: ObservationProfile::HarmonyGptOss,
+            },
+            owner,
+        )
+        .await?;
+    test.codex
+        .start_or_steer_turn(codex_core::TurnInputRequest::user_input(vec![
+            codex_protocol::user_input::UserInput::Text {
+                text: "hello".into(),
+                text_elements: Vec::new(),
+            },
+        ]))
+        .await?;
+    let event = wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await;
+    let EventMsg::Error(error) = event else {
+        unreachable!("waited for error");
+    };
+    assert!(
+        error
+            .message
+            .contains("observation_max_output_tokens is required for observation requests")
+    );
+    test.codex.shutdown_and_wait().await?;
+    let posts: Vec<_> = server
+        .received_requests()
+        .await
+        .expect("request recording enabled")
+        .into_iter()
+        .filter(|request| request.method == wiremock::http::Method::POST)
+        .collect();
+    assert_eq!(posts.len(), 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn unbound_session_does_not_send_observation_output_ceiling() -> anyhow::Result<()> {
     let server = wiremock::MockServer::start().await;
     let test = test_codex()
