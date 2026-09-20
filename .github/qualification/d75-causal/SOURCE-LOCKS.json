@@ -1,0 +1,7 @@
+{
+  "MODULE.bazel": "4aef1747c8798a081bc869877478c5a2853afc83a0c9130b56dad1c1107b025d",
+  "MODULE.bazel.lock": "50e3d2afed2c78e80e04e0f8d531a760bf6740c8402b8ffa5d81813d689ea5d6",
+  "codex-rs/Cargo.lock": "40e4c08fd83c64e8e2883a344169baddad8f230fa24be53bb388dd499592f90e",
+  "codex-rs/Cargo.toml": "836f9f2023f17c3823310efd7f89779e9310c035d5f144e01772b65436a711b6",
+  "codex-rs/rust-toolchain.toml": "570656042681cfd8795403a455baf9a33035331a07db0645e866bbcea89a3d64"
+}
