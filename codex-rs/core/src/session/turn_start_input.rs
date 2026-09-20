@@ -24,6 +24,10 @@ impl TurnStartInput {
         }
     }
 
+    pub(super) fn is_recorded(&self) -> bool {
+        matches!(self.progress, InputProgress::Recorded { .. })
+    }
+
     pub(super) fn original(&self) -> &[TurnInput] {
         &self.original
     }

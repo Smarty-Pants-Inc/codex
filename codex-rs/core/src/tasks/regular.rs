@@ -4,14 +4,14 @@ use tokio_util::sync::CancellationToken;
 
 use crate::session::TurnInput;
 use crate::session::session::Session;
-use crate::session::turn::run_hooks_and_record_inputs;
+use crate::session::turn::TurnStartCustody;
 use crate::session::turn::run_turn;
 use crate::session::turn_context::TurnContext;
 use crate::session_startup_prewarm::SessionStartupPrewarmResolution;
 use crate::state::TaskKind;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TurnStartedEvent;
-use codex_thread_store::PersistContext;
+use tokio::sync::Mutex;
 use tracing::Instrument;
 use tracing::trace_span;
 
@@ -19,11 +19,13 @@ use super::SessionTask;
 use super::SessionTaskResult;
 
 #[derive(Default)]
-pub(crate) struct RegularTask;
+pub(crate) struct RegularTask {
+    preparation: Mutex<Option<TurnStartCustody>>,
+}
 
 impl RegularTask {
     pub(crate) fn new() -> Self {
-        Self
+        Self::default()
     }
 }
 
@@ -36,6 +38,18 @@ impl SessionTask for RegularTask {
         "session_task.turn"
     }
 
+    async fn abort(&self, _session: Arc<Session>, ctx: Arc<TurnContext>) {
+        let custody = self.preparation.lock().await;
+        if custody
+            .as_ref()
+            .is_some_and(TurnStartCustody::has_unresolved_input)
+        {
+            // No hook replay or accepted-input fallback. The original task is
+            // still the owner here; post-retirement resolution remains a gap.
+            tracing::warn!(turn_id = %ctx.sub_id, "original preparation input remains unresolved at task abort");
+        }
+    }
+
     async fn run(
         self: Arc<Self>,
         sess: Arc<Session>,
@@ -43,6 +57,10 @@ impl SessionTask for RegularTask {
         input: Vec<TurnInput>,
         cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
+        // RunningTask retains self through its original abort callback. Dropping
+        // the run future releases this borrow, not its original input/state.
+        let mut preparation = self.preparation.lock().await;
+        *preparation = Some(TurnStartCustody::new(input));
         let run_turn_span = trace_span!("run_turn");
         // Regular turns emit `TurnStarted` inline so first-turn lifecycle does
         // not wait on startup prewarm resolution.
@@ -63,7 +81,11 @@ impl SessionTask for RegularTask {
         .await;
         let prewarmed_client_session = match prewarmed_client_session {
             SessionStartupPrewarmResolution::Cancelled => {
-                run_hooks_and_record_inputs(&sess, &ctx, &input, PersistContext::Standard).await;
+                preparation
+                    .as_mut()
+                    .expect("original task custody")
+                    .record_initial_input(&sess, &ctx)
+                    .await?;
                 return Ok(None);
             }
             SessionStartupPrewarmResolution::Unavailable { .. } => None,
@@ -71,13 +93,12 @@ impl SessionTask for RegularTask {
                 Some(*prewarmed_client_session)
             }
         };
-        let mut next_input = input;
         let mut prewarmed_client_session = prewarmed_client_session;
         loop {
             let last_agent_message = run_turn(
                 Arc::clone(&sess),
                 Arc::clone(&ctx),
-                next_input,
+                preparation.as_mut().expect("original task custody"),
                 prewarmed_client_session.take(),
                 cancellation_token.child_token(),
             )
@@ -86,7 +107,21 @@ impl SessionTask for RegularTask {
             if !sess.input_queue.has_pending_input(&sess.active_turn).await {
                 return Ok(last_agent_message);
             }
-            next_input = Vec::new();
+            if preparation
+                .as_ref()
+                .expect("original task custody")
+                .has_unresolved_input()
+            {
+                return Err(crate::error::CodexErr::InvalidRequest(
+                    "original turn input is unresolved; follow-up cannot replace its custody"
+                        .to_owned(),
+                ));
+            }
+            *preparation = Some(TurnStartCustody::new(Vec::new()));
         }
     }
 }
+
+#[cfg(test)]
+#[path = "regular_tests.rs"]
+mod tests;

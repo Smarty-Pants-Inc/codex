@@ -12,6 +12,57 @@ pub(super) struct PreparedTurnStart {
     pub(super) previous_turn_settings: Option<PreviousTurnSettings>,
 }
 
+/// Retained by the original RegularTask, not owned by its cancellable run future.
+/// No restart/readback authority follows when the task itself is retired.
+pub(crate) struct TurnStartCustody {
+    pub(super) input: turn_start_input::TurnStartInput,
+    pub(super) prepared: Option<PreparedTurnStart>,
+    preparation_started: bool,
+}
+
+impl TurnStartCustody {
+    pub(crate) fn new(input: Vec<TurnInput>) -> Self {
+        Self {
+            input: turn_start_input::TurnStartInput::new(input),
+            prepared: None,
+            preparation_started: false,
+        }
+    }
+
+    pub(crate) async fn record_initial_input(
+        &mut self,
+        sess: &Arc<Session>,
+        turn: &Arc<TurnContext>,
+    ) -> CodexResult<bool> {
+        self.input
+            .record(sess, turn, PersistContext::Standard)
+            .await
+    }
+
+    pub(crate) fn has_unresolved_input(&self) -> bool {
+        !self.input.is_recorded()
+    }
+
+    pub(super) async fn prepare_once(
+        &mut self,
+        sess: &Arc<Session>,
+        turn: &Arc<TurnContext>,
+        cancellation: &CancellationToken,
+    ) -> CodexResult<bool> {
+        if self.prepared.is_some() {
+            return Ok(true);
+        }
+        if self.preparation_started {
+            return Err(CodexErr::InvalidRequest(
+                "original turn preparation is incomplete; effects cannot be replayed".to_owned(),
+            ));
+        }
+        self.preparation_started = true;
+        self.prepared = prepare_turn_start(sess, turn, &mut self.input, cancellation).await?;
+        Ok(self.prepared.is_some())
+    }
+}
+
 #[instrument(level = "trace", skip_all)]
 pub(super) async fn prepare_turn_start(
     sess: &Arc<Session>,
@@ -126,3 +177,7 @@ pub(super) async fn prepare_turn_start(
         previous_turn_settings,
     }))
 }
+
+#[cfg(test)]
+#[path = "turn_preparation_custody_tests.rs"]
+mod custody_tests;

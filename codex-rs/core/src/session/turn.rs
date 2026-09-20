@@ -137,6 +137,7 @@ use tracing::warn;
 mod turn_start_input;
 #[path = "turn_start_preparation.rs"]
 mod turn_start_preparation;
+pub(crate) use turn_start_preparation::TurnStartCustody;
 
 const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_token_estimate";
 
@@ -157,11 +158,10 @@ const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_tok
 pub(crate) async fn run_turn(
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
-    input: Vec<TurnInput>,
+    custody: &mut TurnStartCustody,
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
-    let mut input = turn_start_input::TurnStartInput::new(input);
     // Record results from hooks that finished after the previous turn before this turn's user prompt.
     drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
 
@@ -180,9 +180,7 @@ pub(crate) async fn run_turn(
     .await
     {
         if matches!(err.details(), CodexErrorDetails::TurnAborted) {
-            input
-                .record(&sess, &turn_context, PersistContext::Standard)
-                .await?;
+            custody.record_initial_input(&sess, &turn_context).await?;
             return Err(err);
         }
         if matches!(err.details(), CodexErrorDetails::ToolCollision(_)) {
@@ -195,22 +193,21 @@ pub(crate) async fn run_turn(
         return Ok(None);
     }
 
-    let Some(turn_start_preparation::PreparedTurnStart {
-        first_step_context,
-        mut world_state,
-        display_roots,
-        mut can_drain_pending_input,
-        previous_turn_settings: _previous_turn_settings,
-    }) = turn_start_preparation::prepare_turn_start(
-        &sess,
-        &turn_context,
-        &mut input,
-        &cancellation_token,
-    )
-    .await?
-    else {
+    if !custody
+        .prepare_once(&sess, &turn_context, &cancellation_token)
+        .await?
+    {
         return Ok(None);
-    };
+    }
+    let prepared = custody
+        .prepared
+        .as_ref()
+        .expect("completed original preparation");
+    let first_step_context = Arc::clone(&prepared.first_step_context);
+    let mut world_state = Arc::clone(&prepared.world_state);
+    let display_roots = prepared.display_roots.clone();
+    let mut can_drain_pending_input = prepared.can_drain_pending_input;
+    let _previous_turn_settings = prepared.previous_turn_settings.clone();
 
     let mut last_agent_message: Option<String> = None;
     let mut stop_hook_active = false;
