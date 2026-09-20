@@ -1559,7 +1559,8 @@ impl TestAppServer {
         tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, self.read_response(request_id)).await?
     }
 
-    async fn send_request(
+    /// Sends a raw request without consuming its response, including error responses.
+    pub async fn send_request(
         &mut self,
         method: &str,
         params: Option<serde_json::Value>,
