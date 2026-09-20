@@ -2,6 +2,12 @@ name: smarty-ci
 
 on:
   workflow_dispatch:
+    inputs:
+      phase:
+        description: Qualification phases selected by CI
+        type: choice
+        options: [both, fix]
+        default: both
   pull_request:
     branches:
       - main
@@ -20,7 +26,12 @@ concurrency:
 
 jobs:
   smarty-ci:
-    name: smarty-ci
+    name: smarty-ci (${{ matrix.phase }})
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        phase: ${{ fromJSON(inputs.phase == 'fix' && '["fix"]' || '["test", "fix"]') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -95,12 +106,14 @@ jobs:
           just bazel-lock-update 2>&1 | tee "$RUNNER_TEMP/transport-generation/bazel-lock-update.log"
           just bazel-lock-check 2>&1 | tee "$RUNNER_TEMP/transport-generation/bazel-lock-check.log"
       - name: Test transport packages
+        if: matrix.phase == 'test'
         working-directory: codex-rs
         run: |
           set -euo pipefail
           just test -p codex-http-client -p codex-client -p codex-api -p codex-tui --locked --retries 0 --test-threads 2 \
             2>&1 | tee "$RUNNER_TEMP/transport-generation/package-tests.log"
       - name: Fix transport lint and format
+        if: matrix.phase == 'fix'
         working-directory: codex-rs
         run: |
           set -euo pipefail
@@ -141,11 +154,25 @@ jobs:
           PY
           git diff --cached --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
-      - name: Upload generation evidence (not final qualification)
+      - name: Bound generation evidence
+        id: evidence-bound
         if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"]) / "transport-generation"
+          files = list(root.iterdir())
+          if not files or len(files) > 15 or any(p.is_symlink() or not p.is_file() for p in files):
+              raise SystemExit("Invalid generation evidence members")
+          if sum(p.stat().st_size for p in files) > 24 * 1024 * 1024:
+              raise SystemExit("Generation evidence exceeds 24 MiB; retain original runner logs")
+          PY
+      - name: Upload generation evidence (not final qualification)
+        if: always() && steps.evidence-bound.outcome == 'success'
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
-          name: transport-generation-${{ github.run_id }}-${{ github.run_attempt }}
+          name: transport-generation-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.phase }}
           path: ${{ runner.temp }}/transport-generation/
           if-no-files-found: error
           retention-days: 7
