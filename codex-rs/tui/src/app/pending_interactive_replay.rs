@@ -106,6 +106,13 @@ impl PendingInteractiveReplayState {
                         !matches!(pending, PendingInteractiveRequest::ExecApproval { turn_id: pending_turn_id, approval_id } if pending_turn_id == turn_id && approval_id == id)
                     },
                 );
+                if !self
+                    .exec_approval_call_ids_by_turn_id
+                    .values()
+                    .any(|call_ids| call_ids.iter().any(|call_id| call_id == id))
+                {
+                    self.exec_approval_call_ids.remove(id);
+                }
             }
             AppCommand::PatchApproval {
                 id,
@@ -122,6 +129,13 @@ impl PendingInteractiveReplayState {
                         !matches!(pending, PendingInteractiveRequest::PatchApproval { turn_id: pending_turn_id, item_id } if pending_turn_id == turn_id && item_id == id)
                     },
                 );
+                if !self
+                    .patch_approval_call_ids_by_turn_id
+                    .values()
+                    .any(|call_ids| call_ids.iter().any(|call_id| call_id == id))
+                {
+                    self.patch_approval_call_ids.remove(id);
+                }
             }
             AppCommand::ResolveElicitation {
                 server_name,
@@ -913,6 +927,7 @@ mod tests {
         });
 
         assert!(store.snapshot().events.is_empty());
+        assert!(!store.has_pending_thread_approvals());
     }
 
     #[test]
@@ -937,6 +952,13 @@ mod tests {
         assert!(store.snapshot().events.iter().any(|event| {
             matches!(event, ThreadBufferedEvent::Request(request) if matches!(request.as_ref(), ServerRequest::CommandExecutionRequestApproval { params, .. } if params.turn_id == "turn-2"))
         }));
+        assert!(store.has_pending_thread_approvals());
+        store.note_outbound_op(&Op::ExecApproval {
+            id: "approval-1".to_string(),
+            turn_id: Some("turn-2".to_string()),
+            decision: CommandExecutionApprovalDecision::Accept,
+        });
+        assert!(!store.has_pending_thread_approvals());
     }
 
     #[test]
@@ -953,6 +975,13 @@ mod tests {
         assert!(store.snapshot().events.iter().any(|event| {
             matches!(event, ThreadBufferedEvent::Request(request) if matches!(request.as_ref(), ServerRequest::FileChangeRequestApproval { params, .. } if params.turn_id == "turn-2"))
         }));
+        assert!(store.has_pending_thread_approvals());
+        store.note_outbound_op(&Op::PatchApproval {
+            id: "call-1".to_string(),
+            turn_id: Some("turn-2".to_string()),
+            decision: codex_app_server_protocol::FileChangeApprovalDecision::Accept,
+        });
+        assert!(!store.has_pending_thread_approvals());
     }
 
     #[test]
