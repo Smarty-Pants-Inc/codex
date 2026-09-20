@@ -38,9 +38,14 @@ impl SseTelemetry for Telemetry {
 
 #[tokio::test]
 async fn created_is_attempt_bound_once_and_survives_later_stream_failure() {
-    for payload in [
-        "",
-        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r\"}}\n\n",
+    for (payload, expected) in [
+        ("", vec![]),
+        ("data: {\"type\":\"response.created\"}\n\n", vec![]),
+        ("data: {invalid json}\n\n", vec![]),
+        (
+            "data: {\"type\":\"response.created\",\"response\":{\"id\":\"r\"}}\n\n",
+            vec![7],
+        ),
     ] {
         let accepted = Arc::new(Mutex::new(Vec::new()));
         let telemetry = Arc::new(Telemetry {
@@ -62,10 +67,7 @@ async fn created_is_attempt_bound_once_and_survives_later_stream_failure() {
         telemetry.current.store(8, Ordering::SeqCst);
         let events: Vec<_> = stream.collect().await;
         assert!(events.last().unwrap().is_err()); // no response.completed
-        assert_eq!(
-            *accepted.lock().unwrap(),
-            if payload.is_empty() { vec![] } else { vec![7] }
-        );
+        assert_eq!(*accepted.lock().unwrap(), expected);
     }
 }
 
