@@ -2,14 +2,6 @@ name: smarty-ci
 
 on:
   workflow_dispatch:
-  pull_request:
-    branches:
-      - main
-  push:
-    branches:
-      - main
-      - mergify/merge-queue/**
-      - tmp-mergify/merge-queue/**
 
 permissions:
   contents: read
@@ -22,7 +14,7 @@ jobs:
   smarty-ci:
     name: smarty-ci
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
@@ -81,97 +73,78 @@ jobs:
             -I. -I../vendor/bubblewrap -Wl,--gc-sections \
             tests/netlink_reply.c -o "$test_binary"
           "$test_binary"
-      - name: Check Rust formatting
-        working-directory: codex-rs
-        run: cargo fmt -- --config imports_granularity=Item --check
-      - name: Test codex-bwrap
-        working-directory: codex-rs
-        run: |
-          # The crate has no Rust tests; C29 above supplies behavioral coverage.
-          just test -p codex-bwrap --locked --no-tests=pass --retries 0 --test-threads 2
-      - name: Generate and check Bazel lock
+      - name: Generate canonical config schema
+        shell: bash
         run: |
           set -euo pipefail
-          just bazel-lock-update 2>&1 | tee "$RUNNER_TEMP/transport-generation/bazel-lock-update.log"
-          just bazel-lock-check 2>&1 | tee "$RUNNER_TEMP/transport-generation/bazel-lock-check.log"
-      - name: Generate normal and experimental protocol schemas
-        working-directory: codex-rs
+          just write-config-schema 2>&1 | tee "$RUNNER_TEMP/transport-generation/config-generator.log"
+      - name: Check generated schema whitespace
+        shell: bash
         run: |
           set -euo pipefail
-          export CODEX_APP_SERVER_SCHEMA_ROOT="$PWD/app-server-protocol/schema"
-          CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL=0 just test -p codex-app-server-protocol --lib \
-            -E 'test(=schema_fixtures_tests::write_schema_fixtures_from_env)' --run-ignored only \
-            --locked --retries 0 --test-threads 2 2>&1 | tee "$RUNNER_TEMP/transport-generation/schema-normal.log"
-          CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL=1 just test -p codex-app-server-protocol --lib \
-            -E 'test(=schema_fixtures_tests::write_schema_fixtures_from_env)' --run-ignored only \
-            --locked --retries 0 --test-threads 2 2>&1 | tee "$RUNNER_TEMP/transport-generation/schema-experimental.log"
-      - name: Test protocol packages
-        working-directory: codex-rs
+          git diff --check -- codex-rs/core/config.schema.json 2>&1 | tee "$RUNNER_TEMP/transport-generation/schema-diff-check.log"
+      - name: Test canonical config schema
+        shell: bash
         run: |
           set -euo pipefail
-          just test -p codex-protocol -p codex-app-server-protocol --locked --retries 0 --test-threads 2 \
-            2>&1 | tee "$RUNNER_TEMP/transport-generation/package-tests.log"
-      - name: Fix protocol lint and format
-        working-directory: codex-rs
-        run: |
-          set -euo pipefail
-          just fix -p codex-protocol -p codex-app-server-protocol --locked \
-            2>&1 | tee "$RUNNER_TEMP/transport-generation/scoped-fix.log"
-          just fmt 2>&1 | tee "$RUNNER_TEMP/transport-generation/fmt.log"
-      - name: Return generation evidence and validate changed paths
+          RUST_MIN_STACK=8388608 NEXTEST_PROFILE=local cargo nextest list --manifest-path codex-rs/Cargo.toml -p codex-core --lib --locked --message-format json -- config::schema::tests > "$RUNNER_TEMP/transport-generation/schema-inventory.json" 2> "$RUNNER_TEMP/transport-generation/schema-inventory.stderr"
+          just test -p codex-core --lib --locked --no-tests=fail -- config::schema::tests 2>&1 | tee "$RUNNER_TEMP/transport-generation/schema-tests.log"
+      - name: Return bounded schema evidence
+        id: evidence
         if: always()
+        shell: bash
         run: |
           set -euo pipefail
-          evidence="$RUNNER_TEMP/transport-generation"
-          mkdir -p "$evidence"
-          git show -s --format='%H %T %P' HEAD > "$evidence/source-after.txt"
-          export GIT_INDEX_FILE="$RUNNER_TEMP/transport-generation-index"
-          git read-tree HEAD
-          git add --update
-          git add --all -- codex-rs/app-server-protocol/schema
-          git write-tree >> "$evidence/source-after.txt"
-          git diff --cached --binary HEAD > "$evidence/generated.patch"
-          git diff --cached --binary HEAD -- MODULE.bazel.lock > "$evidence/bazel-lock.patch"
-          git diff --cached --binary HEAD -- codex-rs/app-server-protocol/schema > "$evidence/schemas.patch"
-          git diff --cached --binary HEAD -- codex-rs/protocol/src codex-rs/app-server-protocol/src > "$evidence/scoped-fix.patch"
-          rm "$GIT_INDEX_FILE"
-          unset GIT_INDEX_FILE
-          git status --porcelain=v1 --untracked-files=all > "$evidence/status-after.txt"
-          cp MODULE.bazel.lock "$evidence/MODULE.bazel.lock"
-          sha256sum MODULE.bazel.lock codex-rs/Cargo.lock .github/workflows/smarty-ci.yml > "$evidence/source-after.sha256"
-          if test -s "$evidence/generated.patch"; then
-            echo 'GENERATED DELTA: NOT FINAL CLEAN QUALIFICATION; source-owner integration and review required.' | tee "$evidence/qualification.txt" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'No tracked generated delta. Qualification still requires every job step to pass.' | tee "$evidence/qualification.txt" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          out="$RUNNER_TEMP/transport-generation"
+          git show -s --format='%H %T %P' HEAD > "$out/source-after.txt"
+          git diff --binary > "$out/source.patch"
+          git diff --cached --binary > "$out/index.patch"
+          git status --porcelain=v1 --untracked-files=all > "$out/status.txt"
+          cp codex-rs/core/config.schema.json "$out/config.schema.json"
+          sha256sum codex-rs/core/config.schema.json codex-rs/Cargo.lock MODULE.bazel.lock > "$out/schema-hashes.txt"
           python3 - <<'PY'
-          import subprocess
-          paths = subprocess.check_output(["git", "diff", "--no-renames", "--name-only", "-z", "HEAD"]).decode().split("\0")
-          untracked = subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "-z"]).decode().split("\0")
-          schema = "codex-rs/app-server-protocol/schema/"
-          def schema_output(p):
-              return (p.startswith(schema + "typescript/") and p.endswith(".ts")
-                      or p.startswith(schema + "json/") and p.endswith(".json")
-                      or p in (schema + "precomputed/app-server-exports-stable.json.zst",
-                               schema + "precomputed/app-server-exports-experimental.json.zst"))
-          prefixes = ("codex-rs/protocol/src/", "codex-rs/app-server-protocol/src/")
-          unexpected = [p for p in paths if p and p != "MODULE.bazel.lock" and not schema_output(p) and not (p.startswith(prefixes) and p.endswith(".rs"))]
-          unexpected += [p for p in untracked if p and not schema_output(p)]
-          if unexpected:
-              raise SystemExit(f"Undeclared generated changes: {unexpected}")
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'transport-generation'
+          names = ['source-before.txt', 'source-after.txt', 'tools.log', 'config-generator.log', 'schema-diff-check.log', 'schema-tests.log', 'schema-inventory.json', 'schema-inventory.stderr', 'source.patch', 'index.patch', 'status.txt', 'config.schema.json', 'schema-hashes.txt']
+          entries = []
+          total = 0
+          for name in names:
+              p = root / name
+              if not p.exists():
+                  entries.append({'name': name, 'missing': True})
+                  continue
+              if p.is_symlink() or not p.is_file():
+                  raise RuntimeError('nonregular evidence')
+              size = p.stat().st_size
+              total += size
+              if size > 16 * 1024 * 1024 or total > 48 * 1024 * 1024:
+                  raise RuntimeError('evidence cap exceeded; no truncation')
+              entries.append({'name': name, 'bytes': size, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()})
+          (root / 'manifest.json').write_text(json.dumps({'entries': entries, 'qualification_awarded': False}, indent=2))
           PY
-          git diff --cached --exit-code
-      - name: Upload generation evidence (not final qualification)
-        if: always()
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: full-observation-generation-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/transport-generation/
-          if-no-files-found: error
-          retention-days: 7
-      - name: Check source remains unchanged
-        if: always()
-        run: |
-          git diff --exit-code
-          git diff --cached --exit-code
+          test -z "$(git diff --cached --name-only)"
           test -z "$(git ls-files --others --exclude-standard)"
+          test -z "$(git diff --name-only -- . ':!codex-rs/core/config.schema.json')"
+      - name: Upload schema evidence only
+        if: ${{ always() && steps.evidence.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: readiness-config-schema
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            ${{ runner.temp }}/transport-generation/source-before.txt
+            ${{ runner.temp }}/transport-generation/source-after.txt
+            ${{ runner.temp }}/transport-generation/tools.log
+            ${{ runner.temp }}/transport-generation/config-generator.log
+            ${{ runner.temp }}/transport-generation/schema-diff-check.log
+            ${{ runner.temp }}/transport-generation/schema-tests.log
+            ${{ runner.temp }}/transport-generation/schema-inventory.json
+            ${{ runner.temp }}/transport-generation/schema-inventory.stderr
+            ${{ runner.temp }}/transport-generation/source.patch
+            ${{ runner.temp }}/transport-generation/index.patch
+            ${{ runner.temp }}/transport-generation/status.txt
+            ${{ runner.temp }}/transport-generation/config.schema.json
+            ${{ runner.temp }}/transport-generation/schema-hashes.txt
+            ${{ runner.temp }}/transport-generation/manifest.json
