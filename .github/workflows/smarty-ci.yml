@@ -1,64 +1,140 @@
-name: smarty-ci
+name: rustls-resolution
 
 on:
-  pull_request:
-    branches:
-      - main
-  push:
-    branches:
-      - main
-      - mergify/merge-queue/**
-      - tmp-mergify/merge-queue/**
+  workflow_dispatch:
+    inputs:
+      workflow_sha256:
+        description: CI-selected SHA-256 of this exact workflow
+        required: true
+        type: string
 
 permissions:
   contents: read
 
-concurrency:
-  group: smarty-ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
-  smarty-ci:
-    name: smarty-ci
+  resolve:
+    if: github.repository == 'Smarty-Pants-Inc/codex' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/qualify/rustls-02345-resolution'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       CARGO_BUILD_JOBS: "2"
+      CARGO_NET_RETRY: "0"
       CARGO_INCREMENTAL: "0"
+      EXPECTED_WORKFLOW_SHA256: ${{ inputs.workflow_sha256 }}
+      WORKFLOW_SOURCE_SHA: ${{ github.workflow_sha }}
+      WORKFLOW_SOURCE_REF: ${{ github.workflow_ref }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
+          fetch-depth: 2
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-        with:
-          components: rustfmt
-      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
-        with:
-          tool: just@1.51.0,nextest@0.9.103
-      - name: Install Linux sandbox build dependencies
+      - name: Guard fixed product base
         run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
-      - name: Check bubblewrap netlink replies
-        working-directory: codex-rs/bwrap
-        run: |
-          test_binary="$(mktemp)"
-          trap 'rm -f "$test_binary"' EXIT
-          cc -std=gnu11 -Wall -Wextra -ffunction-sections -fdata-sections \
-            -I. -I../vendor/bubblewrap -Wl,--gc-sections \
-            tests/netlink_reply.c -o "$test_binary"
-          "$test_binary"
-      - name: Check Rust formatting
-        working-directory: codex-rs
-        run: cargo fmt -- --config imports_granularity=Item --check
-      - name: Test codex-bwrap
-        working-directory: codex-rs
-        run: |
-          # The crate has no Rust tests; C29 above supplies behavioral coverage.
-          just test -p codex-bwrap --locked --no-tests=pass --retries 0 --test-threads 2
-      - name: Check source remains unchanged
-        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = Smarty-Pants-Inc/codex
+          test "$GITHUB_REPOSITORY_ID" = 1047329867
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$GITHUB_REF" = refs/heads/qualify/rustls-02345-resolution
+          test "$WORKFLOW_SOURCE_SHA" = "$GITHUB_SHA"
+          test "$WORKFLOW_SOURCE_REF" = 'Smarty-Pants-Inc/codex/.github/workflows/smarty-ci.yml@refs/heads/qualify/rustls-02345-resolution'
+          [[ "$EXPECTED_WORKFLOW_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          printf '%s  %s\n' "$EXPECTED_WORKFLOW_SHA256" .github/workflows/smarty-ci.yml | sha256sum --check --strict
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD^)" = 1c17b4111297130007b416384bc7408bb88ea4e8
+          test "$(git diff --name-only HEAD^ HEAD)" = .github/workflows/smarty-ci.yml
           git diff --exit-code
           git diff --cached --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
+          mkdir -p "$RUNNER_TEMP/rustls-resolution"
+          git show -s --format='%H %T %P' HEAD > "$RUNNER_TEMP/rustls-resolution/source-before.txt"
+          cp codex-rs/Cargo.lock "$RUNNER_TEMP/rustls-resolution/Cargo.before.lock"
+          cp MODULE.bazel.lock "$RUNNER_TEMP/rustls-resolution/MODULE.before.bazel.lock"
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          toolchain: 1.95.0
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: just@1.51.0
+      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+        with:
+          bazelisk-version: 1.28.1
+      - uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.3"
+          enable-cache: false
+      - name: Resolve exact rustls patch and generate Bazel lock
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/rustls-resolution"
+          test "$(rustc -Vv | awk '/^release:/ { print $2 }')" = 1.95.0
+          test "$(cargo --version | awk '{ print $2 }')" = 1.95.0
+          test "$(cat .bazelversion)" = 9.0.0
+          test "$(bazel --version)" = 'bazel 9.0.0'
+          { rustc -Vv; cargo --version; just --version; bazel --version; dotslash --version; uv --version; } > "$evidence/tools.log"
+          cargo update --manifest-path codex-rs/Cargo.toml -p rustls@0.23.36 --precise 0.23.45 2>&1 | tee "$evidence/cargo-update.log"
+          just bazel-lock-update 2>&1 | tee "$evidence/bazel-lock-update.log"
+          just bazel-lock-check 2>&1 | tee "$evidence/bazel-lock-check.log"
+      - name: Preserve complete resolution data and refuse unrelated changes
+        if: always()
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/rustls-resolution"
+          mkdir -p "$evidence"
+          cp codex-rs/Cargo.lock "$evidence/Cargo.after.lock"
+          cp MODULE.bazel.lock "$evidence/MODULE.after.bazel.lock"
+          git show -s --format='%H %T %P' HEAD > "$evidence/source-after.txt"
+          git diff --binary HEAD > "$evidence/generated.patch"
+          git diff --binary HEAD -- codex-rs/Cargo.lock > "$evidence/cargo.patch"
+          git diff --binary HEAD -- MODULE.bazel.lock > "$evidence/bazel.patch"
+          git status --porcelain=v1 --untracked-files=all > "$evidence/status-after.txt"
+          python3 - <<'PY'
+          import json, os, subprocess, tomllib
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"]) / "rustls-resolution"
+          inventories = {}
+          for stage in ("before", "after"):
+              packages = tomllib.loads((root / f"Cargo.{stage}.lock").read_text())["package"]
+              inventories[stage] = sorted((p["name"], p["version"], p.get("source", "")) for p in packages)
+          (root / "package-inventories.json").write_text(json.dumps(inventories, indent=2) + "\n")
+          before, after = inventories["before"], inventories["after"]
+          if [p for p in before if p[0] != "rustls"] != [p for p in after if p[0] != "rustls"]:
+              raise SystemExit("Additional dependency changes require independent review; refuse adoption")
+          if [p[1] for p in after if p[0] == "rustls"] != ["0.23.45"]:
+              raise SystemExit("Expected exactly rustls 0.23.45; refuse adoption")
+          paths = subprocess.check_output(["git", "diff", "--name-only", "HEAD"]).decode().splitlines()
+          if set(paths) - {"codex-rs/Cargo.lock", "MODULE.bazel.lock"}:
+              raise SystemExit("Unexpected source changes; refuse adoption")
+          PY
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Validate bounded evidence
+        id: evidence
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"]) / "rustls-resolution"
+          files = list(root.iterdir())
+          if not files or len(files) > 20 or any(p.is_symlink() or not p.is_file() for p in files):
+              raise SystemExit("Invalid evidence members")
+          sizes = [p.stat().st_size for p in files]
+          if max(sizes) > 16 * 1024**2 or sum(sizes) > 32 * 1024**2 - 65536:
+              raise SystemExit("Evidence over bound; preserve runner logs, do not truncate")
+          rows = [{"path": p.name, "bytes": p.stat().st_size, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()} for p in files]
+          manifest = json.dumps(rows, indent=2) + "\n"
+          if len(manifest.encode()) > 65536:
+              raise SystemExit("Manifest over bound")
+          (root / "manifest.json").write_text(manifest)
+          PY
+      - name: Upload resolution data only
+        if: always() && steps.evidence.outcome == 'success'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: rustls-resolution-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rustls-resolution/
+          if-no-files-found: error
+          retention-days: 7
