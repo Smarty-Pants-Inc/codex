@@ -19,6 +19,7 @@ concurrency:
 
 jobs:
   metadata:
+    if: github.repository != 'Smarty-Pants-Inc/codex' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     outputs:
       # Older revisions can contain a detector that does not emit this output.

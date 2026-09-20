@@ -15,11 +15,13 @@ jobs:
   # Keep reusable workflow calls alphabetized. Each child retains its own
   # workflow_dispatch trigger so maintainers can rerun flaky suites directly.
   rust-ci-full:
+    if: github.repository != 'Smarty-Pants-Inc/codex' || github.event_name == 'workflow_dispatch'
     name: rust-ci-full
     uses: ./.github/workflows/rust-ci-full.yml
     secrets: inherit
 
   v8-canary:
+    if: github.repository != 'Smarty-Pants-Inc/codex' || github.event_name == 'workflow_dispatch'
     name: v8-canary
     uses: ./.github/workflows/v8-canary.yml
     secrets: inherit
