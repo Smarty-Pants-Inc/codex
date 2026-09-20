@@ -225,6 +225,7 @@ impl InProcessClientStartArgs {
                 Some(self.opt_out_notification_methods.clone())
             },
             mcp_server_openai_form_elicitation: self.mcp_server_openai_form_elicitation,
+            goal_auto_continue: self.goal_auto_continue_enabled,
         };
 
         InitializeParams {

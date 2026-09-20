@@ -1310,14 +1310,9 @@ async fn disabled_idle_continuation_preserves_active_goal() -> anyhow::Result<()
 
 #[tokio::test]
 async fn interactive_host_does_not_auto_continue_subagent_goal() -> anyhow::Result<()> {
-    let server = start_mock_server().await;
-    let mut builder = test_codex();
-    let test = builder.build(&server).await?;
-    let runtime = test
-        .codex
-        .state_db()
-        .ok_or_else(|| anyhow::anyhow!("live test thread should have a state database"))?;
-    let thread_id = test.session_configured.thread_id;
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
     runtime
         .thread_goals()
         .replace_thread_goal(
@@ -1332,7 +1327,7 @@ async fn interactive_host_does_not_auto_continue_subagent_goal() -> anyhow::Resu
         thread_id,
         GoalAutoContinueCapability::Interactive,
         /*persistent_thread_state_available*/ true,
-        Arc::downgrade(&test.thread_manager),
+        Weak::new(),
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: ThreadId::new(),
             depth: 1,
@@ -1344,6 +1339,13 @@ async fn interactive_host_does_not_auto_continue_subagent_goal() -> anyhow::Resu
     .await?;
 
     harness.resume_thread().await;
+    assert_eq!(
+        harness
+            .thread_store
+            .get::<GoalAutoContinueCapability>()
+            .as_deref(),
+        Some(&GoalAutoContinueCapability::Disabled)
+    );
     harness.idle_thread().await;
 
     let goal = runtime
@@ -1352,14 +1354,6 @@ async fn interactive_host_does_not_auto_continue_subagent_goal() -> anyhow::Resu
         .await?
         .ok_or_else(|| anyhow::anyhow!("subagent goal should exist"))?;
     assert_eq!(codex_state::ThreadGoalStatus::Active, goal.status);
-    assert!(
-        server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .is_empty(),
-        "interactive host capability must not auto-continue a non-root agent thread"
-    );
     Ok(())
 }
 
@@ -1487,7 +1481,7 @@ async fn goal_service_enforces_maximum_token_budget_on_creation_and_updates() ->
 async fn installed_tools(
     runtime: Arc<codex_state::StateRuntime>,
     thread_id: ThreadId,
-) -> Vec<Arc<dyn ToolExecutor<ToolCall>>> {
+) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
     installed_tools_with_start(
         runtime,
         thread_id,
@@ -1502,7 +1496,7 @@ async fn installed_tools_with_start(
     thread_id: ThreadId,
     session_source: SessionSource,
     persistent_thread_state_available: bool,
-) -> Vec<Arc<dyn ToolExecutor<ToolCall>>> {
+) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
     let mut builder = ExtensionRegistryBuilder::<()>::new();
     let goal_service = Arc::new(GoalService::new());
     install_with_backend(
@@ -1544,7 +1538,7 @@ async fn installed_tools_with_start(
         .collect()
 }
 
-fn tool_names(tools: &[Arc<dyn ToolExecutor<ToolCall>>]) -> Vec<String> {
+fn tool_names(tools: &[Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>]) -> Vec<String> {
     tools.iter().map(|tool| tool.tool_name().name).collect()
 }
 
@@ -1632,6 +1626,7 @@ impl GoalExtensionHarness {
         let registry = builder.build();
         let session_store = ExtensionData::new("session-1");
         let thread_store = ExtensionData::new(thread_id.to_string());
+        thread_store.insert(auto_continue_capability);
         for contributor in registry.thread_lifecycle_contributors() {
             contributor
                 .on_thread_start(ThreadStartInput {
@@ -1655,7 +1650,7 @@ impl GoalExtensionHarness {
         })
     }
 
-    fn tools(&self) -> Vec<Arc<dyn ToolExecutor<ToolCall>>> {
+    fn tools(&self) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>> {
         self.registry
             .tool_contributors()
             .iter()
@@ -1822,16 +1817,16 @@ impl GoalExtensionHarness {
 }
 
 fn tool_by_name<'a>(
-    tools: &'a [Arc<dyn ToolExecutor<ToolCall>>],
+    tools: &'a [Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>],
     name: &str,
-) -> &'a Arc<dyn ToolExecutor<ToolCall>> {
+) -> &'a Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>> {
     tools
         .iter()
         .find(|tool| tool.tool_name().namespace.is_none() && tool.tool_name().name == name)
         .expect("requested goal tool should exist")
 }
 
-fn tool_call(tool_name: &str, call_id: &str, arguments: serde_json::Value) -> ToolCall {
+fn tool_call(tool_name: &str, call_id: &str, arguments: serde_json::Value) -> ToolCall<'static> {
     ToolCall {
         turn_id: "turn-1".to_string(),
         call_id: call_id.to_string(),

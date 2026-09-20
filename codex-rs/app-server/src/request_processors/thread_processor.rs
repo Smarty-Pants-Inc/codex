@@ -7,6 +7,7 @@ use super::thread_input::ensure_direct_input_allowed;
 use super::*;
 use crate::error_code::method_not_found;
 use codex_app_server_protocol::SelectedCapabilityRoot;
+use codex_app_server_protocol::ThreadHistoryMode as ApiThreadHistoryMode;
 use codex_app_server_protocol::ThreadRevertParams;
 use codex_app_server_protocol::ThreadRevertResponse;
 use codex_app_server_protocol::ThreadRevertedNotification;
@@ -16,10 +17,15 @@ use codex_app_server_protocol::ThreadSectionMoveParams;
 use codex_app_server_protocol::ThreadSectionMoveResponse;
 use codex_extension_api::ExtensionDataInit;
 use codex_extension_api::ThreadIdleCause;
+use codex_goal_extension::GoalAutoContinueCapability;
+use codex_protocol::SanitizedGitUrl;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::mcp::ClientMcpExtensions;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_queue_extension::SuppressQueueResumeWake;
 use codex_thread_store::PersistContext;
 
 pub(super) const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
@@ -27,6 +33,19 @@ pub(super) const THREAD_LIST_MAX_LIMIT: usize = 100;
 const CODEX_TUI_CLIENT_NAME: &str = "codex-tui";
 const THREAD_ROLLBACK_DEPRECATION_SUMMARY: &str =
     "thread/rollback is deprecated and will be removed soon";
+const PAGINATED_FULL_HISTORY_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; use `excludeTurns: true`, then page with `thread/turns/list` and `thread/items/list`.";
+fn goal_extension_init(capability: GoalAutoContinueCapability) -> ExtensionDataInit {
+    let mut init = ExtensionDataInit::new();
+    init.insert(capability);
+    init
+}
+
+fn restored_thread_extension_init(capability: GoalAutoContinueCapability) -> ExtensionDataInit {
+    let mut init = goal_extension_init(capability);
+    init.insert(SuppressQueueResumeWake);
+    init
+}
+const PAGINATED_THREAD_READ_DEPRECATION_SUMMARY: &str = "Full-history hydration is deprecated for paginated threads; omit `includeTurns` or set it to `false`, then page with `thread/turns/list` and `thread/items/list`.";
 
 async fn stage_pending_project_metadata(
     thread_manager: &ThreadManager,
@@ -85,6 +104,50 @@ struct ThreadRevertRuntimeSnapshot {
     config: Config,
     settings: CodexThreadSettingsOverrides,
     client_mcp_extensions: ClientMcpExtensions,
+    goal_auto_continue_capability: GoalAutoContinueCapability,
+}
+
+struct PendingThreadUnloadReservation {
+    pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
+    thread_id: ThreadId,
+    released: bool,
+}
+
+impl PendingThreadUnloadReservation {
+    async fn reserve(
+        pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
+        thread_id: ThreadId,
+    ) -> Option<Self> {
+        let inserted = pending_thread_unloads.lock().await.insert(thread_id);
+        inserted.then_some(Self {
+            pending_thread_unloads,
+            thread_id,
+            released: false,
+        })
+    }
+
+    async fn release(mut self) {
+        self.pending_thread_unloads
+            .lock()
+            .await
+            .remove(&self.thread_id);
+        self.released = true;
+    }
+}
+
+impl Drop for PendingThreadUnloadReservation {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        let pending_thread_unloads = Arc::clone(&self.pending_thread_unloads);
+        let thread_id = self.thread_id;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                pending_thread_unloads.lock().await.remove(&thread_id);
+            });
+        }
+    }
 }
 
 fn collect_resume_override_mismatches(
@@ -498,6 +561,10 @@ impl ThreadRequestProcessor {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "thread start keeps connection capability inputs explicit"
+    )]
     pub(crate) async fn thread_start(
         &self,
         request_id: ConnectionRequestId,
@@ -505,6 +572,7 @@ impl ThreadRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
+        goal_auto_continue_capability: GoalAutoContinueCapability,
         request_context: RequestContext,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         self.thread_start_inner(
@@ -513,6 +581,7 @@ impl ThreadRequestProcessor {
             app_server_client_name,
             app_server_client_version,
             client_mcp_extensions,
+            goal_auto_continue_capability,
             request_context,
         )
         .await
@@ -536,6 +605,7 @@ impl ThreadRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
+        goal_auto_continue_capability: GoalAutoContinueCapability,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         self.thread_resume_inner(
             request_id,
@@ -543,6 +613,7 @@ impl ThreadRequestProcessor {
             app_server_client_name,
             app_server_client_version,
             client_mcp_extensions,
+            goal_auto_continue_capability,
         )
         .await
         .map(|()| None)
@@ -555,6 +626,7 @@ impl ThreadRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
+        goal_auto_continue_capability: GoalAutoContinueCapability,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         self.thread_fork_inner(
             request_id,
@@ -562,6 +634,7 @@ impl ThreadRequestProcessor {
             app_server_client_name,
             app_server_client_version,
             client_mcp_extensions,
+            goal_auto_continue_capability,
         )
         .await
         .map(|()| None)
@@ -573,6 +646,7 @@ impl ThreadRequestProcessor {
         params: ThreadRevertParams,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
+        goal_auto_continue_capability: GoalAutoContinueCapability,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         let (response, thread_id) = self
             .thread_revert_response(
@@ -580,14 +654,28 @@ impl ThreadRequestProcessor {
                 params,
                 app_server_client_name,
                 app_server_client_version,
+                goal_auto_continue_capability,
             )
             .await?;
         self.outgoing.send_response(request_id, response).await;
         self.outgoing
             .send_server_notification(ServerNotification::ThreadReverted(
-                ThreadRevertedNotification { thread_id },
+                ThreadRevertedNotification {
+                    thread_id: thread_id.to_string(),
+                },
             ))
             .await;
+        if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
+            thread
+                .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Restored)
+                .await;
+            thread
+                .thread_extension_data()
+                .remove::<SuppressQueueResumeWake>();
+            thread
+                .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
+                .await;
+        }
         Ok(None)
     }
 
@@ -787,20 +875,23 @@ impl ThreadRequestProcessor {
         app_server_client_name: Option<&str>,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
         if app_server_client_name != Some(CODEX_TUI_CLIENT_NAME) {
-            self.send_thread_rollback_deprecation_notice(request_id.connection_id)
-                .await;
+            self.send_deprecation_notice(
+                request_id.connection_id,
+                THREAD_ROLLBACK_DEPRECATION_SUMMARY,
+            )
+            .await;
         }
         self.thread_rollback_inner(request_id, params)
             .await
             .map(|()| None)
     }
 
-    async fn send_thread_rollback_deprecation_notice(&self, connection_id: ConnectionId) {
+    async fn send_deprecation_notice(&self, connection_id: ConnectionId, summary: &str) {
         self.outgoing
             .send_server_notification_to_connections(
                 &[connection_id],
                 ServerNotification::DeprecationNotice(DeprecationNoticeNotification {
-                    summary: THREAD_ROLLBACK_DEPRECATION_SUMMARY.to_string(),
+                    summary: summary.to_string(),
                     details: None,
                 }),
             )
@@ -845,11 +936,24 @@ impl ThreadRequestProcessor {
 
     pub(crate) async fn thread_read(
         &self,
+        request_id: &ConnectionRequestId,
         params: ThreadReadParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.thread_read_response_inner(params)
-            .await
-            .map(|response| Some(response.into()))
+        let include_turns = params.include_turns;
+        let response = self.thread_read_response_inner(params).await?;
+        if include_turns
+            && matches!(
+                response.thread.history_mode,
+                ApiThreadHistoryMode::Paginated
+            )
+        {
+            self.send_deprecation_notice(
+                request_id.connection_id,
+                PAGINATED_THREAD_READ_DEPRECATION_SUMMARY,
+            )
+            .await;
+        }
+        Ok(Some(response.into()))
     }
 
     pub(crate) async fn thread_turns_list(
@@ -1084,6 +1188,10 @@ impl ThreadRequestProcessor {
         .await
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "thread start keeps connection capability inputs explicit"
+    )]
     async fn thread_start_inner(
         &self,
         request_id: ConnectionRequestId,
@@ -1091,6 +1199,7 @@ impl ThreadRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
+        goal_auto_continue_capability: GoalAutoContinueCapability,
         request_context: RequestContext,
     ) -> Result<(), JSONRPCErrorError> {
         let ThreadStartParams {
@@ -1191,6 +1300,7 @@ impl ThreadRequestProcessor {
         let error_request_id = request_id.clone();
         let thread_start_task = async move {
             if let Err(error) = Self::thread_start_task(
+                goal_auto_continue_capability,
                 listener_task_context,
                 thread_store,
                 config_manager,
@@ -1270,6 +1380,7 @@ impl ThreadRequestProcessor {
 
     #[allow(clippy::too_many_arguments)]
     async fn thread_start_task(
+        goal_auto_continue_capability: GoalAutoContinueCapability,
         listener_task_context: ListenerTaskContext,
         thread_store: Arc<dyn ThreadStore>,
         config_manager: ConfigManager,
@@ -1396,7 +1507,12 @@ impl ThreadRequestProcessor {
                 DynamicToolSpec::Namespace(namespace) => namespace.tools.len(),
             })
             .sum();
+        let history_mode = history_mode.or_else(|| {
+            (!config.ephemeral && thread_store.supports_paginated_history_lists())
+                .then_some(ThreadHistoryMode::Paginated)
+        });
         let mut thread_extension_init = ExtensionDataInit::new();
+        thread_extension_init.insert(goal_auto_continue_capability);
         if !selected_capability_roots.is_empty() {
             thread_extension_init.insert(selected_capability_roots);
         }
@@ -1878,16 +1994,25 @@ impl ThreadRequestProcessor {
                         return Err(invalid_request("gitInfo must include at least one field"));
                     }
 
+                    let origin_url =
+                        Self::normalize_thread_metadata_git_field(origin_url, "gitInfo.originUrl")?;
+                    let origin_url = match origin_url {
+                        Some(Some(origin_url)) => {
+                            Some(Some(SanitizedGitUrl::try_from(origin_url).map_err(
+                                |_| invalid_request("gitInfo.originUrl must be a valid Git remote"),
+                            )?))
+                        }
+                        Some(None) => Some(None),
+                        None => None,
+                    };
+
                     Ok(StoreGitInfoPatch {
                         sha: Self::normalize_thread_metadata_git_field(sha, "gitInfo.sha")?,
                         branch: Self::normalize_thread_metadata_git_field(
                             branch,
                             "gitInfo.branch",
                         )?,
-                        origin_url: Self::normalize_thread_metadata_git_field(
-                            origin_url,
-                            "gitInfo.originUrl",
-                        )?,
+                        origin_url,
                     })
                 },
             )
@@ -2037,7 +2162,8 @@ impl ThreadRequestProcessor {
         params: ThreadRevertParams,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
-    ) -> Result<(ThreadRevertResponse, String), JSONRPCErrorError> {
+        goal_auto_continue_capability: GoalAutoContinueCapability,
+    ) -> Result<(ThreadRevertResponse, ThreadId), JSONRPCErrorError> {
         let _thread_list_state_permit = self.acquire_thread_list_state_permit().await?;
         let ThreadRevertParams {
             thread_id,
@@ -2051,99 +2177,169 @@ impl ThreadRequestProcessor {
                 "thread/revert only supports paginated threads",
             ));
         }
-        let runtime_snapshot = ThreadRevertRuntimeSnapshot {
-            config: thread.config().await.as_ref().clone(),
-            settings: thread.restorable_thread_settings().await,
-            client_mcp_extensions: thread.client_mcp_extensions(),
-        };
-
-        // Subscribe before shutdown so a pending idle unload either rejects this request or can
-        // no longer race the replacement runtime. The same listener then drains Core's shutdown
-        // events before we replace it.
-        if matches!(
-            self.ensure_conversation_listener(
-                thread_id,
-                request_id.connection_id,
-                /*raw_events_enabled*/ false,
+        let (_parent_residency_lease, parent_unload_reservation) = if let SessionSource::SubAgent(
+            SubAgentSource::ThreadSpawn {
+                parent_thread_id, ..
+            },
+        ) =
+            &config_snapshot.session_source
+        {
+            let reservation = PendingThreadUnloadReservation::reserve(
+                Arc::clone(&self.pending_thread_unloads),
+                *parent_thread_id,
             )
-            .await?,
-            EnsureConversationListenerResult::ConnectionClosed
-        ) {
-            return Err(internal_error(format!(
-                "connection closed before thread {thread_id} could be reverted"
-            )));
-        }
-        let thread_state = self.thread_state_manager.thread_state(thread_id).await;
-        let shutdown_drain_rx = thread_state.lock().await.register_shutdown_drain_waiter();
-
-        match wait_for_thread_shutdown(&thread).await {
-            ThreadShutdownResult::Complete => {}
-            ThreadShutdownResult::SubmitFailed => {
-                thread_state.lock().await.take_shutdown_drain_waiter();
-                return Err(internal_error(format!(
-                    "failed to shut down thread {thread_id} before revert"
-                )));
-            }
-            ThreadShutdownResult::TimedOut => {
-                thread_state.lock().await.take_shutdown_drain_waiter();
-                return Err(internal_error(format!(
-                    "timed out shutting down thread {thread_id} before revert"
-                )));
-            }
-        }
-        let drain_result = tokio::time::timeout(Duration::from_secs(10), shutdown_drain_rx)
             .await
-            .map_err(|_| {
-                internal_error(format!(
-                    "timed out waiting for thread {thread_id} listener to drain shutdown events"
+            .ok_or_else(|| {
+                invalid_request(format!(
+                    "cannot revert child thread: parent {parent_thread_id} is closing; retry after the parent is resumed"
                 ))
-            })
-            .and_then(|result| {
-                result.map_err(|_| {
+            })?;
+            let residency_lease = self
+                .thread_manager
+                .acquire_thread_residency_lease(*parent_thread_id)
+                .await;
+            if self
+                .thread_manager
+                .get_thread(*parent_thread_id)
+                .await
+                .is_err()
+            {
+                reservation.release().await;
+                return Err(invalid_request(format!(
+                    "cannot revert child thread: parent {parent_thread_id} is not loaded; resume the parent first"
+                )));
+            }
+            (Some(residency_lease), Some(reservation))
+        } else {
+            (None, None)
+        };
+        let result = async {
+            let runtime_snapshot = ThreadRevertRuntimeSnapshot {
+                config: thread.config().await.as_ref().clone(),
+                settings: thread.restorable_thread_settings().await,
+                client_mcp_extensions: thread.client_mcp_extensions(),
+                goal_auto_continue_capability,
+            };
+
+            // Subscribe before shutdown so a pending idle unload either rejects this request or can
+            // no longer race the replacement runtime. The same listener then drains Core's shutdown
+            // events before we replace it.
+            if matches!(
+                self.ensure_conversation_listener(
+                    thread_id,
+                    request_id.connection_id,
+                    /*raw_events_enabled*/ false,
+                )
+                .await?,
+                EnsureConversationListenerResult::ConnectionClosed
+            ) {
+                return Err(internal_error(format!(
+                    "connection closed before thread {thread_id} could be reverted"
+                )));
+            }
+            let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+            let shutdown_drain_rx = thread_state.lock().await.register_shutdown_drain_waiter();
+
+            match wait_for_thread_shutdown(&thread).await {
+                ThreadShutdownResult::Complete => {}
+                ThreadShutdownResult::SubmitFailed => {
+                    thread_state.lock().await.take_shutdown_drain_waiter();
+                    return Err(internal_error(format!(
+                        "failed to shut down thread {thread_id} before revert"
+                    )));
+                }
+                ThreadShutdownResult::TimedOut => {
+                    thread_state.lock().await.take_shutdown_drain_waiter();
+                    return Err(internal_error(format!(
+                        "timed out shutting down thread {thread_id} before revert"
+                    )));
+                }
+            }
+            let drain_result = tokio::time::timeout(Duration::from_secs(10), shutdown_drain_rx)
+                .await
+                .map_err(|_| {
                     internal_error(format!(
-                        "thread {thread_id} listener stopped before draining shutdown events"
+                        "timed out waiting for thread {thread_id} listener to drain shutdown events"
                     ))
                 })
-            });
-        if let Err(err) = drain_result {
-            thread_state.lock().await.take_shutdown_drain_waiter();
-            return Err(err);
-        }
-        if self
-            .thread_manager
-            .remove_thread(&thread_id)
-            .await
-            .is_none()
-        {
-            return Err(internal_error(format!(
-                "thread {thread_id} disappeared before revert"
-            )));
-        }
-        // Keep thread state and subscriptions across the internal reload. Full teardown would
-        // force clients to call thread/resume after a successful revert.
-        self.outgoing
-            .cancel_requests_for_thread(thread_id, /*error*/ None)
-            .await;
+                .and_then(|result| {
+                    result.map_err(|_| {
+                        internal_error(format!(
+                            "thread {thread_id} listener stopped before draining shutdown events"
+                        ))
+                    })
+                });
+            if let Err(err) = drain_result {
+                thread_state.lock().await.take_shutdown_drain_waiter();
+                return Err(err);
+            }
+            if self
+                .thread_manager
+                .remove_thread(&thread_id)
+                .await
+                .is_none()
+            {
+                return Err(internal_error(format!(
+                    "thread {thread_id} disappeared before revert"
+                )));
+            }
+            // Keep thread state and subscriptions across the internal reload. Full teardown would
+            // force clients to call thread/resume after a successful revert.
+            self.outgoing
+                .cancel_requests_for_thread(thread_id, /*error*/ None)
+                .await;
 
-        let revert_result = self
-            .thread_store
-            .revert_thread(codex_thread_store::RevertThreadParams {
-                thread_id,
-                before_turn_id,
-            })
-            .await
-            .map_err(|err| thread_store_mutation_error("revert", err));
-        let response = self
-            .reload_paginated_thread(
-                request_id,
-                thread_id,
-                runtime_snapshot,
-                app_server_client_name,
-                app_server_client_version,
-            )
-            .await?;
-        revert_result?;
-        Ok((response, thread_id.to_string()))
+            let revert_result = self
+                .thread_store
+                .revert_thread(codex_thread_store::RevertThreadParams {
+                    thread_id,
+                    before_turn_id,
+                })
+                .await
+                .map_err(|err| thread_store_mutation_error("revert", err));
+            let response = self
+                .reload_paginated_thread(
+                    request_id,
+                    thread_id,
+                    runtime_snapshot,
+                    app_server_client_name,
+                    app_server_client_version,
+                )
+                .await;
+            match response {
+                Ok(response) => {
+                    if let Err(err) = revert_result {
+                        if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
+                            thread
+                                .thread_extension_data()
+                                .remove::<SuppressQueueResumeWake>();
+                            thread
+                                .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
+                                .await;
+                        }
+                        Err(err)
+                    } else {
+                        Ok((response, thread_id))
+                    }
+                }
+                Err(err) => {
+                    if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
+                        thread
+                            .thread_extension_data()
+                            .remove::<SuppressQueueResumeWake>();
+                        thread
+                            .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
+                            .await;
+                    }
+                    Err(err)
+                }
+            }
+        }
+        .await;
+        if let Some(reservation) = parent_unload_reservation {
+            reservation.release().await;
+        }
+        result
     }
 
     async fn reload_paginated_thread(
@@ -2158,6 +2354,7 @@ impl ThreadRequestProcessor {
             config,
             settings,
             client_mcp_extensions,
+            goal_auto_continue_capability,
         } = runtime_snapshot;
         let thread_id_string = thread_id.to_string();
         let stored_thread = self
@@ -2178,12 +2375,13 @@ impl ThreadRequestProcessor {
             ..
         } = self
             .thread_manager
-            .resume_thread_with_history(
+            .resume_thread_with_history_with_extension_init(
                 config,
                 thread_history,
                 self.auth_manager.clone(),
                 self.request_trace_context(request_id).await,
                 client_mcp_extensions,
+                restored_thread_extension_init(goal_auto_continue_capability),
             )
             .await
             .map_err(|err| internal_error(format!("error reloading thread after revert: {err}")))?;
@@ -3523,6 +3721,7 @@ impl ThreadRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
+        goal_auto_continue_capability: GoalAutoContinueCapability,
     ) -> Result<(), JSONRPCErrorError> {
         if let Ok(thread_id) = ThreadId::from_string(&params.thread_id)
             && self
@@ -3567,6 +3766,7 @@ impl ThreadRequestProcessor {
                 &params,
                 app_server_client_name.clone(),
                 app_server_client_version.clone(),
+                goal_auto_continue_capability,
                 /*cold_resume_history*/ None,
             )
             .await
@@ -3636,6 +3836,13 @@ impl ThreadRequestProcessor {
             matches!(thread.history_mode, ThreadHistoryMode::Paginated).then_some(thread.thread_id)
         });
         let paginated_resume = paginated_thread_id.is_some();
+        if paginated_resume && include_turns {
+            self.send_deprecation_notice(
+                request_id.connection_id,
+                PAGINATED_FULL_HISTORY_DEPRECATION_SUMMARY,
+            )
+            .await;
+        }
 
         // Parent-owned V2 children must resume through their owner, not caller configuration.
         if let InitialHistory::Resumed(resumed_history) = &thread_history
@@ -3671,6 +3878,7 @@ impl ThreadRequestProcessor {
                     &attach_params,
                     app_server_client_name,
                     app_server_client_version,
+                    goal_auto_continue_capability,
                     cold_resume_history,
                 )
                 .await?
@@ -3754,12 +3962,13 @@ impl ThreadRequestProcessor {
 
         match self
             .thread_manager
-            .resume_thread_with_history(
+            .resume_thread_with_history_with_extension_init(
                 config,
                 thread_history,
                 self.auth_manager.clone(),
                 self.request_trace_context(&request_id).await,
                 client_mcp_extensions,
+                goal_extension_init(goal_auto_continue_capability),
             )
             .await
         {
@@ -4029,6 +4238,7 @@ impl ThreadRequestProcessor {
         params: &ThreadResumeParams,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
+        goal_auto_continue_capability: GoalAutoContinueCapability,
         cold_resume_history: Option<&[RolloutItem]>,
     ) -> Result<RunningThreadResumeResult, JSONRPCErrorError> {
         let running_thread = if params.history.is_some() {
@@ -4091,6 +4301,12 @@ impl ThreadRequestProcessor {
                 )));
             }
             let config_snapshot = existing_thread.config_snapshot().await;
+            self.thread_goal_processor
+                .update_auto_continue_capability(
+                    existing_thread.as_ref(),
+                    goal_auto_continue_capability,
+                )
+                .await;
             let mismatch_details = collect_resume_override_mismatches(params, &config_snapshot);
             if !mismatch_details.is_empty() {
                 let has_subscribers = !self
@@ -4144,6 +4360,13 @@ impl ThreadRequestProcessor {
             let redact_resume_payloads =
                 should_redact_thread_resume_payloads(app_server_client_name.as_deref());
             let include_turns = !params.exclude_turns;
+            if paginated_resume && include_turns {
+                self.send_deprecation_notice(
+                    request_id.connection_id,
+                    PAGINATED_FULL_HISTORY_DEPRECATION_SUMMARY,
+                )
+                .await;
+            }
             let needs_history =
                 !paginated_resume && (include_turns || params.initial_turns_page.is_some());
             if needs_history {
@@ -4616,6 +4839,7 @@ impl ThreadRequestProcessor {
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
+        goal_auto_continue_capability: GoalAutoContinueCapability,
     ) -> Result<(), JSONRPCErrorError> {
         let ThreadForkParams {
             thread_id,
@@ -4667,6 +4891,13 @@ impl ThreadRequestProcessor {
             return Err(invalid_request(
                 "ephemeral paginated thread/fork requires `excludeTurns: true`",
             ));
+        }
+        if paginated_source && include_turns {
+            self.send_deprecation_notice(
+                request_id.connection_id,
+                PAGINATED_FULL_HISTORY_DEPRECATION_SUMMARY,
+            )
+            .await;
         }
         let source_thread_id = source_thread.thread_id;
         let source_thread_name = source_thread
@@ -4891,18 +5122,19 @@ impl ThreadRequestProcessor {
 
         let new_thread = if let Some(prepared_fork) = prepared_fork {
             self.thread_manager
-                .fork_prepared_thread(
+                .fork_prepared_thread_with_extension_init(
                     config,
                     prepared_fork,
                     thread_source,
                     parent_trace,
                     client_mcp_extensions,
                     reserved_thread_id,
+                    goal_extension_init(goal_auto_continue_capability),
                 )
                 .await
         } else {
             self.thread_manager
-                .fork_thread_from_history(
+                .fork_thread_from_history_with_extension_init(
                     ForkSnapshot::Interrupted,
                     config,
                     InitialHistory::Resumed(ResumedHistory {
@@ -4914,6 +5146,7 @@ impl ThreadRequestProcessor {
                     parent_trace,
                     client_mcp_extensions,
                     reserved_thread_id,
+                    goal_extension_init(goal_auto_continue_capability),
                 )
                 .await
         };
@@ -5623,6 +5856,7 @@ fn stored_turn_to_api_turn(
         StoredTurnStatus::InProgress => TurnStatus::InProgress,
     };
     let error = turn.error.map(|error| TurnError {
+        misalignment: None,
         message: error.message,
         codex_error_info: error.codex_error_info,
         additional_details: error.additional_details,
@@ -5804,7 +6038,7 @@ pub(crate) fn thread_from_stored_thread(
     let git_info = thread.git_info.map(|info| ApiGitInfo {
         sha: info.commit_hash.map(|sha| sha.0),
         branch: info.branch,
-        origin_url: info.repository_url,
+        origin_url: info.repository_url.map(String::from),
     });
     let cwd = AbsolutePathBuf::relative_to_current_dir(path_utils::normalize_for_native_workdir(
         thread.cwd,
@@ -5880,7 +6114,7 @@ fn summary_from_stored_thread(
     let git_info = thread.git_info.map(|git| ConversationGitInfo {
         sha: git.commit_hash.map(|sha| sha.0),
         branch: git.branch,
-        origin_url: git.repository_url,
+        origin_url: git.repository_url.map(String::from),
     });
     ConversationSummary {
         conversation_id: thread.thread_id,
@@ -5980,7 +6214,7 @@ fn summary_from_thread_metadata(metadata: &ThreadMetadata) -> ConversationSummar
         metadata.agent_role.clone(),
         metadata.git_sha.clone(),
         metadata.git_branch.clone(),
-        metadata.git_origin_url.clone(),
+        metadata.git_origin_url.clone().map(String::from),
     )
 }
 

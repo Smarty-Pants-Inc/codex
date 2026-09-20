@@ -3,6 +3,7 @@ use crate::codex_thread::GuardianAuthorizationVersion;
 use crate::codex_thread::GuardianRootMessage;
 use crate::codex_thread::GuardianRootSnapshot;
 use crate::compact::is_summary_message;
+use crate::context::GuardianReviewEvidence;
 use crate::context::is_contextual_user_fragment;
 use crate::event_mapping::parse_turn_item;
 use crate::guardian::guardian_truncate_text;
@@ -13,16 +14,45 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::MultiAgentVersion;
+use std::borrow::Cow;
 
 const MAX_ROOT_MESSAGES: usize = 8;
 const MAX_ROOT_MESSAGE_TOKENS: usize = 900;
 
-fn is_contextual_root_user_item(item: &ResponseItem) -> bool {
-    matches!(
-        item,
-        ResponseItem::Message { role, content, .. }
-            if role == "user" && content.iter().any(is_contextual_user_fragment)
-    )
+fn root_authorization_item<'a>(item: &'a ResponseItem) -> Option<Cow<'a, ResponseItem>> {
+    let ResponseItem::Message {
+        id,
+        role,
+        content,
+        phase,
+        internal_chat_message_metadata_passthrough,
+    } = item
+    else {
+        return Some(Cow::Borrowed(item));
+    };
+    if role != "user" {
+        return Some(Cow::Borrowed(item));
+    }
+
+    let filtered_content = content
+        .iter()
+        .filter(|content| !is_contextual_user_fragment(content))
+        .cloned()
+        .collect::<Vec<_>>();
+    if filtered_content.is_empty() {
+        return None;
+    }
+    if filtered_content.len() == content.len() {
+        return Some(Cow::Borrowed(item));
+    }
+    Some(Cow::Owned(ResponseItem::Message {
+        id: id.clone(),
+        role: role.clone(),
+        content: filtered_content,
+        phase: phase.clone(),
+        internal_chat_message_metadata_passthrough: internal_chat_message_metadata_passthrough
+            .clone(),
+    }))
 }
 
 impl AgentControl {
@@ -42,41 +72,55 @@ impl AgentControl {
         }
 
         let root_history = root_thread.session.clone_history().await;
+        let root_evidence = root_thread
+            .session
+            .services
+            .thread_extension_data
+            .get::<GuardianReviewEvidence>();
         let mut messages = root_history
             .raw_items()
-            .filter(|item| !is_contextual_root_user_item(item))
-            .filter_map(|item| match parse_turn_item(item) {
-                Some(TurnItem::UserMessage(message)) => {
-                    let message = message.message();
-                    (!is_summary_message(&message)
-                        && !message.trim_start().starts_with("<user_action>"))
-                    .then(|| {
-                        GuardianRootMessage::User(
-                            guardian_truncate_text(&message, MAX_ROOT_MESSAGE_TOKENS).0,
-                        )
-                    })
-                }
-                Some(TurnItem::AgentMessage(message))
-                    if matches!(message.phase, None | Some(MessagePhase::FinalAnswer)) =>
-                {
-                    let text = message
-                        .content
-                        .iter()
-                        .map(|content| match content {
-                            AgentMessageContent::Text { text } => text.as_str(),
+            .filter_map(root_authorization_item)
+            .filter_map(
+                |item| match (parse_turn_item(item.as_ref()), item.as_ref()) {
+                    (Some(TurnItem::UserMessage(message)), _) => {
+                        let message = message.message();
+                        (!is_summary_message(&message)
+                            && !message.trim_start().starts_with("<user_action>"))
+                        .then(|| {
+                            GuardianRootMessage::User(
+                                guardian_truncate_text(&message, MAX_ROOT_MESSAGE_TOKENS).0,
+                            )
                         })
-                        .collect::<String>();
-                    Some(GuardianRootMessage::Assistant(
-                        guardian_truncate_text(&text, MAX_ROOT_MESSAGE_TOKENS).0,
-                    ))
-                }
-                _ => None,
-            })
+                    }
+                    (Some(TurnItem::AgentMessage(message)), _)
+                        if matches!(message.phase, None | Some(MessagePhase::FinalAnswer)) =>
+                    {
+                        let text = message
+                            .content
+                            .iter()
+                            .map(|content| match content {
+                                AgentMessageContent::Text { text } => text.as_str(),
+                            })
+                            .collect::<String>();
+                        Some(GuardianRootMessage::Assistant(
+                            guardian_truncate_text(&text, MAX_ROOT_MESSAGE_TOKENS).0,
+                        ))
+                    }
+                    (_, ResponseItem::FunctionCall { call_id, .. }) => root_evidence
+                        .as_ref()
+                        .and_then(|evidence| evidence.user_input_for_call(call_id))
+                        .map(GuardianRootMessage::UserInput),
+                    _ => None,
+                },
+            )
             .collect::<Vec<_>>();
-        let authorization_version = GuardianAuthorizationVersion::from_history(
-            root_history.conversation_history_snapshot().as_ref(),
-        );
+
         messages.drain(..messages.len().saturating_sub(MAX_ROOT_MESSAGES));
+        let history = root_history.conversation_history_snapshot();
+        let authorization_version = root_evidence.as_ref().map_or_else(
+            || GuardianAuthorizationVersion::from_history(history.as_ref()),
+            |evidence| evidence.authorization_version(history.as_ref()),
+        );
         Some(GuardianRootSnapshot {
             authorization_version,
             messages,
@@ -92,8 +136,8 @@ mod tests {
     use codex_utils_output_truncation::TruncationPolicy;
 
     #[test]
-    fn contextual_user_items_cannot_authorize_guardian_root_actions() {
-        let contextual = ResponseItem::Message {
+    fn contextual_fragments_are_removed_without_dropping_direct_user_input() {
+        let mixed = ResponseItem::Message {
             id: None,
             role: "user".to_string(),
             content: vec![
@@ -117,9 +161,23 @@ mod tests {
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         };
+        let all_contextual = ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "<environment_context>context</environment_context>".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
 
-        assert!(is_contextual_root_user_item(&contextual));
-        assert!(!is_contextual_root_user_item(&direct));
+        let sanitized = root_authorization_item(&mixed).expect("direct content should remain");
+        let Some(TurnItem::UserMessage(message)) = parse_turn_item(sanitized.as_ref()) else {
+            panic!("sanitized direct content should parse as a user message");
+        };
+        assert_eq!(message.message(), "direct-looking text");
+        assert!(root_authorization_item(&direct).is_some());
+        assert!(root_authorization_item(&all_contextual).is_none());
     }
     #[test]
     fn contextual_root_user_items_advance_authorization_version() {

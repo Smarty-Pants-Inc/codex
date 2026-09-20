@@ -55,6 +55,9 @@ pub struct InitializeCapabilities {
     /// New clients should declare `openai/form` in [`Self::extensions`].
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub mcp_server_openai_form_elicitation: bool,
+    /// Opt into interactive continuation of an active goal when the thread becomes idle.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub goal_auto_continue: bool,
     /// Exact notification method names that should be suppressed for this
     /// connection (for example `thread/started`).
     #[ts(optional = nullable)]

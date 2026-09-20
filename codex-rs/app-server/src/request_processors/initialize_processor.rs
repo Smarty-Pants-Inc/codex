@@ -3,6 +3,7 @@ use std::sync::atomic::Ordering;
 
 use axum::http::HeaderValue;
 use codex_analytics::AppServerRpcTransport;
+use codex_goal_extension::GoalAutoContinueCapability;
 use codex_login::default_client::SetOriginatorError;
 use codex_login::default_client::USER_AGENT_SUFFIX;
 use codex_login::default_client::get_codex_user_agent;
@@ -70,6 +71,11 @@ impl InitializeRequestProcessor {
         let capabilities = params.capabilities.unwrap_or_default();
         let experimental_api_enabled = capabilities.experimental_api;
         let request_attestation = capabilities.request_attestation;
+        let goal_auto_continue_capability = if capabilities.goal_auto_continue {
+            GoalAutoContinueCapability::Interactive
+        } else {
+            GoalAutoContinueCapability::Disabled
+        };
         let extensions = capabilities.extensions.as_ref();
         let client_mcp_extensions = codex_mcp::client_mcp_extensions(
             extensions,
@@ -102,6 +108,7 @@ impl InitializeRequestProcessor {
                 client_version: version,
                 request_attestation,
                 client_mcp_extensions,
+                goal_auto_continue_capability,
             })
             .is_err()
         {

@@ -160,7 +160,7 @@ pub struct InProcessStartArgs {
     pub enable_codex_api_key_env: bool,
     /// Initialize params used for initial handshake.
     pub initialize: InitializeParams,
-    /// Whether this embedder explicitly allows interactive goal auto-continuation.
+    /// Legacy embedder opt-in, translated into the initialize capability before startup.
     pub goal_auto_continue_enabled: bool,
     /// Capacity used for all runtime queues (clamped to at least 1).
     pub channel_capacity: usize,
@@ -366,6 +366,12 @@ impl InProcessClientHandle {
 /// the handle, so callers receive a ready-to-use runtime. If initialize fails,
 /// the runtime is shut down and an `InvalidData` error is returned.
 pub async fn start(mut args: InProcessStartArgs) -> IoResult<InProcessClientHandle> {
+    if args.goal_auto_continue_enabled {
+        args.initialize
+            .capabilities
+            .get_or_insert_default()
+            .goal_auto_continue = true;
+    }
     if let Ok(Some(err)) = check_execpolicy_for_warnings(&args.config.config_layer_stack).await {
         let (path, range) = crate::exec_policy_warning_location(&err);
         args.config_warnings.push(ConfigWarningNotification {
@@ -487,7 +493,6 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 installation_id,
                 code_mode_session_provider: None,
                 rpc_transport: AppServerRpcTransport::InProcess,
-                goal_auto_continue_enabled: args.goal_auto_continue_enabled,
                 remote_control_handle: None,
                 plugin_startup_tasks: crate::PluginStartupTasks::Start,
             }));

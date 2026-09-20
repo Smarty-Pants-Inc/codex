@@ -37,7 +37,10 @@ impl ToolExecutor<ToolInvocation> for Handler {
         create_spawn_agent_tool_v2(self.options.clone())
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async move {
             let analytics = invocation.session.services.analytics_events_client.clone();
             let sender_thread_id = invocation.session.thread_id;
@@ -186,7 +189,7 @@ async fn handle_spawn_agent(
     let multi_agent_v2_usage_hints =
         if is_full_history_fork && turn.multi_agent_version == MultiAgentVersion::V2 {
             let child_model_info = match config.model.as_deref() {
-                Some(model) if model != turn.model_info.slug => Some(
+                Some(model) if model != turn.model_info().slug => Some(
                     session
                         .services
                         .models_manager
@@ -197,7 +200,7 @@ async fn handle_spawn_agent(
             };
             let child_catalog = child_model_info
                 .as_ref()
-                .unwrap_or(&turn.model_info)
+                .unwrap_or(turn.model_info())
                 .model_messages
                 .as_ref()
                 .and_then(|messages| messages.multi_agent.as_ref())
@@ -223,6 +226,7 @@ async fn handle_spawn_agent(
                     root_turn_id: turn.turn_metadata_state.root_turn_id(),
                     environments: Some(step_context.environments.to_selections()),
                     multi_agent_v2_usage_hints,
+                    cyber_access_program: turn.cyber_access_program,
                 },
             ),
     )
@@ -235,6 +239,12 @@ async fn handle_spawn_agent(
         .agent_control
         .get_agent_config_snapshot(new_thread_id)
         .await;
+    let runtime = session
+        .services
+        .agent_control
+        .get_agent_runtime_info(new_thread_id)
+        .await
+        .map_err(collab_spawn_error)?;
     let nickname = agent_snapshot
         .as_ref()
         .and_then(|snapshot| snapshot.session_source.get_nickname())
@@ -257,23 +267,22 @@ async fn handle_spawn_agent(
         &[("role", role_tag), ("version", "v2")],
     );
     let task_name = String::from(new_agent_path);
-    let model = agent_snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.model.clone())
-        .unwrap_or_else(|| turn.model_info.slug.clone());
-    let multi_agent_version = Some(spawned_agent.multi_agent_version);
+    let capability = runtime.capability;
+    let effective_model = runtime.effective_model;
+    let multi_agent_version = runtime.multi_agent_version;
     let hide_agent_metadata = turn.config.multi_agent_v2.hide_spawn_agent_metadata;
     let output = if hide_agent_metadata {
         SpawnAgentResult::HiddenMetadata {
             task_name,
-            model,
+            capability,
             multi_agent_version,
         }
     } else {
         SpawnAgentResult::WithNickname {
             task_name,
             nickname,
-            model,
+            capability,
+            effective_model,
             multi_agent_version,
         }
     };
@@ -342,13 +351,14 @@ pub(crate) enum SpawnAgentResult {
     WithNickname {
         task_name: String,
         nickname: Option<String>,
-        model: String,
-        multi_agent_version: Option<MultiAgentVersion>,
+        capability: crate::tools::spec_plan::MultiAgentCapability,
+        effective_model: String,
+        multi_agent_version: MultiAgentVersion,
     },
     HiddenMetadata {
         task_name: String,
-        model: String,
-        multi_agent_version: Option<MultiAgentVersion>,
+        capability: crate::tools::spec_plan::MultiAgentCapability,
+        multi_agent_version: MultiAgentVersion,
     },
 }
 
