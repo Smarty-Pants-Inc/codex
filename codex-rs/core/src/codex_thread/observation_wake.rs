@@ -31,6 +31,34 @@ impl CodexThread {
             .get::<ObservationBinding>()
             .ok_or(ObservationError::Unavailable)?;
         let guard = Arc::new(binding.slot.prepare_wake(owner, intent, policy)?);
+        self.start_prepared_observation_wake(guard).await
+    }
+
+    /// Host RPC preparation is retained with the original receipt, not authority.
+    /// The same trusted policy and native idle admission rules apply as for embedding.
+    pub async fn start_host_observation_wake(
+        &self,
+        owner: ObservationOwner,
+        intent: ObservationWakeIntent,
+        policy: Arc<dyn IdleTurnAdmission>,
+        preparation: crate::ObservationHostPreparation,
+    ) -> Result<ObservationWakeReceipt, ObservationError> {
+        let binding = self
+            .thread_extension_data()
+            .get::<ObservationBinding>()
+            .ok_or(ObservationError::Unavailable)?;
+        let guard = Arc::new(
+            binding
+                .slot
+                .prepare_host_wake(owner, intent, policy, preparation)?,
+        );
+        self.start_prepared_observation_wake(guard).await
+    }
+
+    async fn start_prepared_observation_wake(
+        &self,
+        guard: Arc<crate::observation::WakeAdmission>,
+    ) -> Result<ObservationWakeReceipt, ObservationError> {
         // Empty automatic input adds no pretend human instruction or durable wake
         // message. The existing request-only observation supplies current context.
         let request = TurnInputRequest::new(TurnInput::UserInput {

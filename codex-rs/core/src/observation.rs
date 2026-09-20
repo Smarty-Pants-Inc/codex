@@ -37,6 +37,9 @@ const MAX_SEQUENCE: u64 = (1_u64 << 53) - 1;
 const MAX_TIMESTAMP: i64 = 8_640_000_000_000;
 const EVENT_CAPACITY: usize = 32;
 
+#[path = "observation_host_preparation.rs"]
+mod host_preparation;
+pub use host_preparation::ObservationHostPreparation;
 #[path = "observation_wake.rs"]
 mod wake;
 pub use wake::ObservationWakeHostPolicy;
@@ -44,6 +47,7 @@ pub use wake::ObservationWakeIntent;
 pub use wake::ObservationWakeOutcome;
 pub use wake::ObservationWakeReceipt;
 pub use wake::ObservationWakeSnapshot;
+pub(crate) use wake::WakeAdmission;
 
 #[path = "observation_budget.rs"]
 mod budget;

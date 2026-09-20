@@ -9,20 +9,32 @@ matching both the original thread and owner. Without it, start is unsupported.
 Context/profile qualification and original host admission policy remain required.
 
 Start takes `intent` (`sequence`, `frameRevision`, `frameHash`, `budgetGeneration`,
-`expectedCommitOrder`) and `operandDigest`. All integers are positive safe JSON
+`expectedCommitOrder`), `operandDigest`, and required `hostPreparation`.
+This is a breaking change to the experimental request boundary: old requests
+without preparation are rejected, not mapped to an old receipt. Update the host
+consumer and generated normal/experimental schemas together before use.
+`hostPreparation` contains `cooldownRevision` (the original positive safe-integer
+Core state revision) and `wakeNotBeforeBits` (exactly16 lowercase hex digits of
+the original positive finite binary64, big-endian). Fractions and subnormals are
+preserved; zero, negative and nonfinite values are invalid. This is provenance,
+not a clock comparison, readiness result, permission or durable budget permit.
+The original slot retains it atomically with the receipt; a same-key mismatch
+cannot read a cached result or retire it. The v1 digest below is unchanged and
+does not itself bind these preparation fields. All integers are positive safe JSON
 integers. Digest: SHA256 of UTF-8 `codex-observation-wake-v1` plus NUL, raw16 UUID
 owner bytes, four big-endian u64 values (sequence, frameRevision, budgetGeneration,
 expectedCommitOrder), then64 lowercase ASCII frameHash bytes. Persist the original
 sequence/digest/cooldown before dispatch; never replay a lost-ACK start.
 
-Read takes `query:{type:"attempt",sequence,operandDigest}` or
+Read takes `query:{type:"attempt",sequence,operandDigest,hostPreparation}` or
 `query:{type:"fence",sequence}`. Responses have `protocol:1`, query type and
 `intentFloor`; attempt responses also contain a nullable `receipt`. A receipt has
 sequence, operandDigest and tagged outcome: `pending` with nullable turnId,
 `started` with actual turnId, `suppressed`, or `unknown`. Pending is not Started;
 Started is not exposure. Missing history is Unknown, not retry permission.
 
-Invalidate takes sequence; retire takes sequence/operandDigest. Both return
+Invalidate takes sequence; retire takes sequence/operandDigest/hostPreparation.
+Fence and invalidate requests are unchanged. Both mutations return
 `protocol:1,intentFloor`. A higher invalidation floor fences lower unreserved
 attempts, not an already reserved turn. Retire only after durably recording the
 terminal Started/Suppressed result; Pending/Unknown cannot retire. The floor

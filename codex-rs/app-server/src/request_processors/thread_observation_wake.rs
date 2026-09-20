@@ -104,42 +104,49 @@ fn control(
 ) -> Result<ClientResponsePayload, JSONRPCErrorError> {
     Ok(match operation {
         WakeOperation::Start(_) => return Err(rejected(Code::Unsupported)),
-        WakeOperation::Read(params) => {
-            let snapshot = bridge
-                .slot
-                .observation_wake_snapshot(bridge.owner)
-                .map_err(store_error)?;
-            match params.query {
-                WakeReadQuery::Attempt {
-                    sequence: value,
-                    operand_digest,
-                } => {
-                    sequence(value)?;
-                    digest(&operand_digest)?;
-                    let original = snapshot.receipt.filter(|entry| entry.sequence == value);
-                    if original
-                        .as_ref()
-                        .is_some_and(|entry| entry.operand_digest != operand_digest)
-                    {
-                        return Err(rejected(Code::RevisionMismatch));
-                    }
-                    ThreadObservationWakeReadResponse::Attempt {
-                        protocol: 1,
-                        intent_floor: snapshot.intent_floor,
-                        receipt: original.map(receipt),
-                    }
-                    .into()
+        WakeOperation::Read(params) => match params.query {
+            WakeReadQuery::Attempt {
+                sequence: value,
+                operand_digest,
+                host_preparation,
+            } => {
+                sequence(value)?;
+                digest(&operand_digest)?;
+                let preparation = codex_core::ObservationHostPreparation::from_wire(
+                    host_preparation.cooldown_revision,
+                    &host_preparation.wake_not_before_bits,
+                )
+                .map_err(|_| rejected(Code::InvalidInput))?;
+                let snapshot = bridge
+                    .slot
+                    .host_observation_wake_snapshot(
+                        bridge.owner,
+                        value,
+                        &operand_digest,
+                        &preparation,
+                    )
+                    .map_err(store_error)?;
+                let original = snapshot.receipt;
+                ThreadObservationWakeReadResponse::Attempt {
+                    protocol: 1,
+                    intent_floor: snapshot.intent_floor,
+                    receipt: original.map(receipt),
                 }
-                WakeReadQuery::Fence { sequence: value } => {
-                    sequence(value)?;
-                    ThreadObservationWakeReadResponse::Fence {
-                        protocol: 1,
-                        intent_floor: snapshot.intent_floor,
-                    }
-                    .into()
-                }
+                .into()
             }
-        }
+            WakeReadQuery::Fence { sequence: value } => {
+                sequence(value)?;
+                let snapshot = bridge
+                    .slot
+                    .observation_wake_snapshot(bridge.owner)
+                    .map_err(store_error)?;
+                ThreadObservationWakeReadResponse::Fence {
+                    protocol: 1,
+                    intent_floor: snapshot.intent_floor,
+                }
+                .into()
+            }
+        },
         WakeOperation::Invalidate(params) => {
             sequence(params.sequence)?;
             let intent_floor = bridge
@@ -155,9 +162,19 @@ fn control(
         WakeOperation::Retire(params) => {
             sequence(params.sequence)?;
             digest(&params.operand_digest)?;
+            let preparation = codex_core::ObservationHostPreparation::from_wire(
+                params.host_preparation.cooldown_revision,
+                &params.host_preparation.wake_not_before_bits,
+            )
+            .map_err(|_| rejected(Code::InvalidInput))?;
             let intent_floor = bridge
                 .slot
-                .retire_observation_wake(bridge.owner, params.sequence, &params.operand_digest)
+                .retire_host_observation_wake(
+                    bridge.owner,
+                    params.sequence,
+                    &params.operand_digest,
+                    preparation,
+                )
                 .map_err(store_error)?;
             ThreadObservationWakeRetireResponse {
                 protocol: 1,
@@ -200,8 +217,18 @@ async fn start(
     if intent.operand_digest(bridge.owner) != params.operand_digest {
         return Err(rejected(Code::InvalidInput));
     }
+    let preparation = codex_core::ObservationHostPreparation::from_wire(
+        params.host_preparation.cooldown_revision,
+        &params.host_preparation.wake_not_before_bits,
+    )
+    .map_err(|_| rejected(Code::InvalidInput))?;
     let native = thread
-        .start_observation_wake(bridge.owner, intent, Arc::clone(&policy.admission))
+        .start_host_observation_wake(
+            bridge.owner,
+            intent,
+            Arc::clone(&policy.admission),
+            preparation,
+        )
         .await
         // Preparation may already have consumed the original intent.
         // Never turn a later owner/transport failure into no-commit proof.

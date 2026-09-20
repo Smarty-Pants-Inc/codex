@@ -124,6 +124,10 @@ async fn trusted_policy_validation_receipts_and_inflight_cleanup_use_original_na
         expected_commit_order: 1,
     };
     let params = ThreadObservationWakeStartParams {
+        host_preparation: codex_app_server_protocol::WakeHostPreparation {
+            cooldown_revision: 1,
+            wake_not_before_bits: "3ff8000000000000".into(),
+        },
         thread_id: thread_id.to_string(),
         owner_epoch: bridge.owner.epoch.to_string(),
         intent: WakeIntent {
@@ -141,12 +145,14 @@ async fn trusted_policy_validation_receipts_and_inflight_cleanup_use_original_na
         admission: Arc::new(Denied),
     };
     test.codex.thread_extension_data().insert(policy.clone());
-    for change in [0, 1, 2] {
+    for change in [0, 1, 2, 3, 4] {
         let mut bad = params.clone();
         match change {
             0 => bad.intent.sequence = 1_u64 << 53,
             1 => bad.intent.frame_hash = "A".repeat(64),
             2 => bad.operand_digest = "0".repeat(64),
+            3 => bad.host_preparation.cooldown_revision = 0,
+            4 => bad.host_preparation.wake_not_before_bits = "8000000000000000".into(),
             _ => unreachable!(),
         }
         assert_eq!(
@@ -197,6 +203,7 @@ async fn trusted_policy_validation_receipts_and_inflight_cleanup_use_original_na
         thread_id: thread_id.to_string(),
         owner_epoch: params.owner_epoch.clone(),
         query: WakeReadQuery::Attempt {
+            host_preparation: params.host_preparation.clone(),
             sequence: 1,
             operand_digest: params.operand_digest.clone(),
         },
@@ -207,8 +214,20 @@ async fn trusted_policy_validation_receipts_and_inflight_cleanup_use_original_na
         )?,
         json!({"protocol":1,"type":"attempt","intentFloor":1,"receipt":expected})
     );
+    let mut preparation_conflict = read.clone();
+    if let WakeReadQuery::Attempt {
+        host_preparation, ..
+    } = &mut preparation_conflict.query
+    {
+        host_preparation.cooldown_revision += 1;
+    }
+    assert_eq!(
+        control(&bridge, WakeOperation::Read(preparation_conflict)).unwrap_err(),
+        rejected(Code::RevisionMismatch)
+    );
     let mut conflict = read.clone();
     conflict.query = WakeReadQuery::Attempt {
+        host_preparation: params.host_preparation.clone(),
         sequence: 1,
         operand_digest: "0".repeat(64),
     };
@@ -219,6 +238,7 @@ async fn trusted_policy_validation_receipts_and_inflight_cleanup_use_original_na
     control(
         &bridge,
         WakeOperation::Retire(ThreadObservationWakeRetireParams {
+            host_preparation: params.host_preparation.clone(),
             thread_id: thread_id.to_string(),
             owner_epoch: params.owner_epoch.clone(),
             sequence: 1,

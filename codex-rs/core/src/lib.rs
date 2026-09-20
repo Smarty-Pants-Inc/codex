@@ -88,6 +88,7 @@ pub use observation::ObservationCapture;
 pub use observation::ObservationError;
 pub use observation::ObservationEvent;
 pub use observation::ObservationFrame;
+pub use observation::ObservationHostPreparation;
 pub use observation::ObservationMetadata;
 pub use observation::ObservationOutcome;
 pub use observation::ObservationOwner;

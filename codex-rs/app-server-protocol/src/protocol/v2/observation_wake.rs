@@ -19,6 +19,17 @@ pub struct WakeIntent {
     pub expected_commit_order: u64,
 }
 
+/// Original host cooldown provenance, never permission or budget authority.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(export_to = "v2/")]
+pub struct WakeHostPreparation {
+    #[ts(type = "number")]
+    pub cooldown_revision: u64,
+    /// Exactly sixteen lowercase hex digits of the original positive finite binary64.
+    pub wake_not_before_bits: String,
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 #[ts(export_to = "v2/")]
@@ -27,6 +38,7 @@ pub struct ThreadObservationWakeStartParams {
     pub owner_epoch: String,
     pub intent: WakeIntent,
     pub operand_digest: String,
+    pub host_preparation: WakeHostPreparation,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -75,6 +87,9 @@ pub enum WakeReadQuery {
         #[serde(rename = "operandDigest")]
         #[ts(rename = "operandDigest")]
         operand_digest: String,
+        #[serde(rename = "hostPreparation")]
+        #[ts(rename = "hostPreparation")]
+        host_preparation: WakeHostPreparation,
     },
     Fence {
         #[ts(type = "number")]
@@ -138,6 +153,7 @@ pub struct ThreadObservationWakeRetireParams {
     #[ts(type = "number")]
     pub sequence: u64,
     pub operand_digest: String,
+    pub host_preparation: WakeHostPreparation,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

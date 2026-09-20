@@ -114,6 +114,7 @@ async fn observation_start_and_admitted_resume_install_fresh_owned_relays() -> R
             "threadId":thread_id, "ownerEpoch":initial.owner_epoch,
             "intent":{"sequence":1,"frameRevision":1,"frameHash":"a".repeat(64),
                 "budgetGeneration":1,"expectedCommitOrder":1}, "operandDigest":"b".repeat(64),
+            "hostPreparation":{"cooldownRevision":1,"wakeNotBeforeBits":"3ff8000000000000"},
         }))).await?;
         assert_eq!(app.read_stream_until_error_message(RequestId::Integer(id)).await?.error, rejection("UNSUPPORTED"));
         for (epoch, code) in [(initial.owner_epoch.replace('-', ""), "DENIED"), ("00000000-0000-0000-0000-000000000000".into(), "STALE_OWNER")] {
@@ -138,11 +139,13 @@ async fn observation_start_and_admitted_resume_install_fresh_owned_relays() -> R
         assert_eq!(app.read_response::<serde_json::Value>(id).await?, json!({"protocol":1,"type":"fence","intentFloor":2}));
         let id = app.send_request("thread/observation/wake/read", Some(json!({
             "threadId":thread_id, "ownerEpoch":initial.owner_epoch,
-            "query":{"type":"attempt","sequence":1,"operandDigest":"a".repeat(64)},
+            "query":{"type":"attempt","sequence":1,"operandDigest":"a".repeat(64),
+                "hostPreparation":{"cooldownRevision":1,"wakeNotBeforeBits":"3ff8000000000000"}},
         }))).await?;
         assert_eq!(app.read_response::<serde_json::Value>(id).await?, json!({"protocol":1,"type":"attempt","intentFloor":2,"receipt":null}));
         let id = app.send_request("thread/observation/wake/retire", Some(json!({
             "threadId":thread_id, "ownerEpoch":initial.owner_epoch,"sequence":1,"operandDigest":"a".repeat(64),
+            "hostPreparation":{"cooldownRevision":1,"wakeNotBeforeBits":"3ff8000000000000"},
         }))).await?;
         assert_eq!(app.read_stream_until_error_message(RequestId::Integer(id)).await?.error, rejection("REVISION_MISMATCH"));
         let text = "SOURCE19_OWNER_ONLY";

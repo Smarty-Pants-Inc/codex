@@ -7,6 +7,9 @@ use pretty_assertions::assert_eq;
 #[path = "observation_wake_snapshot_tests.rs"]
 mod snapshot_tests;
 
+#[path = "observation_wake_host_tests.rs"]
+mod host_tests;
+
 #[derive(Debug)]
 struct OriginalPolicy;
 impl IdleTurnAdmission for OriginalPolicy {

@@ -69,10 +69,18 @@ pub struct ObservationWakeSnapshot {
     pub receipt: Option<ObservationWakeReceipt>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+enum WakePreparation {
+    #[default]
+    Embedding,
+    Host(crate::ObservationHostPreparation),
+}
+
 #[derive(Default)]
 pub(super) struct WakeState {
     floor: u64,
     receipt: Option<ObservationWakeReceipt>,
+    preparation: WakePreparation,
 }
 
 pub(crate) struct WakeAdmission {
@@ -96,6 +104,31 @@ impl ObservationSlot {
         owner: ObservationOwner,
         intent: ObservationWakeIntent,
         policy: Arc<dyn IdleTurnAdmission>,
+    ) -> Result<WakeAdmission, ObservationError> {
+        self.prepare_wake_with_preparation(owner, intent, policy, WakePreparation::Embedding)
+    }
+
+    pub(crate) fn prepare_host_wake(
+        self: &Arc<Self>,
+        owner: ObservationOwner,
+        intent: ObservationWakeIntent,
+        policy: Arc<dyn IdleTurnAdmission>,
+        preparation: crate::ObservationHostPreparation,
+    ) -> Result<WakeAdmission, ObservationError> {
+        self.prepare_wake_with_preparation(
+            owner,
+            intent,
+            policy,
+            WakePreparation::Host(preparation),
+        )
+    }
+
+    fn prepare_wake_with_preparation(
+        self: &Arc<Self>,
+        owner: ObservationOwner,
+        intent: ObservationWakeIntent,
+        policy: Arc<dyn IdleTurnAdmission>,
+        preparation: WakePreparation,
     ) -> Result<WakeAdmission, ObservationError> {
         let mut state = self
             .state
@@ -126,6 +159,7 @@ impl ObservationSlot {
             return Err(ObservationError::RevisionMismatch);
         }
         state.wake.floor = intent.sequence;
+        state.wake.preparation = preparation;
         state.wake.receipt = Some(ObservationWakeReceipt {
             sequence: intent.sequence,
             operand_digest: intent.operand_digest(owner),
@@ -173,6 +207,37 @@ impl ObservationSlot {
             .ok_or(ObservationError::RevisionMismatch)
     }
 
+    /// Read a host attempt only after joining its exact original provenance.
+    /// A different sequence has no receipt; matching keys with different provenance fail.
+    pub fn host_observation_wake_snapshot(
+        &self,
+        owner: ObservationOwner,
+        sequence: u64,
+        operand_digest: &str,
+        preparation: &crate::ObservationHostPreparation,
+    ) -> Result<ObservationWakeSnapshot, ObservationError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| ObservationError::Unavailable)?;
+        state.authorize(owner)?;
+        let receipt = state
+            .wake
+            .receipt
+            .as_ref()
+            .filter(|entry| entry.sequence == sequence);
+        if let Some(receipt) = receipt
+            && (receipt.operand_digest != operand_digest
+                || state.wake.preparation != WakePreparation::Host(preparation.clone()))
+        {
+            return Err(ObservationError::RevisionMismatch);
+        }
+        Ok(ObservationWakeSnapshot {
+            intent_floor: state.wake.floor,
+            receipt: receipt.cloned(),
+        })
+    }
+
     /// Read the existing floor and optional receipt at one native lock boundary.
     /// This neither revalidates the observation budget nor dispatches a turn.
     pub fn observation_wake_snapshot(
@@ -198,11 +263,45 @@ impl ObservationSlot {
         sequence: u64,
         operand_digest: &str,
     ) -> Result<u64, ObservationError> {
+        self.retire_wake_with_preparation(
+            owner,
+            sequence,
+            operand_digest,
+            WakePreparation::Embedding,
+        )
+    }
+
+    /// Retire only the terminal receipt carrying this exact host preparation.
+    pub fn retire_host_observation_wake(
+        &self,
+        owner: ObservationOwner,
+        sequence: u64,
+        operand_digest: &str,
+        preparation: crate::ObservationHostPreparation,
+    ) -> Result<u64, ObservationError> {
+        self.retire_wake_with_preparation(
+            owner,
+            sequence,
+            operand_digest,
+            WakePreparation::Host(preparation),
+        )
+    }
+
+    fn retire_wake_with_preparation(
+        &self,
+        owner: ObservationOwner,
+        sequence: u64,
+        operand_digest: &str,
+        preparation: WakePreparation,
+    ) -> Result<u64, ObservationError> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| ObservationError::Unavailable)?;
         state.authorize(owner)?;
+        if state.wake.preparation != preparation {
+            return Err(ObservationError::RevisionMismatch);
+        }
         let receipt = state
             .wake
             .receipt
