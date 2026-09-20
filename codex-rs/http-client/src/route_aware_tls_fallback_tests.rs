@@ -326,7 +326,6 @@ fn native_tls_pool() -> RouteAwareClientPool {
     // ponytail: Cargo can inject SSL_CERT_FILE before starting tests. Seed only this fixture's
     // direct client so shared custom-CA handling cannot replace the native backend with rustls.
     let client = reqwest::Client::builder()
-        .use_native_tls()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
         .build()
