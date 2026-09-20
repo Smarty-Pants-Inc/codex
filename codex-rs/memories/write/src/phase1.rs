@@ -421,6 +421,7 @@ mod job {
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::RealtimeItem(_)
                 | RolloutItem::WorldState(_)
+                | RolloutItem::ObservationWakeBudget(_)
                 | RolloutItem::SecurityRiskScore(_)
                 | RolloutItem::EventMsg(_) => None,
             })

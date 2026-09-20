@@ -1378,7 +1378,7 @@ impl Session {
                     | RolloutItem::TurnContext(_)
                     | RolloutItem::WorldState(_)
                     | RolloutItem::RealtimeItem(_)
-                    | RolloutItem::SecurityRiskScore(_) => {}
+                    | RolloutItem::ObservationWakeBudget(_) | RolloutItem::SecurityRiskScore(_) => {}
                 }
             }
             let session_extension_data =

@@ -5,6 +5,7 @@ use super::CompactedItem;
 use super::EventMsg;
 use super::InterAgentCommunication;
 use super::McpResourceOriginCheckpoint;
+use super::ObservationWakeBudgetRecord;
 use super::RealtimeItem;
 use super::ResponseItem;
 use super::ResponseItemEnvelope;
@@ -47,6 +48,9 @@ pub(super) enum RolloutItemWire<'a> {
     SecurityRiskScore {
         payload: Cow<'a, SecurityRiskScore>,
     },
+    ObservationWakeBudget {
+        payload: Cow<'a, ObservationWakeBudgetRecord>,
+    },
     EventMsg {
         payload: Cow<'a, EventMsg>,
     },
@@ -84,6 +88,9 @@ impl<'a> From<&'a RolloutItem> for RolloutItemWire<'a> {
             RolloutItem::WorldState(payload) => Self::WorldState {
                 payload: Cow::Borrowed(payload),
             },
+            RolloutItem::ObservationWakeBudget(payload) => Self::ObservationWakeBudget {
+                payload: Cow::Borrowed(payload),
+            },
             RolloutItem::SecurityRiskScore(payload) => Self::SecurityRiskScore {
                 payload: Cow::Borrowed(payload),
             },
@@ -118,6 +125,9 @@ impl From<RolloutItemWire<'_>> for RolloutItem {
             RolloutItemWire::Compacted { payload } => Self::Compacted(payload.into_owned()),
             RolloutItemWire::TurnContext { payload } => Self::TurnContext(payload.into_owned()),
             RolloutItemWire::WorldState { payload } => Self::WorldState(payload.into_owned()),
+            RolloutItemWire::ObservationWakeBudget { payload } => {
+                Self::ObservationWakeBudget(payload.into_owned())
+            }
             RolloutItemWire::SecurityRiskScore { payload } => {
                 Self::SecurityRiskScore(payload.into_owned())
             }

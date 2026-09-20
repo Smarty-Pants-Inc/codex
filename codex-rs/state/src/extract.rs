@@ -26,7 +26,7 @@ pub fn apply_rollout_item(
         | RolloutItem::InterAgentCommunicationMetadata { .. } => {}
         RolloutItem::Compacted(_) => {}
         RolloutItem::WorldState(_) => {}
-        RolloutItem::SecurityRiskScore(_) => {}
+        RolloutItem::ObservationWakeBudget(_) | RolloutItem::SecurityRiskScore(_) => {}
         RolloutItem::RealtimeItem(_) => {}
     }
     if metadata.model_provider.is_empty() {
@@ -55,6 +55,7 @@ pub fn rollout_item_affects_thread_metadata(item: &RolloutItem) -> bool {
         | RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::Compacted(_)
         | RolloutItem::RealtimeItem(_)
+        | RolloutItem::ObservationWakeBudget(_)
         | RolloutItem::SecurityRiskScore(_)
         | RolloutItem::WorldState(_) => false,
     }

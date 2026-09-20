@@ -154,6 +154,7 @@ impl ModelContextScan {
             | RolloutItem::SessionMeta(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::RealtimeItem(_)
+            | RolloutItem::ObservationWakeBudget(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::WorldState(_) => {}
         }

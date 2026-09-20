@@ -293,6 +293,7 @@ impl LegacyRolloutCanonicalizer {
             item @ (RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::TurnContext(_)
             | RolloutItem::RealtimeItem(_)
+            | RolloutItem::ObservationWakeBudget(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::WorldState(_)) => {
                 self.write_item(writer, &timestamp, item).await?;

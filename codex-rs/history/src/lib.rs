@@ -32,6 +32,13 @@ use serde::Serialize;
 use serde::Serializer;
 use serde::de::Error as _;
 
+mod observation_wake_budget;
+pub use observation_wake_budget::ObservationWakeBudgetRecord;
+pub use observation_wake_budget::ObservationWakeBudgetReplay;
+pub use observation_wake_budget::ObservationWakeBudgetReplayError;
+pub use observation_wake_budget::ObservationWakeBudgetSelection;
+pub use observation_wake_budget::ObservationWakeDebit;
+
 /// A model-history item with room for history-only metadata.
 ///
 /// Persistence keeps the response item intact and stores its metadata separately.
@@ -104,6 +111,8 @@ pub enum RolloutItem {
     TurnContext(TurnContextItem),
     WorldState(WorldStateItem),
     SecurityRiskScore(SecurityRiskScore),
+    /// Original writer accounting, never model history or an admission permit.
+    ObservationWakeBudget(ObservationWakeBudgetRecord),
     EventMsg(EventMsg),
     /// Sparse, model-invisible facts used to reconstruct realtime presentation.
     RealtimeItem(RealtimeItem),
@@ -419,6 +428,7 @@ fn multi_agent_version_from_items(
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
             | RolloutItem::WorldState(_)
+            | RolloutItem::ObservationWakeBudget(_)
             | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::RealtimeItem(_)
             | RolloutItem::EventMsg(_) => None,

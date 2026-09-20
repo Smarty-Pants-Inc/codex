@@ -235,7 +235,9 @@ impl RollbackPlanner {
                 }
             }
             RolloutItem::WorldState(_) | RolloutItem::RealtimeItem(_) => {}
-            RolloutItem::SecurityRiskScore(_) => self.record_boundaries[index] = None,
+            RolloutItem::ObservationWakeBudget(_) | RolloutItem::SecurityRiskScore(_) => {
+                self.record_boundaries[index] = None
+            }
         }
 
         Ok(())

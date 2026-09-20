@@ -698,6 +698,62 @@ async fn migration_preserves_valid_final_record_without_newline() {
 }
 
 #[tokio::test]
+async fn migration_keeps_original_wake_debt_when_its_turn_is_rolled_back() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let selection = serde_json::json!({
+        "type": "observation_wake_budget",
+        "payload": {"type": "initialized_v1", "payload": {
+            "thread_id": thread_id, "rollout_id": thread_id,
+            "selection_digest": vec![7_u8; 32], "reservation_limit": 2
+        }}
+    });
+    let debit = serde_json::json!({
+        "type": "observation_wake_budget",
+        "payload": {"type": "debited_v1", "payload": {
+            "ordinal": 1, "owner_epoch": vec![3_u8; 16], "sequence": 1,
+            "operand_digest": vec![9_u8; 32], "cooldown_revision": 1,
+            "wake_not_before_bits": 0.125_f64.to_bits()
+        }}
+    });
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            serde_json::from_value(selection.clone()).expect("decode selection"),
+            started("remove"),
+            user_message("removed user input"),
+            serde_json::from_value(debit.clone()).expect("decode original debit"),
+            agent_message("removed answer"),
+            completed("remove"),
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                num_turns: 1,
+            })),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+    let report = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate with wake debt");
+    assert_eq!(report.outcomes[0].status, RolloutMigrationStatus::Migrated);
+    let lines = read_rollout(&path);
+    let retained = lines
+        .iter()
+        .filter_map(|line| match &line.item {
+            RolloutItem::ObservationWakeBudget(_) => {
+                Some(serde_json::to_value(&line.item).unwrap())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(retained, vec![selection, debit]);
+    assert!(!lines.iter().any(|line| matches!(&line.item, RolloutItem::ResponseItem(item)
+        if matches!(&item.item, ResponseItem::Message { role, .. } if role == "user" || role == "assistant"))));
+}
+
+#[tokio::test]
 async fn migration_applies_historical_rollbacks_before_sqlite_projection() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
