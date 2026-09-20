@@ -15,8 +15,7 @@ use codex_core::ObservationOwner;
 use codex_core::ObservationSlot;
 use codex_core::PilotPermission;
 use codex_core::PilotReport;
-use codex_protocol::models::ContentItem;
-use codex_protocol::models::ResponseItem;
+use codex_core::context::PilotOpportunity;
 use codex_protocol::turn_input::StartIfIdleSubmission;
 use codex_protocol::turn_input::TurnInput;
 use codex_protocol::turn_input::TurnInputRequest;
@@ -96,16 +95,8 @@ impl PilotControl {
         &self,
         input: String,
     ) -> Result<ThreadPilotStartResponse, JSONRPCErrorError> {
-        if input.is_empty() || input.len() > 1024 {
-            return Err(denied());
-        }
-        let request = TurnInputRequest::new(TurnInput::ResponseItem(ResponseItem::Message {
-            id: None,
-            role: "user".to_owned(),
-            content: vec![ContentItem::InputText { text: input }],
-            phase: None,
-            internal_chat_message_metadata_passthrough: None,
-        }));
+        let opportunity = PilotOpportunity::try_from(input).map_err(|_| denied())?;
+        let request = TurnInputRequest::new(TurnInput::ResponseItem(opportunity.into()));
         // Native idle reservation + issuer guard commits the ACTUAL turn identity.
         // Never implement D as sampled idle followed by ordinary foreground input.
         let result = self

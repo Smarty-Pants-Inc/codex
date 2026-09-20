@@ -2901,9 +2901,19 @@ RPC field cannot install authority. Unknown request fields are rejected.
   request ID is diagnostic, not reusable authority for another operation.
 - `thread/pilot/start {threadId, input}` attempts one automatic turn through the
   native idle reservation and owner guard, not ordinary foreground submission.
-  Input is nonempty and at most 1024 UTF-8 bytes. There are no settings, model, tool,
-  limits or owner overrides. `{started:false, turnId:null}` means no commit; it is
-  not a promise that a later turn can start. Existing Plan-mode, trigger priority,
+  Input is nonempty and at most 1024 UTF-8 bytes. It is caller-supplied opportunity
+  data, not human authorization, an instruction override, or a grant. Core preserves
+  every accepted input byte as one JSON string inside a fixed
+  `<pilot_opportunity_data>` envelope, with literal `<`, `>`, and `&` JSON-escaped.
+  The separate developer data message has the fixed `pilot.opportunity` content
+  kind; repeated opportunities are not context-store deduplicated. The encoded
+  string is bounded at 6146 bytes and the complete rendered item at 6402 bytes,
+  without truncation. **P0 manual review is required:** this item can exceed 1000
+  tokens; byte bounds do not establish native/provider context qualification.
+  Envelope wording does not replace the original launch and native admission
+  security boundary. There are no settings, model, tool, limits or owner overrides.
+  `{started:false, turnId:null}` means no commit; it is not a promise that a later
+  turn can start. Existing Plan-mode, trigger priority,
   cooldown, revocation and finite-ledger checks apply at native commit.
 - `thread/pilot/retire {threadId}` derives the original owner and synchronously
   fences its slot/issuer before retirement waits. It retains one original task
