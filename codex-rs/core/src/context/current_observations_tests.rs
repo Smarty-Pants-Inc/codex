@@ -193,7 +193,8 @@ fn original_eight_multiview_serializer_fixtures_fit_lossless_groups() -> anyhow:
             case["text"]["sha256"],
             format!("{:x}", Sha256::digest(text.as_bytes()))
         );
-        assert!(verify_group(&text).len() > 1);
+        let (items, _) = verify_group(&text);
+        assert!(items.len() > 1);
     }
     Ok(())
 }
