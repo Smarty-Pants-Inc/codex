@@ -119,6 +119,7 @@ jobs:
             2>&1 | tee "$RUNNER_TEMP/transport-generation/scoped-fix.log"
           just fmt 2>&1 | tee "$RUNNER_TEMP/transport-generation/fmt.log"
       - name: Return generation evidence and validate changed paths
+        id: generation-evidence
         if: always()
         run: |
           set -euo pipefail
@@ -161,12 +162,49 @@ jobs:
               raise SystemExit(f"Undeclared generated changes: {unexpected}")
           PY
           git diff --cached --exit-code
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          import shutil
+          from pathlib import Path
+          root = Path(os.environ['RUNNER_TEMP']) / 'transport-generation'
+          destination = Path(os.environ['RUNNER_TEMP']) / 'transport-generation-upload'
+          allowed = set('source-before.txt tools.log bazel-lock-update.log bazel-lock-check.log schema-normal.log schema-experimental.log package-tests.log scoped-fix.log fmt.log source-after.txt generated.patch bazel-lock.patch schemas.patch scoped-fix.patch status-after.txt MODULE.bazel.lock source-after.sha256 qualification.txt'.split())
+          required = set('source-before.txt source-after.txt generated.patch schemas.patch status-after.txt MODULE.bazel.lock source-after.sha256 qualification.txt'.split())
+          members = sorted(root.iterdir())
+          names = {p.name for p in members}
+          if not required <= names or not names <= allowed:
+              raise SystemExit('Missing required or undeclared evidence')
+          entries = []
+          total = 0
+          for p in members:
+              if p.is_symlink() or not p.is_file():
+                  raise SystemExit(f'Invalid evidence member: {p.name}')
+              size = p.stat().st_size
+              total += size
+              if size > 16 * 1024 * 1024 or total > 48 * 1024 * 1024:
+                  raise SystemExit('Evidence exceeds full-byte bounds; no truncation or upload')
+              entries.append({'name': p.name, 'bytes': size, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()})
+          manifest = (json.dumps({'entries': entries}, indent=2) + '\n').encode()
+          if total + len(manifest) > 48 * 1024 * 1024:
+              raise SystemExit('Manifest exceeds total evidence bound')
+          destination.mkdir(exist_ok=False)
+          for entry in entries:
+              target = destination / entry['name']
+              shutil.copyfile(root / entry['name'], target)
+              if target.stat().st_size != entry['bytes'] or hashlib.sha256(target.read_bytes()).hexdigest() != entry['sha256']:
+                  raise SystemExit('Staged evidence changed')
+          (destination / 'manifest.json').write_bytes(manifest)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('evidence_ready=true\n')
+          PY
       - name: Upload generation evidence (not final qualification)
-        if: always()
+        if: always() && steps.generation-evidence.outputs.evidence_ready == 'true'
         uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
         with:
           name: full-observation-generation-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/transport-generation/
+          path: ${{ runner.temp }}/transport-generation-upload/
           if-no-files-found: error
           retention-days: 7
       - name: Check source remains unchanged
