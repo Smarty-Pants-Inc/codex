@@ -269,7 +269,7 @@ async fn trusted_policy_validation_receipts_and_inflight_cleanup_use_original_na
     let original_bridge = Arc::clone(&bridge);
     let original_thread = Arc::clone(&test.codex);
     let wire_start = ClientRequest::ThreadObservationWakeStart {
-        id: RequestId::Integer(1),
+        request_id: RequestId::Integer(1),
         params: pending.clone(),
     };
     dispatch(&queues, &gate, wire_start, async move {
@@ -290,7 +290,7 @@ async fn trusted_policy_validation_receipts_and_inflight_cleanup_use_original_na
         &queues,
         &gate,
         ClientRequest::ThreadObservationWakeInvalidate {
-            id: RequestId::Integer(2),
+            request_id: RequestId::Integer(2),
             params: invalidate.clone(),
         },
         async move {
@@ -319,7 +319,7 @@ async fn trusted_policy_validation_receipts_and_inflight_cleanup_use_original_na
         &queues,
         &gate,
         ClientRequest::ThreadObservationWakeRead {
-            id: RequestId::Integer(3),
+            request_id: RequestId::Integer(3),
             params: read.clone(),
         },
         async move {

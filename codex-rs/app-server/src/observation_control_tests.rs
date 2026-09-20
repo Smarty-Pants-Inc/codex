@@ -2,8 +2,24 @@ use super::*;
 use codex_app_server_protocol::JSONRPCError;
 use codex_app_server_protocol::RequestId;
 use codex_core::ObservationEvent;
+use codex_core::ObservationFrame;
+use codex_core::ObservationOwner;
+use codex_core::ObservationSlot;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+
+// The production bridge uses the budgeted mutation path. These slot tests
+// isolate the same pre-commit error mapping without becoming a success ACK path.
+fn set(
+    slot: &ObservationSlot,
+    owner: ObservationOwner,
+    revision: u64,
+    frame: Option<ObservationFrame>,
+) -> Result<(), JSONRPCErrorError> {
+    slot.set(owner, revision, frame)
+        .map(|_| ())
+        .map_err(store_error)
+}
 
 #[test]
 fn revision_rejection_has_exact_wire_envelope_and_does_not_publish() {

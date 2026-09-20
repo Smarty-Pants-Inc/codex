@@ -85,7 +85,7 @@ async fn original_control_enforces_rights_and_retains_one_retirement_after_waite
             grant_id: Uuid::now_v7(),
             issuer_generation: 1,
             owner,
-            thread_id: test.session_configured.session_id,
+            thread_id: test.session_configured.session_id.into(),
             scope: "fixture-source".into(),
             permissions: [PilotPermission::PrepareSource].into(),
             expires_at: chrono::Utc::now().timestamp() + 60,

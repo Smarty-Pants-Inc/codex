@@ -53,7 +53,7 @@ fn verify_group(text: &str) -> Vec<ResponseItem> {
     for part in &group.parts {
         let rendered = part.render();
         let tokens = tokenizer.encode_ordinary(&rendered);
-        assert_eq!(tokenizer.decode(tokens.clone()).unwrap(), rendered);
+        assert_eq!(tokenizer.decode(&tokens).unwrap(), rendered);
         assert!(tokens.len() + framing < 10_000);
         needs_p0_review |= tokens.len() + framing > 1000;
         assert!(part.body.len() <= OBSERVATION_PART_BYTES);

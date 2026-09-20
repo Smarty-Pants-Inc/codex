@@ -41,8 +41,14 @@ async fn unchanged_retry_retains_a_and_completed_tool_retry_captures_b() -> anyh
             // Test-only output allocation, not an operating profile default.
             config.observation_max_output_tokens = std::num::NonZeroU64::new(128);
             config.update_plan_enabled = true;
-            config.features.disable(Feature::CodeModeOnly);
-            config.features.disable(Feature::CodeMode);
+            config
+                .features
+                .disable(Feature::CodeModeOnly)
+                .expect("disable code-mode-only for observation retry fixture");
+            config
+                .features
+                .disable(Feature::CodeMode)
+                .expect("disable code mode for observation retry fixture");
             let mut model = model_info_from_slug("gpt-oss-20b");
             model.context_window = Some(131_072);
             model.effective_context_window_percent = 100;
