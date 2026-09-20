@@ -21,6 +21,7 @@ use super::SessionTaskResult;
 #[derive(Default)]
 pub(crate) struct RegularTask {
     preparation: Mutex<Option<TurnStartCustody>>,
+    original_observation_binding: std::sync::OnceLock<Option<Arc<crate::ObservationBinding>>>,
 }
 
 impl RegularTask {
@@ -57,6 +58,13 @@ impl SessionTask for RegularTask {
         input: Vec<TurnInput>,
         cancellation_token: CancellationToken,
     ) -> SessionTaskResult {
+        // Capture the actual original binding before the first await. Revocation
+        // cannot downgrade this task's unresolved input to ordinary input.
+        let original_binding = self.original_observation_binding.get_or_init(|| {
+            sess.services
+                .thread_extension_data
+                .get::<crate::ObservationBinding>()
+        });
         // RunningTask retains self through its original abort callback. Dropping
         // the run future releases this borrow, not its original input/state.
         let mut preparation = self.preparation.lock().await;
@@ -109,11 +117,7 @@ impl SessionTask for RegularTask {
             }
             // Preserve the original unbound follow-up behavior after hook/skills
             // refusal. Only the original observation binding adds this fence.
-            if sess
-                .services
-                .thread_extension_data
-                .get::<crate::ObservationBinding>()
-                .is_some()
+            if original_binding.is_some()
                 && preparation
                     .as_ref()
                     .expect("original task custody")

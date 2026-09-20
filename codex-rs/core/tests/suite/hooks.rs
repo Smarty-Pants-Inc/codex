@@ -2620,6 +2620,30 @@ async fn blocked_user_prompt_submit_persists_additional_context_for_next_turn() 
 
 #[tokio::test]
 async fn unbound_start_hook_refusal_keeps_original_queued_followup() -> Result<()> {
+    queued_followup_after_start_hook_refusal(OriginalHookBinding::Unbound).await
+}
+
+#[tokio::test]
+async fn revoked_original_binding_cannot_downgrade_unresolved_followup() -> Result<()> {
+    queued_followup_after_start_hook_refusal(OriginalHookBinding::RevokeDuringHook).await
+}
+
+enum OriginalHookBinding {
+    Unbound,
+    RevokeDuringHook,
+}
+
+struct StartHookRelease(std::path::PathBuf);
+
+impl Drop for StartHookRelease {
+    fn drop(&mut self) {
+        // Release on errors and unwinding as well as on the success path.
+        // The child deadline also bounds a failed cleanup write.
+        let _ = fs::write(&self.0, "release");
+    }
+}
+
+async fn queued_followup_after_start_hook_refusal(binding: OriginalHookBinding) -> Result<()> {
     skip_if_no_network!(Ok(()));
     let server = start_mock_server().await;
     let response = mount_sse_once(
@@ -2645,7 +2669,10 @@ import sys
 import time
 json.load(sys.stdin)
 Path(r"{}").write_text("started")
+deadline = time.monotonic() + 30
 while not Path(r"{}").exists():
+    if time.monotonic() >= deadline:
+        raise TimeoutError("test startup gate was not released")
     time.sleep(0.01)
 print(json.dumps({{"continue": False, "stopReason": "original startup refusal"}}))
 "#,
@@ -2665,9 +2692,35 @@ print(json.dumps({{"continue": False, "stopReason": "original startup refusal"}}
             )
             .unwrap();
         })
-        .with_config(trust_discovered_hooks);
+        .with_config(|config| {
+            trust_discovered_hooks(config);
+            config.model = Some("gpt-oss-20b".to_owned());
+            config.observation_max_output_tokens = std::num::NonZeroU64::new(128);
+            config.model_catalog = Some(codex_protocol::openai_models::ModelsResponse {
+                models: vec![codex_models_manager::model_info::model_info_from_slug(
+                    "gpt-oss-20b",
+                )],
+            });
+        });
     let test = builder.build_with_auto_env(&server).await?;
-    // No ObservationBinding is installed: this is the ordinary native path.
+    let release = StartHookRelease(test.codex_home_path().join("start-refusal-release"));
+    let original_slot = match binding {
+        OriginalHookBinding::Unbound => None,
+        OriginalHookBinding::RevokeDuringHook => {
+            let (slot, events, owner) = codex_core::ObservationSlot::new(/*connection_id*/ 1);
+            let slot = Arc::new(slot);
+            test.codex
+                .install_budgeted_observation_binding(
+                    codex_core::ObservationBinding {
+                        slot: Arc::clone(&slot),
+                        profile: codex_core::ObservationProfile::HarmonyGptOss,
+                    },
+                    owner,
+                )
+                .await?;
+            Some((slot, events))
+        }
+    };
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
             text: "initial input stopped before user hooks".to_owned(),
@@ -2692,21 +2745,50 @@ print(json.dumps({{"continue": False, "stopReason": "original startup refusal"}}
             text_elements: Vec::new(),
         }]))
         .await;
-    // Release even if steering failed, so the test cannot strand its hook.
-    fs::write(
-        test.codex_home_path().join("start-refusal-release"),
-        "release",
-    )?;
     queued?;
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
-    .await;
-    let request = response.single_request();
-    assert_eq!(
-        request.message_input_texts("user"),
-        vec!["queued followup survives startup refusal".to_owned()]
-    );
+    if let Some((slot, _events)) = original_slot.as_ref() {
+        slot.revoke()?;
+        let removed = test
+            .codex
+            .thread_extension_data()
+            .remove::<codex_core::ObservationBinding>()
+            .expect("remove the actual original binding during preparation");
+        assert!(Arc::ptr_eq(slot, &removed.slot));
+        assert!(
+            test.codex
+                .thread_extension_data()
+                .get::<codex_core::ObservationBinding>()
+                .is_none()
+        );
+    }
+    drop(release);
+    match binding {
+        OriginalHookBinding::Unbound => {
+            wait_for_event(&test.codex, |event| {
+                matches!(event, EventMsg::TurnComplete(_))
+            })
+            .await;
+            assert_eq!(
+                response.single_request().message_input_texts("user"),
+                vec!["queued followup survives startup refusal".to_owned()]
+            );
+        }
+        OriginalHookBinding::RevokeDuringHook => {
+            let event =
+                wait_for_event(&test.codex, |event| matches!(event, EventMsg::Error(_))).await;
+            let EventMsg::Error(error) = event else {
+                unreachable!()
+            };
+            assert!(error.message.contains(
+                "original turn input is unresolved; follow-up cannot replace its custody"
+            ));
+            wait_for_event(&test.codex, |event| {
+                matches!(event, EventMsg::TurnComplete(_))
+            })
+            .await;
+            assert_eq!(response.requests().len(), 0);
+        }
+    }
     Ok(())
 }
 
