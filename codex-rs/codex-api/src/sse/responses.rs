@@ -25,6 +25,10 @@ use tokio::time::timeout;
 use tracing::debug;
 use tracing::trace;
 
+#[cfg(test)]
+#[path = "responses_acceptance_tests.rs"]
+mod acceptance_tests;
+
 const X_REASONING_INCLUDED_HEADER: &str = "x-reasoning-included";
 const X_CODEX_TURN_STATE_HEADER: &str = "x-codex-turn-state";
 const OPENAI_MODEL_HEADER: &str = "openai-model";
@@ -67,6 +71,9 @@ pub fn spawn_response_stream(
     {
         let _ = turn_state.set(header_value.to_string());
     }
+    let response_created = telemetry
+        .as_ref()
+        .and_then(|telemetry| telemetry.response_created_callback());
     let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent, ApiError>>(1600);
     tokio::spawn(async move {
         if let Some(model) = server_model {
@@ -89,6 +96,7 @@ pub fn spawn_response_stream(
             idle_timeout,
             telemetry,
             safety_buffering_treatment,
+            response_created,
         )
         .await;
     });
@@ -534,6 +542,7 @@ pub async fn process_sse(
         idle_timeout,
         telemetry,
         SafetyBufferingTreatment::default(),
+        /*response_created*/ None,
     )
     .await;
 }
@@ -544,8 +553,10 @@ async fn process_sse_with_treatment(
     idle_timeout: Duration,
     telemetry: Option<Arc<dyn SseTelemetry>>,
     safety_buffering_treatment: SafetyBufferingTreatment,
+    response_created: Option<Arc<dyn Fn() + Send + Sync>>,
 ) {
     let mut stream = stream.eventsource();
+    let mut accepted = false;
     let mut response_error: Option<ApiError> = None;
     let mut last_server_model: Option<String> = None;
 
@@ -596,7 +607,16 @@ async fn process_sse_with_treatment(
         let turn_moderation_metadata = event.turn_moderation_metadata();
         let safety_buffering = event.safety_buffering(&safety_buffering_treatment);
 
-        if let Some(model) = event.response_model()
+        let response_model = event.response_model();
+        let processed_event = process_responses_event(event);
+        if !accepted && matches!(&processed_event, Ok(Some(ResponseEvent::Created))) {
+            accepted = true;
+            if let Some(callback) = response_created.as_ref() {
+                callback();
+            }
+        }
+
+        if let Some(model) = response_model
             && last_server_model.as_deref() != Some(model.as_str())
         {
             if tx_event
@@ -633,7 +653,7 @@ async fn process_sse_with_treatment(
             return;
         }
 
-        match process_responses_event(event) {
+        match processed_event {
             Ok(Some(event)) => {
                 let is_completed = matches!(event, ResponseEvent::Completed { .. });
                 if tx_event.send(Ok(event)).await.is_err() {
