@@ -105,3 +105,102 @@ fn rejected_profile_does_not_commit_or_publish_a_capture() {
     assert_eq!(slot.read(owner).unwrap(), published);
     assert!(sampling.active.is_none());
 }
+
+#[test]
+fn receipt_requires_complete_group_and_cancellation_releases_one_unknown_outcome() {
+    let (slot, mut events, owner) = ObservationSlot::new(/*connection_id*/ 1);
+    let slot = Arc::new(slot);
+    slot.set(
+        owner,
+        /*revision*/ 1,
+        Some(frame(&"group-data".repeat(2048))),
+    )
+    .unwrap();
+    let mut sampling = ObservationSampling::new(
+        Arc::clone(&slot),
+        ObservationProfile::HarmonyGptOss,
+        "group-turn".into(),
+    );
+    let (items, decision) = sampling.prepare(vec![], &model()).unwrap();
+    assert!(items.len() > 1);
+    let body = serde_json::json!({"input": items, "stream": true, "store": false});
+    let original = body["input"].as_array().unwrap();
+    let mut missing = original.clone();
+    missing.pop();
+    let mut duplicate = original.clone();
+    duplicate.push(original[0].clone());
+    let mut reordered = original.clone();
+    reordered.swap(/*a*/ 0, /*b*/ 1);
+    let mut mixed = original.clone();
+    mixed[0]["content"][0]["text"] = serde_json::Value::String(
+        mixed[0]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .replace(&decision.to_string(), &uuid::Uuid::new_v4().to_string()),
+    );
+    let mut wrong_role = original.clone();
+    wrong_role[0]["role"] = "developer".into();
+    let mut annotated = original.clone();
+    annotated[0]["internal_chat_message_metadata_passthrough"] =
+        serde_json::json!({"turn_id": "foreign"});
+    for input in [
+        vec![],
+        missing,
+        duplicate,
+        reordered,
+        mixed,
+        wrong_role,
+        annotated,
+    ] {
+        let request =
+            codex_client::Request::new(http::Method::POST, "http://fixture/responses".into())
+                .with_json(&serde_json::json!({"input": input, "stream": true, "store": false}));
+        assert_eq!(
+            slot.begin_attempt_for_request(decision, &request),
+            Err(ObservationError::InvalidFrame)
+        );
+    }
+    assert_eq!(
+        slot.begin_attempt(decision),
+        Err(ObservationError::InvalidFrame)
+    );
+    let mut incremental = body.clone();
+    incremental["previous_response_id"] = "old-response".into();
+    let request = codex_client::Request::new(http::Method::POST, "http://fixture/responses".into())
+        .with_json(&incremental);
+    assert_eq!(
+        slot.begin_attempt_for_request(decision, &request),
+        Err(ObservationError::InvalidFrame)
+    );
+    let mut request =
+        codex_client::Request::new(http::Method::POST, "http://fixture/responses".into())
+            .with_json(&body);
+    request.compression = codex_client::RequestCompression::Zstd;
+    assert_eq!(
+        slot.begin_attempt_for_request(decision, &request),
+        Err(ObservationError::InvalidFrame)
+    );
+    request.compression = codex_client::RequestCompression::None;
+    let request = request.into_prepared().unwrap();
+    slot.begin_attempt_for_request(decision, &request).unwrap();
+    drop(sampling);
+    let submitted = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| {
+            if let ObservationEvent::Submitted(record) = event {
+                Some(record)
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(submitted.len(), 1);
+    assert_eq!(
+        (
+            submitted[0].decision_id,
+            submitted[0].outcome,
+            submitted[0].terminal_decision
+        ),
+        (decision, crate::ObservationOutcome::Unknown, true)
+    );
+    assert!(slot.capture("after-cancellation").is_ok());
+}

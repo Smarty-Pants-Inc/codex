@@ -61,7 +61,9 @@ impl ObservationSampling {
                 items = CurrentObservations::new(self.profile, model, capture)?
                     .map(CurrentObservations::into_request_items)
                     .unwrap_or_default();
-                Ok(())
+                let mut input = canonical_input.clone();
+                input.extend(items.iter().cloned());
+                ObservationSlot::request_input_digest(input).map(Some)
             })?;
         let decision_id = capture.decision_id;
         self.active = Some(Active {

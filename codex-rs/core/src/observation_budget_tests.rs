@@ -49,7 +49,7 @@ fn lost_ack_retains_original_commit_but_revalidation_never_relabels_or_renews_it
     reservation.state = ObservationReservationState::Valid;
     assert_eq!(slot.read(owner).unwrap(), expected);
     assert_eq!(
-        slot.capture_checked("turn", Some(&model), |_| Ok(())),
+        slot.capture_checked("turn", Some(&model), |_| Ok(None)),
         Err(ObservationError::BudgetInvalid)
     );
     assert_eq!(
@@ -76,7 +76,7 @@ fn lost_ack_retains_original_commit_but_revalidation_never_relabels_or_renews_it
     expected.frame_budget_generation = Some(3);
     assert_eq!(slot.read(owner).unwrap(), expected);
     let captured = slot
-        .capture_checked("turn", Some(&model), |_| Ok(()))
+        .capture_checked("turn", Some(&model), |_| Ok(None))
         .unwrap();
     let original = captured.clone();
     slot.invalidate_budget().unwrap();
@@ -190,7 +190,7 @@ fn already_sent_acceptance_keeps_original_capture_after_budget_invalidation() {
     slot.initialize_budget(owner, &model, ObservationProfile::HarmonyGptOss)
         .unwrap();
     let captured = slot
-        .capture_checked("turn", Some(&model), |_| Ok(()))
+        .capture_checked("turn", Some(&model), |_| Ok(None))
         .unwrap();
     let attempt = slot.begin_attempt(captured.decision_id).unwrap();
     slot.invalidate_budget().unwrap();
