@@ -102,8 +102,14 @@ impl<T: HttpTransport> EndpointSession<T> {
             |req| {
                 let auth = self.auth.clone();
                 let transport = &self.transport;
+                let telemetry = self.request_telemetry.clone();
                 async move {
                     let req = auth.apply_auth(req).await.map_err(TransportError::from)?;
+                    if let Some(telemetry) = telemetry {
+                        telemetry
+                            .on_request_start()
+                            .map_err(TransportError::Build)?;
+                    }
                     transport.execute(req).await
                 }
             },
@@ -143,8 +149,14 @@ impl<T: HttpTransport> EndpointSession<T> {
             |req| {
                 let auth = self.auth.clone();
                 let transport = &self.transport;
+                let telemetry = self.request_telemetry.clone();
                 async move {
                     let req = auth.apply_auth(req).await.map_err(TransportError::from)?;
+                    if let Some(telemetry) = telemetry {
+                        telemetry
+                            .on_request_start()
+                            .map_err(TransportError::Build)?;
+                    }
                     transport.stream(req).await
                 }
             },
