@@ -1,0 +1,37 @@
+{
+  "locked_version": "150.4.0",
+  "release_tag": "rusty-v8-v150.4.0",
+  "target": "x86_64-unknown-linux-gnu",
+  "profile": "ptrcomp_sandbox_release",
+  "source": {
+    "action": ".github/actions/setup-rusty-v8/action.yml",
+    "action_sha256": "ec4107dfd69f6034d34a558df2c85191a9e6d03dfedf3bce7a94bb0fb0de85b0",
+    "resolver": ".github/scripts/rusty_v8_bazel.py",
+    "resolver_sha256": "d76414bc5c392fc17bb8cc4f81a8a679aa04e718b0c34141ba8db31b5cc9cff9",
+    "module_helper": ".github/scripts/rusty_v8_module_bazel.py",
+    "module_helper_sha256": "a330e559ae4fa71d9e8a9f97c38805756c89de896019d60f596ca8b745770b0c",
+    "bazel_helper": ".github/scripts/run_bazel_with_buildbuddy.py",
+    "bazel_helper_sha256": "9bde86d11cfd4271dadc0b942d6b2d2cd90c59600b7e807b66a14eb49b5e1fff"
+  },
+  "operands": {
+    "archive_name": "librusty_v8_ptrcomp_sandbox_release_x86_64-unknown-linux-gnu.a.gz",
+    "archive_sha256": "a35c75d1f26e6a983885a45b33490a4ebe54f05050568b32b89cfb421b30b583",
+    "binding_name": "src_binding_ptrcomp_sandbox_release_x86_64-unknown-linux-gnu.rs",
+    "binding_sha256": "7727826ae479bdb645e807239fb12d1f8e2e23de7a6cf16f5ee592690d1d8506",
+    "checksums_name": "rusty_v8_ptrcomp_sandbox_release_x86_64-unknown-linux-gnu.sha256",
+    "checksums_sha256": "6774b42c9424c098c72a805c08d4e94be17c591cf02b1dc2633060255a8a61be"
+  },
+  "evidence": {
+    "historical_download_result": "/home/paul/Projects/smarty-dev/worktrees/codex/ci-rollout/.local/ci-rollout/pr20-v8-150.4.0/RESULT.md",
+    "historical_data_only": true,
+    "live_download_in_preparation": false,
+    "archive_or_binding_copied_into_lane_evidence": false,
+    "lane_evidence_allowlist": ["rusty-v8-paths.txt", "rusty-v8.sha256"]
+  },
+  "path_binding": {
+    "wrapper_checkout": "$GITHUB_WORKSPACE",
+    "product_checkout_before_move": "$GITHUB_WORKSPACE/product",
+    "product_runtime_root_after_move": "/tmp/codex-d75-causal/<lane>/source",
+    "reason": "The existing action resolves GITHUB_WORKSPACE/.github/scripts; the wrapper is checked out at workspace root so the immutable helper paths exist without mutating product source or loosening guards."
+  }
+}

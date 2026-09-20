@@ -1,177 +1,165 @@
 name: smarty-ci
-
 on:
   workflow_dispatch:
-  pull_request:
-    branches:
-      - main
-  push:
-    branches:
-      - main
-      - mergify/merge-queue/**
-      - tmp-mergify/merge-queue/**
-
 permissions:
   contents: read
-
 concurrency:
-  group: smarty-ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
+  group: codex-d75-causal-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  smarty-ci:
-    name: smarty-ci
+  causal:
+    name: d75-${{ matrix.lane }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        lane: [core, app]
     env:
-      CARGO_BUILD_JOBS: "2"
-      CARGO_INCREMENTAL: "0"
-      CARGO_NET_RETRY: "0"
+      D75_LANE: ${{ matrix.lane }}
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_NET_RETRY: '0'
+      NEXTEST_PROFILE: local
+      RUST_MIN_STACK: '8388608'
+      INSTA_UPDATE: 'no'
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-      - name: Record generation source
+      - name: Guard one-shot candidate event
+        env:
+          EVENT_REPOSITORY_ID: ${{ github.repository_id }}
+          EVENT_WORKFLOW_SHA: ${{ github.workflow_sha }}
         run: |
-          mkdir -p "$RUNNER_TEMP/transport-generation"
-          git show -s --format='%H %T %P' HEAD | tee "$RUNNER_TEMP/transport-generation/source-before.txt"
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = workflow_dispatch
+          test "$GITHUB_REPOSITORY" = Smarty-Pants-Inc/codex
+          test "$EVENT_REPOSITORY_ID" = 1047329867
+          test "$GITHUB_REF" = refs/heads/qualify/codex-d75-causal
+          test "$GITHUB_WORKFLOW_REF" = Smarty-Pants-Inc/codex/.github/workflows/smarty-ci.yml@refs/heads/qualify/codex-d75-causal
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$EVENT_WORKFLOW_SHA" = "$GITHUB_SHA"
+          test ! -e /tmp/codex-d75-causal
+          test ! -L /tmp/codex-d75-causal
+          mkdir -m 700 -p "/tmp/codex-d75-causal/$D75_LANE"
+      - name: Checkout exact wrapper at workspace root for immutable helper binding
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Checkout reviewed product
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          ref: d75f0d72f3d3f9870db0d1a6e98128bc730ae5ac
+          path: product
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Bind source and wrapper
+        id: bind
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD^)" = d75f0d72f3d3f9870db0d1a6e98128bc730ae5ac
+          test "$(git -C product rev-parse HEAD)" = d75f0d72f3d3f9870db0d1a6e98128bc730ae5ac
+          test "$(git -C product rev-parse HEAD^{tree})" = 9d3ad5e06fbe64ed9c7bb721eafe980e8d095c09
+          base="/tmp/codex-d75-causal/$D75_LANE"
+          mv product "$base/source"
           git diff --exit-code
           git diff --cached --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+          git -C "$base/source" diff --exit-code
+          git -C "$base/source" diff --cached --exit-code
+          test -z "$(git -C "$base/source" ls-files --others --exclude-standard)"
+          (cd .github/qualification/d75-causal && sha256sum -c RECIPE.sha256)
+          test "$(sha256sum .github/actions/setup-rusty-v8/action.yml | cut -d ' ' -f1)" = ec4107dfd69f6034d34a558df2c85191a9e6d03dfedf3bce7a94bb0fb0de85b0
+          test "$(sha256sum .github/scripts/rusty_v8_bazel.py | cut -d ' ' -f1)" = d76414bc5c392fc17bb8cc4f81a8a679aa04e718b0c34141ba8db31b5cc9cff9
+          test "$(sha256sum .github/scripts/rusty_v8_module_bazel.py | cut -d ' ' -f1)" = a330e559ae4fa71d9e8a9f97c38805756c89de896019d60f596ca8b745770b0c
+          test "$(sha256sum .github/scripts/run_bazel_with_buildbuddy.py | cut -d ' ' -f1)" = 9bde86d11cfd4271dadc0b942d6b2d2cd90c59600b7e807b66a14eb49b5e1fff
+          mkdir -m 700 "$base/evidence"
+          export D75_EVIDENCE_DIR="$base/evidence"
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json,os,subprocess
+          e=os.environ
+          git=lambda *a: subprocess.check_output(['git',*a],text=True).strip()
+          source=Path('/tmp/codex-d75-causal')/e['D75_LANE']/'source'
+          h,t,p=git('-C',str(source),'show','-s','--format=%H %T %P').split()
+          row={'product':h,'tree':t,'parent':p,'wrapper':e['GITHUB_SHA'],
+               'wrapper_tree':git('rev-parse','HEAD^{tree}'),
+               'workflow_sha256':hashlib.sha256(Path('.github/workflows/smarty-ci.yml').read_bytes()).hexdigest(),
+               'repository':e['GITHUB_REPOSITORY'],'repository_id':'1047329867',
+               'run':e['GITHUB_RUN_ID'],'attempt':e['GITHUB_RUN_ATTEMPT'],'job_key':e['GITHUB_JOB'],
+               'workflow_ref':e['GITHUB_WORKFLOW_REF'],'ref':e['GITHUB_REF'],'lane':e['D75_LANE'],
+               'runner_name':e['RUNNER_NAME'],'runner_os':e['RUNNER_OS'],'runner_arch':e['RUNNER_ARCH'],
+               'recipe_manifest_sha256':hashlib.sha256(Path('wrapper/.github/qualification/d75-causal/RECIPE.sha256').read_bytes()).hexdigest()}
+          Path(e['D75_EVIDENCE_DIR'],'custody.json').write_text(json.dumps(row,indent=2)+'\n')
+          PY
+          echo 'ready=true' >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
         with:
-          components: rustfmt,clippy
-      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+          toolchain: 1.95.0
+          components: rustfmt,clippy,rust-src
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532
         with:
           tool: just@1.51.0,nextest@0.9.103
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+      - uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a
+      - name: Configure matching sandbox V8 artifacts
+        uses: ./.github/actions/setup-rusty-v8
         with:
-          bazelisk-version: 1.28.1
-      - uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          version: "0.11.3"
-          enable-cache: false
-      - name: Record generation tools
+          target: x86_64-unknown-linux-gnu
+      - name: Record consumed V8 operand hashes and paths
+        if: success()
         run: |
           set -euo pipefail
-          {
-            test "$(cat .bazelversion)" = 9.0.0
-            bazel_version="$(bazel --version)"
-            echo "$bazel_version"
-            test "$bazel_version" = 'bazel 9.0.0'
-            rustc -Vv
-            cargo --version
-            just --version
-            cargo nextest --version
-            dotslash --version
-            uv --version
-          } 2>&1 | tee "$RUNNER_TEMP/transport-generation/tools.log"
-      - name: Install Linux sandbox build dependencies
+          base="/tmp/codex-d75-causal/$D75_LANE"
+          evidence="$base/evidence"
+          test "$(basename "$RUSTY_V8_ARCHIVE")" = librusty_v8_ptrcomp_sandbox_release_x86_64-unknown-linux-gnu.a.gz
+          test "$(basename "$RUSTY_V8_SRC_BINDING_PATH")" = src_binding_ptrcomp_sandbox_release_x86_64-unknown-linux-gnu.rs
+          checksums="$(dirname "$RUSTY_V8_ARCHIVE")/rusty_v8_ptrcomp_sandbox_release_x86_64-unknown-linux-gnu.sha256"
+          test -f "$RUSTY_V8_ARCHIVE" -a -f "$RUSTY_V8_SRC_BINDING_PATH" -a -f "$checksums"
+          printf 'archive=%s\nbinding=%s\nchecksums=%s\n' "$RUSTY_V8_ARCHIVE" "$RUSTY_V8_SRC_BINDING_PATH" "$checksums" > "$evidence/rusty-v8-paths.txt"
+          sha256sum "$RUSTY_V8_ARCHIVE" "$RUSTY_V8_SRC_BINDING_PATH" "$checksums" > "$evidence/rusty-v8.sha256"
+      - name: Existing Linux build dependencies (no sandbox-policy changes)
         run: |
+          set -euo pipefail
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
-      - name: Check bubblewrap netlink replies
-        working-directory: codex-rs/bwrap
-        run: |
-          test_binary="$(mktemp)"
-          trap 'rm -f "$test_binary"' EXIT
-          cc -std=gnu11 -Wall -Wextra -ffunction-sections -fdata-sections \
-            -I. -I../vendor/bubblewrap -Wl,--gc-sections \
-            tests/netlink_reply.c -o "$test_binary"
-          "$test_binary"
-      - name: Check Rust formatting
-        working-directory: codex-rs
-        run: cargo fmt -- --config imports_granularity=Item --check
-      - name: Test codex-bwrap
-        working-directory: codex-rs
-        run: |
-          # The crate has no Rust tests; C29 above supplies behavioral coverage.
-          just test -p codex-bwrap --locked --no-tests=pass --retries 0 --test-threads 2
-      - name: Generate and check Bazel lock
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential pkg-config libcap-dev libssl-dev protobuf-compiler
+          sudo cp "$(command -v dotslash)" /usr/local/bin/dotslash
+      - name: Serial causal lane within one shared 30-minute timeout
+        id: lane
         run: |
           set -euo pipefail
-          just bazel-lock-update 2>&1 | tee "$RUNNER_TEMP/transport-generation/bazel-lock-update.log"
-          just bazel-lock-check 2>&1 | tee "$RUNNER_TEMP/transport-generation/bazel-lock-check.log"
-      - name: Generate normal and experimental protocol schemas
-        working-directory: codex-rs
+          base="/tmp/codex-d75-causal/$D75_LANE"
+          export D75_RECIPE="$GITHUB_WORKSPACE/.github/qualification/d75-causal"
+          export D75_EVIDENCE_DIR="$base/evidence"
+          export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+          export CARGO_HOME="$base/cargo-home"
+          export HOME="$base/home" TMPDIR="$base/tmp" CODEX_HOME="$base/codex-home" CARGO_TARGET_DIR="$base/target"
+          mkdir -m 700 "$HOME" "$TMPDIR" "$CODEX_HOME" "$CARGO_HOME"
+          if test "$D75_LANE" = core; then export CODEX_OBSERVATION_CAPACITY_FIXTURES="$base/fixtures"; fi
+          cd "$base/source"
+          set +e
+          timeout --signal=TERM --kill-after=5s 1800s bash "$D75_RECIPE/run-lane.sh" > "$D75_EVIDENCE_DIR/wrapper.stdout" 2> "$D75_EVIDENCE_DIR/wrapper.stderr"
+          rc=$?
+          set -e
+          printf '%s\n' "$rc" > "$D75_EVIDENCE_DIR/external-lane-exit.txt"
+          exit "$rc"
+      - name: Produce and separately stage bounded DATA, including first failure
+        id: evidence
+        if: always() && steps.bind.outputs.ready == 'true'
         run: |
           set -euo pipefail
-          export CODEX_APP_SERVER_SCHEMA_ROOT="$PWD/app-server-protocol/schema"
-          CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL=0 just test -p codex-app-server-protocol --lib \
-            -E 'test(=schema_fixtures_tests::write_schema_fixtures_from_env)' --run-ignored only \
-            --locked --retries 0 --test-threads 2 2>&1 | tee "$RUNNER_TEMP/transport-generation/schema-normal.log"
-          CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL=1 just test -p codex-app-server-protocol --lib \
-            -E 'test(=schema_fixtures_tests::write_schema_fixtures_from_env)' --run-ignored only \
-            --locked --retries 0 --test-threads 2 2>&1 | tee "$RUNNER_TEMP/transport-generation/schema-experimental.log"
-      - name: Test protocol packages
-        working-directory: codex-rs
-        run: |
-          set -euo pipefail
-          just test -p codex-protocol -p codex-app-server-protocol --locked --retries 0 --test-threads 2 \
-            2>&1 | tee "$RUNNER_TEMP/transport-generation/package-tests.log"
-      - name: Fix protocol lint and format
-        working-directory: codex-rs
-        run: |
-          set -euo pipefail
-          just fix -p codex-protocol -p codex-app-server-protocol --locked \
-            2>&1 | tee "$RUNNER_TEMP/transport-generation/scoped-fix.log"
-          just fmt 2>&1 | tee "$RUNNER_TEMP/transport-generation/fmt.log"
-      - name: Return generation evidence and validate changed paths
-        if: always()
-        run: |
-          set -euo pipefail
-          evidence="$RUNNER_TEMP/transport-generation"
-          mkdir -p "$evidence"
-          git show -s --format='%H %T %P' HEAD > "$evidence/source-after.txt"
-          export GIT_INDEX_FILE="$RUNNER_TEMP/transport-generation-index"
-          git read-tree HEAD
-          git add --update
-          git add --all -- codex-rs/app-server-protocol/schema
-          git write-tree >> "$evidence/source-after.txt"
-          git diff --cached --binary HEAD > "$evidence/generated.patch"
-          git diff --cached --binary HEAD -- MODULE.bazel.lock > "$evidence/bazel-lock.patch"
-          git diff --cached --binary HEAD -- codex-rs/app-server-protocol/schema > "$evidence/schemas.patch"
-          git diff --cached --binary HEAD -- codex-rs/protocol/src codex-rs/app-server-protocol/src > "$evidence/scoped-fix.patch"
-          rm "$GIT_INDEX_FILE"
-          unset GIT_INDEX_FILE
-          git status --porcelain=v1 --untracked-files=all > "$evidence/status-after.txt"
-          cp MODULE.bazel.lock "$evidence/MODULE.bazel.lock"
-          sha256sum MODULE.bazel.lock codex-rs/Cargo.lock .github/workflows/smarty-ci.yml > "$evidence/source-after.sha256"
-          if test -s "$evidence/generated.patch"; then
-            echo 'GENERATED DELTA: NOT FINAL CLEAN QUALIFICATION; source-owner integration and review required.' | tee "$evidence/qualification.txt" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'No tracked generated delta. Qualification still requires every job step to pass.' | tee "$evidence/qualification.txt" >> "$GITHUB_STEP_SUMMARY"
-          fi
-          python3 - <<'PY'
-          import subprocess
-          paths = subprocess.check_output(["git", "diff", "--no-renames", "--name-only", "-z", "HEAD"]).decode().split("\0")
-          untracked = subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "-z"]).decode().split("\0")
-          schema = "codex-rs/app-server-protocol/schema/"
-          def schema_output(p):
-              return (p.startswith(schema + "typescript/") and p.endswith(".ts")
-                      or p.startswith(schema + "json/") and p.endswith(".json")
-                      or p in (schema + "precomputed/app-server-exports-stable.json.zst",
-                               schema + "precomputed/app-server-exports-experimental.json.zst"))
-          prefixes = ("codex-rs/protocol/src/", "codex-rs/app-server-protocol/src/")
-          unexpected = [p for p in paths if p and p != "MODULE.bazel.lock" and not schema_output(p) and not (p.startswith(prefixes) and p.endswith(".rs"))]
-          unexpected += [p for p in untracked if p and not schema_output(p)]
-          if unexpected:
-              raise SystemExit(f"Undeclared generated changes: {unexpected}")
-          PY
-          git diff --cached --exit-code
-      - name: Upload generation evidence (not final qualification)
-        if: always()
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+          base="/tmp/codex-d75-causal/$D75_LANE"
+          recipe="$GITHUB_WORKSPACE/.github/qualification/d75-causal"
+          if ! test -f "$base/evidence/external-lane-exit.txt"; then printf '125\n' > "$base/evidence/external-lane-exit.txt"; fi
+          python3 "$recipe/produce-evidence.py" "$base/evidence" "$D75_LANE"
+          python3 "$recipe/stage-upload.py" "$base/evidence" "$base/validated-upload"
+          echo 'ready=true' >> "$GITHUB_OUTPUT"
+      - name: Upload only validated bounded lane evidence
+        if: always() && steps.evidence.outputs.ready == 'true'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
         with:
-          name: full-observation-generation-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/transport-generation/
+          name: d75-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/codex-d75-causal/${{ matrix.lane }}/validated-upload/
           if-no-files-found: error
           retention-days: 7
-      - name: Check source remains unchanged
-        if: always()
-        run: |
-          git diff --exit-code
-          git diff --cached --exit-code
-          test -z "$(git ls-files --others --exclude-standard)"

@@ -1,0 +1,313 @@
+{
+  "kind": "ORIGINAL_SERIALIZER_NEGATIVE_CAPACITY_INPUTS",
+  "sourceCommit": "91b5d782ef5ad5eaad470abfd5d4eff157513e94",
+  "serializer": "src/core/frames.ts::compose",
+  "bodyValidation": "src/execution/index.ts::normalizeOutput",
+  "composedAt": "2026-09-19T00:00:00.000Z",
+  "cases": [
+    {
+      "label": "apostrophe",
+      "watches": 4,
+      "bodyBytesPerWatch": 2048,
+      "normalization": "OK",
+      "input": {
+        "name": "apostrophe-4x2048.input.json",
+        "bytes": 10387,
+        "sha256": "7cd6f6cf7b7d5a0936f584a37d91a8fc6f4e1095571ae0262488846063eace16"
+      },
+      "body": {
+        "name": "apostrophe-4x2048.body.txt",
+        "bytes": 2048,
+        "sha256": "0265b8f82954fb56e5ea876c19c8bc5d289519fabb67682e9723cca0da72892f"
+      },
+      "text": {
+        "name": "apostrophe-4x2048.frame.txt",
+        "bytes": 9125,
+        "sha256": "4af0da49e03351ae3d23b58ab8c443166bfde6371421895689824955b3211217"
+      },
+      "frame": {
+        "name": "apostrophe-4x2048.frame.json",
+        "bytes": 19750,
+        "sha256": "813f95eb57c86d38c1c13c61d8a0ef1129d34c8bb032a6ad804e698f3a90be99"
+      },
+      "coreReservationBytes": 58368,
+      "tokenCount": null
+    },
+    {
+      "label": "apostrophe",
+      "watches": 8,
+      "bodyBytesPerWatch": 2048,
+      "normalization": "OK",
+      "input": {
+        "name": "apostrophe-8x2048.input.json",
+        "bytes": 20415,
+        "sha256": "bdac3ad0a122cb9cf24f426f8761c2fe87686ff25abe1436c2a4e689f0f0ccbe"
+      },
+      "body": {
+        "name": "apostrophe-8x2048.body.txt",
+        "bytes": 2048,
+        "sha256": "0265b8f82954fb56e5ea876c19c8bc5d289519fabb67682e9723cca0da72892f"
+      },
+      "text": {
+        "name": "apostrophe-8x2048.frame.txt",
+        "bytes": 18145,
+        "sha256": "9e24132bb81fd93a80fcc9977963bef6632c421e7b1a815e761a70e5054e9336"
+      },
+      "frame": {
+        "name": "apostrophe-8x2048.frame.json",
+        "bytes": 38906,
+        "sha256": "cfb0391bfebb00558003ba5016476fc56b30f490d6638a41e55ac664dcf1b3e2"
+      },
+      "coreReservationBytes": 115712,
+      "tokenCount": null
+    },
+    {
+      "label": "quote",
+      "watches": 4,
+      "bodyBytesPerWatch": 2048,
+      "normalization": "OK",
+      "input": {
+        "name": "quote-4x2048.input.json",
+        "bytes": 18579,
+        "sha256": "c5ca5cdebd224687dc1f43d02861a0697e66b2999a2a95c31e3b8d9a158d0b91"
+      },
+      "body": {
+        "name": "quote-4x2048.body.txt",
+        "bytes": 2048,
+        "sha256": "32090522b93f6c897f40a4920361f5078fcccf9bbcbae10a513d2e4e41ef3882"
+      },
+      "text": {
+        "name": "quote-4x2048.frame.txt",
+        "bytes": 17317,
+        "sha256": "9043d479a5bb378643ee1eeca168ba1cd2453636e019be8e4375c011d1d57575"
+      },
+      "frame": {
+        "name": "quote-4x2048.frame.json",
+        "bytes": 52518,
+        "sha256": "0f90db64be1817ff29ea3b454602cc482a65bd8482aba99f6a2e5772d6664a61"
+      },
+      "coreReservationBytes": 58368,
+      "tokenCount": null
+    },
+    {
+      "label": "quote",
+      "watches": 8,
+      "bodyBytesPerWatch": 2048,
+      "normalization": "OK",
+      "input": {
+        "name": "quote-8x2048.input.json",
+        "bytes": 36799,
+        "sha256": "cab78d0a5677049984913121c611a873ff847893fda08c9690bd0f84dd5f2731"
+      },
+      "body": {
+        "name": "quote-8x2048.body.txt",
+        "bytes": 2048,
+        "sha256": "32090522b93f6c897f40a4920361f5078fcccf9bbcbae10a513d2e4e41ef3882"
+      },
+      "text": {
+        "name": "quote-8x2048.frame.txt",
+        "bytes": 34529,
+        "sha256": "6e65142fb397db7d25193f0c645f9ace191e27019861e3cc784d98a34b56491e"
+      },
+      "frame": {
+        "name": "quote-8x2048.frame.json",
+        "bytes": 104442,
+        "sha256": "743dd6777e8ddeaf22e502e429c00322807af5b9470f1ca383a1231ae2011261"
+      },
+      "coreReservationBytes": 115712,
+      "tokenCount": null
+    },
+    {
+      "label": "backslash",
+      "watches": 4,
+      "bodyBytesPerWatch": 2048,
+      "normalization": "OK",
+      "input": {
+        "name": "backslash-4x2048.input.json",
+        "bytes": 18579,
+        "sha256": "e68203ebb962091c2bd369fc851a3dd72504b98f55aee6593224eebb0182514d"
+      },
+      "body": {
+        "name": "backslash-4x2048.body.txt",
+        "bytes": 2048,
+        "sha256": "f3306068285abaa9bf588a5b5f25795863b77cb21e03b476e7f5e17061010000"
+      },
+      "text": {
+        "name": "backslash-4x2048.frame.txt",
+        "bytes": 17317,
+        "sha256": "e1ebcd8ec3ebeab919a87ca0dcd73854151c27d4cc6d5c469627217ceeb36e5d"
+      },
+      "frame": {
+        "name": "backslash-4x2048.frame.json",
+        "bytes": 52518,
+        "sha256": "ce5a6fddb11134ea9af0b73d4274d25e78d6583d332b22767e35e26f72bce30b"
+      },
+      "coreReservationBytes": 58368,
+      "tokenCount": null
+    },
+    {
+      "label": "backslash",
+      "watches": 8,
+      "bodyBytesPerWatch": 2048,
+      "normalization": "OK",
+      "input": {
+        "name": "backslash-8x2048.input.json",
+        "bytes": 36799,
+        "sha256": "aedde2a595f1d3b77452dc3b808d96be37e2dca46f5bb96d13c2b818deb5f412"
+      },
+      "body": {
+        "name": "backslash-8x2048.body.txt",
+        "bytes": 2048,
+        "sha256": "f3306068285abaa9bf588a5b5f25795863b77cb21e03b476e7f5e17061010000"
+      },
+      "text": {
+        "name": "backslash-8x2048.frame.txt",
+        "bytes": 34529,
+        "sha256": "5ba113e91b4a1cf85dd1727384286310f68596c702fc6c8da169b927cf1f176f"
+      },
+      "frame": {
+        "name": "backslash-8x2048.frame.json",
+        "bytes": 104442,
+        "sha256": "3da3dcd4980fd7e93b58e085695c2e2025195aa203e1f9dd65fdd0010d545f6d"
+      },
+      "coreReservationBytes": 115712,
+      "tokenCount": null
+    },
+    {
+      "label": "ampersand",
+      "watches": 4,
+      "bodyBytesPerWatch": 2048,
+      "normalization": "OK",
+      "input": {
+        "name": "ampersand-4x2048.input.json",
+        "bytes": 10387,
+        "sha256": "5277b90d4ea6566e0a0f0054210668d9d1fbd3d7e801e777983f8b8f2f777fa2"
+      },
+      "body": {
+        "name": "ampersand-4x2048.body.txt",
+        "bytes": 2048,
+        "sha256": "a8ef449923555a03d8ed0f266681d18a3c363b89e8a7fea61502047ea6f06cb1"
+      },
+      "text": {
+        "name": "ampersand-4x2048.frame.txt",
+        "bytes": 9125,
+        "sha256": "7f1b3846c913eeda954d00a4daa976e4600dc3ff30ced7b6531c73be571690ab"
+      },
+      "frame": {
+        "name": "ampersand-4x2048.frame.json",
+        "bytes": 19750,
+        "sha256": "7fa609942338ed604e253d801a0eabb38a491ee776ebfedbedad51de8dc5b52d"
+      },
+      "coreReservationBytes": 58368,
+      "tokenCount": null
+    },
+    {
+      "label": "ampersand",
+      "watches": 8,
+      "bodyBytesPerWatch": 2048,
+      "normalization": "OK",
+      "input": {
+        "name": "ampersand-8x2048.input.json",
+        "bytes": 20415,
+        "sha256": "2d239ccfee0c7cb70d601783d1da6edbb88120c39ccb0d512d484648bb9f765d"
+      },
+      "body": {
+        "name": "ampersand-8x2048.body.txt",
+        "bytes": 2048,
+        "sha256": "a8ef449923555a03d8ed0f266681d18a3c363b89e8a7fea61502047ea6f06cb1"
+      },
+      "text": {
+        "name": "ampersand-8x2048.frame.txt",
+        "bytes": 18145,
+        "sha256": "59186ea98e673764f96e80a4111118c18098ffe8a1f2132ed2b93bc7a0c6da22"
+      },
+      "frame": {
+        "name": "ampersand-8x2048.frame.json",
+        "bytes": 38906,
+        "sha256": "9a1acd32e7457d05efd539b386d43450cd4a97cf0feaa65a731ad345a55a1eb4"
+      },
+      "coreReservationBytes": 115712,
+      "tokenCount": null
+    }
+  ],
+  "domain": [
+    {
+      "code": 0,
+      "result": {
+        "outcome": "INVALID_OUTPUT",
+        "body": ""
+      }
+    },
+    {
+      "code": 8,
+      "result": {
+        "outcome": "INVALID_OUTPUT",
+        "body": ""
+      }
+    },
+    {
+      "code": 9,
+      "result": {
+        "outcome": "OK",
+        "body": "A\tB"
+      }
+    },
+    {
+      "code": 10,
+      "result": {
+        "outcome": "OK",
+        "body": "A\nB"
+      }
+    },
+    {
+      "code": 11,
+      "result": {
+        "outcome": "INVALID_OUTPUT",
+        "body": ""
+      }
+    },
+    {
+      "code": 13,
+      "result": {
+        "outcome": "INVALID_OUTPUT",
+        "body": ""
+      }
+    },
+    {
+      "code": 27,
+      "result": {
+        "outcome": "INVALID_OUTPUT",
+        "body": ""
+      }
+    },
+    {
+      "code": 31,
+      "result": {
+        "outcome": "INVALID_OUTPUT",
+        "body": ""
+      }
+    },
+    {
+      "code": 127,
+      "result": {
+        "outcome": "INVALID_OUTPUT",
+        "body": ""
+      }
+    },
+    {
+      "code": 128,
+      "result": {
+        "outcome": "INVALID_OUTPUT",
+        "body": ""
+      }
+    },
+    {
+      "code": 159,
+      "result": {
+        "outcome": "INVALID_OUTPUT",
+        "body": ""
+      }
+    }
+  ],
+  "limits": "Fixture owner/sample fingerprints are data, not native authority or real sample receipts. Actual compose/normalizer used; no provider, process execution, token proof or native capacity qualification."
+}
