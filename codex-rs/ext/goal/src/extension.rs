@@ -206,12 +206,12 @@ where
                     thread_id,
                     Arc::clone(&self.state_dbs),
                     self.event_emitter.clone(),
-                    self.metrics.clone(),
                     self.thread_manager.clone(),
                     self.queue_service.clone(),
                     accounting_state,
                     GoalRuntimeConfig {
                         analytics: self.analytics.clone(),
+                        metrics: self.metrics.clone(),
                         enabled,
                         tools_available_for_thread,
                         auto_continue_capability,
