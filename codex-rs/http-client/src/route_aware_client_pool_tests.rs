@@ -19,6 +19,35 @@ use tracing_subscriber::layer::SubscriberExt;
 use super::*;
 use crate::OutboundProxyPolicy;
 
+#[test]
+fn request_failures_classify_tls_errors_inside_nested_io_wrappers() {
+    for (source, expected) in [
+        (
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                rustls::Error::InvalidCertificate(rustls::CertificateError::UnknownIssuer),
+            ),
+            Some(RouteFailureClass::TlsError),
+        ),
+        (
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                rustls::Error::AlertReceived(rustls::AlertDescription::ProtocolVersion),
+            ),
+            Some(RouteFailureClass::TlsError),
+        ),
+        (
+            io::Error::other("certificate validation failed"),
+            Some(RouteFailureClass::ProxyResolutionUnavailable),
+        ),
+    ] {
+        let error = RouteAwareRequestError::Route(RouteAwareClientPoolError::Resolve(
+            io::Error::other(source),
+        ));
+        assert_eq!(error.failure_class(), expected);
+    }
+}
+
 #[tokio::test]
 async fn request_failures_classify_real_untrusted_certificate_handshakes() {
     codex_utils_rustls_provider::ensure_rustls_crypto_provider();
