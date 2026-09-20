@@ -9,6 +9,8 @@ use codex_core::PilotRequestReservation;
 use codex_models_manager::model_info::model_info_from_slug;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::TokenUsage;
@@ -158,9 +160,15 @@ async fn original_thread_admission_send_usage_and_shutdown_share_native_custody(
             profile: ObservationProfile::HarmonyGptOss,
         })
         .await?;
-    let input = TurnInputRequest::new(TurnInput::ResponseItem(responses::user_message_item(
-        "controlled native opportunity",
-    )));
+    let input = TurnInputRequest::new(TurnInput::ResponseItem(ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "controlled native opportunity".to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }));
     let nonce = Uuid::new_v4();
     for request in [
         TurnInputRequest::user_input(vec![codex_protocol::user_input::UserInput::Text {
@@ -170,6 +178,9 @@ async fn original_thread_admission_send_usage_and_shutdown_share_native_custody(
         input
             .clone()
             .with_idle_turn_source(codex_protocol::turn_input::IdleTurnSource::GoalContinuation),
+        TurnInputRequest::new(TurnInput::ResponseItem(responses::user_message_item(
+            "must not forge direct user input through pilot admission",
+        ))),
     ] {
         let error = test
             .codex

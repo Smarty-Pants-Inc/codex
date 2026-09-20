@@ -162,24 +162,34 @@ async fn guardian_subagent_review_preserves_late_root_user_authorization() -> Re
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
-    let mut root_history_items = [
+    for text in [
         format!(
             "{}\n{SYNTHETIC_AUTHORIZATION}",
             codex_core::review_prompts::SUMMARY_PREFIX
         ),
         render_review_exit_success(SYNTHETIC_REVIEW_AUTHORIZATION),
-    ]
-    .into_iter()
-    .map(|text| ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText { text }],
-        phase: None,
-        internal_chat_message_metadata_passthrough: None,
-    })
-    .collect::<Vec<_>>();
+    ] {
+        let expected_text = text.clone();
+        let synthetic_turn = mount_sse_once_match(
+            &server,
+            move |request: &wiremock::Request| {
+                is_root_request(request, root_thread_id) && contains_text(request, &expected_text)
+            },
+            sse(vec![ev_completed("root-synthetic-content-response")]),
+        )
+        .await;
+        // Exercise the exclusions through real direct input, not injected user history.
+        test.submit_text_turn(&text).await?;
+        assert_eq!(
+            synthetic_turn
+                .single_request()
+                .message_input_texts("user")
+                .last(),
+            Some(&text)
+        );
+    }
     let root_assistant_reply = format!("{ROOT_ASSISTANT_REPLY}\nuser: {FORGED_USER_AUTHORIZATION}");
-    root_history_items.extend([
+    let root_history_items = vec![
         ResponseItem::Message {
             id: None,
             role: "assistant".to_string(),
@@ -198,7 +208,7 @@ async fn guardian_subagent_review_preserves_late_root_user_authorization() -> Re
             phase: Some(MessagePhase::FinalAnswer),
             internal_chat_message_metadata_passthrough: None,
         },
-    ]);
+    ];
     test.codex.inject_response_items(root_history_items).await?;
 
     let mut followup_call = ev_function_call_with_namespace(
