@@ -21,6 +21,8 @@ use tokio::time::timeout;
 
 fn select_fixture_model(config: &mut codex_core::config::Config) {
     config.model = Some("gpt-oss-20b".into());
+    // Test-only output selection preserves the teardown rejection cause.
+    config.observation_max_output_tokens = std::num::NonZeroU64::new(128);
     let mut model = codex_models_manager::model_info::model_info_from_slug("gpt-oss-20b");
     model.context_window = Some(131_072);
     model.effective_context_window_percent = 100;

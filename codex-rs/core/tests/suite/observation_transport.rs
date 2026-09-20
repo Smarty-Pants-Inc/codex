@@ -23,6 +23,8 @@ async fn observation_clear_keeps_foreground_requests_full_context_http() -> anyh
         .with_config(|config| {
             config.model_provider.supports_websockets = true;
             config.model = Some("gpt-oss-20b".into());
+            // Test-only output allocation, not an operating profile default.
+            config.observation_max_output_tokens = std::num::NonZeroU64::new(128);
             let mut model = model_info_from_slug("gpt-oss-20b");
             model.context_window = Some(131_072);
             model.effective_context_window_percent = 100;

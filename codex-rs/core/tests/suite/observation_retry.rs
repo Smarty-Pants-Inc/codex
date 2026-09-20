@@ -38,6 +38,8 @@ async fn unchanged_retry_retains_a_and_completed_tool_retry_captures_b() -> anyh
             config.model_provider.request_max_retries = Some(0);
             config.model_provider.stream_max_retries = Some(2);
             config.model = Some("gpt-oss-20b".into());
+            // Test-only output allocation, not an operating profile default.
+            config.observation_max_output_tokens = std::num::NonZeroU64::new(128);
             config.update_plan_enabled = true;
             config.features.disable(Feature::CodeModeOnly);
             config.features.disable(Feature::CodeMode);

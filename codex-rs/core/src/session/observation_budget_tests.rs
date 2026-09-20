@@ -26,6 +26,8 @@ async fn setup() -> (
         );
         let mut config = (*configuration.original_config_do_not_use).clone();
         config.model_context_window = Some(131_072);
+        // Test-only output allocation, not an operating profile default.
+        config.observation_max_output_tokens = std::num::NonZeroU64::new(128);
         configuration.original_config_do_not_use = Arc::new(config);
     }
     let (slot, events, owner) = ObservationSlot::new(/*connection_id*/ 1);

@@ -184,10 +184,10 @@ impl ThreadStateManager {
         }
         Ok(ThreadObservationCapabilities {
             protocol: 2,
+            max_frame_bytes: native_reservation.max_frame_bytes,
+            reserved_tokens: native_reservation.reserved_tokens,
             native_reservation,
             owner_epoch,
-            max_frame_bytes: 4096,
-            reserved_tokens: 4608,
             max_lease_seconds: 60,
             max_in_flight_decisions: 1,
             replacement: ObservationReplacement::FullContext,

@@ -46,7 +46,7 @@ async fn observation_start_and_admitted_resume_install_fresh_owned_relays() -> R
         let catalog = home.path().join("models.json");
         std::fs::write(&catalog, serde_json::to_vec(&json!({"models":[model]}))?)?;
         MockResponsesConfig::new(&server.uri()).with_model("gpt-oss-20b")
-            .with_root_config(&format!("model_catalog_json = {}", serde_json::to_string(&catalog)?))
+            .with_root_config(&format!("observation_max_output_tokens = 128\nmodel_catalog_json = {}", serde_json::to_string(&catalog)?))
             .write(home.path())?;
         let mut app = TestAppServer::builder().with_codex_home(home.path())
             .without_managed_config().build_initialized().await?;
@@ -78,6 +78,10 @@ async fn observation_start_and_admitted_resume_install_fresh_owned_relays() -> R
         }).await?;
         let started: ThreadStartResponse = app.read_response(id).await?;
         let initial = started.observation.expect("installed start capability");
+        assert_eq!(
+            (initial.max_frame_bytes, initial.reserved_tokens),
+            (initial.native_reservation.max_frame_bytes, initial.native_reservation.reserved_tokens),
+        );
         let thread_id = started.thread.id;
         // A real owned observation connection/profile still installs no pilot
         // authority. These public methods must not resume or mint one from IDs.
@@ -101,6 +105,7 @@ async fn observation_start_and_admitted_resume_install_fresh_owned_relays() -> R
             "threadId":thread_id, "ownerEpoch":initial.owner_epoch,
         }))).await?;
         let first: ThreadObservationReadResponse = app.read_response(id).await?;
+        assert_eq!(&first.native_reservation, &initial.native_reservation);
         assert_eq!((&first.owner_epoch, first.revision, &first.hash), (&initial.owner_epoch, 0, &None));
         // Cleanup/fence remains available without an automatic policy, while
         // ordinary launch ownership alone never enables automatic start.
@@ -221,6 +226,10 @@ async fn observation_start_and_admitted_resume_install_fresh_owned_relays() -> R
         }).await?;
         let resumed: ThreadResumeResponse = app.read_response(id).await?;
         let current = resumed.observation.expect("installed resume capability");
+        assert_eq!(
+            (current.max_frame_bytes, current.reserved_tokens),
+            (current.native_reservation.max_frame_bytes, current.native_reservation.reserved_tokens),
+        );
         assert_ne!(current.owner_epoch, initial.owner_epoch);
         let id = app.send_request("thread/observation/read", Some(json!({
             "threadId":thread_id, "ownerEpoch":initial.owner_epoch,
@@ -230,6 +239,7 @@ async fn observation_start_and_admitted_resume_install_fresh_owned_relays() -> R
             "threadId":thread_id, "ownerEpoch":current.owner_epoch,
         }))).await?;
         let mut fresh: ThreadObservationReadResponse = app.read_response(id).await?;
+        assert_eq!(&fresh.native_reservation, &current.native_reservation);
         // Fresh admission restores neither body, revision nor prior audit order.
         fresh.owner_epoch = first.owner_epoch.clone();
         assert_eq!(fresh, first);

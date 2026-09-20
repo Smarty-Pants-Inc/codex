@@ -2791,9 +2791,12 @@ Start/resume capabilities and set/read responses include `nativeReservation`:
 `{generation, state, model, profile, usableContextTokens, reservedTokens, maxFrameBytes}`.
 The state is `valid`, `invalid`, or `unsupported`; model and usable context tokens
 are required nullable fields. The profile is `harmonyGptOss`. Integers are JSON-safe.
-Current limits remain 4096 frame bytes and 4608 framed tokens. `valid` reports native
-capacity preconditions only, not external tokenizer/framing/provider qualification.
-It does not qualify a whole-request pilot bound or enable automatic admission.
+The top-level capability fields `maxFrameBytes` and `reservedTokens` copy the same
+native reservation snapshot returned at start/resume. They describe the whole
+frame byte ceiling and aggregate group token allocation, not per-message limits.
+`valid` reports allocation/model compatibility only. It does not prove complete
+request readiness, tokenizer/framing/provider qualification, or a whole-request
+pilot bound, and does not enable automatic admission.
 
 Set requires `expectedBudgetGeneration`, checked with the original owner under
 the publication lock. A non-null frame requires a valid matching generation.
@@ -2823,11 +2826,53 @@ is its original capture order, even after a later budget event. The internal aud
 journal retains its distinct terminal/retry order. Already observed acceptance
 remains credited to the original attempt; invalidation cannot invent exposure.
 
-The native 4096-byte cap does not cover every host watch profile. For example,
-Sense's reservation formula `1024 + watches * (maxBodyBytes * 6 + 2048)` needs 5120
-bytes for two zero-body views, or 15360 for one default 2048-byte view. Assembly must
-report this scope mismatch, not silently reduce watch/body acceptance or widen
-native constants without independent physical qualification.
+#### Request-only atomic observation groups
+
+Core renders one captured opaque frame as a bounded, ordered group of user
+messages. It splits losslessly at UTF-8 boundaries without parsing watches or
+adding XML/HTML entity expansion. Each message carries the original decision ID
+and its part index/count. Source text, including token-like strings and fake
+role delimiters, uses ordinary-content encoding; only fixed native framing uses
+special-token encoding. Every complete rendered message must count below 10000
+tokens under the selected encoding contract before the group can be constructed.
+Actual provider rendering must independently match that contract.
+
+All members are added together to a request-only prompt copy. No member enters
+canonical history, rollout, compaction input or auxiliary prompts. Unchanged
+canonical retries retain the original capture; changed canonical input releases
+it and captures the current slot. Replacement, clear and expiry operate on the
+single frame, not on independent part slots. Captured expiry also fences unsent
+attempts and retries. A clear removes the group from the next capture, not from
+an already sent request or its historical receipt.
+
+Before attempt credit, the audit checks the complete ordered sender-normalized
+input against its captured digest, preserving message content and wire fields.
+Missing, duplicated, reordered, mixed-capture or altered parts fail the check.
+Observation requests use full-context HTTP with no previous-response reference
+or request compression. There is one original capture/receipt identity for the
+group, never partial delivery credit. Acceptance reports the observed original
+attempt; cancellation or lost acceptance remains unknown, not proof of remote
+context removal.
+
+The source allocation uses Sense's reservation formula
+`1024 + watches * (maxBodyBytes * 6 + 2048)`: eight views at 2048 body bytes reserve
+115712 bytes including worst-case escaping and metadata/error allowance. This
+is an envelope, not the actual frame text length or an extra copy of its payload.
+With native headers and part framing, the proposed aggregate allocation is
+117608 tokens. These source values are not a qualified usable capacity profile.
+The four-view minimum and eight-view reference allocations must not be reduced
+to make a request fit.
+
+Complete readiness is still required: original session preparation must account
+for canonical base, pending input, resolved tools, effective model/output identity
+and the full group reservation before both compaction paths, then revalidate
+after compaction and before send. The existing allocation subtraction alone does
+not establish this. At a 131072-token window, the default 90% auto-compaction
+threshold leaves only 356 tokens after the proposed group reservation, before
+those other operands. Report actual operands and fail closed if they do not fit;
+do not silently raise the model window or auto-compaction threshold, clip source
+output, borrow a count authority, or infer automatic admission. Full native and
+provider qualification remains pending.
 
 ### Original-owner pilot controls (experimental, under development)
 
