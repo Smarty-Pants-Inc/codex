@@ -2696,10 +2696,11 @@ print(json.dumps({{"continue": False, "stopReason": "original startup refusal"}}
             trust_discovered_hooks(config);
             config.model = Some("gpt-oss-20b".to_owned());
             config.observation_max_output_tokens = std::num::NonZeroU64::new(128);
+            let mut model = codex_models_manager::model_info::model_info_from_slug("gpt-oss-20b");
+            model.context_window = Some(131_072);
+            model.max_context_window = Some(131_072);
             config.model_catalog = Some(codex_protocol::openai_models::ModelsResponse {
-                models: vec![codex_models_manager::model_info::model_info_from_slug(
-                    "gpt-oss-20b",
-                )],
+                models: vec![model],
             });
         });
     let test = builder.build_with_auto_env(&server).await?;
