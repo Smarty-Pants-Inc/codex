@@ -27,12 +27,12 @@ async fn explicit_model_start_and_resume_fence_session_auth_readers() -> anyhow:
     use crate::StartThreadOptions;
     use crate::ThreadManager;
     use crate::config::test_config;
+    use crate::rollout::recorder::RolloutRecorder;
     use crate::thread_manager::build_models_manager;
     use crate::thread_manager::thread_store_from_config;
     use codex_extension_api::ExtensionDataInit;
     use codex_extension_api::empty_extension_registry;
     use codex_history::InitialHistory;
-    use codex_history::ResumedHistory;
     use codex_models_manager::model_info::model_info_from_slug;
     use codex_protocol::openai_models::ModelsResponse;
     use codex_protocol::protocol::SessionSource;
@@ -126,15 +126,24 @@ async fn explicit_model_start_and_resume_fence_session_auth_readers() -> anyhow:
                 expected_provider,
             );
         }
+        started.thread.ensure_rollout_materialized().await;
+        started.thread.flush_rollout().await?;
+        let rollout_path = started
+            .thread
+            .rollout_path()
+            .expect("original rollout path");
         started.thread.shutdown_and_wait().await?;
+        let history = RolloutRecorder::get_rollout_history(&rollout_path).await?;
+        let InitialHistory::Resumed(original) = &history else {
+            panic!("materialized original thread must have resumable history");
+        };
+        assert_eq!(original.conversation_id, started.thread_id);
+        assert_eq!(original.rollout_path.as_ref(), Some(&rollout_path));
+        assert!(!original.history.is_empty());
         let resumed = manager
             .resume_thread_with_history_and_init(
                 config,
-                InitialHistory::Resumed(ResumedHistory {
-                    conversation_id: started.thread_id,
-                    history: Arc::new(Vec::new()),
-                    rollout_path: None,
-                }),
+                history,
                 auth_manager,
                 /*parent_trace*/ None,
                 Default::default(),
