@@ -56,16 +56,11 @@ pub(crate) async fn context_window_token_status(
     // Only the qualified owner-admission path may attach an observation slot.
     // Keep reserving after clear/expiry: replacement mode and an unavailable
     // marker must not borrow capacity from canonical input or fallback prompts.
-    let observation_reserve = if sess
+    let observation_reserve = sess
         .services
         .thread_extension_data
         .get::<crate::ObservationBinding>()
-        .is_some()
-    {
-        crate::observation::RESERVED_TOKENS
-    } else {
-        0
-    };
+        .map_or(0, |binding| binding.profile.group_reservation());
     let (auto_compact_scope_limit, full_context_window_limit) = reserve_observation_capacity(
         auto_compact_scope_limit,
         full_context_window_limit,

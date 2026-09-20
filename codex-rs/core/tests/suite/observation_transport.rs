@@ -1,4 +1,5 @@
 use codex_core::ObservationBinding;
+use codex_core::ObservationFrame;
 use codex_core::ObservationProfile;
 use codex_core::ObservationSlot;
 use codex_models_manager::model_info::model_info_from_slug;
@@ -6,11 +7,15 @@ use codex_protocol::openai_models::ModelsResponse;
 use core_test_support::responses;
 use core_test_support::test_codex::test_codex;
 use pretty_assertions::assert_eq;
+use sha2::Digest;
+use sha2::Sha256;
 use std::sync::Arc;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use wiremock::MockServer;
 
 /// Exercises the foreground sampler, not only websocket prefix comparison.
-/// This transport fixture has no observation body and qualifies no model profile.
+/// This request-only group fixture qualifies no external model/provider profile.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn observation_clear_keeps_foreground_requests_full_context_http() -> anyhow::Result<()> {
     let server = MockServer::start().await;
@@ -35,6 +40,16 @@ async fn observation_clear_keeps_foreground_requests_full_context_http() -> anyh
         slot: Arc::clone(&slot),
         profile: ObservationProfile::HarmonyGptOss,
     });
+    let text = "FULL_GROUP_CANARY".repeat(2048);
+    slot.set(
+        owner,
+        /*revision*/ 1,
+        Some(ObservationFrame {
+            text: Arc::from(text.as_str()),
+            hash: format!("{:x}", Sha256::digest(text.as_bytes())),
+            expires_at: SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64 + 60,
+        }),
+    )?;
     let first = responses::mount_sse_once(
         &server,
         responses::sse(vec![
@@ -52,7 +67,15 @@ async fn observation_clear_keeps_foreground_requests_full_context_http() -> anyh
             .is_none()
     );
 
-    slot.set(owner, /*revision*/ 1, /*frame*/ None)?;
+    assert!(
+        first_request
+            .message_input_texts("user")
+            .iter()
+            .filter(|text| text.starts_with("<current_observations>"))
+            .count()
+            > 1
+    );
+    slot.set(owner, /*revision*/ 2, /*frame*/ None)?;
     let second = responses::mount_sse_once(
         &server,
         responses::sse(vec![
@@ -78,5 +101,7 @@ async fn observation_clear_keeps_foreground_requests_full_context_http() -> anyh
         vec!["first prompt", "second prompt"],
     );
     assert!(second_request.body_contains_text("answer one"));
+    assert!(!second_request.body_contains_text("FULL_GROUP_CANARY"));
+    assert!(!second_request.body_contains_text("<current_observations>"));
     Ok(())
 }
