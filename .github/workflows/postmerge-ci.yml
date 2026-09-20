@@ -27,6 +27,7 @@ jobs:
     secrets: inherit
 
   results:
+    timeout-minutes: ${{ github.repository == 'Smarty-Pants-Inc/codex' && 10 || 360 }}
     name: Postmerge CI results
     needs:
       - rust-ci-full
