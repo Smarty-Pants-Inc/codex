@@ -2619,6 +2619,98 @@ async fn blocked_user_prompt_submit_persists_additional_context_for_next_turn() 
 }
 
 #[tokio::test]
+async fn unbound_start_hook_refusal_keeps_original_queued_followup() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let response = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("queued-response"),
+            ev_assistant_message("queued-message", "queued prompt handled"),
+            ev_completed("queued-response"),
+        ]),
+    )
+    .await;
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            let script = home.join("gated_start_refusal.py");
+            let started = home.join("start-refusal-started");
+            let release = home.join("start-refusal-release");
+            fs::write(
+                &script,
+                format!(
+                    r#"import json
+from pathlib import Path
+import sys
+import time
+json.load(sys.stdin)
+Path(r"{}").write_text("started")
+while not Path(r"{}").exists():
+    time.sleep(0.01)
+print(json.dumps({{"continue": False, "stopReason": "original startup refusal"}}))
+"#,
+                    started.display(),
+                    release.display()
+                ),
+            )
+            .unwrap();
+            fs::write(
+                home.join("hooks.json"),
+                serde_json::json!({
+                    "hooks": {"SessionStart": [{"matcher": "startup", "hooks": [{
+                        "type": "command", "command": format!("python3 {}", script.display())
+                    }]}]}
+                })
+                .to_string(),
+            )
+            .unwrap();
+        })
+        .with_config(trust_discovered_hooks);
+    let test = builder.build_with_auto_env(&server).await?;
+    // No ObservationBinding is installed: this is the ordinary native path.
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "initial input stopped before user hooks".to_owned(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !test
+            .codex_home_path()
+            .join("start-refusal-started")
+            .exists()
+        {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("startup hook reached its gate")?;
+    let queued = test
+        .codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "queued followup survives startup refusal".to_owned(),
+            text_elements: Vec::new(),
+        }]))
+        .await;
+    // Release even if steering failed, so the test cannot strand its hook.
+    fs::write(
+        test.codex_home_path().join("start-refusal-release"),
+        "release",
+    )?;
+    queued?;
+    wait_for_event(&test.codex, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let request = response.single_request();
+    assert_eq!(
+        request.message_input_texts("user"),
+        vec!["queued followup survives startup refusal".to_owned()]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn blocked_queued_prompt_does_not_strand_earlier_accepted_prompt() -> Result<()> {
     skip_if_no_network!(Ok(()));
 

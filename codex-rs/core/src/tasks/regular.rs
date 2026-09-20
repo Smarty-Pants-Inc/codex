@@ -107,10 +107,17 @@ impl SessionTask for RegularTask {
             if !sess.input_queue.has_pending_input(&sess.active_turn).await {
                 return Ok(last_agent_message);
             }
-            if preparation
-                .as_ref()
-                .expect("original task custody")
-                .has_unresolved_input()
+            // Preserve the original unbound follow-up behavior after hook/skills
+            // refusal. Only the original observation binding adds this fence.
+            if sess
+                .services
+                .thread_extension_data
+                .get::<crate::ObservationBinding>()
+                .is_some()
+                && preparation
+                    .as_ref()
+                    .expect("original task custody")
+                    .has_unresolved_input()
             {
                 return Err(crate::error::CodexErr::InvalidRequest(
                     "original turn input is unresolved; follow-up cannot replace its custody"
