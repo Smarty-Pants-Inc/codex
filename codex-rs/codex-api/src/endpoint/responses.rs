@@ -26,6 +26,7 @@ use tracing::instrument;
 pub struct ResponsesClient<T: HttpTransport> {
     session: EndpointSession<T>,
     sse_telemetry: Option<Arc<dyn SseTelemetry>>,
+    redact_body_trace: bool,
 }
 
 #[derive(Default)]
@@ -43,7 +44,15 @@ impl<T: HttpTransport> ResponsesClient<T> {
         Self {
             session: EndpointSession::new(transport, provider, auth),
             sse_telemetry: None,
+            redact_body_trace: false,
         }
+    }
+
+    /// Keep sensitive request-only context out of HTTP body/debug traces.
+    /// The encoded bytes, signing input and retry behavior are unchanged.
+    pub fn without_body_trace(mut self) -> Self {
+        self.redact_body_trace = true;
+        self
     }
 
     pub fn with_telemetry(
@@ -54,6 +63,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
         Self {
             session: self.session.with_request_telemetry(request),
             sse_telemetry: sse,
+            redact_body_trace: self.redact_body_trace,
         }
     }
 
@@ -132,6 +142,11 @@ impl<T: HttpTransport> ResponsesClient<T> {
         compression: Compression,
         turn_state: Option<Arc<OnceLock<String>>>,
     ) -> Result<ResponseStream, ApiError> {
+        let body = if self.redact_body_trace {
+            body.without_body_trace()
+        } else {
+            body
+        };
         let request_compression = match compression {
             Compression::None => RequestCompression::None,
             Compression::Zstd => RequestCompression::Zstd,

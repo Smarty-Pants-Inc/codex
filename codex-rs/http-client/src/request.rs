@@ -11,11 +11,26 @@ use std::time::Duration;
 /// Clones share the encoded allocation. Internally, the body can also hold the
 /// final compressed wire bytes while retaining the original JSON only when
 /// request-body trace logging is enabled.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct EncodedJsonBody {
     bytes: Bytes,
     trace_bytes: Option<Bytes>,
     prepared: bool,
+    redact_trace: bool,
+}
+
+impl std::fmt::Debug for EncodedJsonBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = f.debug_struct("EncodedJsonBody");
+        if self.redact_trace {
+            debug.field("bytes", &"<redacted>");
+        } else {
+            debug
+                .field("bytes", &self.bytes)
+                .field("trace_bytes", &self.trace_bytes);
+        }
+        debug.field("prepared", &self.prepared).finish()
+    }
 }
 
 impl EncodedJsonBody {
@@ -25,6 +40,7 @@ impl EncodedJsonBody {
             bytes: Bytes::from(bytes),
             trace_bytes: None,
             prepared: false,
+            redact_trace: false,
         })
     }
 
@@ -33,8 +49,20 @@ impl EncodedJsonBody {
         &self.bytes
     }
 
+    /// Suppress body trace/debug output without changing bytes used for signing
+    /// or transport. Clones and repeated preparation retain this policy.
+    pub fn without_body_trace(mut self) -> Self {
+        self.redact_trace = true;
+        self.trace_bytes = None;
+        self
+    }
+
     pub(crate) fn trace_bytes(&self) -> &[u8] {
-        self.trace_bytes.as_ref().unwrap_or(&self.bytes)
+        if self.redact_trace {
+            b"<redacted>"
+        } else {
+            self.trace_bytes.as_ref().unwrap_or(&self.bytes)
+        }
     }
 }
 
@@ -120,7 +148,10 @@ impl Request {
             self.body,
             Some(RequestBody::Json(_) | RequestBody::EncodedJson(_))
         );
-        let trace_bytes = if self.compression != RequestCompression::None
+        let redact_trace =
+            matches!(self.body.as_ref(), Some(RequestBody::EncodedJson(body)) if body.redact_trace);
+        let trace_bytes = if !redact_trace
+            && self.compression != RequestCompression::None
             && tracing::enabled!(target: "codex_http_client::transport", tracing::Level::TRACE)
         {
             match self.body.as_ref() {
@@ -140,6 +171,7 @@ impl Request {
                 bytes,
                 trace_bytes,
                 prepared: true,
+                redact_trace,
             })),
             (false, Some(body)) => Some(RequestBody::Raw(body)),
             (_, None) => None,
