@@ -6218,6 +6218,12 @@
       },
       "type": "array"
     },
+    "observation_max_output_tokens": {
+      "description": "Explicit output ceiling for the controlled observation profile. No default.",
+      "format": "uint64",
+      "minimum": 1.0,
+      "type": "integer"
+    },
     "openai_base_url": {
       "description": "Base URL override for the built-in `openai` model provider.",
       "type": "string"
