@@ -1325,7 +1325,7 @@ pub(crate) fn build_prompt(
         parallel_tool_calls: true,
         base_instructions,
         output_schema: turn_context.final_output_json_schema.clone(),
-        max_output_tokens: turn_context.config.observation_max_output_tokens,
+        max_output_tokens: None,
         output_schema_strict: !crate::guardian::is_basic_session_source(
             &turn_context.session_source,
         ),
@@ -1399,11 +1399,25 @@ async fn run_sampling_request(
         {
             codex_protocol::models::bound_executed_tool_calls_for_prompt(&mut prompt_input);
         }
-        let prompt = build_prompt(
+        let mut prompt = build_prompt(
             prompt_input,
             step_context.as_ref(),
             base_instructions.clone(),
         );
+        if observations.is_some() {
+            prompt.max_output_tokens = Some(
+                step_context
+                    .turn
+                    .config
+                    .observation_max_output_tokens
+                    .ok_or_else(|| {
+                        CodexErr::InvalidRequest(
+                            "observation_max_output_tokens is required for observation requests"
+                                .to_owned(),
+                        )
+                    })?,
+            );
+        }
         let observation_prompt = if let Some(observations) = observations.as_mut() {
             let mut canonical_input = prompt.input.clone();
             client_session.prepare_response_items_for_request(&mut canonical_input);

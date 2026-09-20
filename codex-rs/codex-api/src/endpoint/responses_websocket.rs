@@ -923,7 +923,7 @@ mod tests {
     #[test]
     fn direct_serialization_preserves_websocket_request_payload() {
         let api_request = ResponsesApiRequest {
-            max_output_tokens: None,
+            max_output_tokens: std::num::NonZeroU64::new(128),
             model: "gpt-test".to_string(),
             instructions: "Use the available tools.".to_string(),
             input: vec![ResponseItem::Message {
@@ -978,6 +978,7 @@ mod tests {
             serde_json::from_str::<Value>(&request_text).expect("parse websocket request");
 
         assert_eq!(wire_payload, expected_payload);
+        assert_eq!(wire_payload["max_output_tokens"], json!(128));
     }
 
     #[test]

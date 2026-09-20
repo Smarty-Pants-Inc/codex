@@ -34,12 +34,39 @@ impl IdleTurnAdmission for FixturePolicy {
     }
 }
 
+#[tokio::test]
+async fn unbound_session_does_not_send_observation_output_ceiling() -> anyhow::Result<()> {
+    let server = wiremock::MockServer::start().await;
+    let test = test_codex()
+        .with_config(|config| {
+            config.observation_max_output_tokens = std::num::NonZeroU64::new(128);
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let mock = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_response_created("unbound"),
+            responses::ev_completed("unbound"),
+        ]),
+    )
+    .await;
+    test.submit_turn("hello").await?;
+    assert_eq!(
+        mock.single_request().body_json().get("max_output_tokens"),
+        None
+    );
+    test.codex.shutdown_and_wait().await?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn original_native_wake_starts_once_without_manufacturing_user_input() -> anyhow::Result<()> {
     let server = wiremock::MockServer::start().await;
     let test = test_codex()
         .with_config(|config| {
             config.model = Some("gpt-oss-20b".into());
+            config.observation_max_output_tokens = std::num::NonZeroU64::new(128);
             let mut model = model_info_from_slug("gpt-oss-20b");
             model.context_window = Some(131_072);
             model.effective_context_window_percent = 100;
@@ -120,6 +147,10 @@ async fn original_native_wake_starts_once_without_manufacturing_user_input() -> 
     })
     .await;
     let request = mock.single_request();
+    assert_eq!(
+        request.body_json()["max_output_tokens"],
+        serde_json::json!(128)
+    );
     let user_text = request.message_input_texts("user");
     let overlays: Vec<_> = user_text
         .iter()

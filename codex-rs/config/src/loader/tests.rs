@@ -778,6 +778,58 @@ model = "gpt-dev"
     .expect("profile-v2 should allow unrelated legacy profiles in base user config");
 }
 
+#[tokio::test]
+async fn observation_output_ceiling_uses_profile_v2_file() {
+    let tmp = tempdir().expect("tempdir");
+    std::fs::write(
+        tmp.path().join(CONFIG_TOML_FILE),
+        "observation_max_output_tokens = 128\n",
+    )
+    .expect("write base config");
+    std::fs::write(
+        tmp.path().join("work.config.toml"),
+        "observation_max_output_tokens = 256\n",
+    )
+    .expect("write profile config");
+    let mut overrides = LoaderOverrides::without_managed_config_for_tests();
+    overrides.user_config_path = Some(AbsolutePathBuf::resolve_path_against_base(
+        "work.config.toml",
+        tmp.path(),
+    ));
+    overrides.user_config_profile = Some("work".parse().expect("profile name"));
+    let stack = load_config_layers_state(
+        &TestFileSystem,
+        tmp.path(),
+        /*cwd*/ None,
+        &[],
+        overrides,
+        &crate::NoopThreadConfigLoader,
+    )
+    .await
+    .expect("load profile layers");
+    let config: crate::config_toml::ConfigToml = stack
+        .effective_config()
+        .try_into()
+        .expect("deserialize selected config");
+    assert_eq!(
+        config.observation_max_output_tokens,
+        std::num::NonZeroU64::new(256)
+    );
+}
+
+#[test]
+fn observation_output_ceiling_is_optional_but_not_zero_or_negative() {
+    use crate::config_toml::ConfigToml;
+    let config: ConfigToml = toml::from_str("").expect("absent setting");
+    assert_eq!(config.observation_max_output_tokens, None);
+    for value in ["0", "-1", "18446744073709551616"] {
+        assert!(
+            toml::from_str::<ConfigToml>(&format!("observation_max_output_tokens = {value}"))
+                .is_err()
+        );
+    }
+}
+
 #[test]
 fn local_layer_projection_preserves_override_blockers_and_cloud_position() {
     let tmp = tempdir().expect("tempdir");

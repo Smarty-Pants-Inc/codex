@@ -268,6 +268,7 @@ impl Fixture {
         slot.install_pilot_authority(owner, claims.thread_id, b"fixture", issuer.clone())?;
         let wire = Arc::new(codex_api::prepare_response_count(
             &codex_api::ResponsesApiRequest {
+                max_output_tokens: None,
                 model: "fixture-model".into(),
                 instructions: "fixture instructions".into(),
                 input: vec![],

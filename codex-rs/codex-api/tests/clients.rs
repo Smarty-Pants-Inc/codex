@@ -319,7 +319,7 @@ async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
     let transport = RecordingTransport::new(state.clone());
     let client = ResponsesClient::new(transport, provider("openai"), Arc::new(NoAuth));
     let request = ResponsesApiRequest {
-        max_output_tokens: None,
+        max_output_tokens: std::num::NonZeroU64::new(128),
         model: "gpt-test".into(),
         instructions: "Say hi".into(),
         input: vec![ResponseItem::Message {
@@ -356,6 +356,7 @@ async fn responses_client_stream_request_preserves_item_ids() -> Result<()> {
     let body: serde_json::Value =
         serde_json::from_slice(prepared.body.as_deref().expect("body should be JSON"))?;
     assert_eq!(body, expected);
+    assert_eq!(body["max_output_tokens"], serde_json::json!(128));
     assert_eq!(body["input"][0]["id"], "msg_1");
     assert_eq!(
         prepared.headers.get(http::header::CONTENT_TYPE),
@@ -413,7 +414,7 @@ async fn streaming_client_retries_on_transport_error() -> Result<()> {
     provider.retry.max_attempts = 2;
 
     let request = ResponsesApiRequest {
-        max_output_tokens: None,
+        max_output_tokens: std::num::NonZeroU64::new(128),
         model: "gpt-test".into(),
         instructions: "Say hi".into(),
         input: Vec::new(),
@@ -460,6 +461,9 @@ async fn streaming_client_retries_on_transport_error() -> Result<()> {
         Some(&HeaderValue::from_static("zstd"))
     );
     assert_eq!(requests[0].2, codex_client::RequestCompression::None);
+    let decoded = zstd::stream::decode_all(first_body.as_bytes())?;
+    let retried: serde_json::Value = serde_json::from_slice(&decoded)?;
+    assert_eq!(retried["max_output_tokens"], serde_json::json!(128));
     Ok(())
 }
 

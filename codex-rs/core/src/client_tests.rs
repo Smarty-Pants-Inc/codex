@@ -125,6 +125,40 @@ fn test_model_client_with_thread_id(
     )
 }
 
+#[test]
+fn output_ceiling_changes_prevent_websocket_request_reuse() {
+    let previous = codex_api::ResponsesApiRequest {
+        model: "fixture".into(),
+        max_output_tokens: std::num::NonZeroU64::new(128),
+        instructions: String::new(),
+        input: Vec::new(),
+        tools: None,
+        tool_choice: "auto".into(),
+        parallel_tool_calls: false,
+        reasoning: None,
+        store: false,
+        stream: true,
+        stream_options: None,
+        include: Vec::new(),
+        service_tier: None,
+        prompt_cache_key: None,
+        text: None,
+        client_metadata: None,
+    };
+    let mut current = previous.clone();
+    assert!(super::responses_request_properties_match(
+        &previous, &current
+    ));
+    current.max_output_tokens = std::num::NonZeroU64::new(256);
+    assert!(!super::responses_request_properties_match(
+        &previous, &current
+    ));
+    current.max_output_tokens = None;
+    assert!(!super::responses_request_properties_match(
+        &previous, &current
+    ));
+}
+
 #[tokio::test]
 async fn compact_uses_bearer_after_agent_identity_session_fallback() -> anyhow::Result<()> {
     let server = MockServer::start().await;
