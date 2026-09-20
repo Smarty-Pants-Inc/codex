@@ -2567,11 +2567,14 @@ async fn blocked_user_prompt_submit_persists_additional_context_for_next_turn() 
     test.submit_turn("second prompt").await?;
 
     let request = response.single_request();
-    assert!(
+    assert_eq!(
         request
             .message_input_texts("developer")
-            .contains(&BLOCKED_PROMPT_CONTEXT.to_string()),
-        "second request should include developer context persisted from the blocked prompt",
+            .into_iter()
+            .filter(|text| text == BLOCKED_PROMPT_CONTEXT)
+            .collect::<Vec<_>>(),
+        vec![BLOCKED_PROMPT_CONTEXT.to_owned()],
+        "the original blocked hook context must be committed exactly once",
     );
     assert!(
         request

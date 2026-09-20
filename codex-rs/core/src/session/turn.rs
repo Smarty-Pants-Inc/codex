@@ -3,6 +3,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use super::turn_input_preparation::PreparedTurnInput;
+use super::turn_input_preparation::RecordedInput;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
@@ -15,9 +17,6 @@ use crate::context::ContextualUserFragment;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
 use crate::hook_runtime::drain_async_hook_results;
-use crate::hook_runtime::inspect_pending_input;
-use crate::hook_runtime::record_additional_contexts;
-use crate::hook_runtime::record_pending_input;
 use crate::hook_runtime::run_legacy_after_agent_hook;
 use crate::hook_runtime::run_pending_session_start_hooks;
 use crate::hook_runtime::run_turn_stop_hooks;
@@ -621,22 +620,11 @@ pub(crate) async fn run_hooks_and_record_inputs(
     let mut blocked_input = false;
     let mut accepted_user_input = false;
     for input_item in input {
-        let hook_outcome = inspect_pending_input(sess, turn_context, input_item).await;
-        if hook_outcome.should_stop {
-            blocked_input = true;
-            record_additional_contexts(sess, turn_context, hook_outcome.additional_contexts).await;
-        } else {
-            if matches!(input_item, TurnInput::UserInput { content, .. } if !content.is_empty()) {
-                accepted_user_input = true;
-            }
-            record_pending_input(
-                sess,
-                turn_context,
-                input_item.clone(),
-                hook_outcome.additional_contexts,
-                persist_context,
-            )
-            .await;
+        let prepared = PreparedTurnInput::prepare(sess, turn_context, input_item.clone()).await;
+        match prepared.record(sess, turn_context, persist_context).await {
+            RecordedInput::Blocked => blocked_input = true,
+            RecordedInput::AcceptedUser => accepted_user_input = true,
+            RecordedInput::Other => {}
         }
     }
     blocked_input && !accepted_user_input
