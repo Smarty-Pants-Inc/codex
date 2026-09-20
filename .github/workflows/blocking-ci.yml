@@ -59,6 +59,7 @@ jobs:
     secrets: inherit
 
   required:
+    timeout-minutes: ${{ github.repository == 'Smarty-Pants-Inc/codex' && 10 || 360 }}
     name: CI required
     # Without `always()`, GitHub skips this job after a failed dependency and a
     # required check can appear successful instead of reporting the failure.

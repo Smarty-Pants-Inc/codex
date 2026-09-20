@@ -5,6 +5,7 @@ on:
 
 jobs:
   check:
+    timeout-minutes: ${{ github.repository == 'Smarty-Pants-Inc/codex' && 10 || 360 }}
     name: Blob size policy
     runs-on: ubuntu-24.04
     permissions:
