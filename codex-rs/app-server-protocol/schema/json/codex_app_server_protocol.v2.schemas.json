@@ -22563,6 +22563,219 @@
       ],
       "type": "string"
     },
+    "WakeHostPreparation": {
+      "additionalProperties": false,
+      "description": "Original host cooldown provenance, never permission or budget authority.",
+      "properties": {
+        "cooldownRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "wakeNotBeforeBits": {
+          "description": "Exactly sixteen lowercase hex digits of the original positive finite binary64.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cooldownRevision",
+        "wakeNotBeforeBits"
+      ],
+      "type": "object"
+    },
+    "WakeIntent": {
+      "additionalProperties": false,
+      "properties": {
+        "budgetGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expectedCommitOrder": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "frameHash": {
+          "type": "string"
+        },
+        "frameRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "budgetGeneration",
+        "expectedCommitOrder",
+        "frameHash",
+        "frameRevision",
+        "sequence"
+      ],
+      "type": "object"
+    },
+    "WakeOutcome": {
+      "oneOf": [
+        {
+          "properties": {
+            "turnId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "pending"
+              ],
+              "title": "PendingWakeOutcomeType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "PendingWakeOutcome",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "turnId": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "started"
+              ],
+              "title": "StartedWakeOutcomeType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "turnId",
+            "type"
+          ],
+          "title": "StartedWakeOutcome",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "suppressed"
+              ],
+              "title": "SuppressedWakeOutcomeType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "SuppressedWakeOutcome",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "type": {
+              "enum": [
+                "unknown"
+              ],
+              "title": "UnknownWakeOutcomeType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "title": "UnknownWakeOutcome",
+          "type": "object"
+        }
+      ]
+    },
+    "WakeReadQuery": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "hostPreparation": {
+              "$ref": "#/definitions/WakeHostPreparation"
+            },
+            "operandDigest": {
+              "type": "string"
+            },
+            "sequence": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "attempt"
+              ],
+              "title": "AttemptWakeReadQueryType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "hostPreparation",
+            "operandDigest",
+            "sequence",
+            "type"
+          ],
+          "title": "AttemptWakeReadQuery",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "sequence": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "fence"
+              ],
+              "title": "FenceWakeReadQueryType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sequence",
+            "type"
+          ],
+          "title": "FenceWakeReadQuery",
+          "type": "object"
+        }
+      ]
+    },
+    "WakeReceipt": {
+      "properties": {
+        "operandDigest": {
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/definitions/WakeOutcome"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "operandDigest",
+        "outcome",
+        "sequence"
+      ],
+      "type": "object"
+    },
     "WarningNotification": {
       "$schema": "http://json-schema.org/draft-07/schema#",
       "properties": {
