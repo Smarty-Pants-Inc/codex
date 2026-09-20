@@ -1,41 +1,90 @@
 name: smarty-ci
 
 on:
-  pull_request:
-    branches:
-      - main
-  push:
-    branches:
-      - main
-      - mergify/merge-queue/**
-      - tmp-mergify/merge-queue/**
+  workflow_dispatch:
+    inputs:
+      workflow_sha256:
+        description: Selected SHA-256 of this exact workflow
+        required: true
+        type: string
 
 permissions:
   contents: read
 
-concurrency:
-  group: smarty-ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
   smarty-ci:
-    name: smarty-ci
+    name: smarty-ci (${{ matrix.phase }})
+    if: github.repository == 'Smarty-Pants-Inc/codex' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/qualify/rustls-ca26-checks'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        phase: [test, fix]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
+      CARGO_NET_RETRY: "0"
+      EXPECTED_WORKFLOW_SHA256: ${{ inputs.workflow_sha256 }}
+      WORKFLOW_SOURCE_SHA: ${{ github.workflow_sha }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
+          fetch-depth: 2
           persist-credentials: false
+      - name: Record generation source
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY_ID" = 1047329867
+          test "$GITHUB_RUN_ATTEMPT" = 1
+          test "$WORKFLOW_SOURCE_SHA" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD^)" = ca26a8fc71390a601b6787e526f87bca779a2f67
+          test "$(git diff --name-only HEAD^ HEAD)" = .github/workflows/smarty-ci.yml
+          [[ "$EXPECTED_WORKFLOW_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          printf '%s  %s\n' "$EXPECTED_WORKFLOW_SHA256" .github/workflows/smarty-ci.yml | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/transport-generation"
+          git show -s --format='%H %T %P' HEAD | tee "$RUNNER_TEMP/transport-generation/source-before.txt"
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
-          components: rustfmt
+          toolchain: 1.95.0
+          components: rustfmt,clippy,rust-src
       - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
         with:
           tool: just@1.51.0,nextest@0.9.103
+      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+        with:
+          bazelisk-version: 1.28.1
+      - uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.3"
+          enable-cache: false
+      - name: Record generation tools
+        run: |
+          set -euo pipefail
+          {
+            uname -a
+            test "$(uname -s)" = Linux
+            test "$(uname -m)" = x86_64
+            test "$(cat .bazelversion)" = 9.0.0
+            bazel_version="$(bazel --version)"
+            echo "$bazel_version"
+            test "$bazel_version" = 'bazel 9.0.0'
+            rustc -Vv
+            test "$(rustc -Vv | awk '/^release:/ { print $2 }')" = 1.95.0
+            cargo --version
+            test "$(cargo --version | awk '{ print $2 }')" = 1.95.0
+            just --version
+            cargo nextest --version
+            dotslash --version
+            uv --version
+          } 2>&1 | tee "$RUNNER_TEMP/transport-generation/tools.log"
       - name: Install Linux sandbox build dependencies
         run: |
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
@@ -57,7 +106,86 @@ jobs:
         run: |
           # The crate has no Rust tests; C29 above supplies behavioral coverage.
           just test -p codex-bwrap --locked --no-tests=pass --retries 0 --test-threads 2
+      - name: Check reviewed Bazel lock
+        run: |
+          set -euo pipefail
+          just bazel-lock-check 2>&1 | tee "$RUNNER_TEMP/transport-generation/bazel-lock-check.log"
+      - name: Test transport packages
+        if: matrix.phase == 'test'
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+          RUST_MIN_STACK=8388608 NEXTEST_PROFILE=local cargo nextest list \
+            -p codex-utils-rustls-provider -p codex-http-client -p codex-client -p codex-api -p codex-network-proxy --locked --message-format json \
+            | tee "$RUNNER_TEMP/transport-generation/package-inventory.json"
+          just test -p codex-utils-rustls-provider -p codex-http-client -p codex-client -p codex-api -p codex-network-proxy --locked --retries 0 --test-threads 2 \
+            2>&1 | tee "$RUNNER_TEMP/transport-generation/package-tests.log"
+      - name: Fix transport lint and format
+        if: matrix.phase == 'fix'
+        working-directory: codex-rs
+        run: |
+          set -euo pipefail
+          just fix -p codex-utils-rustls-provider -p codex-http-client -p codex-client -p codex-api -p codex-network-proxy --locked \
+            2>&1 | tee "$RUNNER_TEMP/transport-generation/scoped-fix.log"
+          just fmt 2>&1 | tee "$RUNNER_TEMP/transport-generation/fmt.log"
+      - name: Return generation evidence and validate changed paths
+        if: always()
+        run: |
+          set -euo pipefail
+          evidence="$RUNNER_TEMP/transport-generation"
+          mkdir -p "$evidence"
+          git show -s --format='%H %T %P' HEAD > "$evidence/source-after.txt"
+          export GIT_INDEX_FILE="$RUNNER_TEMP/transport-generation-index"
+          git read-tree HEAD
+          git add --update
+          git write-tree >> "$evidence/source-after.txt"
+          rm "$GIT_INDEX_FILE"
+          unset GIT_INDEX_FILE
+          git status --porcelain=v1 --untracked-files=all > "$evidence/status-after.txt"
+          git diff --binary HEAD > "$evidence/generated.patch"
+          git diff --binary HEAD -- MODULE.bazel.lock > "$evidence/bazel-lock.patch"
+          git diff --binary HEAD -- codex-rs/utils/rustls-provider codex-rs/http-client codex-rs/codex-client codex-rs/codex-api codex-rs/network-proxy > "$evidence/scoped-fix.patch"
+          cp MODULE.bazel.lock "$evidence/MODULE.bazel.lock"
+          sha256sum MODULE.bazel.lock codex-rs/Cargo.lock .github/workflows/smarty-ci.yml > "$evidence/source-after.sha256"
+          if test -s "$evidence/generated.patch"; then
+            echo 'GENERATED DELTA: NOT FINAL CLEAN QUALIFICATION; source-owner integration and review required.' | tee "$evidence/qualification.txt" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'No tracked generated delta. Qualification still requires every job step to pass.' | tee "$evidence/qualification.txt" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          python3 - <<'PY'
+          import subprocess
+          paths = subprocess.check_output(["git", "diff", "--no-renames", "--name-only", "-z", "HEAD"]).decode().split("\0")
+          prefixes = ("codex-rs/utils/rustls-provider/", "codex-rs/http-client/", "codex-rs/codex-client/", "codex-rs/codex-api/", "codex-rs/network-proxy/")
+          unexpected = [p for p in paths if p and p != "MODULE.bazel.lock" and not (p.startswith(prefixes) and p.endswith(".rs"))]
+          if unexpected:
+              raise SystemExit(f"Undeclared generated changes: {unexpected}")
+          PY
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+      - name: Bound generation evidence
+        id: evidence-bound
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"]) / "transport-generation"
+          files = list(root.iterdir())
+          if not files or len(files) > 15 or any(p.is_symlink() or not p.is_file() for p in files):
+              raise SystemExit("Invalid generation evidence members")
+          if sum(p.stat().st_size for p in files) > 24 * 1024 * 1024:
+              raise SystemExit("Generation evidence exceeds 24 MiB; retain original runner logs")
+          PY
+      - name: Upload generation evidence (not final qualification)
+        if: always() && steps.evidence-bound.outcome == 'success'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: transport-generation-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.phase }}
+          path: ${{ runner.temp }}/transport-generation/
+          if-no-files-found: error
+          retention-days: 7
       - name: Check source remains unchanged
+        if: always()
         run: |
           git diff --exit-code
           git diff --cached --exit-code
