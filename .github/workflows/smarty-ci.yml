@@ -110,14 +110,14 @@ jobs:
         working-directory: codex-rs
         run: |
           set -euo pipefail
-          just test -p codex-queue -p codex-goal -p codex-tui --locked --retries 0 --test-threads 2 \
+          just test -p codex-queue-extension -p codex-goal-extension -p codex-tui --locked --retries 0 --test-threads 2 \
             2>&1 | tee "$RUNNER_TEMP/transport-generation/package-tests.log"
       - name: Fix transport lint and format
         if: matrix.phase == 'fix'
         working-directory: codex-rs
         run: |
           set -euo pipefail
-          just fix -p codex-queue -p codex-goal -p codex-tui --locked \
+          just fix -p codex-queue-extension -p codex-goal-extension -p codex-tui --locked \
             2>&1 | tee "$RUNNER_TEMP/transport-generation/scoped-fix.log"
           just fmt 2>&1 | tee "$RUNNER_TEMP/transport-generation/fmt.log"
       - name: Return generation evidence and validate changed paths
