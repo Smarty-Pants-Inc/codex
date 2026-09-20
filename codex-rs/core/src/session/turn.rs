@@ -133,6 +133,11 @@ use tracing::trace;
 use tracing::trace_span;
 use tracing::warn;
 
+#[path = "turn_start_input.rs"]
+mod turn_start_input;
+#[path = "turn_start_preparation.rs"]
+mod turn_start_preparation;
+
 const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_token_estimate";
 
 /// Takes initial turn input and runs a loop where, at each sampling request,
@@ -156,6 +161,7 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
+    let mut input = turn_start_input::TurnStartInput::new(input);
     // Record results from hooks that finished after the previous turn before this turn's user prompt.
     drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ true).await;
 
@@ -174,8 +180,9 @@ pub(crate) async fn run_turn(
     .await
     {
         if matches!(err.details(), CodexErrorDetails::TurnAborted) {
-            run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)
-                .await;
+            input
+                .record(&sess, &turn_context, PersistContext::Standard)
+                .await?;
             return Err(err);
         }
         if matches!(err.details(), CodexErrorDetails::ToolCollision(_)) {
@@ -188,98 +195,22 @@ pub(crate) async fn run_turn(
         return Ok(None);
     }
 
-    let user_input = turn_user_input(&input);
-    let (required_servers, mentioned_plugins) =
-        match required_mcp_servers_for_input(&sess, turn_context.as_ref(), &user_input)
-            .or_cancel(&cancellation_token)
-            .await
-        {
-            Ok(requirements) => requirements,
-            Err(err) => {
-                run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)
-                    .await;
-                return Err(err.into());
-            }
-        };
-
-    // run_turn owns the step used to seed context and make the first sampling request.
-    let first_step_context = match sess
-        .capture_step_context_with_required_mcp_servers(
-            Arc::clone(&turn_context),
-            &cancellation_token,
-            &required_servers,
-        )
-        .await
-    {
-        Ok(step_context) => step_context,
-        Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
-            run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)
-                .await;
-            return Err(err);
-        }
-        Err(err) => return Err(err),
-    };
-    // Keep the exact model-visible state used by this turn and its inline compactions.
-    let (world_state, display_roots) = tokio::join!(
-        sess.record_context_updates_and_set_reference_context_item(first_step_context.as_ref()),
-        async {
-            if first_step_context
-                .turn
-                .config
-                .features
-                .enabled(Feature::CwdRelativeTurnDiffs)
-            {
-                first_step_context
-                    .environments
-                    .turn_environments()
-                    .map(|environment| {
-                        (
-                            environment.selection().environment_id,
-                            environment.cwd().clone(),
-                        )
-                    })
-                    .collect()
-            } else {
-                turn_diff_display_roots(first_step_context.as_ref()).await
-            }
-        },
-    );
-    let mut world_state = world_state?;
-
-    let Some((injection_items, explicitly_enabled_connectors)) = build_skills_and_plugins(
+    let Some(turn_start_preparation::PreparedTurnStart {
+        first_step_context,
+        mut world_state,
+        display_roots,
+        mut can_drain_pending_input,
+        previous_turn_settings: _previous_turn_settings,
+    }) = turn_start_preparation::prepare_turn_start(
         &sess,
-        first_step_context.as_ref(),
-        &user_input,
-        &mentioned_plugins,
+        &turn_context,
+        &mut input,
         &cancellation_token,
     )
-    .await
+    .await?
     else {
         return Ok(None);
     };
-
-    if run_pending_session_start_hooks(&sess, &turn_context).await {
-        return Ok(None);
-    }
-    let mut can_drain_pending_input = input.is_empty();
-    if run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::TurnStart).await {
-        return Ok(None);
-    }
-
-    sess.merge_connector_selection(explicitly_enabled_connectors.clone())
-        .await;
-    sess.set_previous_turn_settings(Some(PreviousTurnSettings {
-        model: turn_context.model_info.slug.clone(),
-        comp_hash: turn_context.model_info.comp_hash.clone(),
-        realtime_active: Some(turn_context.realtime_active),
-    }))
-    .await;
-    for response_item in injection_items {
-        sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
-            .await;
-    }
-
-    track_turn_resolved_config_analytics(&sess, &turn_context, &input).await;
 
     let mut last_agent_message: Option<String> = None;
     let mut stop_hook_active = false;
