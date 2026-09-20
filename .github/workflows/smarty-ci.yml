@@ -1,177 +1,275 @@
 name: smarty-ci
-
-on:
-  workflow_dispatch:
-  pull_request:
-    branches:
-      - main
-  push:
-    branches:
-      - main
-      - mergify/merge-queue/**
-      - tmp-mergify/merge-queue/**
-
+'on':
+  workflow_dispatch: null
 permissions:
   contents: read
-
 concurrency:
-  group: smarty-ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
+  group: full-core-app-${{ github.ref }}
+  cancel-in-progress: false
 jobs:
-  smarty-ci:
-    name: smarty-ci
+  full-package:
+    name: full-${{ matrix.lane }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        lane:
+        - core
+        - app-server
     env:
-      CARGO_BUILD_JOBS: "2"
-      CARGO_INCREMENTAL: "0"
-      CARGO_NET_RETRY: "0"
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_NET_RETRY: '0'
+      NEXTEST_PROFILE: local
+      RUST_MIN_STACK: '8388608'
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
-          persist-credentials: false
-      - name: Record generation source
-        run: |
-          mkdir -p "$RUNNER_TEMP/transport-generation"
-          git show -s --format='%H %T %P' HEAD | tee "$RUNNER_TEMP/transport-generation/source-before.txt"
-          git diff --exit-code
-          git diff --cached --exit-code
-          test -z "$(git ls-files --others --exclude-standard)"
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-        with:
-          components: rustfmt,clippy
-      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
-        with:
-          tool: just@1.51.0,nextest@0.9.103
-      - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
-        with:
-          bazelisk-version: 1.28.1
-      - uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2
-      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
-        with:
-          version: "0.11.3"
-          enable-cache: false
-      - name: Record generation tools
-        run: |
-          set -euo pipefail
-          {
-            test "$(cat .bazelversion)" = 9.0.0
-            bazel_version="$(bazel --version)"
-            echo "$bazel_version"
-            test "$bazel_version" = 'bazel 9.0.0'
-            rustc -Vv
-            cargo --version
-            just --version
-            cargo nextest --version
-            dotslash --version
-            uv --version
-          } 2>&1 | tee "$RUNNER_TEMP/transport-generation/tools.log"
-      - name: Install Linux sandbox build dependencies
-        run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
-      - name: Check bubblewrap netlink replies
-        working-directory: codex-rs/bwrap
-        run: |
-          test_binary="$(mktemp)"
-          trap 'rm -f "$test_binary"' EXIT
-          cc -std=gnu11 -Wall -Wextra -ffunction-sections -fdata-sections \
-            -I. -I../vendor/bubblewrap -Wl,--gc-sections \
-            tests/netlink_reply.c -o "$test_binary"
-          "$test_binary"
-      - name: Check Rust formatting
-        working-directory: codex-rs
-        run: cargo fmt -- --config imports_granularity=Item --check
-      - name: Test codex-bwrap
-        working-directory: codex-rs
-        run: |
-          # The crate has no Rust tests; C29 above supplies behavioral coverage.
-          just test -p codex-bwrap --locked --no-tests=pass --retries 0 --test-threads 2
-      - name: Generate and check Bazel lock
-        run: |
-          set -euo pipefail
-          just bazel-lock-update 2>&1 | tee "$RUNNER_TEMP/transport-generation/bazel-lock-update.log"
-          just bazel-lock-check 2>&1 | tee "$RUNNER_TEMP/transport-generation/bazel-lock-check.log"
-      - name: Generate normal and experimental protocol schemas
-        working-directory: codex-rs
-        run: |
-          set -euo pipefail
-          export CODEX_APP_SERVER_SCHEMA_ROOT="$PWD/app-server-protocol/schema"
-          CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL=0 just test -p codex-app-server-protocol --lib \
-            -E 'test(=schema_fixtures_tests::write_schema_fixtures_from_env)' --run-ignored only \
-            --locked --retries 0 --test-threads 2 2>&1 | tee "$RUNNER_TEMP/transport-generation/schema-normal.log"
-          CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL=1 just test -p codex-app-server-protocol --lib \
-            -E 'test(=schema_fixtures_tests::write_schema_fixtures_from_env)' --run-ignored only \
-            --locked --retries 0 --test-threads 2 2>&1 | tee "$RUNNER_TEMP/transport-generation/schema-experimental.log"
-      - name: Test protocol packages
-        working-directory: codex-rs
-        run: |
-          set -euo pipefail
-          just test -p codex-protocol -p codex-app-server-protocol --locked --retries 0 --test-threads 2 \
-            2>&1 | tee "$RUNNER_TEMP/transport-generation/package-tests.log"
-      - name: Fix protocol lint and format
-        working-directory: codex-rs
-        run: |
-          set -euo pipefail
-          just fix -p codex-protocol -p codex-app-server-protocol --locked \
-            2>&1 | tee "$RUNNER_TEMP/transport-generation/scoped-fix.log"
-          just fmt 2>&1 | tee "$RUNNER_TEMP/transport-generation/fmt.log"
-      - name: Return generation evidence and validate changed paths
-        if: always()
-        run: |
-          set -euo pipefail
-          evidence="$RUNNER_TEMP/transport-generation"
-          mkdir -p "$evidence"
-          git show -s --format='%H %T %P' HEAD > "$evidence/source-after.txt"
-          export GIT_INDEX_FILE="$RUNNER_TEMP/transport-generation-index"
-          git read-tree HEAD
-          git add --update
-          git add --all -- codex-rs/app-server-protocol/schema
-          git write-tree >> "$evidence/source-after.txt"
-          git diff --cached --binary HEAD > "$evidence/generated.patch"
-          git diff --cached --binary HEAD -- MODULE.bazel.lock > "$evidence/bazel-lock.patch"
-          git diff --cached --binary HEAD -- codex-rs/app-server-protocol/schema > "$evidence/schemas.patch"
-          git diff --cached --binary HEAD -- codex-rs/protocol/src codex-rs/app-server-protocol/src > "$evidence/scoped-fix.patch"
-          rm "$GIT_INDEX_FILE"
-          unset GIT_INDEX_FILE
-          git status --porcelain=v1 --untracked-files=all > "$evidence/status-after.txt"
-          cp MODULE.bazel.lock "$evidence/MODULE.bazel.lock"
-          sha256sum MODULE.bazel.lock codex-rs/Cargo.lock .github/workflows/smarty-ci.yml > "$evidence/source-after.sha256"
-          if test -s "$evidence/generated.patch"; then
-            echo 'GENERATED DELTA: NOT FINAL CLEAN QUALIFICATION; source-owner integration and review required.' | tee "$evidence/qualification.txt" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo 'No tracked generated delta. Qualification still requires every job step to pass.' | tee "$evidence/qualification.txt" >> "$GITHUB_STEP_SUMMARY"
-          fi
-          python3 - <<'PY'
-          import subprocess
-          paths = subprocess.check_output(["git", "diff", "--no-renames", "--name-only", "-z", "HEAD"]).decode().split("\0")
-          untracked = subprocess.check_output(["git", "ls-files", "--others", "--exclude-standard", "-z"]).decode().split("\0")
-          schema = "codex-rs/app-server-protocol/schema/"
-          def schema_output(p):
-              return (p.startswith(schema + "typescript/") and p.endswith(".ts")
-                      or p.startswith(schema + "json/") and p.endswith(".json")
-                      or p in (schema + "precomputed/app-server-exports-stable.json.zst",
-                               schema + "precomputed/app-server-exports-experimental.json.zst"))
-          prefixes = ("codex-rs/protocol/src/", "codex-rs/app-server-protocol/src/")
-          unexpected = [p for p in paths if p and p != "MODULE.bazel.lock" and not schema_output(p) and not (p.startswith(prefixes) and p.endswith(".rs"))]
-          unexpected += [p for p in untracked if p and not schema_output(p)]
-          if unexpected:
-              raise SystemExit(f"Undeclared generated changes: {unexpected}")
-          PY
-          git diff --cached --exit-code
-      - name: Upload generation evidence (not final qualification)
-        if: always()
-        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
-        with:
-          name: full-observation-generation-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/transport-generation/
-          if-no-files-found: error
-          retention-days: 7
-      - name: Check source remains unchanged
-        if: always()
-        run: |
-          git diff --exit-code
-          git diff --cached --exit-code
-          test -z "$(git ls-files --others --exclude-standard)"
+    - name: Guard exact selected event before effects
+      env:
+        EVENT_REPOSITORY_ID: ${{ github.repository_id }}
+        EVENT_WORKFLOW_SHA: ${{ github.workflow_sha }}
+      run: 'set -euo pipefail
+
+        mkdir -p -m 700 "$RUNNER_TEMP/wrapper-proof"
+
+        proof="$RUNNER_TEMP/wrapper-proof"
+
+        trap ''rc=$?; trap - EXIT; printf "%s\\n" "$rc" > "$RUNNER_TEMP/wrapper-proof/step-0.exit"; exit "$rc"''
+        EXIT
+
+        exec > >(tee "$proof/step-0.log") 2>&1
+
+        set -euo pipefail
+
+        test "$GITHUB_EVENT_NAME" = workflow_dispatch
+
+        test "$GITHUB_REPOSITORY" = Smarty-Pants-Inc/codex
+
+        test "$EVENT_REPOSITORY_ID" = 1047329867
+
+        test "$GITHUB_RUN_ATTEMPT" = 1
+
+        test "$GITHUB_REF" = refs/heads/qualify/full-core-app-a9a7-v2
+
+        test "$GITHUB_WORKFLOW_REF" = Smarty-Pants-Inc/codex/.github/workflows/smarty-ci.yml@refs/heads/qualify/full-core-app-a9a7-v2
+
+        test "$EVENT_WORKFLOW_SHA" = "$GITHUB_SHA"
+
+        '
+      id: phase0
+    - name: Checkout exact wrapper
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      with:
+        ref: ${{ github.sha }}
+        path: wrapper
+        persist-credentials: false
+      id: phase1
+    - name: Checkout frozen product
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      with:
+        ref: a9a7b2ffb4cd4f210586e786fffaaedd27a5b0e8
+        path: product
+        persist-credentials: false
+      id: phase2
+    - name: Bind wrapper and product custody
+      run: "set -euo pipefail\nmkdir -p -m 700 \"$RUNNER_TEMP/wrapper-proof\"\nproof=\"$RUNNER_TEMP/wrapper-proof\"\
+        \ntrap 'rc=$?; trap - EXIT; printf \"%s\\\\n\" \"$rc\" > \"$RUNNER_TEMP/wrapper-proof/step-3.exit\"; exit\
+        \ \"$rc\"' EXIT\nexec > >(tee \"$proof/step-3.log\") 2>&1\nset -euo pipefail\nmkdir -p -m 700 \"$RUNNER_TEMP/wrapper-proof\"\
+        \nproof=\"$RUNNER_TEMP/wrapper-proof\"\ngit -C wrapper show -s --format='%H %T %P' > \"$proof/wrapper-source.txt\"\
+        \ntest \"$(git -C wrapper rev-parse HEAD)\" = \"$GITHUB_SHA\"\nsha256sum wrapper/.github/workflows/smarty-ci.yml\
+        \ > \"$proof/workflow.sha256\"\ncp \"$GITHUB_EVENT_PATH\" \"$proof/event.json\"\nprintf '%s\\n' \"$GITHUB_EVENT_NAME\"\
+        \ > \"$proof/event-name.txt\"\ngit -C product show -s --format='%H %T %P' > \"$proof/product-source.txt\"\
+        \ntest \"$(git -C product rev-parse HEAD)\" = a9a7b2ffb4cd4f210586e786fffaaedd27a5b0e8\ntest \"$(git -C\
+        \ product rev-parse HEAD^{tree})\" = 0ec09cfc62bc848c986770b2294b839492b10198\nfor checkout in wrapper product;\
+        \ do\n  git -C \"$checkout\" diff --exit-code\n  git -C \"$checkout\" diff --cached --exit-code\n  test\
+        \ -z \"$(git -C \"$checkout\" ls-files --others --exclude-standard)\"\ndone\ntest \"$(sha256sum wrapper/.github/qualification/full-core-app/produce-evidence.py\
+        \ | cut -d ' ' -f 1)\" = a22c5989dccad281046a31f6085c7174379170b0b30322ace868cdbf768de717\ntest \"$(sha256sum\
+        \ wrapper/.github/qualification/full-core-app/run-lane.sh | cut -d ' ' -f 1)\" = a059fa955807d2c6bb2ca3153fbcb056b6fad9287d21e4bb19627f550c2bfefa\n\
+        test \"$(sha256sum wrapper/.github/qualification/full-core-app/stage-upload.py | cut -d ' ' -f 1)\" = eb85511e0f4c3c6442add0d53d5a66bb6073614da58903c360aa94ca97318470\n\
+        sha256sum wrapper/.github/qualification/full-core-app/* > \"$proof/recipes.sha256\"\necho \"CARGO_TARGET_DIR=$RUNNER_TEMP/target\"\
+        \ >> \"$GITHUB_ENV\"\n"
+      id: phase3
+    - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+      with:
+        components: rustfmt,clippy,rust-src
+        toolchain: 1.95.0
+      id: phase4
+    - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532
+      with:
+        tool: just@1.51.0,nextest@0.9.103
+      id: phase5
+    - uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86
+      with:
+        bazelisk-version: 1.28.1
+      id: phase6
+    - uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a
+      id: phase7
+    - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+      with:
+        version: 0.11.3
+        enable-cache: false
+      id: phase8
+    - name: Linux dependencies and native tool guards
+      working-directory: product
+      run: "set -euo pipefail\nmkdir -p -m 700 \"$RUNNER_TEMP/wrapper-proof\"\nproof=\"$RUNNER_TEMP/wrapper-proof\"\
+        \ntrap 'rc=$?; trap - EXIT; printf \"%s\\\\n\" \"$rc\" > \"$RUNNER_TEMP/wrapper-proof/step-9.exit\"; exit\
+        \ \"$rc\"' EXIT\nexec > >(tee \"$proof/step-9.log\") 2>&1\nset -euo pipefail\nsudo DEBIAN_FRONTEND=noninteractive\
+        \ apt-get update\nsudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential\
+        \ pkg-config libcap-dev libssl-dev protobuf-compiler\nsudo sysctl -w kernel.unprivileged_userns_clone=1\n\
+        if sudo sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then\n  sudo sysctl\
+        \ -w kernel.apparmor_restrict_unprivileged_userns=0\nfi\nsudo cp \"$(command -v dotslash)\" /usr/local/bin/dotslash\n\
+        test \"$(cd codex-rs && rustc --version | cut -d ' ' -f 2)\" = 1.95.0\n{ cc --version; protoc --version;\
+        \ (cd codex-rs && rustc -Vv && cargo --version); cargo nextest --version; just --version; dotslash --version;\
+        \ uv --version; } > \"$RUNNER_TEMP/wrapper-proof/native-tools.log\"\ntest \"$(cat .bazelversion)\" = 9.0.0\n\
+        test \"$(bazel --version)\" = 'bazel 9.0.0'\nsha256sum MODULE.bazel MODULE.bazel.lock codex-rs/Cargo.lock\
+        \ > \"$RUNNER_TEMP/wrapper-proof/locks-before.sha256\"\n"
+      id: phase9
+    - name: Check bubblewrap netlink replies
+      working-directory: product/codex-rs/bwrap
+      run: "set -euo pipefail\nmkdir -p -m 700 \"$RUNNER_TEMP/wrapper-proof\"\nproof=\"$RUNNER_TEMP/wrapper-proof\"\
+        \ntrap 'rc=$?; trap - EXIT; if test -n \"${test_binary:-}\"; then rm -f \"$test_binary\"; fi; printf \"\
+        %s\\\\n\" \"$rc\" > \"$RUNNER_TEMP/wrapper-proof/step-10.exit\"; exit \"$rc\"' EXIT\nexec > >(tee \"$proof/step-10.log\"\
+        ) 2>&1\ntest_binary=\"$(mktemp)\"\ncc -std=gnu11 -Wall -Wextra -ffunction-sections -fdata-sections \\\n\
+        \  -I. -I../vendor/bubblewrap -Wl,--gc-sections \\\n  tests/netlink_reply.c -o \"$test_binary\"\n\"$test_binary\"\
+        \n"
+      id: phase10
+    - name: Check Rust formatting
+      working-directory: product/codex-rs
+      run: 'set -euo pipefail
+
+        mkdir -p -m 700 "$RUNNER_TEMP/wrapper-proof"
+
+        proof="$RUNNER_TEMP/wrapper-proof"
+
+        trap ''rc=$?; trap - EXIT; printf "%s\\n" "$rc" > "$RUNNER_TEMP/wrapper-proof/step-11.exit"; exit "$rc"''
+        EXIT
+
+        exec > >(tee "$proof/step-11.log") 2>&1
+
+        cargo fmt -- --config imports_granularity=Item --check'
+      id: phase11
+    - name: Test codex-bwrap
+      working-directory: product/codex-rs
+      run: 'set -euo pipefail
+
+        mkdir -p -m 700 "$RUNNER_TEMP/wrapper-proof"
+
+        proof="$RUNNER_TEMP/wrapper-proof"
+
+        trap ''rc=$?; trap - EXIT; printf "%s\\n" "$rc" > "$RUNNER_TEMP/wrapper-proof/step-12.exit"; exit "$rc"''
+        EXIT
+
+        exec > >(tee "$proof/step-12.log") 2>&1
+
+        # The crate has no Rust tests; C29 above supplies behavioral coverage.
+
+        just test -p codex-bwrap --locked --no-tests=pass --retries 0 --test-threads 2
+
+        '
+      id: phase12
+    - name: Check immutable Bazel lock
+      working-directory: product
+      run: 'set -euo pipefail
+
+        mkdir -p -m 700 "$RUNNER_TEMP/wrapper-proof"
+
+        proof="$RUNNER_TEMP/wrapper-proof"
+
+        trap ''rc=$?; trap - EXIT; printf "%s\\n" "$rc" > "$RUNNER_TEMP/wrapper-proof/step-13.exit"; exit "$rc"''
+        EXIT
+
+        exec > >(tee "$proof/step-13.log") 2>&1
+
+        set -euo pipefail
+
+        just bazel-lock-check 2>&1 | tee "$RUNNER_TEMP/wrapper-proof/bazel-lock-check.log"
+
+        sha256sum -c "$RUNNER_TEMP/wrapper-proof/locks-before.sha256"
+
+        '
+      id: phase13
+    - name: Full selected package lane
+      id: lane
+      working-directory: product
+      env:
+        B_SOURCE_HEAD: a9a7b2ffb4cd4f210586e786fffaaedd27a5b0e8
+        B_SOURCE_TREE: 0ec09cfc62bc848c986770b2294b839492b10198
+        B_LANE: ${{ matrix.lane }}
+        B_BUILD_JOBS: '2'
+        B_TEST_THREADS: '2'
+      run: 'set -euo pipefail
+
+        mkdir -p -m 700 "$RUNNER_TEMP/wrapper-proof"
+
+        proof="$RUNNER_TEMP/wrapper-proof"
+
+        trap ''rc=$?; trap - EXIT; printf "%s\\n" "$rc" > "$RUNNER_TEMP/wrapper-proof/step-14.exit"; exit "$rc"''
+        EXIT
+
+        exec > >(tee "$proof/step-14.log") 2>&1
+
+        set -euo pipefail
+
+        export B_EVIDENCE_DIR="$RUNNER_TEMP/lane-evidence"
+
+        export B_EVIDENCE_PRODUCER="$GITHUB_WORKSPACE/wrapper/.github/qualification/full-core-app/produce-evidence.py"
+
+        export B_EVIDENCE_PRODUCER_SHA256=a22c5989dccad281046a31f6085c7174379170b0b30322ace868cdbf768de717
+
+        set +e
+
+        timeout --signal=TERM --kill-after=5s 1800s bash "$GITHUB_WORKSPACE/wrapper/.github/qualification/full-core-app/run-lane.sh"
+
+        status=$?
+
+        set -e
+
+        printf ''%s\n'' "$status" > "$RUNNER_TEMP/wrapper-proof/external-lane-exit.txt"
+
+        exit "$status"
+
+        '
+    - name: Stage only validated bounded evidence
+      id: stage
+      if: always()
+      run: "set -euo pipefail\nmkdir -p -m 700 \"$RUNNER_TEMP/wrapper-proof\"\npython3 - <<'OUTCOMES'\nimport json,os\n\
+        from pathlib import Path\np=Path(os.environ['RUNNER_TEMP'])/'wrapper-proof'\n(p/'step-outcomes.json').write_text(os.environ['STEP_OUTCOMES']+'\\\
+        n')\n(p/'actions-raw-reference.json').write_text(json.dumps({key:os.environ.get(key) for key in ['GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','GITHUB_JOB','GITHUB_SHA','GITHUB_WORKFLOW_REF']})+'\\\
+        n')\nOUTCOMES\nset -euo pipefail\npython3 - <<'PY'\nimport hashlib,json,os,shutil,stat\nfrom pathlib import\
+        \ Path\nif not __debug__:\n    raise RuntimeError('optimized evidence validation forbidden')\nroot=Path(os.environ['RUNNER_TEMP'])\n\
+        source=root/'lane-evidence'\nproof=root/'wrapper-proof'\n# Missing producer after preflight/timeout is failure\
+        \ DATA, never lane success.\n# Copy only bounded regular allowlisted files into a NEW failure directory.\n\
+        manifest=source/'members.json'\nif not manifest.is_file() or (source/'producer-failed.txt').exists():\n\
+        \    failure=root/'failure-evidence'\n    failure.mkdir(exist_ok=False)\n    allowed={'source-before.txt','source-after.txt','source.patch','index.patch','status-after.txt','lane-exit.txt','resources-before.txt','disk-after.txt','dependencies.sha256','tools.log','MODULE.bazel.lock','lane.txt','test-environment.txt','test-fix-fmt-phases.txt','failure-classification.txt','final-clean.txt','producer-failed.txt'}\n\
+        \    for phase in ['core','app-server','fix','fmt']:\n        allowed.update({phase+'.log',phase+'.command.txt'})\n\
+        \    for phase in ['core','app-server']:\n        allowed.update({'inventory-'+phase+suffix for suffix in\
+        \ ['.json','.stderr','.command.txt']})\n    rows=[]\n    if source.exists():\n        for p in source.iterdir():\n\
+        \            assert p.name in allowed and stat.S_ISREG(p.lstat().st_mode)\n            assert p.stat().st_size<=16*1024**2\n\
+        \            data=p.read_bytes()\n            rows.append({'path':p.name,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()})\n\
+        \        assert sum(row['bytes'] for row in rows)<=32*1024**2\n        for row in rows: shutil.copyfile(source/row['path'],failure/row['path'])\n\
+        \    data=b'Incomplete lane or producer: FAILURE DATA only; no success or qualification.\\n'\n    (failure/'incomplete.txt').write_bytes(data)\n\
+        \    rows.append({'path':'incomplete.txt','bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()})\n\
+        \    # Preserve the failed producer marker as DATA under a non-success filename.\n    if (failure/'producer-failed.txt').exists():\n\
+        \        (failure/'producer-failed.txt').rename(failure/'original-producer-failed.txt')\n        next(row\
+        \ for row in rows if row['path']=='producer-failed.txt')['path']='original-producer-failed.txt'\n    source=failure\n\
+        \    manifest=source/'members.json'\nelse:\n    rows=json.loads(manifest.read_bytes())\nnames={'wrapper-source.txt','workflow.sha256','event.json','event-name.txt','product-source.txt','recipes.sha256','native-tools.log','locks-before.sha256','bazel-lock-check.log','external-lane-exit.txt'}\n\
+        names.update('step-'+str(i)+suffix for i in range(40) for suffix in ['.log','.exit'])\nnames.update({'step-outcomes.json','actions-raw-reference.json'})\n\
+        assert {p.name for p in proof.iterdir()}<=names\nfor p in proof.iterdir():\n    assert stat.S_ISREG(p.lstat().st_mode)\
+        \ and p.stat().st_size<=16*1024**2\n    name='wrapper-proof/'+p.name\n    assert name not in {row['path']\
+        \ for row in rows}\n    data=p.read_bytes()\n    rows.append({'path':name,'bytes':len(data),'sha256':hashlib.sha256(data).hexdigest()})\n\
+        encoded=(json.dumps(rows,indent=2)+'\\n').encode()\nassert len(encoded)+sum(row['bytes'] for row in rows)<=32*1024**2\n\
+        shutil.copytree(proof,source/'wrapper-proof')\nmanifest.write_bytes(encoded)\n(root/'stage-source.txt').write_text(str(source))\n\
+        PY\npython3 wrapper/.github/qualification/full-core-app/stage-upload.py \"$(cat \"$RUNNER_TEMP/stage-source.txt\"\
+        )\" \"$RUNNER_TEMP/validated-upload\"\necho 'ready=true' >> \"$GITHUB_OUTPUT\"\n"
+      env:
+        STEP_OUTCOMES: ${{ toJSON(steps) }}
+    - name: Upload validated lane DATA
+      if: always() && steps.stage.outputs.ready == 'true'
+      uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+      with:
+        name: full-${{ matrix.lane }}-${{ github.run_id }}-${{ github.run_attempt }}
+        path: ${{ runner.temp }}/validated-upload/
+        if-no-files-found: error
+        retention-days: 7
+      id: phase16
