@@ -131,16 +131,14 @@ impl ChatWidget {
                 .model()
                 .trim()
                 .is_empty();
-        let server_queue_request = can_admit_to_server_queue.then(|| {
-            let mut input = self.app_server_user_inputs(&user_message);
-            self.maybe_apply_ide_context(&mut input);
-            (
-                self.thread_id
-                    .expect("configured queued message must have a thread"),
-                uuid::Uuid::new_v4().to_string(),
-                input,
-            )
-        });
+        let server_queue_request =
+            self.thread_id
+                .filter(|_| can_admit_to_server_queue)
+                .map(|thread_id| {
+                    let mut input = self.app_server_user_inputs(&user_message);
+                    self.maybe_apply_ide_context(&mut input);
+                    (thread_id, uuid::Uuid::new_v4().to_string(), input)
+                });
         if !should_run_now || action != QueuedInputAction::Plain {
             let mut queued_message = QueuedUserMessage::new(user_message, action);
             queued_message.pending_pastes = pending_pastes;
