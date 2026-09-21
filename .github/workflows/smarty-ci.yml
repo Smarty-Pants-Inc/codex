@@ -21,7 +21,7 @@ jobs:
   smarty-ci:
     name: smarty-ci
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
@@ -72,6 +72,18 @@ jobs:
       - name: Lint codex-client library
         working-directory: codex-rs
         run: just clippy -p codex-client --lib --locked -- -D warnings
+      - name: Test codex-core source contract
+        working-directory: codex-rs
+        run: just test -p codex-core --locked --retries 0 --test-threads 2 --success-output final
+      - name: Test codex-guardian-v2 source contract
+        working-directory: codex-rs
+        run: just test -p codex-guardian-v2 --locked --retries 0 --test-threads 2
+      - name: Lint Core and guardian source
+        working-directory: codex-rs
+        run: just clippy -p codex-core -p codex-guardian-v2 --locked -- -D warnings
+      - name: Test complete workspace after targeted checks
+        working-directory: codex-rs
+        run: just test --locked --retries 0 --test-threads 2
       - name: Check source remains unchanged
         run: |
           git diff --exit-code
