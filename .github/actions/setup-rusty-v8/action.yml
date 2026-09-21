@@ -37,9 +37,46 @@ runs:
         mkdir -p "${binding_dir}"
         release_path="${binding_dir}/release.json"
         printf 'Resolving V8 release %s\n' "${release_tag}"
-        curl -fsSL --retry 1 --retry-max-time 30 --connect-timeout 10 --max-time 60 \
+        metadata_headers="$(mktemp "${binding_dir}/metadata-headers.XXXXXX")"
+        trap 'rm -f "${metadata_headers}"' EXIT
+        if metadata_status="$(curl -fsSL --retry 1 --retry-max-time 30 --connect-timeout 10 --max-time 60 \
           -H 'Accept: application/vnd.github+json' --max-filesize 2097152 \
-          "${api_url}/releases/tags/${release_tag}" -o "${release_path}"
+          --dump-header "${metadata_headers}" --write-out '%{http_code}' \
+          "${api_url}/releases/tags/${release_tag}" -o "${release_path}")"; then
+          rm -f "${metadata_headers}"
+        else
+          metadata_exit=$?
+          python3 - "${metadata_headers}" "${metadata_status}" <<'PY' || true
+        import json
+        import re
+        import sys
+
+        allowed = {"x-github-request-id", "x-ratelimit-limit", "x-ratelimit-remaining",
+                   "x-ratelimit-reset", "x-ratelimit-resource", "retry-after", "date"}
+        with open(sys.argv[1], "rb") as stream:
+            size = stream.seek(0, 2)
+            stream.seek(max(0, size - 65536))
+            headers = stream.read(65536).decode("ascii", errors="replace")
+        blocks = []
+        for line in headers.splitlines():
+            if re.fullmatch(r"HTTP/[0-9.]+ [0-9]{3}(?: .*)?", line):
+                blocks.append({"status": line[:256]})
+            elif blocks and ":" in line:
+                key, value = line.split(":", 1)
+                if key.lower() in allowed:
+                    blocks[-1][key.lower()] = "".join(
+                        c for c in value.strip() if 32 <= ord(c) <= 126
+                    )[:256]
+        result = {"final_http_status": sys.argv[2] if re.fullmatch(r"[0-9]{3}", sys.argv[2]) else "unknown",
+                  "headers_truncated": size > 65536, "omitted_blocks": max(0, len(blocks) - 8),
+                  "blocks": blocks[-8:]}
+        while len(json.dumps(result)) > 4000 and result["blocks"]:
+            result["blocks"].pop(0)
+            result["omitted_blocks"] += 1
+        print("V8 metadata failure: " + json.dumps(result), file=sys.stderr)
+        PY
+          exit "${metadata_exit}"
+        fi
         for artifact_name in "${archive_name}" "${binding_name}" "${checksums_name}"; do
           asset_id="$(python3 - "${release_path}" "${release_tag}" "${artifact_name}" <<'PY'
         import json
