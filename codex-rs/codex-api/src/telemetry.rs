@@ -19,6 +19,10 @@ use tokio_tungstenite::tungstenite::Message;
 #[path = "telemetry_tests.rs"]
 mod tests;
 
+/// Captured per HTTP attempt, before decoder task scheduling. Bodies are never included.
+pub type ResponseCompletedCallback =
+    Arc<dyn Fn(&str, Option<&codex_protocol::protocol::TokenUsage>) + Send + Sync>;
+
 /// Generic telemetry.
 pub trait SseTelemetry: Send + Sync {
     /// Bind an acceptance callback to the concrete HTTP attempt that opened this
@@ -26,6 +30,12 @@ pub trait SseTelemetry: Send + Sync {
     /// It runs once when the decoder validates `response.created`, before event
     /// forwarding; stream creation, headers and polling do not call it.
     fn response_created_callback(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        None
+    }
+
+    /// Receive actual parsed provider completion/usage before event forwarding.
+    /// A missing usage record stays unknown; completion is not transport/remote cleanup.
+    fn response_completed_callback(&self) -> Option<ResponseCompletedCallback> {
         None
     }
 
