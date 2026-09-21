@@ -58,7 +58,9 @@ use codex_analytics::SubAgentThreadStartedInput;
 use codex_analytics::TurnCodexErrorFact;
 use codex_async_utils::OrCancelExt;
 use codex_connectors::connector_runtime_context_key;
+use codex_context_fragments::AnnotatedContent;
 use codex_context_fragments::RenderedFragment;
+use codex_context_fragments::set_annotated_content;
 use codex_exec_server::Environment;
 use codex_exec_server::EnvironmentManager;
 use codex_execpolicy::prefix_rule_migration;
@@ -323,6 +325,8 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::mcp::ClientMcpExtensions;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::LocalImagePreparation;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -3114,7 +3118,28 @@ impl Session {
             LocalImagePreparation::Defer,
         )
         .into_iter()
-        .map(ResponseItem::from)
+        .map(|input| {
+            let mut item = ResponseItem::from(input);
+            if let ResponseItem::Message { role, content, .. } = &mut item
+                && role == "user"
+            {
+                // Only this direct-input boundary owns user classifications, not history replay.
+                let annotated = std::mem::take(content)
+                    .into_iter()
+                    .map(|content| {
+                        let kind = match &content {
+                            ContentItem::InputText { .. } => "user.text",
+                            ContentItem::InputImage { .. } => "user.image",
+                            ContentItem::InputAudio { .. } => "user.audio",
+                            ContentItem::OutputText { .. } => "unknown",
+                        };
+                        AnnotatedContent::new(content, ContentItemKind(kind.to_string()))
+                    })
+                    .collect();
+                let _ = set_annotated_content(&mut item, annotated);
+            }
+            item
+        })
         .collect()
     }
 
