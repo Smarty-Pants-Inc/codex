@@ -109,6 +109,8 @@ pub struct Request {
     pub body: Option<RequestBody>,
     pub compression: RequestCompression,
     pub timeout: Option<Duration>,
+    /// In-process metadata; the standard transports do not serialize it into headers or body.
+    pub extensions: http::Extensions,
 }
 
 impl Request {
@@ -120,6 +122,7 @@ impl Request {
             body: None,
             compression: RequestCompression::None,
             timeout: None,
+            extensions: http::Extensions::new(),
         }
     }
 
@@ -323,6 +326,34 @@ mod tests {
             err,
             "request compression was requested but content-encoding is already set"
         );
+    }
+
+    #[test]
+    fn into_prepared_and_clone_preserve_typed_metadata_without_changing_wire_body() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct Metadata(&'static str);
+
+        let mut request = Request::new(Method::POST, "https://example.com/v1/responses".into())
+            .with_json(&json!({"model": "test-model"}));
+        let expected = request
+            .prepare_body_for_send()
+            .expect("body should prepare");
+        request.extensions.insert(Metadata("in-process-only"));
+
+        let prepared = request.into_prepared().expect("body should prepare");
+        let cloned = prepared.clone();
+        for request in [&prepared, &cloned] {
+            assert_eq!(
+                request.extensions.get::<Metadata>(),
+                Some(&Metadata("in-process-only"))
+            );
+            assert_eq!(
+                request
+                    .prepare_body_for_send()
+                    .expect("body should prepare"),
+                expected
+            );
+        }
     }
 
     #[test]
