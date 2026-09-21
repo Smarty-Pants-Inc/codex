@@ -94,6 +94,9 @@ jobs:
       - name: Build runtime test helpers
         working-directory: codex-rs
         run: cargo build --locked -p codex-cli -p codex-exec -p codex-code-mode-host -p codex-linux-sandbox -p codex-rmcp-client -p codex-shell-escalation --bins
+      - name: Test codex-guardian-v2 source contract
+        working-directory: codex-rs
+        run: just test -p codex-guardian-v2 --locked --retries 0 --test-threads 2
       - name: Test affected Core repair contracts
         working-directory: codex-rs
         run: >-
@@ -135,9 +138,6 @@ jobs:
       - name: Test codex-core source contract
         working-directory: codex-rs
         run: just test -p codex-core --locked --retries 0 --test-threads 2 --success-output final
-      - name: Test codex-guardian-v2 source contract
-        working-directory: codex-rs
-        run: just test -p codex-guardian-v2 --locked --retries 0 --test-threads 2
       - name: Lint Core and guardian source
         working-directory: codex-rs
         run: just clippy -p codex-core -p codex-guardian-v2 --locked -- -D warnings
