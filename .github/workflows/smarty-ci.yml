@@ -72,6 +72,13 @@ jobs:
       - name: Lint codex-client library
         working-directory: codex-rs
         run: just clippy -p codex-client --lib --locked -- -D warnings
+      - name: Configure verified V8 artifacts for runtime test helpers
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
+      - name: Build runtime test helpers
+        working-directory: codex-rs
+        run: cargo build --locked -p codex-cli -p codex-exec -p codex-code-mode-host -p codex-linux-sandbox -p codex-rmcp-client --bins
       - name: Test codex-core source contract
         working-directory: codex-rs
         run: just test -p codex-core --locked --retries 0 --test-threads 2 --success-output final
@@ -81,10 +88,6 @@ jobs:
       - name: Lint Core and guardian source
         working-directory: codex-rs
         run: just clippy -p codex-core -p codex-guardian-v2 --locked -- -D warnings
-      - name: Configure verified V8 artifacts for complete workspace
-        uses: ./.github/actions/setup-rusty-v8
-        with:
-          target: x86_64-unknown-linux-gnu
       - name: Test complete workspace after targeted checks
         working-directory: codex-rs
         run: just test --locked --retries 0 --test-threads 2
