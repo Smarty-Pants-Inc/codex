@@ -1,4 +1,5 @@
 use super::*;
+use pretty_assertions::assert_eq;
 use std::num::NonZeroU64;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
