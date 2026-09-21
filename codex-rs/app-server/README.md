@@ -1873,6 +1873,8 @@ The server also emits item lifecycle notifications around the request:
 3. Client response.
 4. `item/completed` with `item.type = "dynamicToolCall"`, final `status`, and the returned `contentItems`/`success`.
 
+Responses remain bound to the turn that issued the request. A late response from an interrupted turn cannot resolve a tool call in a later turn, even if the call ID is reused.
+
 The client must respond with content items. Use `inputText` for text, `inputImage` for inline image data URLs, and `inputAudio` for inline audio data URLs. Audio data URLs accept wav, mp3, m4a, webm, and ogg media types. Remote HTTP(S) image URLs and non-data audio URLs make the dynamic tool response invalid.
 
 ```json
