@@ -39,7 +39,7 @@ jobs:
       - name: Install Linux sandbox build dependencies
         run: |
           sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev bubblewrap
       - name: Check bubblewrap netlink replies
         working-directory: codex-rs/bwrap
         run: |
@@ -52,6 +52,54 @@ jobs:
       - name: Check Rust formatting
         working-directory: codex-rs
         run: cargo fmt -- --config imports_granularity=Item --check
+      - name: Configure verified V8 artifacts for runtime test helpers
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-gnu
+      - name: Install DotSlash
+        uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2
+      - name: Make DotSlash available in stable PATH
+        run: |
+          if [[ -w /usr/local/bin ]]; then
+            cp "$(which dotslash)" /usr/local/bin
+          else
+            sudo cp "$(which dotslash)" /usr/local/bin
+          fi
+      - name: Check Core fix and format readiness without changing the candidate
+        working-directory: codex-rs
+        run: |
+          status=0
+          just fix -p codex-core --locked -- -D warnings || status=1
+          cargo fmt -- --config imports_granularity=Item --check || status=1
+          git -C .. diff --exit-code || status=1
+          git -C .. diff --cached --exit-code || status=1
+          untracked="$(git -C .. ls-files --others --exclude-standard)"
+          if test -n "$untracked"; then
+            printf 'Unexpected untracked files:\n%s\n' "$untracked"
+            status=1
+          fi
+          exit "$status"
+      - name: Build runtime test helpers
+        working-directory: codex-rs
+        run: cargo build --locked -p codex-cli -p codex-exec -p codex-code-mode-host -p codex-linux-sandbox -p codex-rmcp-client -p codex-shell-escalation --bins
+      - name: Test affected Core repair contracts
+        working-directory: codex-rs
+        run: >-
+          just test -p codex-core --locked --retries 0 --test-threads 2 --success-output final
+          -E 'test(guardian::evidence_admission) |
+          test(guardian::review_session::tests::cancellation_only_admits_evidence) |
+          test(review_skill_input) | test(turn_user_input_returns_only_direct_user_content) |
+          test(image_preparation) | test(session::tests::local_media) |
+          test(/suite::(additional_context|client::sends_(local_)?audio|code_mode::code_mode_node_repl_text_evidence|codex_delegate|compact|context_annotations|current_time_reminder|guardian_subagent_authorization|hooks::async_hook_finishing|image_rollout|mcp_tool_exposure|pending_input|responses_lite|token_budget|view_image::user_turn)/) |
+          test(model_switching::model_change_from_multimodal_to_text_strips_prior_media_content) |
+          test(multi_exec_server_sandbox::two_exec_servers_isolate_workspace_write_roots) |
+          test(agents_md::restricted_project_without_instructions_starts_successfully) |
+          test(request_permissions::workspace_write_with_additional_permissions_can_write_outside_cwd) |
+          test(tools::sandbox_denied_exec_command_returns_original_output) |
+          test(workspace_roots::workspace_roots_allow_file_and_command_writes) |
+          test(network_approval::user_network_approval_once_session_and_denial_semantics) |
+          test(network_approval::disconnected_network_request_explains_failure_to_model::connect) |
+          test(hooks::permission_request_hook_allows_network_approval_without_prompt)'
       - name: Test codex-bwrap
         working-directory: codex-rs
         run: |
@@ -72,13 +120,6 @@ jobs:
       - name: Lint codex-client library
         working-directory: codex-rs
         run: just clippy -p codex-client --lib --locked -- -D warnings
-      - name: Configure verified V8 artifacts for runtime test helpers
-        uses: ./.github/actions/setup-rusty-v8
-        with:
-          target: x86_64-unknown-linux-gnu
-      - name: Build runtime test helpers
-        working-directory: codex-rs
-        run: cargo build --locked -p codex-cli -p codex-exec -p codex-code-mode-host -p codex-linux-sandbox -p codex-rmcp-client --bins
       - name: Test codex-core source contract
         working-directory: codex-rs
         run: just test -p codex-core --locked --retries 0 --test-threads 2 --success-output final
