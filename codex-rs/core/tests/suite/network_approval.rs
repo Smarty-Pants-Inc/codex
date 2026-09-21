@@ -1023,19 +1023,13 @@ async fn user_network_approval_once_session_and_denial_semantics() -> Result<()>
     let socks_command = format!(
         r#"python3 -c "import os,socket,urllib.parse; proxy=urllib.parse.urlparse(os.environ['ALL_PROXY']); host='{NETWORK_TEST_HOST}'.encode(); sock=socket.create_connection((proxy.hostname, proxy.port)); sock.sendall(b'\x05\x01\x00'); assert sock.recv(2) == b'\x05\x00'; sock.sendall(b'\x05\x01\x00\x03' + bytes([len(host)]) + host + (443).to_bytes(2, 'big')); print(sock.recv(10))""#
     );
-    let abort_response = mount_sse_once(
+    let abort_responses = mount_exec_network_turn(
         &server,
-        sse(vec![
-            ev_response_created("resp-user-network-abort"),
-            ev_function_call(
-                "user-network-abort",
-                "exec_command",
-                &serde_json::to_string(&network_exec_args(&socks_command))?,
-            ),
-            ev_completed("resp-user-network-abort"),
-        ]),
+        "resp-user-network-abort",
+        "user-network-abort",
+        network_exec_args(&socks_command),
     )
-    .await;
+    .await?;
     submit_managed_network_turn(
         &test,
         "a different protocol must prompt and the user abort must stay a user outcome",
@@ -1058,11 +1052,15 @@ async fn user_network_approval_once_session_and_denial_semantics() -> Result<()>
             decision: ReviewDecision::Abort,
         })
         .await?;
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnAborted(_))
-    })
-    .await;
-    abort_response.single_request();
+    wait_for_completion_without_network_prompt(&test).await;
+    let abort_requests = abort_responses.requests();
+    assert_eq!(abort_requests.len(), 2);
+    let abort_output = abort_requests[1]
+        .function_call_output_text("user-network-abort")
+        .context("expected user-aborted network output in the follow-up request")?;
+    assert!(abort_output.contains("rejected by user"));
+    assert!(!abort_output.contains("blocked by policy"));
+    assert!(!abort_output.contains("Error while requesting approval"));
 
     Ok(())
 }
