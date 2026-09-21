@@ -1,3 +1,6 @@
+use crate::async_scorer::test_support::ProxyPrewarmLimit;
+use crate::async_scorer::test_support::proxy_websocket_servers;
+use crate::async_scorer::test_support::proxy_websocket_servers_with_prewarm_limit;
 use anyhow::Result;
 use codex_extension_api::ExtensionMetrics;
 use codex_http_client::HttpClientFactory;
@@ -87,50 +90,6 @@ fn assert_connection_metadata(server: &responses::WebSocketTestServer) -> Result
         );
     }
     Ok(thread_id)
-}
-
-#[derive(Clone, Copy)]
-enum ProxyPrewarmLimit {
-    AllConnections,
-    StopAfter { ready_connections: usize },
-}
-
-async fn proxy_websocket_servers(servers: &[&responses::WebSocketTestServer]) -> Result<String> {
-    proxy_websocket_servers_with_prewarm_limit(servers, ProxyPrewarmLimit::AllConnections).await
-}
-
-async fn proxy_websocket_servers_with_prewarm_limit(
-    servers: &[&responses::WebSocketTestServer],
-    prewarm_limit: ProxyPrewarmLimit,
-) -> Result<String> {
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    let targets = servers
-        .iter()
-        .map(|server| server.uri().trim_start_matches("ws://").to_owned())
-        .collect::<Vec<_>>();
-    tokio::spawn(async move {
-        for (index, target) in targets.into_iter().enumerate() {
-            if let ProxyPrewarmLimit::StopAfter { ready_connections } = prewarm_limit
-                && index == ready_connections
-            {
-                let Ok((connection, _)) = listener.accept().await else {
-                    return;
-                };
-                drop(connection);
-            }
-            let Ok((mut incoming, _)) = listener.accept().await else {
-                return;
-            };
-            tokio::spawn(async move {
-                let Ok(mut outgoing) = TcpStream::connect(target).await else {
-                    return;
-                };
-                let _ = tokio::io::copy_bidirectional(&mut incoming, &mut outgoing).await;
-            });
-        }
-    });
-    Ok(format!("http://{address}/v1"))
 }
 
 fn sampler_config(base_url: String) -> LunaSamplerConfig {
@@ -424,13 +383,14 @@ async fn sampler_reuses_parent_compaction_only_for_matching_model_hashes() -> Re
             ev_assistant_message("sample", "low"),
             ev_completed("response-1"),
         ];
-        let mut connections = vec![Vec::new(); INITIAL_WEBSOCKET_CONNECTIONS - 1];
-        connections.push(vec![events.clone(), events]);
-        let server = responses::start_websocket_server(connections).await;
-        let mut config = sampler_config(format!(
-            "http://{}/v1",
-            server.uri().trim_start_matches("ws://")
-        ));
+        let mut servers = Vec::new();
+        for _ in 0..INITIAL_WEBSOCKET_CONNECTIONS {
+            servers.push(
+                responses::start_websocket_server(vec![vec![events.clone(), events.clone()]]).await,
+            );
+        }
+        let server_refs = servers.iter().collect::<Vec<_>>();
+        let mut config = sampler_config(proxy_websocket_servers(&server_refs).await?);
         config.luna_compaction_hash = luna_hash.map(str::to_owned);
         let sampler = LunaSampler::connect(config).await?;
         let parent_compaction = ResponseItem::Compaction {
@@ -445,13 +405,13 @@ async fn sampler_reuses_parent_compaction_only_for_matching_model_hashes() -> Re
 
         assert_eq!(sampler.sample(request).await?, "low");
 
-        let request = server
-            .wait_for_request(
-                /*connection_index*/ INITIAL_WEBSOCKET_CONNECTIONS - 1,
-                /*request_index*/ 0,
-            )
-            .await
-            .body_json();
+        let requests = servers
+            .iter()
+            .flat_map(|server| server.connections())
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len(), 1);
+        let request = requests[0].body_json();
         let input = request["input"].as_array().expect("input items");
         assert_eq!(input[0]["type"], "additional_tools");
         assert_eq!(input[1]["role"], "developer");
@@ -466,14 +426,32 @@ async fn sampler_reuses_parent_compaction_only_for_matching_model_hashes() -> Re
             switched_request.parent_compaction = Some(parent_compaction);
             switched_request.parent_compaction_hash = Some("incompatible".to_owned());
             assert_eq!(sampler.sample(switched_request).await?, "low");
-            let switched_request = server
-                .wait_for_request(
-                    /*connection_index*/ INITIAL_WEBSOCKET_CONNECTIONS - 1,
-                    /*request_index*/ 1,
-                )
-                .await
-                .body_json();
+            let requests = servers
+                .iter()
+                .flat_map(|server| server.connections())
+                .flatten()
+                .map(|request| request.body_json())
+                .collect::<Vec<_>>();
+            assert_eq!(requests.len(), 2);
+            let switched = requests
+                .iter()
+                .filter(|body| **body != request)
+                .collect::<Vec<_>>();
+            let [switched_request] = switched.as_slice() else {
+                panic!("expected exactly one incompatible-hash request");
+            };
+            assert_eq!(
+                switched_request["input"]
+                    .as_array()
+                    .expect("input items")
+                    .len(),
+                3
+            );
             assert_eq!(switched_request["input"][2]["role"], "user");
+            assert_eq!(
+                switched_request["input"][2]["content"][0]["text"],
+                super::UNTRUSTED_GUARDIAN_EVIDENCE_NOTICE
+            );
         } else {
             assert_eq!(input.len(), 4);
             assert_eq!(input[2]["role"], "developer");
