@@ -223,6 +223,7 @@ mod mcp_refresh;
 mod mcp_runtime;
 pub(crate) mod multi_agents;
 mod review;
+mod review_skill_input;
 mod rollout_budget;
 mod rollout_reconstruction;
 #[allow(clippy::module_inception)]
