@@ -275,10 +275,23 @@ fn resize_notices_preserve_original_image_positions_and_skip_failed_images() {
     );
 
     assert_eq!(items.len(), 4);
-    let ResponseItem::Message { role, content, .. } = &items[0] else {
+    let ResponseItem::Message {
+        role,
+        content,
+        internal_chat_message_metadata_passthrough,
+        ..
+    } = &items[0]
+    else {
         panic!("expected user message");
     };
     assert_eq!(role, "user");
+    assert_eq!(
+        internal_chat_message_metadata_passthrough,
+        &Some(InternalChatMessageMetadataPassthrough {
+            content_item_kinds: Some(vec![ContentItemKind("user.image".to_string()); 2]),
+            ..Default::default()
+        })
+    );
     let [
         ContentItem::InputImage {
             image_url: small_message_image_url,
@@ -314,7 +327,15 @@ fn resize_notices_preserve_original_image_positions_and_skip_failed_images() {
                 },
             ],
             phase: None,
-            internal_chat_message_metadata_passthrough: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    content_item_kinds: Some(vec![
+                        ContentItemKind("images.preparation_error".to_string()),
+                        ContentItemKind("images.resize_notice".to_string()),
+                    ]),
+                    ..Default::default()
+                },
+            ),
         }
     );
     let ResponseItem::FunctionCallOutput { output, .. } = &items[2] else {
@@ -422,6 +443,15 @@ fn mixed_user_media_notices_preserve_content_source_order() {
     assert_eq!(decoded_image(image_url).1.dimensions(), (1600, 1600));
     assert_eq!(audio_url, "data:audio/wav;base64,YXVkaW8=");
     assert_eq!(after, "after");
+    let mut legacy_user = items[0].clone();
+    let legacy_content = to_annotated_content(&mut legacy_user).expect("user content");
+    assert_eq!(
+        legacy_content
+            .iter()
+            .map(AnnotatedContent::kind)
+            .collect::<Vec<_>>(),
+        vec![&ContentItemKind("unknown".to_string()); 4]
+    );
     assert_eq!(items[0].turn_id(), Some("turn-media"));
     assert_eq!(
         items[1],
@@ -445,7 +475,16 @@ fn mixed_user_media_notices_preserve_content_source_order() {
                 },
             ],
             phase: None,
-            internal_chat_message_metadata_passthrough: None,
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    content_item_kinds: Some(vec![
+                        ContentItemKind("images.resize_notice".to_string()),
+                        ContentItemKind("audio.preparation_error".to_string()),
+                        ContentItemKind("images.preparation_error".to_string()),
+                    ]),
+                    ..Default::default()
+                },
+            ),
         }
     );
 }
@@ -502,7 +541,16 @@ fn all_failed_user_media_preserves_the_user_boundary_and_source_order() {
                     },
                 ],
                 phase: None,
-                internal_chat_message_metadata_passthrough: None,
+                internal_chat_message_metadata_passthrough: Some(
+                    InternalChatMessageMetadataPassthrough {
+                        content_item_kinds: Some(vec![
+                            ContentItemKind("audio.preparation_error".to_string()),
+                            ContentItemKind("images.preparation_error".to_string()),
+                            ContentItemKind("audio.preparation_error".to_string()),
+                        ]),
+                        ..Default::default()
+                    },
+                ),
             },
         ]
     );
