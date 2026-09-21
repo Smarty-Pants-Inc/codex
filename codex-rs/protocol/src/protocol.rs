@@ -664,11 +664,22 @@ pub enum Op {
         response: RequestPermissionsResponse,
     },
 
-    /// Resolve a dynamic tool call request.
+    /// Resolve a dynamic tool call request for a legacy direct Core caller.
+    /// Native adapters retaining an originating turn use `DynamicToolResponseForTurn`.
     DynamicToolResponse {
         /// Call id for the in-flight request.
         id: String,
         /// Tool output payload.
+        response: DynamicToolResponse,
+    },
+
+    /// Resolve a dynamic tool call only in the turn that issued it.
+    ///
+    /// Native adapters must retain the originating turn across asynchronous
+    /// client responses. A late response must not consume a reused call ID.
+    DynamicToolResponseForTurn {
+        turn_id: String,
+        id: String,
         response: DynamicToolResponse,
     },
 
@@ -904,6 +915,7 @@ impl Op {
             Self::UserInputAnswer { .. } => "user_input_answer",
             Self::RequestPermissionsResponse { .. } => "request_permissions_response",
             Self::DynamicToolResponse { .. } => "dynamic_tool_response",
+            Self::DynamicToolResponseForTurn { .. } => "dynamic_tool_response_for_turn",
             Self::RefreshMcpServers => "refresh_mcp_servers",
             Self::ReloadUserConfig => "reload_user_config",
             Self::Compact => "compact",
