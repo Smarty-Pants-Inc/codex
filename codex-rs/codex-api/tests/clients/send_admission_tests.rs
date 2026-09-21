@@ -25,6 +25,11 @@ enum PreparedDecision {
     Reject,
 }
 
+const METADATA_SENTINEL: &str = "private-request-metadata-5c83490e";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RequestMetadata(&'static str);
+
 struct MutatingAuth;
 
 impl AuthProvider for MutatingAuth {
@@ -34,6 +39,9 @@ impl AuthProvider for MutatingAuth {
 
     fn apply_auth(&self, mut request: Request) -> codex_api::AuthProviderFuture<'_> {
         self.add_auth_headers(&mut request.headers);
+        request
+            .extensions
+            .insert(RequestMetadata(METADATA_SENTINEL));
         request
             .headers
             .insert("x-auth-returned", HeaderValue::from_static("mutated"));
@@ -57,6 +65,10 @@ struct PreparedAdmission {
 impl RequestTelemetry for PreparedAdmission {
     fn on_request_prepared(&self, request: &Request) -> std::result::Result<(), String> {
         let body = request.prepare_body_for_send()?;
+        assert_eq!(
+            request.extensions.get::<RequestMetadata>(),
+            Some(&RequestMetadata(METADATA_SENTINEL))
+        );
         assert_eq!(
             (
                 &request.method,
@@ -172,6 +184,22 @@ async fn prepared_admission_sees_post_auth_request_and_refuses_both_transports()
                 result?;
                 assert_eq!(requests.len(), 1);
                 let sent = &requests[0];
+                assert!(!sent.url.as_str().contains(METADATA_SENTINEL));
+                for (name, value) in &sent.headers {
+                    assert!(!name.as_str().contains(METADATA_SENTINEL));
+                    assert!(
+                        !value
+                            .as_bytes()
+                            .windows(METADATA_SENTINEL.len())
+                            .any(|bytes| bytes == METADATA_SENTINEL.as_bytes())
+                    );
+                }
+                assert!(
+                    !sent
+                        .body
+                        .windows(METADATA_SENTINEL.len())
+                        .any(|bytes| bytes == METADATA_SENTINEL.as_bytes())
+                );
                 let expected_url = url::Url::parse(&admission.expected_url)?;
                 // Wiremock reconstructs origin-form request targets with a localhost
                 // base. The actual destination authority is in the Host header.
