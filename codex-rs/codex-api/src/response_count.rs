@@ -190,7 +190,7 @@ pub fn prepare_response_count(
     Ok(CountWire {
         inference,
         count,
-        model: request.model.clone(),
+        model: request.model,
         output_tokens,
     })
 }
