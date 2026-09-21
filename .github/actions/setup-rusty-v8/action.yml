@@ -37,7 +37,7 @@ runs:
         mkdir -p "${binding_dir}"
         for artifact_name in "${archive_name}" "${binding_name}" "${checksums_name}"; do
           printf 'Downloading %s\n' "${artifact_name}"
-          curl -fsSL --retry 1 --retry-max-time 30 --max-time 60 \
+          curl -fsSL --retry 1 --retry-max-time 30 --connect-timeout 10 --max-time 60 \
             "${base_url}/${artifact_name}" -o "${binding_dir}/${artifact_name}"
         done
 
