@@ -107,7 +107,7 @@ impl<T: HttpTransport> EndpointSession<T> {
                     let req = auth.apply_auth(req).await.map_err(TransportError::from)?;
                     if let Some(telemetry) = telemetry {
                         telemetry
-                            .on_request_start()
+                            .on_request_prepared(&req)
                             .map_err(TransportError::Build)?;
                     }
                     transport.execute(req).await
@@ -154,7 +154,7 @@ impl<T: HttpTransport> EndpointSession<T> {
                     let req = auth.apply_auth(req).await.map_err(TransportError::from)?;
                     if let Some(telemetry) = telemetry {
                         telemetry
-                            .on_request_start()
+                            .on_request_prepared(&req)
                             .map_err(TransportError::Build)?;
                     }
                     transport.stream(req).await
