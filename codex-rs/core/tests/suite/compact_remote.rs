@@ -1484,7 +1484,14 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
             }),
     )
     .await?;
-    let image_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
+    let image =
+        image::ImageBuffer::from_pixel(/*width*/ 1, /*height*/ 1, image::Luma([0u8]));
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    image.write_to(&mut bytes, image::ImageFormat::Png)?;
+    let image_url = format!(
+        "data:image/png;base64,{}",
+        BASE64_STANDARD.encode(bytes.get_ref())
+    );
     let user_notice = "<image_resize_notice>retained user image</image_resize_notice>";
     let tool_notice = "<image_resize_notice>discarded tool image</image_resize_notice>";
     let unlisted_notice = "<unlisted_notice>discarded developer notice</unlisted_notice>";
@@ -1640,6 +1647,21 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
     wait_for_turn_complete(&codex).await;
 
     let response_requests = responses_mock.requests();
+    let retains_user_image_and_notice = |request: &responses::ResponsesRequest| {
+        request.input().windows(2).any(|items| {
+            items[0]["role"] == "user"
+                && items[0]["content"][0]["text"] == "retained image source"
+                && items[0]["content"]
+                    .as_array()
+                    .is_some_and(|content| content.iter().any(|item| item["type"] == "input_image"))
+                && items[1]["role"] == "developer"
+                && items[1]["content"][0]["text"] == user_notice
+        })
+    };
+    assert!(
+        retains_user_image_and_notice(&response_requests[0]),
+        "fixture must reach compaction with a decoded user image and adjacent resize notice"
+    );
     let compact_request = &response_requests[3];
     let item_create_time = |request: &responses::ResponsesRequest, text: &str| {
         request
@@ -1798,12 +1820,7 @@ async fn remote_compact_v2_reuses_compaction_trigger_for_followups() -> Result<(
         "expected v2 follow-up request to preserve retained original user messages"
     );
     assert!(
-        follow_up_request.input().windows(2).any(|items| {
-            items[0]["role"] == "user"
-                && items[0]["content"][0]["text"] == "retained image source"
-                && items[1]["role"] == "developer"
-                && items[1]["content"][0]["text"] == user_notice
-        }),
+        retains_user_image_and_notice(follow_up_request),
         "expected v2 compaction to retain the user image and its adjacent resize notice"
     );
     assert!(
