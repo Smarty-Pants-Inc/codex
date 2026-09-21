@@ -31,6 +31,7 @@ use crate::with_chatgpt_cloudflare_cookie_store;
 pub struct HttpClientBuilder {
     default_headers: Option<HeaderMap>,
     follow_redirects: bool,
+    single_attempt: bool,
     connect_timeout: Option<Duration>,
     chatgpt_cloudflare_cookie_store: bool,
     chatgpt_cookie_store: Option<Arc<ChatGptCookieStore>>,
@@ -88,6 +89,16 @@ impl HttpClientBuilder {
 
     pub fn without_redirects(mut self) -> Self {
         self.follow_redirects = false;
+        self
+    }
+
+    /// No redirect, protocol resend, connection reuse, cookies or request logging.
+    /// Used for separately accounted sends; proxy policy still comes from the factory.
+    pub(crate) fn single_attempt(mut self) -> Self {
+        self.single_attempt = true;
+        self.follow_redirects = false;
+        self.chatgpt_cloudflare_cookie_store = false;
+        self.request_logging = RequestLogging::Disabled;
         self
     }
 
@@ -279,6 +290,16 @@ impl HttpClientBuilder {
             ensure_rustls_crypto_provider();
             builder = builder.use_rustls_tls();
         }
+        if self.single_attempt {
+            builder = builder
+                .retry(reqwest::retry::never())
+                .http1_only()
+                .no_gzip()
+                .no_brotli()
+                .no_deflate()
+                .no_zstd()
+                .pool_max_idle_per_host(/*max*/ 0);
+        }
         if let Some(default_headers) = self.default_headers {
             builder = builder.default_headers(default_headers);
         }
@@ -303,6 +324,7 @@ impl Default for HttpClientBuilder {
         Self {
             default_headers: None,
             follow_redirects: true,
+            single_attempt: false,
             connect_timeout: None,
             chatgpt_cloudflare_cookie_store: false,
             chatgpt_cookie_store: None,
