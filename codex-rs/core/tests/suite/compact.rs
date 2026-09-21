@@ -727,7 +727,7 @@ async fn summarize_context_three_requests_and_instructions() {
                             ["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
                     }),
                     json!({
-                        "role": "user",
+                        "role": "developer",
                         "content": [{
                             "type": "input_text",
                             "text": expected_summary_message,
