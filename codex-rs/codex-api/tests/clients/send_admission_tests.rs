@@ -172,12 +172,23 @@ async fn prepared_admission_sees_post_auth_request_and_refuses_both_transports()
                 result?;
                 assert_eq!(requests.len(), 1);
                 let sent = &requests[0];
+                let expected_url = url::Url::parse(&admission.expected_url)?;
+                // Wiremock reconstructs origin-form request targets with a localhost
+                // base. The actual destination authority is in the Host header.
                 assert_eq!(
-                    (&sent.method, sent.url.as_str(), sent.body.as_slice()),
+                    (
+                        &sent.method,
+                        sent.url.path(),
+                        sent.url.query(),
+                        sent.headers.get(http::header::HOST),
+                        sent.body.as_slice(),
+                    ),
                     (
                         &admission.expected_method,
-                        admission.expected_url.as_str(),
-                        admission.expected_body.as_deref().unwrap_or_default()
+                        expected_url.path(),
+                        expected_url.query(),
+                        Some(&HeaderValue::from_str(&server.address().to_string())?),
+                        admission.expected_body.as_deref().unwrap_or_default(),
                     )
                 );
                 for (name, expected) in [
