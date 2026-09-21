@@ -1,3 +1,4 @@
+use codex_http_client::Request;
 use codex_http_client::TransportError;
 use http::HeaderMap;
 use http::StatusCode;
@@ -13,6 +14,14 @@ pub trait RequestTelemetry: Send + Sync {
     /// the owning decision finishes, including cancellation after this boundary.
     fn on_request_start(&self) -> Result<(), String> {
         Ok(())
+    }
+
+    /// Inspect the post-authentication request at the existing send boundary.
+    /// The borrowed request can contain secrets: never retain or log its contents.
+    /// This hook has the same no-I/O and non-retryable refusal contract as
+    /// `on_request_start`; the default preserves existing admission hooks.
+    fn on_request_prepared(&self, _request: &Request) -> Result<(), String> {
+        self.on_request_start()
     }
 
     /// Response headers for this concrete send, including failed HTTP responses.

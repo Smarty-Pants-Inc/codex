@@ -69,6 +69,9 @@ jobs:
       - name: Lint codex-api source
         working-directory: codex-rs
         run: just clippy -p codex-api --locked -- -D warnings
+      - name: Lint codex-client library
+        working-directory: codex-rs
+        run: just clippy -p codex-client --lib --locked -- -D warnings
       - name: Check source remains unchanged
         run: |
           git diff --exit-code
