@@ -153,7 +153,10 @@ async fn environment_context_uses_external_current_time_on_each_turn() -> Result
         .iter()
         .zip([FIRST_TIME_UNIX_SECONDS, FIRST_TIME_UNIX_SECONDS + 86_400])
     {
-        assert!(request.has_content_kinds(&["environments.environment_context"]));
+        assert!(request.has_content_kinds(&[
+            "permissions.instructions",
+            "environments.environment_context",
+        ]));
         let current_date = DateTime::<Utc>::from_timestamp(timestamp, 0)
             .expect("test timestamp should be valid")
             .with_timezone(&Local)
