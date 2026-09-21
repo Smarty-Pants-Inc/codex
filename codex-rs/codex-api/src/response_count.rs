@@ -61,21 +61,24 @@ pub fn prepare_response_count(
         || !request.stream
         || request.store
         || output_tokens.get() > 2_000_000
+        || request
+            .max_output_tokens
+            .is_some_and(|limit| limit != output_tokens)
         || request.client_metadata.is_some()
         || request.stream_options.is_some()
     {
         return Err(CountWireError);
     }
+    let mut request = request.clone();
+    request.max_output_tokens = Some(output_tokens);
     #[derive(Serialize)]
     struct BoundedRequest<'a> {
         #[serde(flatten)]
         request: &'a ResponsesApiRequest,
-        max_output_tokens: u64,
         truncation: &'static str,
     }
     let inference = EncodedJsonBody::encode(&BoundedRequest {
-        request,
-        max_output_tokens: output_tokens.get(),
+        request: &request,
         truncation: "disabled",
     })
     .map_err(|_| CountWireError)?

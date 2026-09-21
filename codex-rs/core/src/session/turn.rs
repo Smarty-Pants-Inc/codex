@@ -1325,6 +1325,7 @@ pub(crate) fn build_prompt(
         parallel_tool_calls: true,
         base_instructions,
         output_schema: turn_context.final_output_json_schema.clone(),
+        max_output_tokens: None,
         output_schema_strict: !crate::guardian::is_basic_session_source(
             &turn_context.session_source,
         ),
