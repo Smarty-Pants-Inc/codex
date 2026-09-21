@@ -57,6 +57,9 @@ jobs:
         run: |
           # The crate has no Rust tests; C29 above supplies behavioral coverage.
           just test -p codex-bwrap --locked --no-tests=pass --retries 0 --test-threads 2
+      - name: Test codex-http-client
+        working-directory: codex-rs
+        run: just test -p codex-http-client --locked --retries 0 --test-threads 2
       - name: Check source remains unchanged
         run: |
           git diff --exit-code
