@@ -25,6 +25,8 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -666,8 +668,8 @@ fn permission_profile_from_toml(profile: &str) -> Result<PermissionProfile> {
                 ":project_roots" => FileSystemPath::Special {
                     value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
                 },
-                _ if *access == FileSystemAccessMode::Deny => FileSystemPath::GlobPattern {
-                    pattern: path.clone(),
+                _ if *access == FileSystemAccessMode::Deny => FileSystemPath::Path {
+                    path: PathUri::from_abs_path(&AbsolutePathBuf::try_from(path.as_str())?),
                 },
                 _ => anyhow::bail!("unexpected filesystem entry in test profile: {path}"),
             };

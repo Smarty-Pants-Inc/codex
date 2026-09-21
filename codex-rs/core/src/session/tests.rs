@@ -2729,7 +2729,15 @@ async fn prepares_resumed_history_before_installing_it() {
                     },
                 ],
                 phase: None,
-                internal_chat_message_metadata_passthrough: None,
+                internal_chat_message_metadata_passthrough: Some(
+                    InternalChatMessageMetadataPassthrough {
+                        content_item_kinds: Some(vec![
+                            ContentItemKind("images.preparation_error".to_string()),
+                            ContentItemKind("images.preparation_error".to_string()),
+                        ]),
+                        ..Default::default()
+                    },
+                ),
             },
         ]
     );
