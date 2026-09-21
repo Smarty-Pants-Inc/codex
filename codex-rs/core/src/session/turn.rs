@@ -723,12 +723,7 @@ async fn required_mcp_servers_for_input(
         .iter()
         .filter_map(|input| match input {
             UserInput::Text { text, .. } => Some(text.clone()),
-            UserInput::Image { .. }
-            | UserInput::LocalImage { .. }
-            | UserInput::Audio { .. }
-            | UserInput::LocalAudio { .. }
-            | UserInput::Skill { .. }
-            | UserInput::Mention { .. } => None,
+            _ => None,
         })
         .collect::<Vec<_>>();
     let skill_mentions = collect_tool_mentions_from_messages(&skill_messages);
