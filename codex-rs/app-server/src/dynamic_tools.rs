@@ -15,6 +15,10 @@ use crate::server_request_error::is_turn_transition_server_request_error;
 
 const INVALID_AUDIO_URL_ERROR: &str = "audio URLs must use an inline data URL";
 
+#[cfg(test)]
+#[path = "dynamic_tools_response_tests.rs"]
+mod tests;
+
 pub(crate) async fn on_call_response(
     turn_id: String,
     call_id: String,
