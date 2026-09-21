@@ -9,6 +9,10 @@ use crate::StreamResponse;
 use crate::TransportError;
 use futures::StreamExt;
 
+#[cfg(test)]
+#[path = "single_attempt_tests.rs"]
+mod tests;
+
 /// Construction is restricted to a no-resend client; an arbitrary existing
 /// reqwest client or transport cannot assert this property with a boolean.
 pub struct SingleAttemptTransport {
