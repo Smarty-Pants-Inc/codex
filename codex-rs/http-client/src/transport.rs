@@ -62,6 +62,7 @@ impl ReqwestTransport {
             headers: _,
             body: _,
             compression: _,
+            extensions: _,
             timeout,
         } = req;
 
