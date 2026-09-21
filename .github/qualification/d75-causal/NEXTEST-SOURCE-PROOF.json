@@ -1,0 +1,36 @@
+{
+  "tool": "cargo-nextest",
+  "version": "0.9.103",
+  "crate": {
+    "name": "cargo-nextest",
+    "sha256": "70cbe40eb7ffd64bfeaba375b0d8b67dd72e7a8fe1e90ed1f4d23dadc6834d10"
+  },
+  "dependency": {
+    "name": "nextest-runner",
+    "version": "0.86.0",
+    "sha256": "54078b119ed19a55a69ffc68ef43aa7fa9f3ba5c67e36fd78bce00462c87dc0a"
+  },
+  "source_anchors": [
+    {
+      "file": "dispatch.rs",
+      "lines": "321/326",
+      "claim": "TestBuildFilter is shared by List"
+    },
+    {
+      "file": "dispatch.rs",
+      "lines": "554-557",
+      "claim": "--run-ignored is a value_enum option"
+    },
+    {
+      "file": "dispatch.rs",
+      "lines": "761-778",
+      "claim": "RunIgnoredOpt::Only maps to RunIgnored::Only"
+    }
+  ],
+  "proven": "cargo nextest list --run-ignored only is supported by the pinned 0.9.103 source",
+  "scope": "original-eight inventory only",
+  "execution_argv_unchanged": true,
+  "strict_exact_one_validator_unchanged": true,
+  "native_execution": false,
+  "dispatch": false
+}
