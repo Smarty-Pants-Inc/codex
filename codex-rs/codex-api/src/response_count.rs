@@ -116,9 +116,11 @@ pub fn prepare_response_count(
         };
         if let Some(parts) = content.and_then(Value::as_array) {
             for part in parts {
-                match part.get("type").and_then(Value::as_str) {
-                    Some("input_text" | "output_text" | "refusal") => {}
-                    Some("input_image") => {
+                match (kind, part.get("type").and_then(Value::as_str)) {
+                    ("reasoning", Some("reasoning_text" | "text")) => {}
+                    ("reasoning", _) => return Err(CountWireError),
+                    (_, Some("input_text" | "output_text" | "refusal")) => {}
+                    (_, Some("input_image")) => {
                         if part.get("file_id").is_some() {
                             return Err(CountWireError);
                         }

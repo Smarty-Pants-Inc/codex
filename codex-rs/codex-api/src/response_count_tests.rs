@@ -68,6 +68,84 @@ fn actual_native_encoder_preserves_complete_context_and_exact_raw_tool_numbers()
 }
 
 #[test]
+fn reasoning_content_and_populated_controls_preserve_exact_projection() {
+    use codex_protocol::models::ReasoningItemContent;
+    use codex_protocol::models::ReasoningItemReasoningSummary;
+    use codex_protocol::models::ResponseItem;
+
+    let mut request = request();
+    request.input.push(ResponseItem::Reasoning {
+        id: None,
+        summary: vec![ReasoningItemReasoningSummary::SummaryText {
+            text: "Retained summary".into(),
+        }],
+        content: Some(vec![
+            ReasoningItemContent::ReasoningText {
+                text: "Retained reasoning é\"\\".into(),
+            },
+            ReasoningItemContent::Text {
+                text: "Retained legacy text".into(),
+            },
+        ]),
+        encrypted_content: Some("opaque-retained-content".into()),
+        internal_chat_message_metadata_passthrough: None,
+    });
+    request.reasoning = Some(crate::Reasoning {
+        effort: Some(codex_protocol::openai_models::ReasoningEffort::High),
+        summary: Some(codex_protocol::config_types::ReasoningSummary::Detailed),
+        context: Some(crate::ReasoningContext::AllTurns),
+    });
+    request.text = Some(crate::TextControls {
+        verbosity: Some(crate::common::OpenAiVerbosity::High),
+        format: Some(crate::common::TextFormat {
+            r#type: crate::common::TextFormatType::JsonSchema,
+            strict: true,
+            schema: json!({"type": "object", "properties": {"answer": {"type": "string"}}}),
+            name: "answer".into(),
+        }),
+    });
+    let wire = prepare_response_count(&request, NonZeroU64::new(/*n*/ 17).unwrap()).unwrap();
+    let inference: BTreeMap<String, Box<RawValue>> =
+        serde_json::from_slice(wire.inference_body().as_bytes()).unwrap();
+    let count: BTreeMap<String, Box<RawValue>> =
+        serde_json::from_slice(wire.count_body().as_bytes()).unwrap();
+    for field in ["input", "reasoning", "text"] {
+        assert_eq!(count[field].get(), inference[field].get());
+    }
+    assert_eq!(
+        serde_json::from_str::<Value>(count["input"].get()).unwrap(),
+        serde_json::to_value(&request.input).unwrap()
+    );
+}
+
+#[test]
+fn model_and_output_boundaries_refuse_without_truncating() {
+    for (model, accepted) in [
+        (String::new(), false),
+        ("m".repeat(256), true),
+        ("m".repeat(257), false),
+        ("é".repeat(128), true),
+        ("é".repeat(129), false),
+    ] {
+        let mut request = request();
+        request.model = model;
+        let result = prepare_response_count(&request, NonZeroU64::new(/*n*/ 17).unwrap());
+        assert_eq!(result.is_ok(), accepted);
+        if let Ok(wire) = result {
+            assert_eq!(wire.model(), request.model);
+        }
+    }
+    for (limit, accepted) in [(1, true), (2_000_000, true), (2_000_001, false)] {
+        let limit = NonZeroU64::new(limit).unwrap();
+        let result = prepare_response_count(&request(), limit);
+        assert_eq!(result.is_ok(), accepted);
+        if let Ok(wire) = result {
+            assert_eq!(wire.output_tokens(), limit);
+        }
+    }
+}
+
+#[test]
 fn output_changes_final_bytes_even_when_count_input_is_unchanged() {
     let request = request();
     let first = prepare_response_count(&request, NonZeroU64::new(/*n*/ 17).unwrap()).unwrap();
