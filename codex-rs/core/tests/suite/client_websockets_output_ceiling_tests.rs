@@ -59,4 +59,5 @@ async fn output_ceiling_is_transmitted_and_only_unchanged_limits_reuse_previous_
         );
         server.shutdown().await;
     }
+    eprintln!("ordinary output ceiling: all five mock WebSocket cases completed");
 }
