@@ -3250,7 +3250,18 @@ allow_local_binding = true
             }
         })
         .await
-        .expect("expected network approval hook to run");
+        .unwrap_or_else(|error| {
+            let requests = responses.requests();
+            let output = requests
+                .iter()
+                .find_map(|request| request.function_call_output_text(call_id))
+                .unwrap_or_else(|| "<no tool output>".to_string());
+            let output = output.chars().take(1024).collect::<String>();
+            panic!(
+                "expected network approval hook to run: {error}; requests={}; call={call_id}; output={output}",
+                requests.len()
+            );
+        });
         assert!(
             timeout(
                 Duration::from_secs(2),

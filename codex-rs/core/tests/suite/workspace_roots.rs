@@ -153,7 +153,9 @@ async fn workspace_roots_allow_file_and_command_writes() -> Result<()> {
     );
 
     let server = start_mock_server().await;
-    let test = workspace_roots_test(&server).await?;
+    let test = workspace_roots_test(&server)
+        .await
+        .context("set up workspace-root write test")?;
     let cwd = PathUri::from_abs_path(&test.config.cwd);
     let patch_path = cwd.join("workspace-root-patch.txt")?;
     let command_path = cwd.join("workspace-root-command.txt")?;
@@ -168,30 +170,53 @@ async fn workspace_roots_allow_file_and_command_writes() -> Result<()> {
         COMMAND_CONTENTS,
     )
     .await?;
-    submit_workspace_turn(&test, "write files inside the workspace roots").await?;
+    submit_workspace_turn(&test, "write files inside the workspace roots")
+        .await
+        .context("submit workspace-root writes")?;
 
     let request = response_mock
         .last_request()
         .context("model should receive both workspace-root tool results")?;
-    let (_, patch_success) = request
+    let (patch_output, patch_success) = request
         .custom_tool_call_output_content_and_success(PATCH_CALL_ID)
         .context("patch result should be present")?;
-    assert_ne!(patch_success, Some(false));
+    let patch_output = format!("{patch_output:?}")
+        .chars()
+        .take(1024)
+        .collect::<String>();
+    assert_ne!(patch_success, Some(false), "patch output: {patch_output}");
 
-    let (_, command_success) = request
+    let (command_output, command_success) = request
         .function_call_output_content_and_success(COMMAND_CALL_ID)
         .context("command result should be present")?;
-    assert_ne!(command_success, Some(false));
+    let command_output = format!("{command_output:?}")
+        .chars()
+        .take(1024)
+        .collect::<String>();
+    assert_ne!(
+        command_success,
+        Some(false),
+        "command output: {command_output}"
+    );
     assert_eq!(
-        read_file(&test, &patch_path).await?,
+        read_file(&test, &patch_path)
+            .await
+            .with_context(|| format!("read patch file {patch_path:?}; output: {patch_output}"))?,
         format!("{PATCH_CONTENTS}\n")
     );
     assert_eq!(
-        read_file(&test, &command_path).await?.trim_end(),
+        read_file(&test, &command_path)
+            .await
+            .with_context(|| format!(
+                "read command file {command_path:?}; output: {command_output}"
+            ))?
+            .trim_end(),
         COMMAND_CONTENTS
     );
 
-    remove_files(&test, &[&patch_path, &command_path]).await
+    remove_files(&test, &[&patch_path, &command_path])
+        .await
+        .with_context(|| format!("remove workspace files {patch_path:?} and {command_path:?}"))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

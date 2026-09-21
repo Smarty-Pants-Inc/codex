@@ -542,7 +542,17 @@ PY"#
         .split_once(prefix)
         .and_then(|(_, rest)| rest.split_once(suffix))
         .map(|(elapsed, _)| elapsed)
-        .with_context(|| format!("missing disconnect explanation: {output}"))?;
+        .with_context(|| {
+            let initial_output = parent_poll
+                .single_request()
+                .function_call_output_text(call_id)
+                .unwrap_or_else(|| "<no initial tool output>".to_string());
+            let initial_output = initial_output.chars().take(1024).collect::<String>();
+            let poll_output = output.chars().take(1024).collect::<String>();
+            format!(
+                "missing disconnect explanation; initial {call_id}: {initial_output}; poll {poll_call_id}: {poll_output}"
+            )
+        })?;
     assert!(elapsed.parse::<u128>()? > 0);
     let message = &output[output.find(prefix).context("missing disconnect prefix")?..];
     let message = &message[..prefix.len() + elapsed.len() + suffix.len()];
@@ -865,7 +875,7 @@ async fn user_network_approval_once_session_and_denial_semantics() -> Result<()>
     let test = managed_network_unified_exec_test(&server).await?;
     let environments = vec![local(test.config.cwd.clone())];
 
-    mount_exec_network_turn(
+    let once_responses = mount_exec_network_turn(
         &server,
         "resp-user-network-once-1",
         "user-network-once-1",
@@ -880,7 +890,17 @@ async fn user_network_approval_once_session_and_denial_semantics() -> Result<()>
         AskForApproval::OnRequest,
     )
     .await?;
-    let approval = expect_network_approval(&test, LOCAL_ENVIRONMENT_ID).await?;
+    let approval = expect_network_approval(&test, LOCAL_ENVIRONMENT_ID)
+        .await
+        .with_context(|| {
+            let output = once_responses
+                .requests()
+                .iter()
+                .find_map(|request| request.function_call_output_text("user-network-once-1"))
+                .unwrap_or_else(|| "<no tool output>".to_string());
+            let output = output.chars().take(1024).collect::<String>();
+            format!("first once approval, call user-network-once-1; output: {output}")
+        })?;
     assert!(
         approval
             .call_id
@@ -903,7 +923,7 @@ async fn user_network_approval_once_session_and_denial_semantics() -> Result<()>
         .await?;
     wait_for_turn_complete(&test).await;
 
-    mount_exec_network_turn(
+    let repeated_responses = mount_exec_network_turn(
         &server,
         "resp-user-network-once-2",
         "user-network-once-2",
@@ -918,7 +938,17 @@ async fn user_network_approval_once_session_and_denial_semantics() -> Result<()>
         AskForApproval::OnRequest,
     )
     .await?;
-    let approval = expect_network_approval(&test, LOCAL_ENVIRONMENT_ID).await?;
+    let approval = expect_network_approval(&test, LOCAL_ENVIRONMENT_ID)
+        .await
+        .with_context(|| {
+            let output = repeated_responses
+                .requests()
+                .iter()
+                .find_map(|request| request.function_call_output_text("user-network-once-2"))
+                .unwrap_or_else(|| "<no tool output>".to_string());
+            let output = output.chars().take(1024).collect::<String>();
+            format!("repeated once approval, call user-network-once-2; output: {output}")
+        })?;
     assert_eq!(approval.approval_id.as_deref(), None);
     assert_ne!(approval.call_id, first_approval_call_id);
     test.codex
@@ -2575,8 +2605,14 @@ async fn expect_network_approval_target(
             );
             Ok(approval)
         }
-        EventMsg::TurnComplete(_) => {
-            panic!("expected network approval request before completion");
+        EventMsg::TurnComplete(completion) => {
+            let completion = format!("{completion:?}")
+                .chars()
+                .take(1024)
+                .collect::<String>();
+            anyhow::bail!(
+                "expected network approval for {expected_environment_id} {expected_target} before completion: {completion:?}"
+            );
         }
         other => panic!("unexpected event: {other:?}"),
     }
