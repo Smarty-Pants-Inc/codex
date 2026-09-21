@@ -142,7 +142,7 @@ async fn prepared_admission_sees_post_auth_request_and_refuses_both_transports()
             calls: AtomicUsize::new(/*v*/ 0),
             decision,
         });
-        let auth = MutatingAuth;
+        let auth = Arc::new(MutatingAuth);
         let headers = HeaderMap::from_iter([(
             http::header::HeaderName::from_static("x-admission-fixture"),
             HeaderValue::from_static("present"),
