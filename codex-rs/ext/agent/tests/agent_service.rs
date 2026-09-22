@@ -1,10 +1,12 @@
 use anyhow::Result;
 use codex_agent_extension::AgentInvocation;
 use codex_agent_extension::AgentRunner;
+use codex_agent_extension::AgentSkill;
 use codex_protocol::protocol::EventMsg;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
+use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_with_timeout;
 use pretty_assertions::assert_eq;
 use std::time::Duration;
@@ -32,6 +34,7 @@ async fn starts_resolved_agent_prompt_in_forked_thread() -> Result<()> {
             AgentInvocation {
                 config: test.config.clone(),
                 prompt: "Use $example-agent to inspect the current changes.".to_string(),
+                skill: None,
                 parent_trace: None,
             },
         )
@@ -72,5 +75,70 @@ async fn starts_resolved_agent_prompt_in_forked_thread() -> Result<()> {
             .any(|text| text == prompt)
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolved_agent_skill_is_selected_without_user_prompt_authority() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let response_mock = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_response_created("resolved-agent-response"),
+            responses::ev_completed("resolved-agent-response"),
+        ]),
+    )
+    .await;
+    let test = test_codex()
+        .with_config(|config| {
+            let skill_dir = config.codex_home.join("skills/resolved-agent");
+            std::fs::create_dir_all(&skill_dir).expect("create agent skill directory");
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                "---\nname: resolved-agent\ndescription: Resolved agent test skill\n---\n\nRESOLVED_AGENT_SKILL_BODY\n",
+            )
+            .expect("write agent skill");
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let skill_path = test
+        .config
+        .codex_home
+        .join("skills/resolved-agent/SKILL.md")
+        .canonicalize()?;
+    let runner = AgentRunner::new(std::sync::Arc::downgrade(&test.thread_manager));
+    let prompt = "Inspect the changes.";
+    let run = runner
+        .start(
+            test.session_configured.session_id.into(),
+            AgentInvocation {
+                config: test.config.clone(),
+                prompt: prompt.to_string(),
+                skill: Some(AgentSkill {
+                    name: "resolved-agent".to_string(),
+                    path: skill_path,
+                }),
+                parent_trace: None,
+            },
+        )
+        .await?;
+    wait_for_event(&run.thread, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let request = response_mock.single_request();
+    let developer = request.message_input_texts("developer");
+    assert!(developer.iter().any(|text| text == prompt));
+    assert!(
+        developer.iter().any(|text| {
+            text.starts_with("<skill>") && text.contains("RESOLVED_AGENT_SKILL_BODY")
+        })
+    );
+    assert!(
+        !request
+            .message_input_texts("user")
+            .iter()
+            .any(|text| text == prompt)
+    );
     Ok(())
 }

@@ -3,6 +3,7 @@ use super::*;
 use codex_agent_extension::AgentInvocation;
 use codex_agent_extension::AgentRun;
 use codex_agent_extension::AgentRunner;
+use codex_agent_extension::AgentSkill;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
@@ -1343,6 +1344,7 @@ impl TurnRequestProcessor {
         request_id: &ConnectionRequestId,
         parent_thread: Arc<CodexThread>,
         prompt: &str,
+        skill: AgentSkill,
     ) -> std::result::Result<(), JSONRPCErrorError> {
         // AgentRunner::start still delegates to spawn_subagent, which forks from the parent's
         // full history. Paginated threads only allow bounded model-context reads, so keep this
@@ -1371,6 +1373,7 @@ impl TurnRequestProcessor {
                 AgentInvocation {
                     config,
                     prompt: prompt.to_string(),
+                    skill: Some(skill),
                     parent_trace: self.request_trace_context(request_id).await,
                 },
             )
@@ -1465,8 +1468,16 @@ impl TurnRequestProcessor {
                 if actual_chars > MAX_USER_INPUT_TEXT_CHARS {
                     return Err(Self::input_too_large_error(actual_chars));
                 }
-                self.start_detached_review(request_id, parent_thread, &prompt)
-                    .await?;
+                self.start_detached_review(
+                    request_id,
+                    parent_thread,
+                    &prompt,
+                    AgentSkill {
+                        name: "review-agent".to_string(),
+                        path: review_skill_path,
+                    },
+                )
+                .await?;
             }
         }
         Ok(())
