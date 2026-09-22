@@ -1,5 +1,6 @@
 use super::*;
 use codex_protocol::protocol::TurnAbortReason;
+use pretty_assertions::assert_eq;
 
 #[tokio::test]
 async fn command_approval_abort_interrupts_without_resampling_or_execution() -> Result<()> {

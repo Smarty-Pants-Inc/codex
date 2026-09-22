@@ -1,5 +1,6 @@
 use super::*;
 use crate::state::ApprovalAbortBehavior;
+use pretty_assertions::assert_eq;
 
 #[tokio::test]
 async fn matched_old_command_abort_leaves_replacement_turn_active() {

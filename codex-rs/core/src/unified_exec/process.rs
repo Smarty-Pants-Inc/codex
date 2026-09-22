@@ -526,9 +526,7 @@ impl UnifiedExecProcess {
                     } = response;
                     for chunk in chunks.into_iter().filter(|chunk| chunk.seq > last_seq) {
                         let bytes = chunk.chunk.into_inner();
-                        let mut guard = output_buffer.lock().await;
-                        guard.push_chunk(&bytes);
-                        drop(guard);
+                        output_buffer.lock().await.push_chunk(&bytes);
                         transcript.lock().await.push_chunk(&bytes);
                         let _ = output_tx.send(bytes);
                         output_notify.notify_waiters();
@@ -570,9 +568,7 @@ impl UnifiedExecProcess {
                         }
                         last_seq = chunk.seq;
                         let bytes = chunk.chunk.into_inner();
-                        let mut guard = output_buffer.lock().await;
-                        guard.push_chunk(&bytes);
-                        drop(guard);
+                        output_buffer.lock().await.push_chunk(&bytes);
                         transcript.lock().await.push_chunk(&bytes);
                         let _ = output_tx.send(bytes);
                         output_notify.notify_waiters();
@@ -633,9 +629,7 @@ impl UnifiedExecProcess {
             loop {
                 match receiver.recv().await {
                     Ok(chunk) => {
-                        let mut guard = output_buffer.lock().await;
-                        guard.push_chunk(&chunk);
-                        drop(guard);
+                        output_buffer.lock().await.push_chunk(&chunk);
                         transcript.lock().await.push_chunk(&chunk);
                         let _ = output_tx.send(chunk);
                         output_notify.notify_waiters();
