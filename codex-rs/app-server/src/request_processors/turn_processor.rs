@@ -1474,7 +1474,7 @@ impl TurnRequestProcessor {
                     &prompt,
                     AgentSkill {
                         name: "review-agent".to_string(),
-                        path: review_skill_path,
+                        path: review_skill_path.into_path_buf(),
                     },
                 )
                 .await?;
