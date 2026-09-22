@@ -198,6 +198,8 @@ jobs:
       - name: Test codex-core source contract
         working-directory: codex-rs
         run: just test -p codex-core --locked --retries 0 --test-threads 2 --success-output final
+      - name: Observe disk before complete workspace
+        run: python3 .github/scripts/ci_disk_observation.py pre-workspace
       - name: Test complete workspace after targeted checks
         working-directory: codex-rs
         run: python3 ../.github/scripts/ci_disk_observation.py run just test --locked --retries 0 --test-threads 2

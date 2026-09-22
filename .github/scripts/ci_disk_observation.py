@@ -75,7 +75,6 @@ def run(command):
     try:
         for sig in (signal.SIGTERM, signal.SIGINT):
             previous[sig] = signal.signal(sig, forward)
-        observe("pre-workspace", sizes=True, stopped=stopped)
         if pending:
             return 128 + pending[0]
         child = subprocess.Popen(command, start_new_session=True)
