@@ -79,6 +79,8 @@ jobs:
           else
             sudo cp "$(which dotslash)" /usr/local/bin
           fi
+      - name: Observe disk after setup
+        run: python3 .github/scripts/ci_disk_observation.py after-setup
       - name: Check Core fix and format readiness without changing the candidate
         working-directory: codex-rs
         run: |
@@ -96,6 +98,8 @@ jobs:
       - name: Build runtime test helpers
         working-directory: codex-rs
         run: cargo build --locked -p codex-cli -p codex-exec -p codex-code-mode-host -p codex-linux-sandbox -p codex-rmcp-client -p codex-shell-escalation --bins
+      - name: Observe disk after runtime helpers
+        run: python3 .github/scripts/ci_disk_observation.py after-helpers
       - name: Lint Core and guardian source
         working-directory: codex-rs
         run: just clippy -p codex-core -p codex-guardian-v2 --locked -- -D warnings
@@ -196,7 +200,7 @@ jobs:
         run: just test -p codex-core --locked --retries 0 --test-threads 2 --success-output final
       - name: Test complete workspace after targeted checks
         working-directory: codex-rs
-        run: just test --locked --retries 0 --test-threads 2
+        run: python3 ../.github/scripts/ci_disk_observation.py run just test --locked --retries 0 --test-threads 2
       - name: Check source remains unchanged
         run: |
           git diff --exit-code
