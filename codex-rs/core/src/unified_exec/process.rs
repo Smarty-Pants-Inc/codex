@@ -61,6 +61,8 @@ impl SpawnLifecycle for NoopSpawnLifecycle {}
 #[derive(Clone)]
 pub(crate) struct OutputHandles<const MAX_BYTES: usize = UNIFIED_EXEC_OUTPUT_MAX_BYTES> {
     pub(crate) output_buffer: Arc<Mutex<HeadTailBuffer<MAX_BYTES>>>,
+    /// Lifetime transcript, recorded before best-effort output broadcasts.
+    pub(crate) transcript: Arc<Mutex<HeadTailBuffer<MAX_BYTES>>>,
     pub(crate) output_notify: Arc<Notify>,
     pub(crate) output_closed: Arc<AtomicBool>,
     pub(crate) output_closed_notify: Arc<Notify>,
@@ -118,6 +120,7 @@ impl UnifiedExecProcess {
     ) -> Self {
         let output = OutputHandles {
             output_buffer: Arc::new(Mutex::new(HeadTailBuffer::default())),
+            transcript: Arc::new(Mutex::new(HeadTailBuffer::default())),
             output_notify: Arc::new(Notify::new()),
             output_closed: Arc::new(AtomicBool::new(false)),
             output_closed_notify: Arc::new(Notify::new()),
@@ -425,6 +428,7 @@ impl UnifiedExecProcess {
     ) -> JoinHandle<()> {
         let OutputHandles {
             output_buffer,
+            transcript,
             output_notify,
             output_closed,
             output_closed_notify,
@@ -503,6 +507,7 @@ impl UnifiedExecProcess {
                         let mut guard = output_buffer.lock().await;
                         guard.push_chunk(&bytes);
                         drop(guard);
+                        transcript.lock().await.push_chunk(&bytes);
                         let _ = output_tx.send(bytes);
                         output_notify.notify_waiters();
                     }
@@ -546,6 +551,7 @@ impl UnifiedExecProcess {
                         let mut guard = output_buffer.lock().await;
                         guard.push_chunk(&bytes);
                         drop(guard);
+                        transcript.lock().await.push_chunk(&bytes);
                         let _ = output_tx.send(bytes);
                         output_notify.notify_waiters();
                     }
@@ -591,6 +597,7 @@ impl UnifiedExecProcess {
     ) -> JoinHandle<()> {
         let OutputHandles {
             output_buffer,
+            transcript,
             output_notify,
             output_closed,
             output_closed_notify,
@@ -607,6 +614,7 @@ impl UnifiedExecProcess {
                         let mut guard = output_buffer.lock().await;
                         guard.push_chunk(&chunk);
                         drop(guard);
+                        transcript.lock().await.push_chunk(&chunk);
                         let _ = output_tx.send(chunk);
                         output_notify.notify_waiters();
                     }

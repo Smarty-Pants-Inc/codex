@@ -16,6 +16,67 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
 
+#[tokio::test]
+async fn terminal_transcript_survives_lagged_broadcast_and_poll_drains() -> anyhow::Result<()> {
+    use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
+    use crate::unified_exec::process::NoopSpawnLifecycle;
+    use codex_sandboxing::SandboxType;
+    use tokio::sync::broadcast::error::RecvError;
+
+    let (writer_tx, _writer_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+    let (stdout_tx, stdout_rx) = tokio::sync::broadcast::channel::<Vec<u8>>(8);
+    let (_exit_tx, exit_rx) = tokio::sync::oneshot::channel::<i32>();
+    let spawned = codex_utils_pty::spawn_from_driver(codex_utils_pty::ProcessDriver {
+        writer_tx,
+        stdout_rx,
+        stderr_rx: None,
+        exit_rx,
+        terminator: None,
+        writer_handle: None,
+        resizer: None,
+        #[cfg(windows)]
+        tty: false,
+    });
+    let process =
+        UnifiedExecProcess::from_spawned(spawned, SandboxType::None, Box::new(NoopSpawnLifecycle))
+            .await?;
+    let mut lagged = process.output_receiver();
+    let mut expected = HeadTailBuffer::default();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        for index in 0..80 {
+            let chunk = vec![b'A' + index % 26; 16 * 1024];
+            expected.push_chunk(&chunk);
+            stdout_tx.send(chunk)?;
+            // Keep the upstream driver lossless while deliberately not draining
+            // the downstream broadcast. Poll collection must not clear history.
+            loop {
+                let mut buffer = process.output_handles().output_buffer.lock().await;
+                if buffer.total_bytes() == 16 * 1024 {
+                    *buffer = HeadTailBuffer::default();
+                    break;
+                }
+                drop(buffer);
+                tokio::task::yield_now().await;
+            }
+        }
+        while process
+            .output_handles()
+            .transcript
+            .lock()
+            .await
+            .total_bytes()
+            < expected.total_bytes()
+        {
+            tokio::task::yield_now().await;
+        }
+        anyhow::Ok(())
+    })
+    .await??;
+    assert!(matches!(lagged.recv().await, Err(RecvError::Lagged(_))));
+    assert_eq!(*process.output_handles().transcript.lock().await, expected);
+    Ok(())
+}
+
 struct MockExecProcess {
     process_id: ProcessId,
     write_response: WriteResponse,

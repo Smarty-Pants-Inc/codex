@@ -49,18 +49,12 @@ struct Emitter {
 
 struct Buffer<const MAX_BYTES: usize = UNIFIED_EXEC_OUTPUT_DELTA_MAX_BYTES> {
     pending: Vec<u8>,
-    transcript: Arc<Mutex<HeadTailBuffer>>,
     emitter: Emitter,
 }
 
-/// Spawn a background task that continuously reads from the PTY, appends to the
-/// shared transcript, and emits ExecCommandOutputDelta events on UTF‑8
-/// boundaries.
-pub(crate) fn start_streaming_output(
-    process: &UnifiedExecProcess,
-    context: &UnifiedExecContext,
-    transcript: Arc<Mutex<HeadTailBuffer>>,
-) {
+/// Emit best-effort output deltas on UTF-8 boundaries. The process producer
+/// records the bounded terminal transcript before broadcasting these chunks.
+pub(crate) fn start_streaming_output(process: &UnifiedExecProcess, context: &UnifiedExecContext) {
     let mut receiver = process.output_receiver();
     let output_drained = process.output_drained_notify();
     let exit_token = process.cancellation_token();
@@ -82,7 +76,6 @@ pub(crate) fn start_streaming_output(
 
         let mut output: Buffer = Buffer {
             pending: Vec::new(),
-            transcript,
             emitter,
         };
 
@@ -247,13 +240,7 @@ impl<const MAX_BYTES: usize> Buffer<MAX_BYTES> {
                 "a frame must fit one UTF-8 scalar"
             )
         };
-        let Self {
-            pending,
-            transcript,
-            emitter,
-        } = self;
-
-        transcript.lock().await.push_chunk(&bytes);
+        let Self { pending, emitter } = self;
 
         // Reuse a producer chunk when it fits, retaining only an incomplete
         // UTF-8 suffix for the next push.
@@ -288,7 +275,6 @@ impl<const MAX_BYTES: usize> Buffer<MAX_BYTES> {
     async fn finish(self) {
         let Self {
             pending,
-            transcript: _,
             mut emitter,
         } = self;
         debug_assert!(

@@ -3132,10 +3132,12 @@ async fn unified_exec_timeout_and_followup_poll() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 // Skipped on arm because the ctor logic to handle arg0 doesn't work on ARM
 #[cfg(not(target_arch = "arm"))]
-async fn unified_exec_formats_large_output_summary() -> Result<()> {
+#[test_case::test_case(100_000; "large_output")]
+#[test_case::test_case(200_000; "larger_output")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unified_exec_formats_large_output_summary(output_repetitions: usize) -> Result<()> {
     // TODO(anp): Remove after output fixtures use target-native commands.
     skip_if_target_windows!(
         Ok(()),
@@ -3150,7 +3152,6 @@ async fn unified_exec_formats_large_output_summary() -> Result<()> {
     let test = builder.build_with_auto_env(&server).await?;
 
     let output_line = "token token \n";
-    let output_repetitions = 100_000;
     let original_output_bytes =
         b"HEAD\n".len() + output_line.len() * output_repetitions + b"TAIL\n".len();
     let expected_original_token_count =
