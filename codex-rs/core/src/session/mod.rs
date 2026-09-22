@@ -2483,7 +2483,9 @@ impl Session {
             .register_pending_approval(
                 effective_approval_id.clone(),
                 turn_context.sub_id.clone(),
-                if approval_id.is_some() {
+                // Network reviews return rejection to the tool; only ordinary command
+                // approval aborts interrupt the originating turn.
+                if approval_id.is_some() || network_approval_context.is_some() {
                     crate::state::ApprovalAbortBehavior::ReturnDecision
                 } else {
                     crate::state::ApprovalAbortBehavior::InterruptTurn
