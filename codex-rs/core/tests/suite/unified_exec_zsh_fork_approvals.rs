@@ -55,6 +55,9 @@ use std::time::Duration;
 use toml_edit::Key as TomlKey;
 use wiremock::MockServer;
 
+#[path = "unified_exec_zsh_fork_cancel_tests.rs"]
+mod cancel_tests;
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_zsh_fork_parent_approval_preserves_denied_reads() -> Result<()> {
     skip_if_no_network!(Ok(()));

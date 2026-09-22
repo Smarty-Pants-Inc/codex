@@ -311,6 +311,14 @@ impl CoreShellActionProvider {
         {
             Ok(decision) => Ok(decision),
             Err(ToolError::Rejected(rejection)) => Ok(ReviewDecision::denied(rejection)),
+            Err(ToolError::Codex(err))
+                if matches!(
+                    err.details(),
+                    codex_protocol::error::CodexErrorDetails::TurnAborted
+                ) =>
+            {
+                Ok(ReviewDecision::Abort)
+            }
             Err(ToolError::Codex(err)) => Err(err.into()),
         }
     }

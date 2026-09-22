@@ -2427,6 +2427,7 @@ impl Session {
         &self,
         approval_id: String,
         turn_id: String,
+        abort_behavior: crate::state::ApprovalAbortBehavior,
         tx: oneshot::Sender<ReviewDecision>,
     ) -> Option<oneshot::Sender<ReviewDecision>> {
         let mut active = self.active_turn.lock().await;
@@ -2437,7 +2438,13 @@ impl Session {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(approval_id.clone());
-        turn_state.insert_pending_approval(approval_id, turn_id, legacy_response_allowed, tx)
+        turn_state.insert_pending_approval(
+            approval_id,
+            turn_id,
+            legacy_response_allowed,
+            abort_behavior,
+            tx,
+        )
     }
 
     /// Emit an exec approval request event and await the user's decision.
@@ -2476,6 +2483,11 @@ impl Session {
             .register_pending_approval(
                 effective_approval_id.clone(),
                 turn_context.sub_id.clone(),
+                if approval_id.is_some() {
+                    crate::state::ApprovalAbortBehavior::ReturnDecision
+                } else {
+                    crate::state::ApprovalAbortBehavior::InterruptTurn
+                },
                 tx_approve,
             )
             .await;
@@ -2546,7 +2558,12 @@ impl Session {
         let (tx_approve, rx_approve) = oneshot::channel();
         let approval_id = call_id.clone();
         let prev_entry = self
-            .register_pending_approval(approval_id.clone(), turn_context.sub_id.clone(), tx_approve)
+            .register_pending_approval(
+                approval_id.clone(),
+                turn_context.sub_id.clone(),
+                crate::state::ApprovalAbortBehavior::ReturnDecision,
+                tx_approve,
+            )
             .await;
         if prev_entry.is_some() {
             warn!("Overwriting existing pending approval for call_id: {approval_id}");
@@ -2996,7 +3013,7 @@ impl Session {
         reason = "active turn checks and turn state updates must remain atomic"
     )]
     pub async fn notify_approval(
-        &self,
+        self: &Arc<Self>,
         approval_id: &str,
         turn_id: Option<&str>,
         decision: ReviewDecision,
@@ -3012,8 +3029,22 @@ impl Session {
             }
         };
         match entry {
-            Some(tx_approve) => {
-                tx_approve.send(decision).ok();
+            Some(pending) => {
+                if pending.tx.is_closed() {
+                    return false;
+                }
+                if matches!(decision, ReviewDecision::Abort)
+                    && matches!(
+                        pending.abort_behavior,
+                        crate::state::ApprovalAbortBehavior::InterruptTurn
+                    )
+                {
+                    // Keep the approval waiter blocked until cancellation reaches
+                    // its originating task; never interrupt a replacement turn.
+                    self.abort_turn_if_active(&pending.turn_id, TurnAbortReason::Interrupted)
+                        .await;
+                }
+                pending.tx.send(decision).ok();
                 true
             }
             None => {

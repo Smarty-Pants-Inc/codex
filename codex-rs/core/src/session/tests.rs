@@ -6687,6 +6687,9 @@ async fn notify_request_permissions_response_ignores_unmatched_call_id() {
     );
 }
 
+#[path = "approval_abort_tests.rs"]
+mod approval_abort_tests;
+
 #[tokio::test]
 async fn stale_abort_does_not_interrupt_reused_exec_approval() {
     let (session, _turn_context) = make_session_and_context().await;
@@ -6695,7 +6698,12 @@ async fn stale_abort_does_not_interrupt_reused_exec_approval() {
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     assert!(
         session
-            .register_pending_approval("reused-approval".to_string(), "new-turn".to_string(), tx)
+            .register_pending_approval(
+                "reused-approval".to_string(),
+                "new-turn".to_string(),
+                crate::state::ApprovalAbortBehavior::InterruptTurn,
+                tx
+            )
             .await
             .is_none()
     );
@@ -6733,7 +6741,12 @@ async fn stale_abort_does_not_interrupt_reused_patch_approval() {
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     assert!(
         session
-            .register_pending_approval("reused-approval".to_string(), "new-turn".to_string(), tx)
+            .register_pending_approval(
+                "reused-approval".to_string(),
+                "new-turn".to_string(),
+                crate::state::ApprovalAbortBehavior::ReturnDecision,
+                tx
+            )
             .await
             .is_none()
     );
@@ -6774,6 +6787,7 @@ async fn legacy_exec_approval_without_turn_id_resolves_pending_approval() {
             .register_pending_approval(
                 "legacy-approval".to_string(),
                 "current-turn".to_string(),
+                crate::state::ApprovalAbortBehavior::InterruptTurn,
                 tx,
             )
             .await
@@ -6805,6 +6819,7 @@ async fn legacy_patch_approval_without_turn_id_resolves_pending_approval() {
             .register_pending_approval(
                 "legacy-approval".to_string(),
                 "current-turn".to_string(),
+                crate::state::ApprovalAbortBehavior::ReturnDecision,
                 tx,
             )
             .await
@@ -6837,6 +6852,7 @@ async fn legacy_exec_approval_without_turn_id_ignores_reused_approval() {
             .register_pending_approval(
                 "reused-approval".to_string(),
                 "first-turn".to_string(),
+                crate::state::ApprovalAbortBehavior::InterruptTurn,
                 first_tx,
             )
             .await
@@ -6850,6 +6866,7 @@ async fn legacy_exec_approval_without_turn_id_ignores_reused_approval() {
             .register_pending_approval(
                 "reused-approval".to_string(),
                 "second-turn".to_string(),
+                crate::state::ApprovalAbortBehavior::InterruptTurn,
                 second_tx,
             )
             .await
