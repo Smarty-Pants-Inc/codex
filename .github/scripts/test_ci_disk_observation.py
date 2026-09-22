@@ -23,6 +23,15 @@ class DiskObservationTests(unittest.TestCase):
                 self.assertEqual(disk.run([sys.executable, "-c", f"raise SystemExit({status})"]), status)
                 self.assertEqual(set(threading.enumerate()), before)
 
+    def test_phase_label_preserves_command_status(self):
+        with patch.object(disk, "observe") as observe:
+            status = disk.run([sys.executable, "-c", "raise SystemExit(7)"], phase="full-core")
+        self.assertEqual(status, 7)
+        self.assertEqual(observe.call_count, 1)
+        self.assertEqual(observe.call_args.args, ("post-full-core",))
+        self.assertTrue(observe.call_args.kwargs["sizes"])
+        self.assertFalse(observe.call_args.kwargs["stopped"].is_set())
+
     def test_signal_forwarding_and_cleanup(self):
         harness = """
 import importlib.util, os, signal, sys, threading

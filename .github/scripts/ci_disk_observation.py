@@ -46,7 +46,7 @@ def observe(phase, sizes=False, stopped=None):
         pass
 
 
-def run(command):
+def run(command, phase="workspace"):
     stopped = threading.Event()
     cancelled = threading.Event()
     child = None
@@ -70,7 +70,7 @@ def run(command):
         for _ in range(90):
             if stopped.wait(60):
                 return
-            observe("workspace", stopped=stopped)
+            observe(phase, stopped=stopped)
 
     try:
         for sig in (signal.SIGTERM, signal.SIGINT):
@@ -93,7 +93,7 @@ def run(command):
             worker.join()
             worker_started = False
         if not cancelled.is_set():
-            observe("post-workspace", sizes=True, stopped=cancelled)
+            observe(f"post-{phase}", sizes=True, stopped=cancelled)
         return status if status >= 0 else 128 - status
     finally:
         stopped.set()
@@ -107,9 +107,9 @@ def run(command):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) >= 3 and sys.argv[1] == "run":
-        sys.exit(run(sys.argv[2:]))
+    if len(sys.argv) >= 4 and sys.argv[1] == "run":
+        sys.exit(run(sys.argv[3:], phase=sys.argv[2]))
     if len(sys.argv) == 2:
         observe(sys.argv[1], sizes=True)
     else:
-        sys.exit("usage: ci_disk_observation.py PHASE | run COMMAND [ARG ...]")
+        sys.exit("usage: ci_disk_observation.py PHASE | run PHASE COMMAND [ARG ...]")
