@@ -50,12 +50,13 @@ async fn terminal_transcript_survives_lagged_broadcast_and_poll_drains() -> anyh
             // Keep the upstream driver lossless while deliberately not draining
             // the downstream broadcast. Poll collection must not clear history.
             loop {
-                let mut buffer = process.output_handles().output_buffer.lock().await;
-                if buffer.total_bytes() == 16 * 1024 {
-                    *buffer = HeadTailBuffer::default();
-                    break;
+                {
+                    let mut buffer = process.output_handles().output_buffer.lock().await;
+                    if buffer.total_bytes() == 16 * 1024 {
+                        *buffer = HeadTailBuffer::default();
+                        break;
+                    }
                 }
-                drop(buffer);
                 tokio::task::yield_now().await;
             }
         }
