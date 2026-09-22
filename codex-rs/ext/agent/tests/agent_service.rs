@@ -116,7 +116,7 @@ async fn resolved_agent_skill_is_selected_without_user_prompt_authority() -> Res
                 prompt: prompt.to_string(),
                 skill: Some(AgentSkill {
                     name: "resolved-agent".to_string(),
-                    path: skill_path,
+                    path: skill_path.into_path_buf(),
                 }),
                 parent_trace: None,
             },

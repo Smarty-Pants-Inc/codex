@@ -479,14 +479,17 @@ mod tests {
             imported.rollout_items.first(),
             Some(RolloutItem::EventMsg(EventMsg::TurnStarted(_)))
         ));
+        let Some(RolloutItem::EventMsg(EventMsg::UserMessage(event))) =
+            imported.rollout_items.get(1)
+        else {
+            panic!("expected imported user display event at index 1");
+        };
         assert_eq!(
-            imported.rollout_items.get(1),
-            Some(&RolloutItem::EventMsg(EventMsg::UserMessage(
-                UserMessageEvent {
-                    message: message.to_string(),
-                    ..Default::default()
-                }
-            )))
+            event,
+            &UserMessageEvent {
+                message: message.to_string(),
+                ..Default::default()
+            }
         );
         assert!(matches!(
             imported.rollout_items.get(2),

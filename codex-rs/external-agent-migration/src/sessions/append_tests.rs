@@ -98,14 +98,15 @@ async fn appends_reloaded_escaped_external_user_context() {
         reloaded.first(),
         Some(RolloutItem::EventMsg(EventMsg::TurnStarted(_)))
     ));
+    let Some(RolloutItem::EventMsg(EventMsg::UserMessage(event))) = reloaded.get(1) else {
+        panic!("expected imported user display event at index 1");
+    };
     assert_eq!(
-        reloaded.get(1),
-        Some(&RolloutItem::EventMsg(EventMsg::UserMessage(
-            UserMessageEvent {
-                message: user_text.to_string(),
-                ..Default::default()
-            }
-        )))
+        event,
+        &UserMessageEvent {
+            message: user_text.to_string(),
+            ..Default::default()
+        }
     );
     assert!(matches!(
         reloaded.get(2),
