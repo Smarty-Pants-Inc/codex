@@ -10,7 +10,7 @@ import sys
 import threading
 
 
-def snapshot(phase, sizes=False):
+def snapshot(phase, sizes=False, stopped=None):
     workspace = Path(os.environ.get("GITHUB_WORKSPACE", os.getcwd()))
     target = Path(os.environ.get("CARGO_TARGET_DIR", workspace / "codex-rs/target"))
     cargo = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))
@@ -22,6 +22,8 @@ def snapshot(phase, sizes=False):
         roots = [target, *(target / "debug" / name for name in ("deps", "build", "incremental")), cargo / "registry", cargo / "git", temporary, Path("/tmp")]
         measurements.extend(("size", root) for root in dict.fromkeys(roots))
     for flag, root in measurements:
+        if stopped is not None and stopped.is_set():
+            return
         if not root.exists():
             print(f"disk-observation missing={root}", flush=True)
             continue
@@ -36,46 +38,73 @@ def snapshot(phase, sizes=False):
     # Parent/child and shared-filesystem measurements overlap; do not sum them.
 
 
-def observe(phase, sizes=False):
+def observe(phase, sizes=False, stopped=None):
     try:
-        snapshot(phase, sizes=sizes)
+        snapshot(phase, sizes=sizes, stopped=stopped)
     except Exception:
         # Even output failure on an exhausted runner must not mask test status.
         pass
 
 
 def run(command):
-    observe("pre-workspace", sizes=True)
     stopped = threading.Event()
+    cancelled = threading.Event()
+    child = None
+    pending = []
+    worker = None
+    worker_started = False
+    previous = {}
+
+    def forward(signum, frame):
+        cancelled.set()
+        stopped.set()
+        if child is None:
+            pending.append(signum)
+        else:
+            try:
+                os.killpg(child.pid, signum)
+            except ProcessLookupError:
+                pass
 
     def sample():
         for _ in range(90):
             if stopped.wait(60):
                 return
-            observe("workspace")
+            observe("workspace", stopped=stopped)
 
-    worker = threading.Thread(target=sample)
-    child = subprocess.Popen(command, start_new_session=True)
-
-    def forward(signum, frame):
-        try:
-            os.killpg(child.pid, signum)
-        except ProcessLookupError:
-            pass
-
-    previous = {}
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        previous[sig] = signal.signal(sig, forward)
-    worker.start()
     try:
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            previous[sig] = signal.signal(sig, forward)
+        observe("pre-workspace", sizes=True, stopped=stopped)
+        if pending:
+            return 128 + pending[0]
+        child = subprocess.Popen(command, start_new_session=True)
+        for signum in pending:
+            forward(signum, None)
+        try:
+            worker = threading.Thread(target=sample)
+            worker.start()
+            worker_started = True
+        except Exception:
+            # Sampling is optional; the test child must still be waited/reaped.
+            pass
         status = child.wait()
+        stopped.set()
+        if worker_started:
+            worker.join()
+            worker_started = False
+        if not cancelled.is_set():
+            observe("post-workspace", sizes=True, stopped=cancelled)
+        return status if status >= 0 else 128 - status
     finally:
         stopped.set()
-        worker.join()
+        if child is not None and child.poll() is None:
+            forward(signal.SIGTERM, None)
+            child.wait()
+        if worker_started:
+            worker.join()
         for sig, handler in previous.items():
             signal.signal(sig, handler)
-    observe("post-workspace", sizes=True)
-    return status if status >= 0 else 128 - status
 
 
 if __name__ == "__main__":

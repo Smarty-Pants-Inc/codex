@@ -36,6 +36,32 @@ raise SystemExit(disk.run([sys.executable, '-c', 'import time; time.sleep(20)'])
         result = subprocess.run([sys.executable, "-c", harness, disk.__file__], timeout=5)
         self.assertEqual(result.returncode, 128 + signal.SIGTERM)
 
+    def test_signal_during_spawn_is_forwarded(self):
+        original = subprocess.Popen
+
+        def spawn(*args, **kwargs):
+            child = original(*args, **kwargs)
+            os.kill(os.getpid(), signal.SIGTERM)
+            return child
+
+        with patch.object(disk, "observe"), patch.object(disk.subprocess, "Popen", side_effect=spawn):
+            self.assertEqual(disk.run([sys.executable, "-c", "import time; time.sleep(20)"]), 143)
+
+    def test_sampler_start_failure_preserves_status(self):
+        with patch.object(disk, "observe"), patch.object(disk.threading.Thread, "start", side_effect=RuntimeError("cannot start")):
+            self.assertEqual(disk.run([sys.executable, "-c", "raise SystemExit(7)"]), 7)
+
+    def test_cancelled_snapshot_stops_between_measurements(self):
+        stopped = threading.Event()
+
+        def measure(*args, **kwargs):
+            stopped.set()
+            return subprocess.CompletedProcess([], 0, b"")
+
+        with patch.object(Path, "exists", return_value=True), patch.object(disk.subprocess, "run", side_effect=measure) as command, contextlib.redirect_stdout(io.StringIO()):
+            disk.snapshot("cancel", sizes=True, stopped=stopped)
+        self.assertEqual(command.call_count, 1)
+
     def test_bounded_measurements_and_failures(self):
         output = io.StringIO()
         results = [subprocess.TimeoutExpired("df", 5), OSError("unavailable")]
