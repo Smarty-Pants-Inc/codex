@@ -96,27 +96,78 @@ jobs:
       - name: Build runtime test helpers
         working-directory: codex-rs
         run: cargo build --locked -p codex-cli -p codex-exec -p codex-code-mode-host -p codex-linux-sandbox -p codex-rmcp-client -p codex-shell-escalation --bins
+      - name: Test affected app-server repair contracts
+        working-directory: codex-rs
+        run: |
+          selection='test(/^suite::v2::(external_agent_config|external_agent_import_sync|review|selected_capability_stack|turn_start_zsh_fork)::/) | test(/^suite::v2::thread_fork::thread_fork_(freezes_active_paginated_turn_as_interrupted|persists_developer_interruption_marker_for_multi_agent_v2)$/) | test(/^suite::v2::thread_resume::thread_resume_(supports_history_and_overrides|rejects_raw_user_history|rejects_history_when_thread_is_running|returns_rollout_history)$/)'
+          RUST_MIN_STACK=8388608 NEXTEST_PROFILE=local cargo nextest list -p codex-app-server --locked -E "$selection" --message-format json > "$RUNNER_TEMP/affected-app-server-inventory.json"
+          python ../.github/scripts/check_required_nextest_tests.py "$RUNNER_TEMP/affected-app-server-inventory.json" \
+            '^codex-app-server::suite::v2::external_agent_config::external_agent_config_import_accepts_detected_session_payload_after_restart$' \
+            '^codex-app-server::suite::v2::external_agent_config::external_agent_config_import_compacts_huge_session_before_first_follow_up$' \
+            '^codex-app-server::suite::v2::external_agent_config::external_agent_config_import_does_not_initialize_required_mcp$' \
+            '^codex-app-server::suite::v2::external_agent_config::external_agent_config_import_returns_before_background_session_import_finishes$' \
+            '^codex-app-server::suite::v2::external_agent_config::external_agent_config_import_skips_already_imported_session_versions$' \
+            '^codex-app-server::suite::v2::external_agent_config::external_agent_config_secondary_source_imports_session_and_plugin_end_to_end$' \
+            '^codex-app-server::suite::v2::external_agent_import_sync::ambiguous_legacy_targets_are_deferred_without_checkpoint$' \
+            '^codex-app-server::suite::v2::external_agent_import_sync::active_target_is_deferred_without_checkpoint$' \
+            '^codex-app-server::suite::v2::external_agent_import_sync::changed_hash_with_equal_transcript_is_deferred_without_checkpoint$' \
+            '^codex-app-server::suite::v2::external_agent_import_sync::cold_exact_prefix_appends_suffix_to_same_task_and_checkpoints$' \
+            '^codex-app-server::suite::v2::external_agent_import_sync::concurrent_changed_sessions_checkpoint_without_lost_update$' \
+            '^codex-app-server::suite::v2::external_agent_import_sync::cold_diverged_target_is_deferred_without_checkpoint$' \
+            '^codex-app-server::suite::v2::review::review_start_with_detached_delivery_returns_new_thread_id$' \
+            '^codex-app-server::suite::v2::selected_capability_stack::selected_capability_stack_tracks_environment_availability_and_resume$' \
+            '^codex-app-server::suite::v2::thread_fork::thread_fork_freezes_active_paginated_turn_as_interrupted$' \
+            '^codex-app-server::suite::v2::thread_resume::thread_resume_supports_history_and_overrides$' \
+            '^codex-app-server::suite::v2::turn_start_zsh_fork::turn_start_shell_zsh_fork_exec_approval_cancel_v2$' \
+            '^codex-app-server::suite::v2::turn_start_zsh_fork::turn_start_shell_zsh_fork_subcommand_decline_marks_parent_declined_v2$' \
+            '^codex-app-server::suite::v2::thread_fork::thread_fork_persists_developer_interruption_marker_for_multi_agent_v2$' \
+            '^codex-app-server::suite::v2::thread_resume::thread_resume_rejects_raw_user_history$' \
+            '^codex-app-server::suite::v2::thread_resume::thread_resume_rejects_history_when_thread_is_running$' \
+            '^codex-app-server::suite::v2::thread_resume::thread_resume_returns_rollout_history$'
+          just test -p codex-app-server --locked --retries 0 --test-threads 2 --success-output final -E "$selection"
+      - name: Test affected Core repair contracts
+        working-directory: codex-rs
+        run: |
+          selection='test(guardian::evidence_admission) | test(guardian::review_session::tests::cancellation_only_admits_evidence) | test(review_skill_input) | test(turn_user_input_returns_only_direct_user_content) | test(image_preparation) | test(session::tests::local_media) | test(/suite::(additional_context|client::sends_(local_)?audio|code_mode::code_mode_node_repl_text_evidence|codex_delegate|compact|context_annotations|current_time_reminder|guardian_subagent_authorization|hooks::async_hook_finishing|image_rollout|mcp_tool_exposure|pending_input|responses_lite|token_budget|view_image::user_turn)/) | test(model_switching::model_change_from_multimodal_to_text_strips_prior_media_content) | test(multi_exec_server_sandbox::two_exec_servers_isolate_workspace_write_roots) | test(agents_md::restricted_project_without_instructions_starts_successfully) | test(request_permissions::workspace_write_with_additional_permissions_can_write_outside_cwd) | test(tools::sandbox_denied_exec_command_returns_original_output) | test(workspace_roots::workspace_roots_allow_file_and_command_writes) | test(network_approval::user_network_approval_once_session_and_denial_semantics) | test(network_approval::disconnected_network_request_explains_failure_to_model::connect) | test(hooks::permission_request_hook_allows_network_approval_without_prompt) | test(/^suite::unified_exec::unified_exec_formats_large_output_summary::(large_output|larger_output)$/) | test(/^unified_exec::/) | test(/^suite::unified_exec_zsh_fork_approvals::/) | test(approval_abort_tests) | test(/(stale_abort_does_not_interrupt_reused|legacy_exec_approval_without_turn_id)/) | test(/thread_manager.*interrupt/) | test(rollout_reconstruction) | test(tools::runtimes::zsh_fork) | test(tools::approvals::tests)'
+          RUST_MIN_STACK=8388608 NEXTEST_PROFILE=local cargo nextest list -p codex-core --locked -E "$selection" --message-format json > "$RUNNER_TEMP/affected-core-inventory.json"
+          python ../.github/scripts/check_required_nextest_tests.py "$RUNNER_TEMP/affected-core-inventory.json" \
+            '^codex-core::.*::terminal_transcript_survives_lagged_broadcast_and_poll_drains$' \
+            '^codex-core::suite::unified_exec::unified_exec_formats_large_output_summary::large_output$' \
+            '^codex-core::suite::unified_exec::unified_exec_formats_large_output_summary::larger_output$' \
+            '^codex-core::.*::terminal_status_uses_trusted_subcommand_approval::trusted_denial$' \
+            '^codex-core::.*::terminal_status_uses_trusted_subcommand_approval::exit_one_and_denial_text_are_not_provenance$' \
+            '^codex-core::.*::developer_skill_selection_requires_review_source_or_structured_skill$' \
+            '^codex-core::.*::matched_old_command_abort_leaves_replacement_turn_active$' \
+            '^codex-core::.*::closed_command_waiter_does_not_interrupt_active_turn$' \
+            '^codex-core::suite::unified_exec_zsh_fork_approvals::cancel_tests::command_approval_abort_interrupts_without_resampling_or_execution$' \
+            '^codex-core::.*::stale_abort_does_not_interrupt_reused_exec_approval$' \
+            '^codex-core::.*::legacy_exec_approval_without_turn_id_resolves_pending_approval$' \
+            '^codex-core::.*::legacy_exec_approval_without_turn_id_ignores_reused_approval$' \
+            '^codex-core::thread_manager.*interrupt' \
+            '^codex-core::.*rollout_reconstruction' \
+            '^codex-core::tools::runtimes::zsh_fork' \
+            '^codex-core::tools::approvals::tests::'
+          just test -p codex-core --locked --retries 0 --test-threads 2 --success-output final -E "$selection"
+      - name: Test affected agent and import repair contracts
+        working-directory: codex-rs
+        run: |
+          selection='package(=codex-agent-extension) | (package(=codex-external-agent-migration) & test(/^sessions::(append|export)::/)) | (package(=codex-skills-extension) & test(/(selection|render|catalog|disabled|missing|structured)/)) | (package(=codex-skills) & test(selection))'
+          RUST_MIN_STACK=8388608 NEXTEST_PROFILE=local cargo nextest list -p codex-agent-extension -p codex-external-agent-migration -p codex-skills-extension -p codex-skills --locked -E "$selection" --message-format json > "$RUNNER_TEMP/affected-support-inventory.json"
+          python ../.github/scripts/check_required_nextest_tests.py "$RUNNER_TEMP/affected-support-inventory.json" \
+            '^codex-agent-extension::starts_resolved_agent_prompt_in_forked_thread$' \
+            '^codex-agent-extension::resolved_agent_skill_is_selected_without_user_prompt_authority$' \
+            '^codex-external-agent-migration::sessions::append::' \
+            '^codex-external-agent-migration::sessions::export::' \
+            '^codex-skills-extension::.*render' \
+            '^codex-skills-extension::.*catalog' \
+            '^codex-skills::.*::collect_explicit_skill_mentions_rejects_disabled_discovery_path$' \
+            '^codex-skills::.*::collect_explicit_skill_mentions_skips_invalid_structured_and_blocks_plain_fallback$' \
+            '^codex-skills::.*::collect_explicit_skill_mentions_skips_disabled_structured_and_blocks_plain_fallback$' \
+            '^codex-skills::.*::collect_explicit_skill_mentions_skips_when_linked_path_disabled$'
+          just test -p codex-agent-extension -p codex-external-agent-migration -p codex-skills-extension -p codex-skills --locked --retries 0 --test-threads 2 --success-output final -E "$selection"
       - name: Test codex-guardian-v2 source contract
         working-directory: codex-rs
         run: just test -p codex-guardian-v2 --locked --retries 0 --test-threads 2
-      - name: Test affected Core repair contracts
-        working-directory: codex-rs
-        run: >-
-          just test -p codex-core --locked --retries 0 --test-threads 2 --success-output final
-          -E 'test(guardian::evidence_admission) |
-          test(guardian::review_session::tests::cancellation_only_admits_evidence) |
-          test(review_skill_input) | test(turn_user_input_returns_only_direct_user_content) |
-          test(image_preparation) | test(session::tests::local_media) |
-          test(/suite::(additional_context|client::sends_(local_)?audio|code_mode::code_mode_node_repl_text_evidence|codex_delegate|compact|context_annotations|current_time_reminder|guardian_subagent_authorization|hooks::async_hook_finishing|image_rollout|mcp_tool_exposure|pending_input|responses_lite|token_budget|view_image::user_turn)/) |
-          test(model_switching::model_change_from_multimodal_to_text_strips_prior_media_content) |
-          test(multi_exec_server_sandbox::two_exec_servers_isolate_workspace_write_roots) |
-          test(agents_md::restricted_project_without_instructions_starts_successfully) |
-          test(request_permissions::workspace_write_with_additional_permissions_can_write_outside_cwd) |
-          test(tools::sandbox_denied_exec_command_returns_original_output) |
-          test(workspace_roots::workspace_roots_allow_file_and_command_writes) |
-          test(network_approval::user_network_approval_once_session_and_denial_semantics) |
-          test(network_approval::disconnected_network_request_explains_failure_to_model::connect) |
-          test(hooks::permission_request_hook_allows_network_approval_without_prompt)'
       - name: Test codex-bwrap
         working-directory: codex-rs
         run: |
