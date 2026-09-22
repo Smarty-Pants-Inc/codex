@@ -407,7 +407,7 @@ async fn sampler_reuses_parent_compaction_only_for_matching_model_hashes() -> Re
 
         let requests = servers
             .iter()
-            .flat_map(|server| server.connections())
+            .flat_map(responses::WebSocketTestServer::connections)
             .flatten()
             .collect::<Vec<_>>();
         assert_eq!(requests.len(), 1);
@@ -428,7 +428,7 @@ async fn sampler_reuses_parent_compaction_only_for_matching_model_hashes() -> Re
             assert_eq!(sampler.sample(switched_request).await?, "low");
             let requests = servers
                 .iter()
-                .flat_map(|server| server.connections())
+                .flat_map(responses::WebSocketTestServer::connections)
                 .flatten()
                 .map(|request| request.body_json())
                 .collect::<Vec<_>>();
