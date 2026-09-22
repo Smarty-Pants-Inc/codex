@@ -60,6 +60,15 @@ async fn command_approval_abort_interrupts_without_resampling_or_execution() -> 
         (Some(approval.turn_id), TurnAbortReason::Interrupted)
     );
     mock.single_request();
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.method == "POST" && request.url.path().ends_with("/responses"))
+            .count(),
+        1,
+        "cancellation must not issue even an unmatched follow-up request"
+    );
     assert!(!output.exists(), "cancelled command must not execute");
     Ok(())
 }

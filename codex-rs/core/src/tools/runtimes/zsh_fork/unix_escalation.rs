@@ -51,6 +51,8 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
@@ -59,6 +61,7 @@ use uuid::Uuid;
 pub(crate) struct PreparedUnifiedExecZshFork {
     pub(crate) exec_request: ExecRequest,
     pub(crate) escalation_session: EscalationSession,
+    pub(crate) approval_denied: Arc<AtomicBool>,
 }
 
 const PROMPT_CONFLICT_REASON: &str =
@@ -143,7 +146,9 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
         codex_linux_sandbox_exe: ctx.step_context.turn.config.codex_linux_sandbox_exe.clone(),
         use_legacy_landlock: ctx.step_context.turn.config.features.use_legacy_landlock(),
     };
+    let approval_denied = Arc::new(AtomicBool::new(/*v*/ false));
     let escalation_policy = CoreShellActionProvider {
+        approval_denied: Arc::clone(&approval_denied),
         policy: Arc::clone(&exec_policy),
         session: Arc::clone(&ctx.session),
         review_context: GuardianReviewContext::from(&ctx.step_context),
@@ -178,10 +183,12 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
     Ok(Some(PreparedUnifiedExecZshFork {
         exec_request,
         escalation_session,
+        approval_denied,
     }))
 }
 
 struct CoreShellActionProvider {
+    approval_denied: Arc<AtomicBool>,
     policy: Arc<RwLock<Policy>>,
     session: Arc<crate::session::session::Session>,
     review_context: GuardianReviewContext,
@@ -373,6 +380,7 @@ impl CoreShellActionProvider {
                             }
                         },
                         ReviewDecision::Denied { rejection } => {
+                            self.approval_denied.store(/*val*/ true, Ordering::Release);
                             EscalationDecision::deny(Some(rejection))
                         }
                         ReviewDecision::TimedOut => EscalationDecision::deny(Some(
@@ -388,6 +396,7 @@ impl CoreShellActionProvider {
                             ))
                         }
                         ReviewDecision::Abort => {
+                            self.approval_denied.store(/*val*/ true, Ordering::Release);
                             EscalationDecision::deny(Some("User cancelled execution".to_string()))
                         }
                     }

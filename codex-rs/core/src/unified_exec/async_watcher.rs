@@ -224,6 +224,7 @@ pub(crate) fn spawn_exit_watcher(
                 plugin_attribution,
                 transcript,
                 String::new(),
+                process.subcommand_approval_status(),
                 exit_code,
                 duration,
             )
@@ -328,6 +329,7 @@ pub(crate) async fn emit_exec_end_for_unified_exec(
     plugin_attribution: Option<PluginCommandAttribution>,
     transcript: Arc<Mutex<HeadTailBuffer>>,
     fallback_output: String,
+    subcommand_approval_status: super::SubcommandApprovalStatus,
     exit_code: i32,
     duration: Duration,
 ) {
@@ -353,15 +355,22 @@ pub(crate) async fn emit_exec_end_for_unified_exec(
         process_id,
         plugin_attribution,
     );
-    emitter
-        .emit(
-            event_ctx,
-            ToolEventStage::Success {
-                output,
+    let stage = match subcommand_approval_status {
+        super::SubcommandApprovalStatus::NotDenied => ToolEventStage::Success {
+            output,
+            applied_patch_delta: None,
+        },
+        super::SubcommandApprovalStatus::Denied => {
+            ToolEventStage::Failure(ToolEventFailure::Rejected {
+                message: format!(
+                    "sandbox denied exec error: {}",
+                    output.aggregated_output.text
+                ),
                 applied_patch_delta: None,
-            },
-        )
-        .await;
+            })
+        }
+    };
+    emitter.emit(event_ctx, stage).await;
 }
 
 #[allow(clippy::too_many_arguments)]

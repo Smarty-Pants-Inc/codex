@@ -718,6 +718,7 @@ impl UnifiedExecProcessManager {
                 plugin_attribution.clone(),
                 Arc::clone(&transcript),
                 text.clone(),
+                process.subcommand_approval_status(),
                 exit,
                 wall_time,
             )
