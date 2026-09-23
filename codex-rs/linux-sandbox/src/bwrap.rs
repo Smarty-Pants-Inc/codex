@@ -184,7 +184,7 @@ impl SyntheticMountTarget {
         }
     }
 
-    fn existing_empty_directory(path: &Path, metadata: &Metadata) -> Self {
+    pub(crate) fn existing_empty_directory(path: &Path, metadata: &Metadata) -> Self {
         Self {
             path: path.to_path_buf(),
             kind: SyntheticMountTargetKind::EmptyDirectory,
@@ -194,6 +194,14 @@ impl SyntheticMountTarget {
 
     pub(crate) fn preserves_pre_existing_path(&self) -> bool {
         self.pre_existing_path.is_some()
+    }
+
+    /// Treats the object at this path as synthetic, not as a real pre-existing path.
+    pub(crate) fn without_pre_existing_path(&self) -> Self {
+        Self {
+            pre_existing_path: None,
+            ..self.clone()
+        }
     }
 
     pub(crate) fn path(&self) -> &Path {
