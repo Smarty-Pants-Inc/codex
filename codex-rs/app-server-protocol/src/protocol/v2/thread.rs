@@ -6,6 +6,8 @@ use super::SandboxPolicy;
 use super::Thread;
 use super::ThreadHistoryMode;
 use super::ThreadItem;
+use super::ThreadObservationCapabilities;
+use super::ThreadObservationOptions;
 use super::ThreadRealtimeItem;
 use super::ThreadSection;
 use super::ThreadSectionAppearance;
@@ -60,6 +62,10 @@ pub enum ThreadStartSource {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadStartParams {
+    /// Requests use of the trusted launch's observation admission; never grants it.
+    #[experimental("thread/start.observation")]
+    #[ts(optional = nullable)]
+    pub observation: Option<ThreadObservationOptions>,
     #[ts(optional = nullable)]
     pub model: Option<String>,
     #[ts(optional = nullable)]
@@ -179,6 +185,8 @@ pub struct MockExperimentalMethodResponse {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadStartResponse {
+    #[experimental("thread/start.observation")]
+    pub observation: Option<ThreadObservationCapabilities>,
     pub thread: Thread,
     pub model: String,
     pub model_provider: String,
@@ -333,6 +341,10 @@ pub struct ThreadSettingsUpdatedNotification {
 ///
 /// Prefer using thread_id whenever possible.
 pub struct ThreadResumeParams {
+    /// Only a cold resume explicitly admitted by the owning launch is eligible.
+    #[experimental("thread/resume.observation")]
+    #[ts(optional = nullable)]
+    pub observation: Option<ThreadObservationOptions>,
     pub thread_id: String,
 
     /// [UNSTABLE] FOR CODEX CLOUD - DO NOT USE.
@@ -412,6 +424,8 @@ pub struct ThreadResumeParams {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct ThreadResumeResponse {
+    #[experimental("thread/resume.observation")]
+    pub observation: Option<ThreadObservationCapabilities>,
     pub thread: Thread,
     pub model: String,
     pub model_provider: String,

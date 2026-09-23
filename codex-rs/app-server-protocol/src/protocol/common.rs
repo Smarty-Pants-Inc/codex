@@ -568,6 +568,67 @@ client_request_definitions! {
         serialization: thread_id(params.thread_id),
         response: v2::ThreadSetNameResponse,
     },
+    #[experimental("thread/pilot/read")]
+    ThreadPilotRead => "thread/pilot/read" {
+        params: v2::ThreadPilotReadParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadPilotReadResponse,
+    },
+    #[experimental("thread/pilot/check")]
+    ThreadPilotCheck => "thread/pilot/check" {
+        params: v2::ThreadPilotCheckParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadPilotCheckResponse,
+    },
+    #[experimental("thread/pilot/start")]
+    ThreadPilotStart => "thread/pilot/start" {
+        params: v2::ThreadPilotStartParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadPilotStartResponse,
+    },
+    #[experimental("thread/pilot/retire")]
+    ThreadPilotRetire => "thread/pilot/retire" {
+        params: v2::ThreadPilotRetireParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadPilotRetireResponse,
+    },
+    #[experimental("thread/observation/wake/start")]
+    ThreadObservationWakeStart => "thread/observation/wake/start" {
+        params: v2::ThreadObservationWakeStartParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadObservationWakeStartResponse,
+    },
+    #[experimental("thread/observation/wake/read")]
+    ThreadObservationWakeRead => "thread/observation/wake/read" {
+        params: v2::ThreadObservationWakeReadParams,
+        serialization: None,
+        response: v2::ThreadObservationWakeReadResponse,
+    },
+    #[experimental("thread/observation/wake/invalidate")]
+    ThreadObservationWakeInvalidate => "thread/observation/wake/invalidate" {
+        params: v2::ThreadObservationWakeInvalidateParams,
+        serialization: None,
+        response: v2::ThreadObservationWakeInvalidateResponse,
+    },
+    #[experimental("thread/observation/wake/retire")]
+    ThreadObservationWakeRetire => "thread/observation/wake/retire" {
+        params: v2::ThreadObservationWakeRetireParams,
+        serialization: None,
+        response: v2::ThreadObservationWakeRetireResponse,
+    },
+    #[experimental("thread/observation/set")]
+    ThreadObservationSet => "thread/observation/set" {
+        params: v2::ThreadObservationSetParams,
+        serialization: thread_id(params.thread_id),
+        response: v2::ThreadObservationSetResponse,
+    },
+    #[experimental("thread/observation/read")]
+    ThreadObservationRead => "thread/observation/read" {
+        params: v2::ThreadObservationReadParams,
+        serialization: thread_id(params.thread_id),
+        manual_payload_conversion: manual,
+        response: v2::ThreadObservationReadResponse,
+    },
     ThreadGoalSet => "thread/goal/set" {
         params: v2::ThreadGoalSetParams,
         serialization: thread_id(params.thread_id),
@@ -1834,6 +1895,12 @@ server_notification_definitions! {
     /// NEW NOTIFICATIONS
     Error => "error" (v2::ErrorNotification),
     ThreadStarted => "thread/started" (v2::ThreadStartedNotification),
+    #[experimental("thread/observation/captured")]
+    ThreadObservationCaptured => "thread/observation/captured" (v2::ThreadObservationCapturedNotification),
+    #[experimental("thread/observation/budget")]
+    ThreadObservationBudget => "thread/observation/budget" (v2::ThreadObservationBudgetNotification),
+    #[experimental("thread/observation/submitted")]
+    ThreadObservationSubmitted => "thread/observation/submitted" (v2::ThreadObservationSubmittedNotification),
     ThreadStatusChanged => "thread/status/changed" (v2::ThreadStatusChangedNotification),
     ThreadArchived => "thread/archived" (v2::ThreadArchivedNotification),
     ThreadDeleted => "thread/deleted" (v2::ThreadDeletedNotification),
@@ -3108,6 +3175,7 @@ mod tests {
         let response = ClientResponse::ThreadStart {
             request_id: RequestId::Integer(7),
             response: v2::ThreadStartResponse {
+                observation: None,
                 thread: v2::Thread {
                     id: "67e55044-10b1-426f-9247-bb680e5fe0c8".to_string(),
                     extra: None,
@@ -3163,6 +3231,7 @@ mod tests {
                 "method": "thread/start",
                 "id": 7,
                 "response": {
+                    "observation": null,
                     "thread": {
                         "id": "67e55044-10b1-426f-9247-bb680e5fe0c8",
                         "extra": null,

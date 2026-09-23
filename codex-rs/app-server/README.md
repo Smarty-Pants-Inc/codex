@@ -1,5 +1,37 @@
 # codex-app-server
 
+## Experimental owner-bound observation wake controls
+
+`thread/observation/wake/{start,read,invalidate,retire}` use the original admitted
+stdio thread and owner epoch. They do not install policy or enable
+`automaticAdmission`. Start requires a trusted native `ObservationWakeHostPolicy`
+matching both the original thread and owner. Without it, start is unsupported.
+Context/profile qualification and original host admission policy remain required.
+
+Start takes `intent` (`sequence`, `frameRevision`, `frameHash`, `budgetGeneration`,
+`expectedCommitOrder`) and `operandDigest`. All integers are positive safe JSON
+integers. Digest: SHA256 of UTF-8 `codex-observation-wake-v1` plus NUL, raw16 UUID
+owner bytes, four big-endian u64 values (sequence, frameRevision, budgetGeneration,
+expectedCommitOrder), then64 lowercase ASCII frameHash bytes. Persist the original
+sequence/digest/cooldown before dispatch; never replay a lost-ACK start.
+
+Read takes `query:{type:"attempt",sequence,operandDigest}` or
+`query:{type:"fence",sequence}`. Responses have `protocol:1`, query type and
+`intentFloor`; attempt responses also contain a nullable `receipt`. A receipt has
+sequence, operandDigest and tagged outcome: `pending` with nullable turnId,
+`started` with actual turnId, `suppressed`, or `unknown`. Pending is not Started;
+Started is not exposure. Missing history is Unknown, not retry permission.
+
+Invalidate takes sequence; retire takes sequence/operandDigest. Both return
+`protocol:1,intentFloor`. A higher invalidation floor fences lower unreserved
+attempts, not an already reserved turn. Retire only after durably recording the
+terminal Started/Suppressed result; Pending/Unknown cannot retire. The floor
+survives retirement. Read/cleanup stay available after budget invalidation but
+never grant send/start authority. Close completion joins the native fence and
+original admission outcome; connection loss is Unknown. Same-owner rollback must
+carry the whole original writer's floor, not rewind it to selected ancestry.
+
+
 `codex app-server` is the interface Codex uses to power rich interfaces such as the [Codex VS Code extension](https://marketplace.visualstudio.com/items?itemName=openai.chatgpt).
 
 ## Table of Contents
@@ -790,6 +822,16 @@ Use `thread/goal/clear` to remove the current goal.
 { "id": 30, "result": { "cleared": true } }
 { "method": "thread/goal/cleared", "params": { "threadId": "thr_123" } }
 ```
+
+### Ordinary continuation
+
+The model's `keep_working` decision applies only to the current operation. Submitted
+human input, steering, queue edits, manual compaction/review, cold resume/fork and
+runtime replacement require a fresh enable decision. A persisted ON flag is not
+restored authority. Queue persistence failure does not restore the prior decision.
+Clients must preserve unsent drafts verbatim: drafts are neither submitted input
+nor a veto. Explicit thread goals retain their pause/resume, storage and accounting
+semantics and remain mutually exclusive with ordinary continuation.
 
 ### Example: Queue a follow-up user turn (experimental)
 
@@ -1873,6 +1915,8 @@ The server also emits item lifecycle notifications around the request:
 3. Client response.
 4. `item/completed` with `item.type = "dynamicToolCall"`, final `status`, and the returned `contentItems`/`success`.
 
+The server binds each response to the originating native turn before applying it in Core. A late response cannot resolve a matching call ID in a different turn. This protects native response delivery only: clients still own any external side effects already accepted before cancellation, and must settle them before claiming a safe transition or shutdown.
+
 The client must respond with content items. Use `inputText` for text, `inputImage` for inline image data URLs, and `inputAudio` for inline audio data URLs. Audio data URLs accept wav, mp3, m4a, webm, and ogg media types. Remote HTTP(S) image URLs and non-data audio URLs make the dynamic tool response invalid.
 
 ```json
@@ -2691,3 +2735,203 @@ For server-initiated request payloads, annotate the field the same way so schema
    ```bash
    just test -p codex-app-server-protocol
    ```
+
+### Observation method routing (under development)
+
+Experimental `thread/observation/set` and `thread/observation/read` use thread-keyed
+request serialization. They only look up an existing owner-bound bridge; they do
+not load, subscribe, resume or create a thread. Unbound/foreign probes are denied
+without thread metadata. `initialize.capabilities.experimentalApi` alone grants no ownership.
+A trusted host can select `--observation-profile harmony-gpt-oss` for its own
+private-home stdio launch. This does not discover or qualify a provider, change a
+provider endpoint, or modify persisted configuration. The host must independently
+qualify the controlled Responses/Harmony mapping and retain its process-tree and
+private-home ownership. The native home lock excludes other cooperating
+observation launches; it is not protection against another same-user process
+which ignores that lock. Remote control is disabled for this launch only.
+
+After experimental initialization, request `observation: { "protocol": 2 }` in
+`thread/start`. The response's experimental nullable `observation` capability is
+returned only after the same slot/profile is attached to the idle Core runtime
+and its sole relay task is retained by the native thread listener. Unsupported
+versions/profiles and non-stdio or unadmitted connections fail closed. Clients
+that opt out of captured/submitted/budget notifications cannot acquire admission. Omission
+keeps the ordinary start path. This API does not start a model turn automatically.
+
+For cold resume, the host must also supply
+`--observation-resume-thread <admitted-thread-id>` at launch, after admitting its
+persisted thread and reconnecting the approved dynamic-tool handler. Only that
+ID can opt in on `thread/resume`; path/history substitutes and live-thread
+attachment cannot acquire observation authority. An already observed live runtime
+also rejects resume without opt-in rather than silently reporting a disabled
+capability while retaining its binding; use its existing handle or an admitted
+cold resume. Resume creates a fresh epoch
+and empty slot, not a restored body or publication revision. Fork does not inherit
+an observation binding. RPC fields and epochs cannot grant host admission.
+A failed start/resume is not a transaction rollback certificate for thread creation.
+
+Successful set/read ACKs share one slot FIFO with owner-only
+`thread/observation/captured`, `thread/observation/submitted`, and
+`thread/observation/budget` notifications.
+The method handler returns no success payload. A native UUID correlates the
+committed control event to its exact connection/request and reply kind. Pending
+correlations are bounded to32; slot capacity stays32 with one in-flight relay
+item and the existing bounded outgoing transport. This is not an aggregate
+32-message end-to-end dequeue/pressure qualification. Cancellation or lost relay
+output is uncertain, never a postcommit rejection certificate. Native connection
+close removes admission before RPC draining and revokes existing slots. Listener
+replacement/teardown revokes the old binding and cancels its retained relay;
+Core keeps the revoked binding so an old runtime cannot silently send unobserved
+requests. Model compatibility is checked at installation and each decision.
+Normal/experimental generated schema and native execution evidence are pending.
+
+#### Native reservation state (observation protocol 2)
+
+Start/resume capabilities and set/read responses include `nativeReservation`:
+`{generation, state, model, profile, usableContextTokens, reservedTokens, maxFrameBytes}`.
+The state is `valid`, `invalid`, or `unsupported`; model and usable context tokens
+are required nullable fields. The profile is `harmonyGptOss`. Integers are JSON-safe.
+The capability's top-level `maxFrameBytes` and `reservedTokens` always equal
+`nativeReservation`'s. The limits fit Sense's 8×2048 reference profile: 115712 frame
+bytes (`1024 + 8 * (2048 * 6 + 2048)`) plus the framing reservation. `valid` reports native
+capacity preconditions only, not external tokenizer/framing/provider qualification.
+It does not qualify a whole-request pilot bound or enable automatic admission.
+
+Set requires `expectedBudgetGeneration`, checked with the original owner under
+the publication lock. A non-null frame requires a valid matching generation.
+A higher-revision null clear remains possible with the current generation even
+when capacity is invalid or unsupported. Equal-revision renewal cannot move an
+old frame to a new generation; republish with a fresh revision instead.
+
+The existing `thread/observation/read` is the sole revalidation RPC. It rejoins
+committed session settings and the original slot generation after model lookup.
+Settings changes invalidate under the same session-state lock before commit;
+per-decision effective-model changes also fence captures and unsent attempts.
+An old configured model cannot revalidate over a known effective fallback.
+No slot lock is held across asynchronous model lookup.
+
+Set/read responses add `protocol:2` and `frameBudgetGeneration` (null only without
+a retained frame). The latter is the original publication's generation, never
+relabeled by revalidation. An old retained frame becomes `unavailable` until
+republished. Exact same-owner revision/hash/expiry/frame-generation readback can
+reconcile a lost ACK as a historical commit when only budget invalidation made it
+unavailable; it does not restore current eligibility, renewal or exposure.
+Expired, mismatched and lost-owner cases retain their existing refusal rules.
+
+`thread/observation/budget` carries `{protocol:2, threadId, ownerEpoch, commitOrder,
+nativeReservation}` on the original FIFO. Captured/submitted notifications add
+`protocol:2` and immutable `budgetGeneration`. A submission's wire `commitOrder`
+is its original capture order, even after a later budget event. The internal audit
+journal retains its distinct terminal/retry order. Already observed acceptance
+remains credited to the original attempt; invalidation cannot invent exposure.
+
+Sense's reservation formula `1024 + watches * (maxBodyBytes * 6 + 2048)` must fit
+the native frame cap. A larger host watch profile is a scope mismatch that assembly
+must report, not silently reduce watch/body acceptance or widen native constants
+without independent physical qualification.
+
+### Original-owner pilot controls (experimental, under development)
+
+These methods require the original exclusively owned observation stdio connection
+and an installed launch issuer. A profile, persisted thread ID, subscription, or
+RPC field cannot install authority. Unknown request fields are rejected.
+
+- `thread/pilot/read {threadId}` returns the actual native identity plus the
+  original instruction, allocation ID and complete decision digest. These are
+  diagnostic bindings, not a transferable grant.
+- `thread/pilot/check {threadId, operation}` consumes one native source-operation
+  check. Operations are `prepareSource`, `sampleSource`, and `actOnSource`; the
+  native slot supplies scope and checks the installed rights. The returned
+  request ID is diagnostic, not reusable authority for another operation.
+- `thread/pilot/start {threadId, input}` attempts one automatic turn through the
+  native idle reservation and owner guard, not ordinary foreground submission.
+  Input is nonempty and at most 1024 UTF-8 bytes. There are no settings, model, tool,
+  limits or owner overrides. `{started:false, turnId:null}` means no commit; it is
+  not a promise that a later turn can start. Existing Plan-mode, trigger priority,
+  cooldown, revocation and finite-ledger checks apply at native commit.
+- `thread/pilot/retire {threadId}` derives the original owner and synchronously
+  fences its slot/issuer before retirement waits. It retains one original task
+  and body-free report across concurrent callers or a cancelled RPC waiter.
+  Disconnect also starts this original join. A failed join remains unknown;
+  it does not release or recreate credit.
+
+The retirement response matches the Foundation `PilotNativeReport` projection:
+identity, revoked, activeDecision, admittedTurns, reservedTokens, and attempts
+with request/decision/turn IDs, reservation receipts, response usage and conflicts.
+It does not certify audit-pipe delivery, observer/process/store closure, key-copy
+exclusion or remote settlement. The original outer owner must persist its report
+and join those resources. Transport loss may prevent report delivery and leaves
+outer debt unknown; a later session cannot recover it by substituting a new owner.
+
+These source interfaces do not enable `automaticAdmission` by themselves. Count
+and final-context qualification remain separate, fail-closed producers. Schema
+fixtures must be generated from the exact integrated source before qualification.
+
+The trusted v2 launcher can supply an optional, complete count descriptor group:
+`--sense-pilot-count-scope-fd 14`, `--sense-pilot-count-scope-sha256 <pin>`,
+`--sense-pilot-count-semantics-fd 15`,
+`--sense-pilot-count-semantics-sha256 <pin>`, and
+`--sense-pilot-count-ledger-fd 16`. These extend original decision/credential/
+prepared descriptors 3/4/5, not an RPC or arbitrary-path loader. Scope and semantics
+are protected readonly canonical JSON; the ledger is the original empty append
+handle transferred once to the same native allocation. No recovery or replacement
+balance is supported. Unknown or unsupported semantics fail closed. A qualified
+artifact must join the original application's binary/source pins, native codec,
+endpoints, model, shapes, limits and independently admitted evidence identity.
+Matching hashes or a status string alone do not establish qualification. Current
+native semantics explicitly refuse `client_metadata` (including an empty object),
+`stream_options` and `access_programs`; these fields are never silently stripped.
+Descriptor survival, independent semantic evidence and native execution remain
+separate qualification requirements; these flags alone do not permit effects.
+
+### Observation control rejections (protocol 2)
+
+The owner-bound observation path uses the existing JSON-RPC error envelope, not
+an alternate rejected-success result. This contract does not itself enable
+observation methods or grant ownership. A definite domain rejection has all of:
+
+```json
+{
+  "id": "set-2",
+  "error": {
+    "code": -32002,
+    "message": "observation control request rejected",
+    "data": {
+      "type": "threadObservationRejected",
+      "protocol": 2,
+      "code": "REVISION_MISMATCH"
+    }
+  }
+}
+```
+
+Require the matching request ID, numeric error code, exact discriminator,
+protocol version and a known uppercase domain code. The data object has exactly
+the three members shown; unknown members are not accepted. The message is not parsed.
+`data.code` alone, another discriminator/version, an unknown code, a malformed
+error, a timeout or a lost response is not a no-commit certificate.
+
+| Domain code | Pre-commit condition |
+| --- | --- |
+| `INVALID_INPUT` | Invalid params or frame, including invalid text, raw-byte limit, hash or lease. |
+| `DENIED` | Native connection/origin/ownership admission denies access before the slot call. No slot existence or metadata is disclosed. |
+| `STALE_OWNER` | The slot owner fence fails, or an expired lease is used to publish another non-null frame. |
+| `REVISION_MISMATCH` | Revision ordering fails, or equal revision is not an active identical-frame lease extension. |
+| `RESOURCE_LIMIT` | Native sequence, in-flight or reserved FIFO capacity is unavailable before mutation. |
+| `UNSUPPORTED` | Protocol/profile/transport admission is unsupported before mutation. |
+| `INCOMPATIBLE_STATE` | Required local state or a valid native clock is unavailable before mutation. |
+| `BUDGET_INVALID` | Non-null publication requires valid native capacity. Cleanup clear is exempt from validity, not generation or owner checks. |
+| `BUDGET_GENERATION_MISMATCH` | Expected generation differs from the current one, or renewal would relabel an old frame. |
+
+For `thread/observation/set`, including clear and renewal, this certifies that the
+**correlated invocation did not commit the requested mutation**. Native expiry or
+revocation can still take effect; it is not a promise that every slot field stayed
+unchanged. A rejection of a retry does not disprove an earlier publication whose
+ACK was lost. A read rejection cannot reconcile an uncertain set.
+
+Once publication has committed, ACK/relay/connection failure must not produce this
+error. Keep that outcome uncertain and reconcile by owner-fenced readback,
+including exact lease expiry for renewal. Success ACKs still use the shared FIFO.
+Errors contain no frame body, hash, revision, owner epoch or other slot metadata.
+Standard `-32601`/`-32602` validation errors retain their existing meanings; generic
+server errors such as `-32001` or `-32603` do not acquire this domain guarantee.

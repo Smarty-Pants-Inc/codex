@@ -748,12 +748,14 @@ impl MessageProcessor {
         &self,
         connection_id: ConnectionId,
         request_attestation: bool,
+        observation: Option<Arc<crate::observation_admission::ObservationAdmission>>,
     ) {
         self.thread_processor
             .connection_initialized(
                 connection_id,
                 ConnectionCapabilities {
                     request_attestation,
+                    observation,
                 },
             )
             .await;
@@ -800,6 +802,9 @@ impl MessageProcessor {
         connection_id: ConnectionId,
         session_state: &ConnectionSessionState,
     ) {
+        self.thread_processor
+            .revoke_observation_connection(connection_id)
+            .await;
         session_state.rpc_gate.close().await;
         session_state.mcp_event_streams.clear().await;
         if timeout(
@@ -871,6 +876,7 @@ impl MessageProcessor {
                         connection_id,
                         ConnectionCapabilities {
                             request_attestation: session.request_attestation(),
+                            ..Default::default()
                         },
                     )
                     .await;
@@ -1200,6 +1206,112 @@ impl MessageProcessor {
             ClientRequest::ThreadSetName { params, .. } => {
                 self.thread_processor
                     .thread_set_name(request_id.clone(), params)
+                    .await
+            }
+            ClientRequest::ThreadPilotRead { params, .. } => self
+                .thread_processor
+                .pilot_control(request_id.connection_id, &params.thread_id)
+                .await
+                .map(|control| Some(control.binding.clone().into())),
+            ClientRequest::ThreadPilotCheck { params, .. } => {
+                match self
+                    .thread_processor
+                    .pilot_control(request_id.connection_id, &params.thread_id)
+                    .await
+                {
+                    Ok(control) => control
+                        .check(params.operation)
+                        .map(|response| Some(response.into())),
+                    Err(error) => Err(error),
+                }
+            }
+            ClientRequest::ThreadPilotStart { params, .. } => {
+                match self
+                    .thread_processor
+                    .pilot_control(request_id.connection_id, &params.thread_id)
+                    .await
+                {
+                    Ok(control) => control
+                        .start(params.input)
+                        .await
+                        .map(|response| Some(response.into())),
+                    Err(error) => Err(error),
+                }
+            }
+            ClientRequest::ThreadPilotRetire { params, .. } => {
+                match self
+                    .thread_processor
+                    .pilot_control(request_id.connection_id, &params.thread_id)
+                    .await
+                {
+                    Ok(control) => control.retire().await.map(|response| Some(response.into())),
+                    Err(error) => Err(error),
+                }
+            }
+            ClientRequest::ThreadObservationWakeStart { params, .. } => {
+                self.thread_processor
+                    .observation_wake_request(
+                        request_id.clone(),
+                        crate::request_processors::WakeOperation::Start(params),
+                    )
+                    .await
+            }
+            ClientRequest::ThreadObservationWakeRead { params, .. } => {
+                self.thread_processor
+                    .observation_wake_request(
+                        request_id.clone(),
+                        crate::request_processors::WakeOperation::Read(params),
+                    )
+                    .await
+            }
+            ClientRequest::ThreadObservationWakeInvalidate { params, .. } => {
+                self.thread_processor
+                    .observation_wake_request(
+                        request_id.clone(),
+                        crate::request_processors::WakeOperation::Invalidate(params),
+                    )
+                    .await
+            }
+            ClientRequest::ThreadObservationWakeRetire { params, .. } => {
+                self.thread_processor
+                    .observation_wake_request(
+                        request_id.clone(),
+                        crate::request_processors::WakeOperation::Retire(params),
+                    )
+                    .await
+            }
+            ClientRequest::ThreadObservationSet { params, .. } => {
+                let frame = match params.frame {
+                    codex_app_server_protocol::ObservationFrameUpdate::Frame(frame) => {
+                        Some(codex_core::ObservationFrame {
+                            text: Arc::from(frame.text),
+                            hash: frame.hash,
+                            expires_at: frame.expires_at,
+                        })
+                    }
+                    codex_app_server_protocol::ObservationFrameUpdate::Clear(()) => None,
+                };
+                self.thread_processor
+                    .observation_request(
+                        request_id.clone(),
+                        &params.thread_id,
+                        &params.owner_epoch,
+                        crate::observation_bridge::ControlOperation::Set {
+                            revision: params.revision,
+                            frame,
+                            expected_budget_generation: params.expected_budget_generation,
+                        },
+                    )
+                    .await
+            }
+            ClientRequest::ThreadObservationRead { params, .. } => {
+                self.thread_processor
+                    .observation_request(
+                        request_id.clone(),
+                        &params.thread_id,
+                        &params.owner_epoch,
+                        crate::observation_bridge::ControlOperation::Read,
+                    )
                     .await
             }
             ClientRequest::ThreadGoalSet { params, .. } => {

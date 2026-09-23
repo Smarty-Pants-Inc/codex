@@ -1,3 +1,11 @@
+#[path = "thread_observation.rs"]
+mod observation;
+#[path = "thread_observation_wake.rs"]
+pub(crate) mod observation_wake;
+#[path = "thread_pilot.rs"]
+mod pilot;
+use codex_app_server_protocol::ThreadObservationOptions;
+
 use super::persisted_resume_settings::PersistedResumeSettings;
 use super::persisted_resume_settings::latest_persisted_resume_settings;
 use super::thread_enrichment::enrich_loaded_threads;
@@ -1093,7 +1101,14 @@ impl ThreadRequestProcessor {
         client_mcp_extensions: ClientMcpExtensions,
         request_context: RequestContext,
     ) -> Result<(), JSONRPCErrorError> {
+        self.validate_observation_admission(
+            request_id.connection_id,
+            &params.observation,
+            observation::ObservationThread::Start,
+        )
+        .await?;
         let ThreadStartParams {
+            observation,
             model,
             model_provider,
             allow_provider_model_fallback,
@@ -1195,6 +1210,7 @@ impl ThreadRequestProcessor {
                 thread_store,
                 config_manager,
                 request_id,
+                observation,
                 app_server_client_name,
                 app_server_client_version,
                 client_mcp_extensions,
@@ -1274,6 +1290,7 @@ impl ThreadRequestProcessor {
         thread_store: Arc<dyn ThreadStore>,
         config_manager: ConfigManager,
         request_id: ConnectionRequestId,
+        observation: Option<ThreadObservationOptions>,
         app_server_client_name: Option<String>,
         app_server_client_version: Option<String>,
         client_mcp_extensions: ClientMcpExtensions,
@@ -1397,6 +1414,14 @@ impl ThreadRequestProcessor {
             })
             .sum();
         let mut thread_extension_init = ExtensionDataInit::new();
+        if observation.is_some() {
+            thread_extension_init.insert(
+                listener_task_context
+                    .thread_state_manager
+                    .observation_startup_policy(request_id.connection_id)
+                    .await?,
+            );
+        }
         if !selected_capability_roots.is_empty() {
             thread_extension_init.insert(selected_capability_roots);
         }
@@ -1535,7 +1560,28 @@ impl ThreadRequestProcessor {
             thread_response_active_permission_profile(config_snapshot.active_permission_profile);
         let thread_originator = config_snapshot.originator.clone();
 
+        let observation = if observation.is_some() {
+            let native_thread = listener_task_context
+                .thread_manager
+                .get_thread(thread_id)
+                .await
+                .map_err(|_| invalid_request("observation thread is no longer loaded"))?;
+            Some(
+                listener_task_context
+                    .thread_state_manager
+                    .install_thread_observation(
+                        thread_id,
+                        request_id.connection_id,
+                        &native_thread,
+                        Arc::clone(&listener_task_context.outgoing),
+                    )
+                    .await?,
+            )
+        } else {
+            None
+        };
         let response = ThreadStartResponse {
+            observation,
             thread: thread.clone(),
             model: config_snapshot.model,
             model_provider: config_snapshot.model_provider_id,
@@ -3526,6 +3572,32 @@ impl ThreadRequestProcessor {
     ) -> Result<(), JSONRPCErrorError> {
         if let Ok(thread_id) = ThreadId::from_string(&params.thread_id)
             && self
+                .thread_state_manager
+                .observation_bridge(thread_id, request_id.connection_id)
+                .await
+                .is_some()
+        {
+            return Err(crate::observation_control::rejected(
+                codex_app_server_protocol::ThreadObservationRejectionCode::Denied,
+            ));
+        }
+        if params.observation.is_some() {
+            if params.history.is_some() || params.path.is_some() {
+                return Err(invalid_request(
+                    "observation resume requires the host-admitted thread ID, not copied history or a path",
+                ));
+            }
+            let thread_id = ThreadId::from_string(&params.thread_id)
+                .map_err(|_| invalid_request("invalid observation resume thread ID"))?;
+            self.validate_observation_admission(
+                request_id.connection_id,
+                &params.observation,
+                observation::ObservationThread::Resume(thread_id),
+            )
+            .await?;
+        }
+        if let Ok(thread_id) = ThreadId::from_string(&params.thread_id)
+            && self
                 .pending_thread_unloads
                 .lock()
                 .await
@@ -3580,6 +3652,7 @@ impl ThreadRequestProcessor {
         };
 
         let ThreadResumeParams {
+            observation,
             thread_id,
             history,
             path,
@@ -3642,6 +3715,11 @@ impl ThreadRequestProcessor {
             && let Some((source, _)) = thread_history.get_resumed_session_sources()
             && !can_accept_direct_input(thread_history.get_multi_agent_version(), &source)
         {
+            if observation.is_some() {
+                return Err(invalid_request(
+                    "observation resume cannot attach through a parent-owned child",
+                ));
+            }
             let child_thread_id = resumed_history.conversation_id;
             self.thread_manager
                 .ensure_multi_agent_v2_child_loaded(child_thread_id)
@@ -3751,15 +3829,24 @@ impl ThreadRequestProcessor {
         }
 
         let response_history = thread_history.clone();
+        let mut thread_extension_init = ExtensionDataInit::new();
+        if observation.is_some() {
+            thread_extension_init.insert(
+                self.thread_state_manager
+                    .observation_startup_policy(request_id.connection_id)
+                    .await?,
+            );
+        }
 
         match self
             .thread_manager
-            .resume_thread_with_history(
+            .resume_thread_with_history_and_init(
                 config,
                 thread_history,
                 self.auth_manager.clone(),
                 self.request_trace_context(&request_id).await,
                 client_mcp_extensions,
+                thread_extension_init,
             )
             .await
         {
@@ -3929,7 +4016,22 @@ impl ThreadRequestProcessor {
                 }
 
                 let thread_originator = config_snapshot.originator.clone();
+                let observation = if observation.is_some() {
+                    Some(
+                        self.thread_state_manager
+                            .install_thread_observation(
+                                thread_id,
+                                request_id.connection_id,
+                                &codex_thread,
+                                Arc::clone(&self.outgoing),
+                            )
+                            .await?,
+                    )
+                } else {
+                    None
+                };
                 let response = ThreadResumeResponse {
+                    observation,
                     thread,
                     model: session_configured.model,
                     model_provider: session_configured.model_provider_id,

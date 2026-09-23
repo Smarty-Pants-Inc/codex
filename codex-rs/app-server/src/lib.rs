@@ -119,6 +119,13 @@ mod mcp_refresh;
 mod message_processor;
 mod models;
 mod models_refresh_worker;
+mod observation_admission;
+mod observation_bridge;
+mod observation_control;
+mod observation_notifications;
+mod observation_pilot_control;
+mod observation_pilot_decision;
+mod observation_pilot_launch;
 mod otel_reloader;
 mod outgoing_message;
 mod realtime_event_handling;
@@ -136,6 +143,8 @@ pub use crate::code_mode_host::AppServerCodeModeHostArgs;
 pub use crate::code_mode_host::CodeModeHostTransport;
 pub use crate::error_code::INPUT_TOO_LARGE_ERROR_CODE;
 pub use crate::error_code::INVALID_PARAMS_ERROR_CODE;
+pub use crate::observation_admission::AppServerObservationArgs;
+pub use crate::observation_admission::ObservationStartup;
 pub use crate::transport::AppServerTransport;
 pub use crate::transport::RemoteControlStartupMode;
 pub use crate::transport::app_server_control_socket_path;
@@ -438,6 +447,7 @@ pub enum PluginStartupTasks {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppServerRuntimeOptions {
+    pub observation_startup: Option<ObservationStartup>,
     pub code_mode_host_transport: CodeModeHostTransport,
     pub plugin_startup_tasks: PluginStartupTasks,
     pub goal_auto_continue_enabled: bool,
@@ -448,6 +458,7 @@ pub struct AppServerRuntimeOptions {
 impl Default for AppServerRuntimeOptions {
     fn default() -> Self {
         Self {
+            observation_startup: None,
             code_mode_host_transport: CodeModeHostTransport::Local,
             plugin_startup_tasks: PluginStartupTasks::Start,
             goal_auto_continue_enabled: false,
@@ -488,6 +499,20 @@ pub async fn run_main_with_transport_options(
         )
     })?;
     let codex_home = find_codex_home()?;
+    if runtime_options.observation_startup.is_some()
+        && runtime_options.remote_control_startup_mode
+            != RemoteControlStartupMode::DisabledEphemeral
+    {
+        return Err(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "observation admission requires remote control disabled for this launch",
+        ));
+    }
+    let observation_admission = runtime_options
+        .observation_startup
+        .clone()
+        .map(|selection| selection.acquire(&codex_home, &transport))
+        .transpose()?;
     let local_runtime_paths = ExecServerRuntimePaths::from_optional_paths(
         arg0_paths.codex_self_exe.clone(),
         arg0_paths.codex_linux_sandbox_exe.clone(),
@@ -1065,6 +1090,9 @@ pub async fn run_main_with_transport_options(
                                         let experimental_api_enabled =
                                             connection_state.session.experimental_api_enabled();
                                         let is_initialized = connection_state.session.initialized();
+                                        let observation_notifications_enabled = experimental_api_enabled
+                                            && !["thread/observation/captured", "thread/observation/submitted", "thread/observation/budget"]
+                                                .iter().any(|method| opted_out_notification_methods_snapshot.contains(*method));
                                         if let Ok(mut opted_out_notification_methods) = connection_state
                                             .outbound_opted_out_notification_methods
                                             .write()
@@ -1102,6 +1130,9 @@ pub async fn run_main_with_transport_options(
                                                     connection_state
                                                         .session
                                                         .request_attestation(),
+                                                    observation_admission.as_ref().filter(|_| observation_notifications_enabled).and_then(|admission| {
+                                                        admission.for_connection(connection_state.origin)
+                                                    }),
                                                 )
                                                 .await;
                                             connection_state

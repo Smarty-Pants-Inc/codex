@@ -2227,6 +2227,38 @@
       ],
       "type": "string"
     },
+    "ObservationFrame": {
+      "properties": {
+        "expiresAt": {
+          "description": "Unix seconds. Native admission validates the bounded active lease.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "hash": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "expiresAt",
+        "hash",
+        "text"
+      ],
+      "type": "object"
+    },
+    "ObservationFrameUpdate": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ObservationFrame"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Required nullable value: omitting `frame` must not silently clear a slot."
+    },
     "PermissionProfileListParams": {
       "properties": {
         "cursor": {
@@ -2260,6 +2292,14 @@
         "none",
         "friendly",
         "pragmatic"
+      ],
+      "type": "string"
+    },
+    "PilotSourceOperation": {
+      "enum": [
+        "prepareSource",
+        "sampleSource",
+        "actOnSource"
       ],
       "type": "string"
     },
@@ -4453,6 +4493,19 @@
       ],
       "type": "object"
     },
+    "ThreadObservationOptions": {
+      "properties": {
+        "protocol": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "protocol"
+      ],
+      "type": "object"
+    },
     "ThreadReadParams": {
       "properties": {
         "includeTurns": {
@@ -5474,6 +5527,96 @@
             "type"
           ],
           "title": "MentionUserInput",
+          "type": "object"
+        }
+      ]
+    },
+    "WakeIntent": {
+      "additionalProperties": false,
+      "properties": {
+        "budgetGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expectedCommitOrder": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "frameHash": {
+          "type": "string"
+        },
+        "frameRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "budgetGeneration",
+        "expectedCommitOrder",
+        "frameHash",
+        "frameRevision",
+        "sequence"
+      ],
+      "type": "object"
+    },
+    "WakeReadQuery": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operandDigest": {
+              "type": "string"
+            },
+            "sequence": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "attempt"
+              ],
+              "title": "AttemptWakeReadQueryType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "operandDigest",
+            "sequence",
+            "type"
+          ],
+          "title": "AttemptWakeReadQuery",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "sequence": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "fence"
+              ],
+              "title": "FenceWakeReadQueryType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sequence",
+            "type"
+          ],
+          "title": "FenceWakeReadQuery",
           "type": "object"
         }
       ]

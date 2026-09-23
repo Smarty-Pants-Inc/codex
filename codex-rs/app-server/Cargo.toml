@@ -114,6 +114,9 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "json"
 url = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v7"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }
+
 [target.'cfg(windows)'.dependencies]
 codex-windows-sandbox = { workspace = true }
 

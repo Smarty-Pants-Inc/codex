@@ -1,0 +1,76 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "ObservationCaptureState": {
+      "enum": [
+        "current",
+        "cleared",
+        "expired",
+        "unavailable"
+      ],
+      "type": "string"
+    }
+  },
+  "properties": {
+    "budgetGeneration": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "capturedAt": {
+      "description": "Native per-decision capture time, in Unix seconds; not host composition time.",
+      "format": "int64",
+      "type": "integer"
+    },
+    "commitOrder": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "decisionId": {
+      "type": "string"
+    },
+    "frameHash": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "frameRevision": {
+      "format": "uint64",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "ownerEpoch": {
+      "type": "string"
+    },
+    "protocol": {
+      "format": "uint32",
+      "minimum": 0.0,
+      "type": "integer"
+    },
+    "state": {
+      "$ref": "#/definitions/ObservationCaptureState"
+    },
+    "threadId": {
+      "type": "string"
+    },
+    "turnId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "budgetGeneration",
+    "capturedAt",
+    "commitOrder",
+    "decisionId",
+    "frameRevision",
+    "ownerEpoch",
+    "protocol",
+    "state",
+    "threadId",
+    "turnId"
+  ],
+  "title": "ThreadObservationCapturedNotification",
+  "type": "object"
+}
