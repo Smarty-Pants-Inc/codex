@@ -102,10 +102,16 @@ pub(crate) struct TurnState {
     pub(crate) token_usage_at_turn_start: TokenUsage,
 }
 
-struct PendingApproval {
-    turn_id: String,
+pub(crate) enum ApprovalAbortBehavior {
+    InterruptTurn,
+    ReturnDecision,
+}
+
+pub(crate) struct PendingApproval {
+    pub(crate) turn_id: String,
+    pub(crate) abort_behavior: ApprovalAbortBehavior,
     legacy_response_allowed: bool,
-    tx: oneshot::Sender<ReviewDecision>,
+    pub(crate) tx: oneshot::Sender<ReviewDecision>,
 }
 
 pub(crate) struct PendingRequestPermissions {
@@ -121,6 +127,7 @@ impl TurnState {
         key: String,
         turn_id: String,
         legacy_response_allowed: bool,
+        abort_behavior: ApprovalAbortBehavior,
         tx: oneshot::Sender<ReviewDecision>,
     ) -> Option<oneshot::Sender<ReviewDecision>> {
         self.pending_approvals
@@ -129,6 +136,7 @@ impl TurnState {
                 PendingApproval {
                     turn_id,
                     legacy_response_allowed,
+                    abort_behavior,
                     tx,
                 },
             )
@@ -139,7 +147,7 @@ impl TurnState {
         &mut self,
         key: &str,
         turn_id: Option<&str>,
-    ) -> Option<oneshot::Sender<ReviewDecision>> {
+    ) -> Option<PendingApproval> {
         if self
             .pending_approvals
             .get(key)
@@ -148,7 +156,7 @@ impl TurnState {
                 None => pending.legacy_response_allowed,
             })
         {
-            self.pending_approvals.remove(key).map(|pending| pending.tx)
+            self.pending_approvals.remove(key)
         } else {
             None
         }

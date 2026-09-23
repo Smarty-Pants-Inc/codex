@@ -16,7 +16,6 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
-use codex_protocol::items::TurnItem;
 use codex_protocol::mcp::is_node_repl_backed_server;
 use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::ContentItem;
@@ -79,6 +78,7 @@ use super::ApprovalRequestReasons;
 use super::GUARDIAN_REVIEWER_NAME;
 use super::GuardianApprovalRequest;
 use super::GuardianReviewContext;
+use super::evidence_admission::PendingNodeReplEvidenceAdmission;
 #[cfg(test)]
 use super::prompt::BUNDLED_GUARDIAN_POLICY;
 use super::prompt::BUNDLED_GUARDIAN_POLICY_TEMPLATE;
@@ -148,11 +148,6 @@ struct GuardianReviewState {
     last_admitted_node_repl_response_sequence: u64,
     pending_node_repl_evidence_admission: Option<PendingNodeReplEvidenceAdmission>,
     last_committed_fork_snapshot: Option<GuardianReviewForkSnapshot>,
-}
-
-struct PendingNodeReplEvidenceAdmission {
-    turn_id: String,
-    response_sequence: u64,
 }
 
 fn had_prior_review_context(prompt_mode: &GuardianPromptMode) -> bool {
@@ -350,21 +345,11 @@ impl GuardianReviewSession {
     }
 
     async fn admit_node_repl_evidence(&self, event: &Event) {
-        let EventMsg::ItemCompleted(completed) = &event.msg else {
-            return;
-        };
-        let TurnItem::UserMessage(_) = &completed.item else {
-            return;
-        };
-
         let mut state = self.state.lock().await;
         let Some(pending) = state.pending_node_repl_evidence_admission.as_ref() else {
             return;
         };
-        if completed.thread_id == self.session.thread_id()
-            && event.id == pending.turn_id
-            && completed.turn_id == pending.turn_id
-        {
+        if pending.matches(event) {
             state.last_admitted_node_repl_response_sequence = state
                 .last_admitted_node_repl_response_sequence
                 .max(pending.response_sequence);
@@ -1118,7 +1103,14 @@ async fn run_review_on_session(
     let transcript_cursor = prompt_items.transcript_cursor;
     let node_repl_evidence_admission = (prompt_items.node_repl_evidence_sequence
         > last_admitted_node_repl_response_sequence)
-        .then_some(prompt_items.node_repl_evidence_sequence);
+        .then(|| {
+            let ResponseInputItem::Message { content, .. } =
+                ResponseInputItem::from(prompt_items.items.clone())
+            else {
+                unreachable!("review input conversion always produces a message");
+            };
+            (prompt_items.node_repl_evidence_sequence, content)
+        });
     let token_usage_at_review_start = review_session
         .session
         .total_token_usage()
@@ -1214,11 +1206,12 @@ async fn run_review_on_session(
         }
         Err(outcome) => return (outcome, false, analytics_result),
     };
-    if let Some(response_sequence) = node_repl_evidence_admission {
+    if let Some((response_sequence, content)) = node_repl_evidence_admission {
         let mut state = review_session.state.lock().await;
         state.pending_node_repl_evidence_admission = Some(PendingNodeReplEvidenceAdmission {
             turn_id: child_turn_id.clone(),
             response_sequence,
+            content,
         });
     }
     analytics_result.reviewed_action_truncated = reviewed_action_truncated;
@@ -1310,7 +1303,7 @@ async fn wait_for_guardian_review(
             event = review_session.io.next_event() => {
                 match event {
                     Ok(event) if !event_matches_turn(&event, expected_turn_id) => {}
-                    Ok(event) if matches!(&event.msg, EventMsg::ItemCompleted(_)) => {
+                    Ok(event) if matches!(&event.msg, EventMsg::RawResponseItem(_)) => {
                         review_session.admit_node_repl_evidence(&event).await;
                     }
                     Ok(event) => match event.msg {
@@ -1573,6 +1566,53 @@ mod tests {
             tx_event,
             rx_sub,
         )
+    }
+
+    #[tokio::test]
+    async fn cancellation_only_admits_evidence_recorded_before_the_terminal_event() {
+        for record_input in [false, true] {
+            let (review_session, events, _submissions) = test_review_session().await;
+            let content = vec![ContentItem::InputText {
+                text: "exact private review evidence".to_string(),
+            }];
+            review_session
+                .state
+                .lock()
+                .await
+                .pending_node_repl_evidence_admission = Some(PendingNodeReplEvidenceAdmission {
+                turn_id: "child-turn".to_string(),
+                response_sequence: 7,
+                content: content.clone(),
+            });
+            let mut item = ResponseItem::from(ResponseInputItem::Message {
+                role: "developer".to_string(),
+                content,
+                phase: None,
+            });
+            item.set_turn_id_if_missing("child-turn");
+            let recorded = Event {
+                id: "child-turn".to_string(),
+                msg: EventMsg::RawResponseItem(codex_protocol::protocol::RawResponseItemEvent {
+                    item,
+                }),
+            };
+            if record_input {
+                events.send(recorded.clone()).await.unwrap();
+                events.send(recorded).await.unwrap();
+            }
+            events.send(turn_aborted_event("child-turn")).await.unwrap();
+            interrupt_and_drain_turn(&review_session, "child-turn")
+                .await
+                .unwrap();
+            let state = review_session.state.lock().await;
+            pretty_assertions::assert_eq!(
+                (
+                    state.last_admitted_node_repl_response_sequence,
+                    state.pending_node_repl_evidence_admission.is_some(),
+                ),
+                if record_input { (7, false) } else { (0, true) },
+            );
+        }
     }
 
     fn turn_complete_event(

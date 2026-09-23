@@ -615,7 +615,14 @@ fn latest_selected_skill_update(request: &ResponsesRequest) -> Option<String> {
     request
         .message_input_texts("developer")
         .into_iter()
-        .rfind(|text| text.contains(SKILL_DESCRIPTION) || text.contains(NO_SELECTED_SKILLS_MESSAGE))
+        .rfind(|text| {
+            text.trim_start()
+                .starts_with(codex_protocol::protocol::SKILLS_INSTRUCTIONS_OPEN_TAG)
+                && text
+                    .trim_end()
+                    .ends_with(codex_protocol::protocol::SKILLS_INSTRUCTIONS_CLOSE_TAG)
+                && (text.contains(SKILL_DESCRIPTION) || text.contains(NO_SELECTED_SKILLS_MESSAGE))
+        })
 }
 
 fn assert_selected_plugin_tools(request: &ResponsesRequest) {

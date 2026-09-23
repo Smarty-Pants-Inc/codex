@@ -1003,11 +1003,44 @@ async fn model_change_from_multimodal_to_text_strips_prior_media_content() -> Re
     );
 
     let second_request = requests.last().expect("expected second request");
-    assert!(second_request.has_content_kinds(&[
-        "images.unsupported",
-        "audio.unsupported",
-        "user.text",
-    ]));
+    let second_input = second_request.input();
+    let first_turn_index = second_input
+        .iter()
+        .position(|item| {
+            item["role"] == "user"
+                && item["content"] == json!([{"type": "input_text", "text": "first turn"}])
+        })
+        .expect("second request should retain the original first-turn user text");
+    let retained_input = second_input[first_turn_index..]
+        .iter()
+        .take(2)
+        .map(|item| {
+            json!({
+                "role": item["role"],
+                "content": item["content"],
+                "content_item_kinds": item["internal_chat_message_metadata_passthrough"]
+                    ["content_item_kinds"],
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained_input,
+        vec![
+            json!({
+                "role": "user",
+                "content": [{"type": "input_text", "text": "first turn"}],
+                "content_item_kinds": ["user.text"],
+            }),
+            json!({
+                "role": "developer",
+                "content": [
+                    {"type": "input_text", "text": "image content omitted because you do not support image input"},
+                    {"type": "input_text", "text": "audio content omitted because you do not support audio input"},
+                ],
+                "content_item_kinds": ["images.unsupported", "audio.unsupported"],
+            }),
+        ]
+    );
     assert!(
         second_request.message_input_image_urls("user").is_empty(),
         "second request should strip unsupported image content"
