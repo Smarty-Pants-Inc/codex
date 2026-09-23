@@ -1075,11 +1075,21 @@ async fn injected_response_item_reopens_turn_after_final_answer() {
 
     let requests = server.requests().await;
     assert_eq!(requests.len(), 2);
+    let first: Value = from_slice(&requests[0]).expect("parse first request");
     let second: Value = from_slice(&requests[1]).expect("parse second request");
+    assert_eq!(message_input_texts(&first, "user"), vec![INITIAL_PROMPT]);
     assert_eq!(message_input_texts(&second, "user"), vec![INITIAL_PROMPT]);
+    let mut expected_developer = message_input_texts(&first, "developer");
+    let [permissions, environment] = expected_developer.as_slice() else {
+        panic!("expected only canonical permissions and environment before injection");
+    };
+    assert!(permissions.starts_with("<permissions instructions>"));
+    assert!(environment.starts_with("<environment_context>"));
+    assert!(!first.to_string().contains(INJECTED_CONTEXT));
+    expected_developer.push(INJECTED_CONTEXT.to_string());
     assert_eq!(
         message_input_texts(&second, "developer"),
-        vec![INJECTED_CONTEXT]
+        expected_developer
     );
 
     server.shutdown().await;

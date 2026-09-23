@@ -2546,6 +2546,7 @@ async fn local_media_failures_become_developer_messages() {
         ResponseItem::Message {
             role: user_role,
             content: user_content,
+            internal_chat_message_metadata_passthrough: user_metadata,
             ..
         },
         ResponseItem::Message {
@@ -2563,6 +2564,13 @@ async fn local_media_failures_become_developer_messages() {
         &[ContentItem::InputText {
             text: "direct user text".to_string(),
         }]
+    );
+    assert_eq!(
+        user_metadata,
+        &Some(InternalChatMessageMetadataPassthrough {
+            content_item_kinds: Some(vec![ContentItemKind("user.text".to_string())]),
+            ..Default::default()
+        })
     );
     assert_eq!(notice_role, "developer");
     assert_eq!(notice_content.len(), 2);
@@ -2597,10 +2605,43 @@ async fn local_media_provenance_preserves_attachment_numbering() {
         UserInput::LocalAudio { path: second_audio },
     ]);
 
-    let [ResponseItem::Message { role, content, .. }] = items.as_slice() else {
+    let [
+        ResponseItem::Message {
+            role,
+            content,
+            internal_chat_message_metadata_passthrough,
+            ..
+        },
+    ] = items.as_slice()
+    else {
         panic!("expected one direct user message");
     };
     assert_eq!(role, "user");
+    assert_eq!(
+        internal_chat_message_metadata_passthrough,
+        &Some(InternalChatMessageMetadataPassthrough {
+            content_item_kinds: Some(
+                [
+                    "user.text",
+                    "user.image",
+                    "user.text",
+                    "user.text",
+                    "user.image",
+                    "user.text",
+                    "user.text",
+                    "user.audio",
+                    "user.text",
+                    "user.text",
+                    "user.audio",
+                    "user.text"
+                ]
+                .into_iter()
+                .map(|kind| ContentItemKind(kind.to_string()))
+                .collect()
+            ),
+            ..Default::default()
+        })
+    );
     let labels = content
         .iter()
         .filter_map(|item| match item {
@@ -2688,7 +2729,15 @@ async fn prepares_resumed_history_before_installing_it() {
                     },
                 ],
                 phase: None,
-                internal_chat_message_metadata_passthrough: None,
+                internal_chat_message_metadata_passthrough: Some(
+                    InternalChatMessageMetadataPassthrough {
+                        content_item_kinds: Some(vec![
+                            ContentItemKind("images.preparation_error".to_string()),
+                            ContentItemKind("images.preparation_error".to_string()),
+                        ]),
+                        ..Default::default()
+                    },
+                ),
             },
         ]
     );
@@ -6638,6 +6687,9 @@ async fn notify_request_permissions_response_ignores_unmatched_call_id() {
     );
 }
 
+#[path = "approval_abort_tests.rs"]
+mod approval_abort_tests;
+
 #[tokio::test]
 async fn stale_abort_does_not_interrupt_reused_exec_approval() {
     let (session, _turn_context) = make_session_and_context().await;
@@ -6646,7 +6698,12 @@ async fn stale_abort_does_not_interrupt_reused_exec_approval() {
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     assert!(
         session
-            .register_pending_approval("reused-approval".to_string(), "new-turn".to_string(), tx)
+            .register_pending_approval(
+                "reused-approval".to_string(),
+                "new-turn".to_string(),
+                crate::state::ApprovalAbortBehavior::InterruptTurn,
+                tx
+            )
             .await
             .is_none()
     );
@@ -6684,7 +6741,12 @@ async fn stale_abort_does_not_interrupt_reused_patch_approval() {
     let (tx, mut rx) = tokio::sync::oneshot::channel();
     assert!(
         session
-            .register_pending_approval("reused-approval".to_string(), "new-turn".to_string(), tx)
+            .register_pending_approval(
+                "reused-approval".to_string(),
+                "new-turn".to_string(),
+                crate::state::ApprovalAbortBehavior::ReturnDecision,
+                tx
+            )
             .await
             .is_none()
     );
@@ -6725,6 +6787,7 @@ async fn legacy_exec_approval_without_turn_id_resolves_pending_approval() {
             .register_pending_approval(
                 "legacy-approval".to_string(),
                 "current-turn".to_string(),
+                crate::state::ApprovalAbortBehavior::InterruptTurn,
                 tx,
             )
             .await
@@ -6756,6 +6819,7 @@ async fn legacy_patch_approval_without_turn_id_resolves_pending_approval() {
             .register_pending_approval(
                 "legacy-approval".to_string(),
                 "current-turn".to_string(),
+                crate::state::ApprovalAbortBehavior::ReturnDecision,
                 tx,
             )
             .await
@@ -6788,6 +6852,7 @@ async fn legacy_exec_approval_without_turn_id_ignores_reused_approval() {
             .register_pending_approval(
                 "reused-approval".to_string(),
                 "first-turn".to_string(),
+                crate::state::ApprovalAbortBehavior::InterruptTurn,
                 first_tx,
             )
             .await
@@ -6801,6 +6866,7 @@ async fn legacy_exec_approval_without_turn_id_ignores_reused_approval() {
             .register_pending_approval(
                 "reused-approval".to_string(),
                 "second-turn".to_string(),
+                crate::state::ApprovalAbortBehavior::InterruptTurn,
                 second_tx,
             )
             .await

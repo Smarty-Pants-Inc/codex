@@ -10,16 +10,25 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_protocol::user_input::UserInput;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Weak;
 
+/// A skill selected by agent discovery, not inferred from developer prompt text.
+pub struct AgentSkill {
+    pub name: String,
+    pub path: PathBuf,
+}
+
 /// A fully resolved agent invocation.
 ///
-/// Agent discovery owns rendering `prompt`, including any selected skill
-/// references. The runtime only starts that prompt in isolated forked context.
+/// Agent discovery owns rendering `prompt` and resolving its optional skill.
+/// The runtime starts developer input in isolated forked context; the selected
+/// skill does not confer direct-user authority on the prompt.
 pub struct AgentInvocation {
     pub config: Config,
     pub prompt: String,
+    pub skill: Option<AgentSkill>,
     pub parent_trace: Option<W3cTraceContext>,
 }
 
@@ -50,6 +59,7 @@ impl AgentRunner {
         let AgentInvocation {
             config,
             prompt,
+            skill,
             parent_trace,
         } = invocation;
         if prompt.trim().is_empty() {
@@ -73,14 +83,15 @@ impl AgentRunner {
                 },
             )
             .await?;
+        let mut input = vec![UserInput::Text {
+            text: prompt,
+            text_elements: Vec::new(),
+        }];
+        if let Some(AgentSkill { name, path }) = skill {
+            input.push(UserInput::Skill { name, path });
+        }
         let turn_id = match thread
-            .start_turn_if_idle(
-                TurnInputRequest::developer_input(vec![UserInput::Text {
-                    text: prompt,
-                    text_elements: Vec::new(),
-                }])
-                .with_trace(parent_trace),
-            )
+            .start_turn_if_idle(TurnInputRequest::developer_input(input).with_trace(parent_trace))
             .await?
         {
             StartIfIdleSubmission::Started { turn_id } => turn_id,

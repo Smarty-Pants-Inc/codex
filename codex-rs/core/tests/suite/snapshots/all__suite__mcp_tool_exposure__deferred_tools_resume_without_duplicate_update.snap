@@ -5,24 +5,24 @@ expression: "format_labeled_requests_snapshot(\"Persisted deferred tools remain 
 Scenario: Persisted deferred tools remain unchanged after resuming the thread.
 
 ## Before resume
-00:message/developer[2]:
+00:message/developer[3]:
     [01] <PERMISSIONS_INSTRUCTIONS>
-    [02] <tools>
+    [02] <ENVIRONMENT_CONTEXT:cwd=<CWD>>
+    [03] <tools>
          Deferred tool namespaces:
          - mcp__codex_apps__calendar: Plan events and manage your calendar.
          </tools>
-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-02:message/user:inspect deferred tools before resume
+01:message/user:inspect deferred tools before resume
 
 ## After resume
-00:message/developer[2]:
+00:message/developer[3]:
     [01] <PERMISSIONS_INSTRUCTIONS>
-    [02] <tools>
+    [02] <ENVIRONMENT_CONTEXT:cwd=<CWD>>
+    [03] <tools>
          Deferred tool namespaces:
          - mcp__codex_apps__calendar: Plan events and manage your calendar.
          </tools>
-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-02:message/user:inspect deferred tools before resume
-03:message/assistant:done
-04:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-05:message/user:inspect unchanged deferred tools after resume
+01:message/user:inspect deferred tools before resume
+02:message/assistant:done
+03:message/developer:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+04:message/user:inspect unchanged deferred tools after resume

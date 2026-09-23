@@ -442,6 +442,7 @@ async fn preapproved_additional_permissions_escalate_intercepted_exec() -> anyho
         Some(&requested_permissions),
     );
     let provider = CoreShellActionProvider {
+        approval_denied: Arc::new(std::sync::atomic::AtomicBool::new(/*v*/ false)),
         policy: Arc::new(RwLock::new(codex_execpolicy::Policy::empty())),
         session: Arc::new(session),
         review_context: GuardianReviewContext::from(Arc::new(turn_context)),
@@ -610,6 +611,7 @@ async fn execve_permission_request_hook_short_circuits_prompt() -> anyhow::Resul
         .spawn_task(Arc::clone(&turn_context), Vec::new(), PendingApprovalTask)
         .await;
     let provider = CoreShellActionProvider {
+        approval_denied: Arc::new(std::sync::atomic::AtomicBool::new(/*v*/ false)),
         policy: std::sync::Arc::new(RwLock::new(codex_execpolicy::Policy::empty())),
         session: Arc::clone(&session),
         review_context: GuardianReviewContext::from(turn_context),
@@ -821,6 +823,7 @@ prefix_rule(pattern = ["{cat_path_literal}"], decision = "allow")
     );
     let workdir = test_sandbox_cwd();
     let provider = CoreShellActionProvider {
+        approval_denied: Arc::new(std::sync::atomic::AtomicBool::new(/*v*/ false)),
         policy: Arc::new(RwLock::new(policy)),
         session: Arc::new(session),
         review_context: GuardianReviewContext::from(Arc::new(turn_context)),
@@ -858,6 +861,7 @@ async fn denied_reads_keep_granular_sandbox_rejection_for_escalation() -> anyhow
     );
     let workdir = test_sandbox_cwd();
     let provider = CoreShellActionProvider {
+        approval_denied: Arc::new(std::sync::atomic::AtomicBool::new(/*v*/ false)),
         policy: Arc::new(RwLock::new(PolicyParser::new().build())),
         session: Arc::new(session),
         review_context: GuardianReviewContext::from(Arc::new(turn_context)),
