@@ -11691,9 +11691,9 @@ max_concurrent_threads_per_session = 17
     let subagent_hint = resolve_usage_hints(
         &config, /*catalog*/ None, /*omit_update_plan_instructions*/ false,
     )
-        .subagent
-        .expect("default subagent usage hint should be present")
-        .body();
+    .subagent
+    .expect("default subagent usage hint should be present")
+    .body();
     assert!(subagent_hint.contains(
         "Always use your final response to report your result, blocker, or inability to proceed"
     ));
