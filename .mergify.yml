@@ -18,5 +18,7 @@ queue_rules:
       - -title ~= (?i)(do not (land|merge)|never land)
       - check-success = review/astra
       - check-success = smarty-ci
+      - -check-failure = smarty-ci
     merge_conditions:
       - check-success = smarty-ci
+      - -check-failure = smarty-ci
