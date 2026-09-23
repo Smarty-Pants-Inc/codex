@@ -5,6 +5,8 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::SystemTime;
 
+use crate::async_scorer::test_support::proxy_websocket_servers;
+use anyhow::Context;
 use anyhow::Result;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
@@ -110,19 +112,22 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
     ];
     // Keep the sampled connection open for another request so only auth
     // invalidation, not a server close, forces the next handshake.
-    let mut connections = vec![Vec::new(); INITIAL_WEBSOCKET_CONNECTIONS - 1];
-    connections.push(vec![events.clone(), events.clone()]);
-    connections.push(vec![events]);
-    let server = responses::start_websocket_server(connections).await;
+    let mut servers = Vec::new();
+    for _ in 0..INITIAL_WEBSOCKET_CONNECTIONS {
+        servers.push(
+            responses::start_websocket_server(vec![vec![events.clone(), events.clone()]]).await,
+        );
+    }
+    let refreshed = responses::start_websocket_server(vec![vec![events]]).await;
+    let mut server_refs = servers.iter().collect::<Vec<_>>();
+    server_refs.push(&refreshed);
+    let base_url = proxy_websocket_servers(&server_refs).await?;
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("original"));
     auth_manager
         .set_external_auth(Arc::new(RefreshableAuth(std::sync::Mutex::new("original"))))
         .await?;
     let mut config = test.config.clone();
-    config.model_provider = ModelProviderInfo::create_openai_provider(Some(format!(
-        "http://{}/v1",
-        server.uri().trim_start_matches("ws://")
-    )));
+    config.model_provider = ModelProviderInfo::create_openai_provider(Some(base_url));
     config.features.enable(Feature::GuardianV2)?;
     let mut builder = ExtensionRegistryBuilder::new();
     super::install(
@@ -156,7 +161,10 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
 
     for (call_index, call_id) in [(1, "call-1"), (2, "call-2")] {
         if call_index == 2 {
-            auth_manager.refresh_token_from_authority().await?;
+            auth_manager
+                .refresh_token_from_authority()
+                .await
+                .context("refresh auth before call-2")?;
         }
         registry.tool_lifecycle_contributors()[0]
             .on_tool_start(ToolStartInput {
@@ -176,7 +184,8 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
                 tokio::task::yield_now().await;
             }
         })
-        .await?;
+        .await
+        .with_context(|| format!("wait for Guardian score for {call_id}"))?;
         assert_eq!(
             registry
                 .fast_approval_decision(
@@ -194,9 +203,9 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
         vec![Some("Bearer original".to_owned()); INITIAL_WEBSOCKET_CONNECTIONS];
     expected_authorizations.push(Some("Bearer refreshed".to_owned()));
     assert_eq!(
-        server
-            .handshakes()
+        server_refs
             .iter()
+            .flat_map(|server| server.handshakes())
             .map(|handshake| handshake.header("authorization"))
             .collect::<Vec<_>>(),
         expected_authorizations
@@ -205,17 +214,17 @@ async fn installed_extension_reconnects_after_auth_refresh() -> Result<()> {
     let mut expected_requests = vec![0; INITIAL_WEBSOCKET_CONNECTIONS - 1];
     expected_requests.extend([1, 1]);
     assert_eq!(
-        server
-            .connections()
+        server_refs
             .iter()
-            .map(Vec::len)
+            .flat_map(|server| server.connections())
+            .map(|requests| requests.len())
             .collect::<Vec<_>>(),
         expected_requests
     );
     Ok(())
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum RecordedMetric {
     Histogram(String, i64, Vec<(String, String)>),
     Counter(String, i64, Vec<(String, String)>),
@@ -1193,7 +1202,7 @@ max_recent_non_user_entries = 8
             .latest_scored_tool_call
             .load(Ordering::Acquire)
             == 0
-            || metrics.0.lock().unwrap().len() < 9
+            || metrics.0.lock().unwrap().len() < 13
         {
             tokio::task::yield_now().await;
         }
@@ -1302,80 +1311,101 @@ max_recent_non_user_entries = 8
         Some(ReviewDecision::Approved)
     );
 
-    let samples = initial_metrics.0.lock().unwrap();
-    let classification_duration_ms = match &samples[8] {
-        RecordedMetric::Histogram(name, duration_ms, _)
-            if name == CLASSIFICATION_DURATION_METRIC =>
-        {
-            *duration_ms
-        }
-        sample => panic!("expected classification duration metric, got {sample:?}"),
+    let mut samples = initial_metrics.0.lock().unwrap().clone();
+    let durations = samples
+        .iter()
+        .filter_map(|sample| match sample {
+            RecordedMetric::Histogram(name, value, tags)
+                if name == CLASSIFICATION_DURATION_METRIC
+                    && tags == &vec![("outcome".to_owned(), "success".to_owned())] =>
+            {
+                Some(*value)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [classification_duration_ms] = durations.as_slice() else {
+        panic!("expected exactly one classification duration metric, got {durations:?}");
     };
     assert_eq!(
-        *samples,
-        [
-            ("total", 150),
-            ("input", 120),
-            ("cached_input", 40),
-            ("cache_write_input", 20),
-            ("non_cached_input", 80),
-            ("output", 30),
-            ("reasoning_output", 10),
-        ]
-        .into_iter()
-        .map(|(token_type, value)| {
-            RecordedMetric::Histogram(
-                CLASSIFICATION_TOKEN_USAGE_METRIC.to_owned(),
-                value,
-                vec![("token_type".to_owned(), token_type.to_owned())],
-            )
-        })
-        .chain([
-            RecordedMetric::Counter(
-                CLASSIFICATION_METRIC.to_owned(),
-                1,
-                vec![("outcome".to_owned(), "success".to_owned())],
-            ),
-            RecordedMetric::Histogram(
-                CLASSIFICATION_DURATION_METRIC.to_owned(),
-                classification_duration_ms,
-                vec![("outcome".to_owned(), "success".to_owned())],
-            ),
-            RecordedMetric::Counter(
-                CLASSIFICATION_TRUNCATION_METRIC.to_owned(),
-                1,
-                vec![
-                    ("component".to_owned(), "action".to_owned()),
-                    ("disposition".to_owned(), "truncated".to_owned()),
-                ],
-            ),
-        ])
-        .chain(
-            [
-                ("original", original_action_bytes),
-                ("retained", retained_action_bytes),
-                ("omitted", original_action_bytes - retained_action_bytes),
-            ]
-            .into_iter()
-            .map(|(measurement, bytes)| {
-                RecordedMetric::Histogram(
-                    CLASSIFICATION_TRUNCATION_BYTES_METRIC.to_owned(),
-                    bytes,
-                    vec![
-                        ("component".to_owned(), "action".to_owned()),
-                        ("disposition".to_owned(), "truncated".to_owned()),
-                        ("measurement".to_owned(), measurement.to_owned()),
-                    ],
-                )
-            }),
-        )
-        .chain([
+        samples
+            .iter()
+            .filter(|sample| {
+                matches!(sample, RecordedMetric::Histogram(name, _, _) if name == TOOL_CALL_LAG_METRIC)
+            })
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![
             RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 0, vec![]),
             RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 0, vec![]),
             RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 2, vec![]),
-        ])
-        .collect::<Vec<_>>()
+        ]
     );
+    let mut expected_samples = [
+        ("total", 150),
+        ("input", 120),
+        ("cached_input", 40),
+        ("cache_write_input", 20),
+        ("non_cached_input", 80),
+        ("output", 30),
+        ("reasoning_output", 10),
+    ]
+    .into_iter()
+    .map(|(token_type, value)| {
+        RecordedMetric::Histogram(
+            CLASSIFICATION_TOKEN_USAGE_METRIC.to_owned(),
+            value,
+            vec![("token_type".to_owned(), token_type.to_owned())],
+        )
+    })
+    .chain([
+        RecordedMetric::Counter(
+            CLASSIFICATION_METRIC.to_owned(),
+            1,
+            vec![("outcome".to_owned(), "success".to_owned())],
+        ),
+        RecordedMetric::Histogram(
+            CLASSIFICATION_DURATION_METRIC.to_owned(),
+            *classification_duration_ms,
+            vec![("outcome".to_owned(), "success".to_owned())],
+        ),
+        RecordedMetric::Counter(
+            CLASSIFICATION_TRUNCATION_METRIC.to_owned(),
+            1,
+            vec![
+                ("component".to_owned(), "action".to_owned()),
+                ("disposition".to_owned(), "truncated".to_owned()),
+            ],
+        ),
+    ])
+    .chain(
+        [
+            ("original", original_action_bytes),
+            ("retained", retained_action_bytes),
+            ("omitted", original_action_bytes - retained_action_bytes),
+        ]
+        .into_iter()
+        .map(|(measurement, bytes)| {
+            RecordedMetric::Histogram(
+                CLASSIFICATION_TRUNCATION_BYTES_METRIC.to_owned(),
+                bytes,
+                vec![
+                    ("component".to_owned(), "action".to_owned()),
+                    ("disposition".to_owned(), "truncated".to_owned()),
+                    ("measurement".to_owned(), measurement.to_owned()),
+                ],
+            )
+        }),
+    )
+    .chain([
+        RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 0, vec![]),
+        RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 0, vec![]),
+        RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 2, vec![]),
+    ])
+    .collect::<Vec<_>>();
+    samples.sort();
+    expected_samples.sort();
+    assert_eq!(samples, expected_samples);
     let metrics = thread_store.get::<RecordingMetrics>().unwrap();
     assert_eq!(
         *metrics.0.lock().unwrap(),
@@ -2031,7 +2061,11 @@ async fn contributor_uses_catalog_policy_without_a_configured_override() -> Resu
             }],
         })
     );
-    assert_eq!(request["input"][2]["role"], "developer");
+    assert_eq!(request["input"][2]["role"], "user");
+    assert_eq!(
+        request["input"][2]["content"][0]["text"],
+        crate::async_scorer::sampler::UNTRUSTED_GUARDIAN_EVIDENCE_NOTICE
+    );
     assert!(
         !request["input"][2]["content"]
             .as_array()
@@ -2322,7 +2356,11 @@ async fn contributor_reuses_the_latest_compatible_parent_compaction() -> Result<
         request["input"][2],
         serde_json::to_value(&latest_compaction)?
     );
-    assert_eq!(request["input"][3]["role"], "developer");
+    assert_eq!(request["input"][3]["role"], "user");
+    assert_eq!(
+        request["input"][3]["content"][0]["text"],
+        crate::async_scorer::sampler::UNTRUSTED_GUARDIAN_EVIDENCE_NOTICE
+    );
 
     let previous_score = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -2441,8 +2479,17 @@ async fn contributor_can_disable_parent_compaction_reuse() -> Result<()> {
         .as_array()
         .expect("Luna request input should be an array");
     assert_eq!(input.len(), 3);
-    assert_eq!(input[2]["role"], "developer");
-    assert!(input.iter().all(|item| item["role"] != "user"));
+    assert_eq!(
+        input
+            .iter()
+            .map(|item| item["role"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!("developer"), json!("developer"), json!("user")]
+    );
+    assert_eq!(
+        input[2]["content"][0]["text"],
+        crate::async_scorer::sampler::UNTRUSTED_GUARDIAN_EVIDENCE_NOTICE
+    );
     assert!(
         input
             .iter()

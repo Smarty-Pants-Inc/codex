@@ -36,6 +36,15 @@ use super::head_tail_buffer::HeadTailBuffer;
 use super::process_state::ProcessState;
 
 const EARLY_EXIT_GRACE_PERIOD: Duration = Duration::from_millis(150);
+
+/// A denied intercepted approval remains part of the parent process outcome,
+/// even if a later subcommand succeeds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SubcommandApprovalStatus {
+    NotDenied,
+    Denied,
+}
+
 pub(crate) trait SpawnLifecycle: std::fmt::Debug + Send + Sync {
     /// Returns file descriptors that must stay open across the child `exec()`.
     ///
@@ -47,6 +56,11 @@ pub(crate) trait SpawnLifecycle: std::fmt::Debug + Send + Sync {
     }
 
     fn after_spawn(&mut self) {}
+
+    /// Reports a trusted intercepted approval outcome, not a process exit code.
+    fn subcommand_approval_status(&self) -> SubcommandApprovalStatus {
+        SubcommandApprovalStatus::NotDenied
+    }
 }
 
 pub(crate) type SpawnLifecycleHandle = Box<dyn SpawnLifecycle>;
@@ -61,6 +75,8 @@ impl SpawnLifecycle for NoopSpawnLifecycle {}
 #[derive(Clone)]
 pub(crate) struct OutputHandles<const MAX_BYTES: usize = UNIFIED_EXEC_OUTPUT_MAX_BYTES> {
     pub(crate) output_buffer: Arc<Mutex<HeadTailBuffer<MAX_BYTES>>>,
+    /// Lifetime transcript, recorded before best-effort output broadcasts.
+    pub(crate) transcript: Arc<Mutex<HeadTailBuffer<MAX_BYTES>>>,
     pub(crate) output_notify: Arc<Notify>,
     pub(crate) output_closed: Arc<AtomicBool>,
     pub(crate) output_closed_notify: Arc<Notify>,
@@ -97,7 +113,7 @@ pub(crate) struct UnifiedExecProcess {
     state_rx: watch::Receiver<ProcessState>,
     output_task: Option<JoinHandle<()>>,
     sandbox_type: SandboxType,
-    _spawn_lifecycle: Option<SpawnLifecycleHandle>,
+    spawn_lifecycle: Option<SpawnLifecycleHandle>,
 }
 
 impl std::fmt::Debug for UnifiedExecProcess {
@@ -118,6 +134,7 @@ impl UnifiedExecProcess {
     ) -> Self {
         let output = OutputHandles {
             output_buffer: Arc::new(Mutex::new(HeadTailBuffer::default())),
+            transcript: Arc::new(Mutex::new(HeadTailBuffer::default())),
             output_notify: Arc::new(Notify::new()),
             output_closed: Arc::new(AtomicBool::new(false)),
             output_closed_notify: Arc::new(Notify::new()),
@@ -137,7 +154,7 @@ impl UnifiedExecProcess {
             state_rx,
             output_task: None,
             sandbox_type,
-            _spawn_lifecycle: spawn_lifecycle,
+            spawn_lifecycle,
         }
     }
 
@@ -192,6 +209,14 @@ impl UnifiedExecProcess {
             ProcessHandle::Local(process_handle) => state.has_exited || process_handle.has_exited(),
             ProcessHandle::ExecServer(_) => state.has_exited,
         }
+    }
+
+    pub(super) fn subcommand_approval_status(&self) -> SubcommandApprovalStatus {
+        self.spawn_lifecycle
+            .as_ref()
+            .map_or(SubcommandApprovalStatus::NotDenied, |lifecycle| {
+                lifecycle.subcommand_approval_status()
+            })
     }
 
     pub(super) fn exit_code(&self) -> Option<i32> {
@@ -425,6 +450,7 @@ impl UnifiedExecProcess {
     ) -> JoinHandle<()> {
         let OutputHandles {
             output_buffer,
+            transcript,
             output_notify,
             output_closed,
             output_closed_notify,
@@ -500,9 +526,8 @@ impl UnifiedExecProcess {
                     } = response;
                     for chunk in chunks.into_iter().filter(|chunk| chunk.seq > last_seq) {
                         let bytes = chunk.chunk.into_inner();
-                        let mut guard = output_buffer.lock().await;
-                        guard.push_chunk(&bytes);
-                        drop(guard);
+                        output_buffer.lock().await.push_chunk(&bytes);
+                        transcript.lock().await.push_chunk(&bytes);
                         let _ = output_tx.send(bytes);
                         output_notify.notify_waiters();
                     }
@@ -543,9 +568,8 @@ impl UnifiedExecProcess {
                         }
                         last_seq = chunk.seq;
                         let bytes = chunk.chunk.into_inner();
-                        let mut guard = output_buffer.lock().await;
-                        guard.push_chunk(&bytes);
-                        drop(guard);
+                        output_buffer.lock().await.push_chunk(&bytes);
+                        transcript.lock().await.push_chunk(&bytes);
                         let _ = output_tx.send(bytes);
                         output_notify.notify_waiters();
                     }
@@ -591,6 +615,7 @@ impl UnifiedExecProcess {
     ) -> JoinHandle<()> {
         let OutputHandles {
             output_buffer,
+            transcript,
             output_notify,
             output_closed,
             output_closed_notify,
@@ -604,9 +629,8 @@ impl UnifiedExecProcess {
             loop {
                 match receiver.recv().await {
                     Ok(chunk) => {
-                        let mut guard = output_buffer.lock().await;
-                        guard.push_chunk(&chunk);
-                        drop(guard);
+                        output_buffer.lock().await.push_chunk(&chunk);
+                        transcript.lock().await.push_chunk(&chunk);
                         let _ = output_tx.send(chunk);
                         output_notify.notify_waiters();
                     }

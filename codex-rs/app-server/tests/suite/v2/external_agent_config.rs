@@ -638,12 +638,33 @@ source = {:?}
     let response: ThreadReadResponse =
         timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
     assert_eq!(response.thread.turns.len(), 1);
-    let imported_items = &response.thread.turns[0].items;
-    assert_eq!(imported_items.len(), 2);
-    match &imported_items[0] {
-        ThreadItem::AgentMessage { text, .. } => assert_eq!(text, "first answer"),
-        other => panic!("expected agent message item, got {other:?}"),
-    }
+    assert_eq!(
+        response.thread.turns[0].items,
+        vec![
+            ThreadItem::UserMessage {
+                id: "item-1".into(),
+                client_id: None,
+                content: vec![UserInput::Text {
+                    text: "first request".into(),
+                    text_elements: Vec::new(),
+                }],
+            },
+            ThreadItem::AgentMessage {
+                id: "item-2".into(),
+                text: "first answer".into(),
+                phase: None,
+                memory_citation: None,
+                delivery: None,
+            },
+            ThreadItem::AgentMessage {
+                id: "item-3".into(),
+                text: "<EXTERNAL SESSION IMPORTED>".into(),
+                phase: None,
+                memory_citation: None,
+                delivery: None,
+            },
+        ]
+    );
 
     let request_id = mcp
         .send_plugin_list_request(PluginListParams {
@@ -1999,22 +2020,43 @@ async fn external_agent_config_import_creates_session_rollouts() -> Result<()> {
     let response: ThreadReadResponse =
         timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
     assert_eq!(response.thread.turns.len(), 2);
-    assert!(response.thread.turns[0].items.is_empty());
-    let imported_items = &response.thread.turns[1].items;
-    assert_eq!(imported_items.len(), 2);
-    match &imported_items[0] {
-        ThreadItem::AgentMessage { text, .. } => assert_eq!(text, "first answer"),
-        other => panic!("expected agent message item, got {other:?}"),
-    }
     assert_eq!(
-        imported_items.last(),
-        Some(&ThreadItem::AgentMessage {
-            id: "item-2".into(),
-            text: "<EXTERNAL SESSION IMPORTED>".into(),
-            phase: None,
-            memory_citation: None,
-            delivery: None,
-        })
+        response.thread.turns[0].items,
+        vec![ThreadItem::UserMessage {
+            id: "item-1".into(),
+            client_id: None,
+            content: vec![UserInput::Text {
+                text: control_request.into(),
+                text_elements: Vec::new(),
+            }],
+        }]
+    );
+    assert_eq!(
+        response.thread.turns[1].items,
+        vec![
+            ThreadItem::UserMessage {
+                id: "item-2".into(),
+                client_id: None,
+                content: vec![UserInput::Text {
+                    text: first_request.into(),
+                    text_elements: Vec::new(),
+                }],
+            },
+            ThreadItem::AgentMessage {
+                id: "item-3".into(),
+                text: "first answer".into(),
+                phase: None,
+                memory_citation: None,
+                delivery: None,
+            },
+            ThreadItem::AgentMessage {
+                id: "item-4".into(),
+                text: "<EXTERNAL SESSION IMPORTED>".into(),
+                phase: None,
+                memory_citation: None,
+                delivery: None,
+            },
+        ]
     );
 
     let request_id = mcp

@@ -12,6 +12,7 @@
 //! 4. Apply the guardian's explicit allow/deny outcome.
 
 mod approval_request;
+mod evidence_admission;
 mod metrics;
 mod prompt;
 mod review;

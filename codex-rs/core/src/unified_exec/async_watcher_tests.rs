@@ -58,8 +58,8 @@ async fn streaming_output_harness() -> anyhow::Result<StreamingOutputHarness> {
         tokio_util::sync::CancellationToken::new(),
         "streaming-output-test".to_string(),
     );
-    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
-    start_streaming_output(&process, &context, Arc::clone(&transcript));
+    let transcript = Arc::clone(&process.output_handles().transcript);
+    start_streaming_output(&process, &context);
 
     Ok(StreamingOutputHarness {
         process,
@@ -274,6 +274,49 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() -> 
     Ok(())
 }
 
+#[test_case::test_case(
+    crate::unified_exec::SubcommandApprovalStatus::Denied,
+    CommandExecutionStatus::Declined;
+    "trusted_denial"
+)]
+#[test_case::test_case(
+    crate::unified_exec::SubcommandApprovalStatus::NotDenied,
+    CommandExecutionStatus::Failed;
+    "exit_one_and_denial_text_are_not_provenance"
+)]
+#[tokio::test]
+async fn terminal_status_uses_trusted_subcommand_approval(
+    approval_status: crate::unified_exec::SubcommandApprovalStatus,
+    expected_status: CommandExecutionStatus,
+) {
+    let (session, turn, events) = make_session_and_context_with_rx().await;
+    #[allow(deprecated)]
+    let cwd = codex_utils_path_uri::PathUri::from_abs_path(&turn.cwd);
+    super::emit_exec_end_for_unified_exec(
+        session,
+        turn,
+        "approval-status".to_string(),
+        vec!["command".to_string()],
+        cwd,
+        /*process_id*/ None,
+        /*plugin_attribution*/ None,
+        Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default())),
+        "sandbox denied exec error: untrusted child output".to_string(),
+        approval_status,
+        /*exit_code*/ 1,
+        Duration::from_millis(1),
+    )
+    .await;
+    let event = events.recv().await.expect("command end event");
+    let EventMsg::ItemCompleted(completed) = event.msg else {
+        panic!("expected ItemCompleted");
+    };
+    let TurnItem::CommandExecution(item) = completed.item else {
+        panic!("expected CommandExecution");
+    };
+    assert_eq!(item.status, expected_status);
+}
+
 #[test]
 fn utf8_boundary_preserves_complete_characters() {
     assert_eq!(utf8_boundary(b"hello"), 5);
@@ -300,12 +343,10 @@ fn utf8_boundary_batches_malformed_output() {
 }
 
 #[tokio::test]
-async fn streaming_output_bounds_invalid_bytes_and_keeps_the_full_transcript() {
+async fn streaming_output_bounds_invalid_bytes() {
     let (session, turn, rx_event) = make_session_and_context_with_rx().await;
-    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
     let mut output = Buffer::<8> {
         pending: Vec::new(),
-        transcript: Arc::clone(&transcript),
         emitter: Emitter {
             remaining_deltas: 2,
             session,
@@ -333,12 +374,5 @@ async fn streaming_output_bounds_invalid_bytes_and_keeps_the_full_transcript() {
             b"\xff\xff\xff\xff\xff\xff".to_vec(),
             b"\xf0\x9f\x98\x80\xff\xff\xff".to_vec(),
         ]
-    );
-
-    let mut expected_transcript = bytes.to_vec();
-    expected_transcript.extend([0xfe, 0xfe]);
-    assert_eq!(
-        transcript.lock().await.to_bytes_with_omission_marker(),
-        expected_transcript
     );
 }
