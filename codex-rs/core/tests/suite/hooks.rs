@@ -1784,6 +1784,12 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn() -> Result<()>
         "an async hook result from the previous turn must not start a model turn"
     );
 
+    // Keep the second hook gated so it cannot race the buffered first-hook assertion.
+    fs::remove_file(
+        test.codex_home_path()
+            .join("async_user_prompt_submit_release"),
+    )
+    .context("gate the next prompt's async hook")?;
     let next_prompt = "observe the buffered async context";
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
@@ -3244,7 +3250,18 @@ allow_local_binding = true
             }
         })
         .await
-        .expect("expected network approval hook to run");
+        .unwrap_or_else(|error| {
+            let requests = responses.requests();
+            let output = requests
+                .iter()
+                .find_map(|request| request.function_call_output_text(call_id))
+                .unwrap_or_else(|| "<no tool output>".to_string());
+            let output = output.chars().take(1024).collect::<String>();
+            panic!(
+                "expected network approval hook to run: {error}; requests={}; call={call_id}; output={output}",
+                requests.len()
+            );
+        });
         assert!(
             timeout(
                 Duration::from_secs(2),

@@ -3,6 +3,9 @@ merge_queue:
   max_parallel_checks: 2
   reset_on_external_merge: always
 
+# The PR, its required checks and this queue are the review (smarty-dev
+# docs/factory.md). The Astra reviewer queues a ready PR after its success
+# verdict. `hold` and do-not-land/merge or never-land titles keep a PR out.
 queue_rules:
   - name: default
     batch_size: 1
@@ -11,8 +14,9 @@ queue_rules:
     queue_conditions:
       - base ~= ^(?:main|codex/maintenance-0\.153\.4)$
       - -draft
-      - check-success = smarty-review
-      - check-success = smarty-land-ready
+      - -label = hold
+      - -title ~= (?i)(do not (land|merge)|never land)
+      - check-success = review/astra
       - check-success = smarty-ci
     merge_conditions:
       - check-success = smarty-ci

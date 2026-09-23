@@ -190,18 +190,27 @@ pub(crate) async fn run_turn(
     }
 
     let user_input = turn_user_input(&input);
-    let (required_servers, mentioned_plugins) =
-        match required_mcp_servers_for_input(&sess, turn_context.as_ref(), &user_input)
-            .or_cancel(&cancellation_token)
-            .await
-        {
-            Ok(requirements) => requirements,
-            Err(err) => {
-                run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)
-                    .await;
-                return Err(err.into());
-            }
-        };
+    let skill_input = super::review_skill_input::explicit_skill_input(
+        &user_input,
+        &input,
+        &turn_context.session_source,
+    );
+    let (required_servers, mentioned_plugins) = match required_mcp_servers_for_input(
+        &sess,
+        turn_context.as_ref(),
+        &user_input,
+        &skill_input,
+    )
+    .or_cancel(&cancellation_token)
+    .await
+    {
+        Ok(requirements) => requirements,
+        Err(err) => {
+            run_hooks_and_record_inputs(&sess, &turn_context, &input, PersistContext::Standard)
+                .await;
+            return Err(err.into());
+        }
+    };
 
     // run_turn owns the step used to seed context and make the first sampling request.
     let first_step_context = match sess
@@ -251,6 +260,7 @@ pub(crate) async fn run_turn(
         &sess,
         first_step_context.as_ref(),
         &user_input,
+        &skill_input,
         &mentioned_plugins,
         &cancellation_token,
     )
@@ -339,10 +349,16 @@ pub(crate) async fn run_turn(
             }
             None => {
                 let pending_user_input = turn_user_input(&pending_input);
+                let pending_skill_input = super::review_skill_input::explicit_skill_input(
+                    &pending_user_input,
+                    &pending_input,
+                    &turn_context.session_source,
+                );
                 let (required_servers, _) = required_mcp_servers_for_input(
                     &sess,
                     turn_context.as_ref(),
                     &pending_user_input,
+                    &pending_skill_input,
                 )
                 .or_cancel(&cancellation_token)
                 .await?;
@@ -660,6 +676,7 @@ async fn required_mcp_servers_for_input(
     sess: &Arc<Session>,
     turn_context: &TurnContext,
     user_input: &[UserInput],
+    skill_input: &[UserInput],
 ) -> (Vec<String>, Vec<crate::plugins::PluginCapabilitySummary>) {
     if crate::guardian::is_basic_session_source(&turn_context.session_source) {
         return (Vec::new(), Vec::new());
@@ -702,7 +719,17 @@ async fn required_mcp_servers_for_input(
             .map(str::to_string)
     }));
 
-    let connector_slug_counts = if turn_context.apps_enabled() && !mentions.plain_names.is_empty() {
+    let skill_messages = skill_input
+        .iter()
+        .filter_map(|input| match input {
+            UserInput::Text { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let skill_mentions = collect_tool_mentions_from_messages(&skill_messages);
+    let connector_slug_counts = if turn_context.apps_enabled()
+        && !skill_mentions.plain_names.is_empty()
+    {
         let cached_connectors =
             connectors::list_cached_accessible_connectors_from_mcp_tools(&turn_context.config)
                 .await;
@@ -732,7 +759,7 @@ async fn required_mcp_servers_for_input(
     let skills_snapshot = turn_context.skills_snapshot();
     let skills_outcome = skills_snapshot.outcome();
     let mentioned_skills =
-        collect_explicit_skill_mentions(user_input, skills_outcome, &connector_slug_counts);
+        collect_explicit_skill_mentions(skill_input, skills_outcome, &connector_slug_counts);
     for skill in mentioned_skills {
         if let Some(dependencies) = skill.dependencies {
             required_servers.extend(
@@ -761,6 +788,7 @@ async fn build_skills_and_plugins(
     sess: &Arc<Session>,
     step_context: &StepContext,
     user_input: &[UserInput],
+    skill_input: &[UserInput],
     mentioned_plugins: &[crate::plugins::PluginCapabilitySummary],
     cancellation_token: &CancellationToken,
 ) -> Option<(Vec<ResponseItem>, HashSet<String>)> {
@@ -808,7 +836,7 @@ async fn build_skills_and_plugins(
     let skill_name_counts_lower =
         build_skill_name_counts(&skills_outcome.skills, &skills_outcome.disabled_paths).1;
     let mentioned_skills =
-        collect_explicit_skill_mentions(user_input, skills_outcome, &connector_slug_counts);
+        collect_explicit_skill_mentions(skill_input, skills_outcome, &connector_slug_counts);
     maybe_prompt_and_install_mcp_dependencies(
         sess,
         turn_context,

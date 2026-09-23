@@ -42,6 +42,7 @@ mod imp {
     #[derive(Debug)]
     struct ZshForkSpawnLifecycle {
         escalation_session: EscalationSession,
+        approval_denied: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl SpawnLifecycle for ZshForkSpawnLifecycle {
@@ -56,6 +57,17 @@ mod imp {
 
         fn after_spawn(&mut self) {
             self.escalation_session.close_client_socket();
+        }
+
+        fn subcommand_approval_status(&self) -> crate::unified_exec::SubcommandApprovalStatus {
+            if self
+                .approval_denied
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                crate::unified_exec::SubcommandApprovalStatus::Denied
+            } else {
+                crate::unified_exec::SubcommandApprovalStatus::NotDenied
+            }
         }
     }
 
@@ -83,6 +95,7 @@ mod imp {
             exec_request: prepared.exec_request,
             spawn_lifecycle: Box::new(ZshForkSpawnLifecycle {
                 escalation_session: prepared.escalation_session,
+                approval_denied: prepared.approval_denied,
             }),
         }))
     }
