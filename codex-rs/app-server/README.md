@@ -2791,7 +2791,9 @@ Start/resume capabilities and set/read responses include `nativeReservation`:
 `{generation, state, model, profile, usableContextTokens, reservedTokens, maxFrameBytes}`.
 The state is `valid`, `invalid`, or `unsupported`; model and usable context tokens
 are required nullable fields. The profile is `harmonyGptOss`. Integers are JSON-safe.
-Current limits remain 4096 frame bytes and 4608 framed tokens. `valid` reports native
+The capability's top-level `maxFrameBytes` and `reservedTokens` always equal
+`nativeReservation`'s. The limits fit Sense's 8×2048 reference profile: 115712 frame
+bytes (`1024 + 8 * (2048 * 6 + 2048)`) plus the framing reservation. `valid` reports native
 capacity preconditions only, not external tokenizer/framing/provider qualification.
 It does not qualify a whole-request pilot bound or enable automatic admission.
 
@@ -2823,11 +2825,10 @@ is its original capture order, even after a later budget event. The internal aud
 journal retains its distinct terminal/retry order. Already observed acceptance
 remains credited to the original attempt; invalidation cannot invent exposure.
 
-The native 4096-byte cap does not cover every host watch profile. For example,
-Sense's reservation formula `1024 + watches * (maxBodyBytes * 6 + 2048)` needs 5120
-bytes for two zero-body views, or 15360 for one default 2048-byte view. Assembly must
-report this scope mismatch, not silently reduce watch/body acceptance or widen
-native constants without independent physical qualification.
+Sense's reservation formula `1024 + watches * (maxBodyBytes * 6 + 2048)` must fit
+the native frame cap. A larger host watch profile is a scope mismatch that assembly
+must report, not silently reduce watch/body acceptance or widen native constants
+without independent physical qualification.
 
 ### Original-owner pilot controls (experimental, under development)
 

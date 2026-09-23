@@ -78,6 +78,12 @@ async fn observation_start_and_admitted_resume_install_fresh_owned_relays() -> R
         }).await?;
         let started: ThreadStartResponse = app.read_response(id).await?;
         let initial = started.observation.expect("installed start capability");
+        // Sense rejects a capability that disagrees with the reservation, and needs 8x2048.
+        assert_eq!(
+            (initial.max_frame_bytes, initial.reserved_tokens),
+            (initial.native_reservation.max_frame_bytes, initial.native_reservation.reserved_tokens)
+        );
+        assert!(initial.max_frame_bytes >= 1024 + 8 * (6 * 2048 + 2048));
         let thread_id = started.thread.id;
         // A real owned observation connection/profile still installs no pilot
         // authority. These public methods must not resume or mint one from IDs.

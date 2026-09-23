@@ -184,10 +184,11 @@ impl ThreadStateManager {
         }
         Ok(ThreadObservationCapabilities {
             protocol: 2,
-            native_reservation,
             owner_epoch,
-            max_frame_bytes: 4096,
-            reserved_tokens: 4608,
+            // Report exactly the frame and token allocation that the native reservation enforces.
+            max_frame_bytes: native_reservation.max_frame_bytes,
+            reserved_tokens: native_reservation.reserved_tokens,
+            native_reservation,
             max_lease_seconds: 60,
             max_in_flight_decisions: 1,
             replacement: ObservationReplacement::FullContext,
