@@ -184,7 +184,7 @@ impl SyntheticMountTarget {
         }
     }
 
-    fn existing_empty_directory(path: &Path, metadata: &Metadata) -> Self {
+    pub(crate) fn existing_empty_directory(path: &Path, metadata: &Metadata) -> Self {
         Self {
             path: path.to_path_buf(),
             kind: SyntheticMountTargetKind::EmptyDirectory,

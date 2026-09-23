@@ -402,6 +402,84 @@ fn cleanup_synthetic_mount_targets_preserves_real_pre_existing_empty_file() {
     assert!(empty_file.exists());
 }
 
+/// Leaves the registration as a helper killed with SIGKILL leaves it: the
+/// marker names a dead owner and cleanup never runs.
+#[cfg(test)]
+fn kill_owner_before_cleanup(registration: &SyntheticMountTargetRegistration) {
+    let mut owner = std::process::Command::new("sleep")
+        .arg("60")
+        .spawn()
+        .expect("spawn owner");
+    owner.kill().expect("kill owner");
+    owner.wait().expect("reap owner");
+    std::fs::rename(
+        &registration.marker_file,
+        registration.marker_dir.join(owner.id().to_string()),
+    )
+    .expect("hand marker to killed owner");
+}
+
+#[test]
+fn register_synthetic_mount_targets_reclaims_directory_left_by_killed_owner() {
+    let temp_dir = tempfile::TempDir::new().expect("tempdir");
+    let dot_git = temp_dir.path().join(".git");
+    let killed_registrations = register_synthetic_mount_targets(&[
+        crate::bwrap::SyntheticMountTarget::missing_empty_directory(&dot_git),
+    ]);
+    std::fs::create_dir(&dot_git).expect("create bwrap mount target");
+    kill_owner_before_cleanup(&killed_registrations[0]);
+
+    let metadata = std::fs::symlink_metadata(&dot_git).expect("stat leaked target");
+    let registrations = register_synthetic_mount_targets(&[
+        crate::bwrap::SyntheticMountTarget::existing_empty_directory(&dot_git, &metadata),
+    ]);
+    cleanup_synthetic_mount_targets(&registrations);
+
+    assert!(!dot_git.exists());
+    assert!(!registrations[0].marker_dir.exists());
+}
+
+#[test]
+fn register_synthetic_mount_targets_keeps_real_directory_after_killed_owner() {
+    let temp_dir = tempfile::TempDir::new().expect("tempdir");
+    let dot_git = temp_dir.path().join(".git");
+    std::fs::create_dir(&dot_git).expect("create real empty directory");
+    let metadata = std::fs::symlink_metadata(&dot_git).expect("stat real directory");
+    let target = crate::bwrap::SyntheticMountTarget::existing_empty_directory(&dot_git, &metadata);
+    let killed_registrations = register_synthetic_mount_targets(std::slice::from_ref(&target));
+    kill_owner_before_cleanup(&killed_registrations[0]);
+
+    let registrations = register_synthetic_mount_targets(&[target]);
+    cleanup_synthetic_mount_targets(&registrations);
+
+    assert!(dot_git.exists());
+}
+
+#[test]
+fn register_synthetic_mount_targets_reclaim_waits_for_live_owner() {
+    let temp_dir = tempfile::TempDir::new().expect("tempdir");
+    let dot_git = temp_dir.path().join(".git");
+    let killed_registrations = register_synthetic_mount_targets(&[
+        crate::bwrap::SyntheticMountTarget::missing_empty_directory(&dot_git),
+    ]);
+    std::fs::create_dir(&dot_git).expect("create bwrap mount target");
+    kill_owner_before_cleanup(&killed_registrations[0]);
+    let live_marker = killed_registrations[0].marker_dir.join("1");
+    std::fs::write(&live_marker, SYNTHETIC_MOUNT_MARKER_SYNTHETIC).expect("write live marker");
+
+    let metadata = std::fs::symlink_metadata(&dot_git).expect("stat leaked target");
+    let registrations = register_synthetic_mount_targets(&[
+        crate::bwrap::SyntheticMountTarget::existing_empty_directory(&dot_git, &metadata),
+    ]);
+    cleanup_synthetic_mount_targets(&registrations);
+    assert!(dot_git.exists());
+
+    std::fs::remove_file(live_marker).expect("remove live marker");
+    cleanup_synthetic_mount_targets(&registrations);
+
+    assert!(!dot_git.exists());
+}
+
 #[test]
 fn cleanup_protected_create_targets_removes_created_path_and_reports_violation() {
     let temp_dir = tempfile::TempDir::new().expect("tempdir");

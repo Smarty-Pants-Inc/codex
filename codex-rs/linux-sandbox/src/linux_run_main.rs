@@ -957,7 +957,7 @@ fn register_synthetic_mount_targets(
                     )
                 });
                 let target = if target.preserves_pre_existing_path()
-                    && synthetic_mount_marker_dir_has_active_synthetic_owner(&marker_dir)
+                    && synthetic_mount_marker_dir_has_synthetic_owner(&marker_dir)
                 {
                     match target.kind() {
                         crate::bwrap::SyntheticMountTargetKind::EmptyFile => {
@@ -1030,8 +1030,14 @@ fn synthetic_mount_marker_contents(target: &crate::bwrap::SyntheticMountTarget) 
     }
 }
 
-fn synthetic_mount_marker_dir_has_active_synthetic_owner(marker_dir: &Path) -> bool {
-    synthetic_mount_marker_dir_has_active_process_matching(marker_dir, |path| {
+/// Reports whether a live or dead owner created the target at this marker path.
+///
+/// A dead owner's synthetic marker means that its helper was killed before
+/// cleanup, so the empty target that it left is still synthetic. Keeping that
+/// marker lets the next registration reclaim the target instead of treating it
+/// as a real pre-existing path.
+fn synthetic_mount_marker_dir_has_synthetic_owner(marker_dir: &Path) -> bool {
+    synthetic_mount_marker_dir_has_marker_matching(marker_dir, |path, _owner_is_active| {
         match fs::read(path) {
             Ok(contents) => contents == SYNTHETIC_MOUNT_MARKER_SYNTHETIC,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
@@ -1044,12 +1050,13 @@ fn synthetic_mount_marker_dir_has_active_synthetic_owner(marker_dir: &Path) -> b
 }
 
 fn synthetic_mount_marker_dir_has_active_process(marker_dir: &Path) -> bool {
-    synthetic_mount_marker_dir_has_active_process_matching(marker_dir, |_| true)
+    synthetic_mount_marker_dir_has_marker_matching(marker_dir, |_, owner_is_active| owner_is_active)
 }
 
-fn synthetic_mount_marker_dir_has_active_process_matching(
+/// Checks each owner marker, then prunes the unmatched markers of dead owners.
+fn synthetic_mount_marker_dir_has_marker_matching(
     marker_dir: &Path,
-    matches_marker: impl Fn(&Path) -> bool,
+    matches_marker: impl Fn(&Path, bool) -> bool,
 ) -> bool {
     let entries = match fs::read_dir(marker_dir) {
         Ok(entries) => entries,
@@ -1074,7 +1081,11 @@ fn synthetic_mount_marker_dir_has_active_process_matching(
         else {
             continue;
         };
-        if !process_is_active(pid) {
+        let owner_is_active = process_is_active(pid);
+        if matches_marker(&path, owner_is_active) {
+            return true;
+        }
+        if !owner_is_active {
             match fs::remove_file(&path) {
                 Ok(()) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -1083,11 +1094,6 @@ fn synthetic_mount_marker_dir_has_active_process_matching(
                     path.display()
                 ),
             }
-            continue;
-        }
-        let matches_marker = matches_marker(&path);
-        if matches_marker {
-            return true;
         }
     }
     false
