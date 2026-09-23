@@ -58,7 +58,9 @@ use codex_analytics::SubAgentThreadStartedInput;
 use codex_analytics::TurnCodexErrorFact;
 use codex_async_utils::OrCancelExt;
 use codex_connectors::connector_runtime_context_key;
+use codex_context_fragments::AnnotatedContent;
 use codex_context_fragments::RenderedFragment;
+use codex_context_fragments::set_annotated_content;
 use codex_exec_server::Environment;
 use codex_exec_server::EnvironmentManager;
 use codex_execpolicy::prefix_rule_migration;
@@ -221,6 +223,7 @@ mod mcp_refresh;
 mod mcp_runtime;
 pub(crate) mod multi_agents;
 mod review;
+mod review_skill_input;
 mod rollout_budget;
 mod rollout_reconstruction;
 #[allow(clippy::module_inception)]
@@ -323,6 +326,8 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::mcp::ClientMcpExtensions;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ContentItemKind;
 use codex_protocol::models::LocalImagePreparation;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -2422,6 +2427,7 @@ impl Session {
         &self,
         approval_id: String,
         turn_id: String,
+        abort_behavior: crate::state::ApprovalAbortBehavior,
         tx: oneshot::Sender<ReviewDecision>,
     ) -> Option<oneshot::Sender<ReviewDecision>> {
         let mut active = self.active_turn.lock().await;
@@ -2432,7 +2438,13 @@ impl Session {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(approval_id.clone());
-        turn_state.insert_pending_approval(approval_id, turn_id, legacy_response_allowed, tx)
+        turn_state.insert_pending_approval(
+            approval_id,
+            turn_id,
+            legacy_response_allowed,
+            abort_behavior,
+            tx,
+        )
     }
 
     /// Emit an exec approval request event and await the user's decision.
@@ -2471,6 +2483,13 @@ impl Session {
             .register_pending_approval(
                 effective_approval_id.clone(),
                 turn_context.sub_id.clone(),
+                // Network reviews return rejection to the tool; only ordinary command
+                // approval aborts interrupt the originating turn.
+                if approval_id.is_some() || network_approval_context.is_some() {
+                    crate::state::ApprovalAbortBehavior::ReturnDecision
+                } else {
+                    crate::state::ApprovalAbortBehavior::InterruptTurn
+                },
                 tx_approve,
             )
             .await;
@@ -2541,7 +2560,12 @@ impl Session {
         let (tx_approve, rx_approve) = oneshot::channel();
         let approval_id = call_id.clone();
         let prev_entry = self
-            .register_pending_approval(approval_id.clone(), turn_context.sub_id.clone(), tx_approve)
+            .register_pending_approval(
+                approval_id.clone(),
+                turn_context.sub_id.clone(),
+                crate::state::ApprovalAbortBehavior::ReturnDecision,
+                tx_approve,
+            )
             .await;
         if prev_entry.is_some() {
             warn!("Overwriting existing pending approval for call_id: {approval_id}");
@@ -2991,7 +3015,7 @@ impl Session {
         reason = "active turn checks and turn state updates must remain atomic"
     )]
     pub async fn notify_approval(
-        &self,
+        self: &Arc<Self>,
         approval_id: &str,
         turn_id: Option<&str>,
         decision: ReviewDecision,
@@ -3007,8 +3031,22 @@ impl Session {
             }
         };
         match entry {
-            Some(tx_approve) => {
-                tx_approve.send(decision).ok();
+            Some(pending) => {
+                if pending.tx.is_closed() {
+                    return false;
+                }
+                if matches!(decision, ReviewDecision::Abort)
+                    && matches!(
+                        pending.abort_behavior,
+                        crate::state::ApprovalAbortBehavior::InterruptTurn
+                    )
+                {
+                    // Keep the approval waiter blocked until cancellation reaches
+                    // its originating task; never interrupt a replacement turn.
+                    self.abort_turn_if_active(&pending.turn_id, TurnAbortReason::Interrupted)
+                        .await;
+                }
+                pending.tx.send(decision).ok();
                 true
             }
             None => {
@@ -3114,7 +3152,28 @@ impl Session {
             LocalImagePreparation::Defer,
         )
         .into_iter()
-        .map(ResponseItem::from)
+        .map(|input| {
+            let mut item = ResponseItem::from(input);
+            if let ResponseItem::Message { role, content, .. } = &mut item
+                && role == "user"
+            {
+                // Only this direct-input boundary owns user classifications, not history replay.
+                let annotated = std::mem::take(content)
+                    .into_iter()
+                    .map(|content| {
+                        let kind = match &content {
+                            ContentItem::InputText { .. } => "user.text",
+                            ContentItem::InputImage { .. } => "user.image",
+                            ContentItem::InputAudio { .. } => "user.audio",
+                            ContentItem::OutputText { .. } => "unknown",
+                        };
+                        AnnotatedContent::new(content, ContentItemKind(kind.to_string()))
+                    })
+                    .collect();
+                let _ = set_annotated_content(&mut item, annotated);
+            }
+            item
+        })
         .collect()
     }
 

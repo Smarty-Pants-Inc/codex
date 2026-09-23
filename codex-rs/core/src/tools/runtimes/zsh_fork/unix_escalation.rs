@@ -10,6 +10,7 @@ use crate::tools::runtimes::exec_env_for_sandbox_permissions;
 use crate::tools::sandboxing::SandboxAttempt;
 use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
+use crate::tools::sandboxing::sandbox_permissions_preserving_denied_reads;
 use crate::tools::sandboxing::unsandboxed_execution_allowed;
 use codex_execpolicy::Decision;
 use codex_execpolicy::Evaluation;
@@ -50,6 +51,8 @@ use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
@@ -58,6 +61,7 @@ use uuid::Uuid;
 pub(crate) struct PreparedUnifiedExecZshFork {
     pub(crate) exec_request: ExecRequest,
     pub(crate) escalation_session: EscalationSession,
+    pub(crate) approval_denied: Arc<AtomicBool>,
 }
 
 const PROMPT_CONFLICT_REASON: &str =
@@ -142,7 +146,9 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
         codex_linux_sandbox_exe: ctx.step_context.turn.config.codex_linux_sandbox_exe.clone(),
         use_legacy_landlock: ctx.step_context.turn.config.features.use_legacy_landlock(),
     };
+    let approval_denied = Arc::new(AtomicBool::new(/*v*/ false));
     let escalation_policy = CoreShellActionProvider {
+        approval_denied: Arc::clone(&approval_denied),
         policy: Arc::clone(&exec_policy),
         session: Arc::clone(&ctx.session),
         review_context: GuardianReviewContext::from(&ctx.step_context),
@@ -154,7 +160,10 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
         permission_profile: exec_request.permission_profile.clone(),
         sandbox_permissions: req.sandbox_permissions,
         approval_sandbox_permissions: approval_sandbox_permissions(
-            req.sandbox_permissions,
+            sandbox_permissions_preserving_denied_reads(
+                req.sandbox_permissions,
+                &exec_request.permission_profile.file_system_sandbox_policy(),
+            ),
             req.additional_permissions_preapproved,
         ),
         prompt_permissions: req.additional_permissions.clone(),
@@ -174,10 +183,12 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
     Ok(Some(PreparedUnifiedExecZshFork {
         exec_request,
         escalation_session,
+        approval_denied,
     }))
 }
 
 struct CoreShellActionProvider {
+    approval_denied: Arc<AtomicBool>,
     policy: Arc<RwLock<Policy>>,
     session: Arc<crate::session::session::Session>,
     review_context: GuardianReviewContext,
@@ -307,6 +318,14 @@ impl CoreShellActionProvider {
         {
             Ok(decision) => Ok(decision),
             Err(ToolError::Rejected(rejection)) => Ok(ReviewDecision::denied(rejection)),
+            Err(ToolError::Codex(err))
+                if matches!(
+                    err.details(),
+                    codex_protocol::error::CodexErrorDetails::TurnAborted
+                ) =>
+            {
+                Ok(ReviewDecision::Abort)
+            }
             Err(ToolError::Codex(err)) => Err(err.into()),
         }
     }
@@ -361,6 +380,7 @@ impl CoreShellActionProvider {
                             }
                         },
                         ReviewDecision::Denied { rejection } => {
+                            self.approval_denied.store(/*val*/ true, Ordering::Release);
                             EscalationDecision::deny(Some(rejection))
                         }
                         ReviewDecision::TimedOut => EscalationDecision::deny(Some(
@@ -376,6 +396,7 @@ impl CoreShellActionProvider {
                             ))
                         }
                         ReviewDecision::Abort => {
+                            self.approval_denied.store(/*val*/ true, Ordering::Release);
                             EscalationDecision::deny(Some("User cancelled execution".to_string()))
                         }
                     }

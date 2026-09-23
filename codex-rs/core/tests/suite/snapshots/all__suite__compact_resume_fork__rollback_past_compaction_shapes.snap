@@ -14,7 +14,7 @@ Scenario: rollback past compaction replay after rollback
 
 ## before rollback
 00:message/user:hello world
-01:message/developer:<COMPACTION_SUMMARY>\nSUMMARY_ONLY_CONTEXT
+01:message/developer:<COMPACTION_SUMMARY>\nThe following compacted summary is generat...
 02:message/developer[2]:
     [01] <PERMISSIONS_INSTRUCTIONS>
     [02] <ENVIRONMENT_CONTEXT:cwd=<CWD>>
@@ -22,7 +22,7 @@ Scenario: rollback past compaction replay after rollback
 
 ## after rollback
 00:message/user:hello world
-01:message/developer:<COMPACTION_SUMMARY>\nSUMMARY_ONLY_CONTEXT
+01:message/developer:<COMPACTION_SUMMARY>\nThe following compacted summary is generat...
 02:message/developer[2]:
     [01] <PERMISSIONS_INSTRUCTIONS>
     [02] <ENVIRONMENT_CONTEXT:cwd=<CWD>>

@@ -271,26 +271,41 @@ async fn responses_lite_prepares_images() -> Result<()> {
     .await;
 
     let request = response_mock.single_request();
-    assert!(request.has_content_kinds(&["user.image", "images.preparation_error"]));
-    let user_content = request
+    let user_item = request
         .input()
         .into_iter()
         .rev()
         .find(|item| item.get("role").and_then(Value::as_str) == Some("user"))
-        .and_then(|item| item.get("content").and_then(Value::as_array).cloned())
+        .context("request should contain a user message")?;
+    assert_eq!(
+        user_item["internal_chat_message_metadata_passthrough"]["content_item_kinds"],
+        serde_json::json!(["user.image"])
+    );
+    let user_content = user_item["content"]
+        .as_array()
         .context("request should contain user content")?;
     assert_eq!(
         user_content,
-        vec![serde_json::json!({
+        &vec![serde_json::json!({
             "type": "input_image",
             "image_url": image_url
         })]
     );
-    assert!(
-        request
-            .message_input_texts("developer")
-            .iter()
-            .any(|text| text == "image content omitted because remote image URLs are not supported")
+    let notice = request
+        .input()
+        .into_iter()
+        .find(|item| {
+            item["internal_chat_message_metadata_passthrough"]["content_item_kinds"]
+                == serde_json::json!(["images.preparation_error"])
+        })
+        .context("request should contain a typed image error")?;
+    assert_eq!(notice["role"], serde_json::json!("developer"));
+    assert_eq!(
+        notice["content"],
+        serde_json::json!([{
+            "type": "input_text",
+            "text": "image content omitted because remote image URLs are not supported"
+        }])
     );
     assert!(!request.body_json().to_string().contains(remote_image_url));
 

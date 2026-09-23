@@ -198,6 +198,7 @@ pub use client_common::ResponseEvent;
 pub use client_common::ResponseStream;
 pub use codex_prompts::REVIEW_PROMPT;
 pub use compact::content_items_to_text;
+pub use context::is_contextual_user_fragment;
 pub use current_time::SleepFuture;
 pub use current_time::TimeFuture;
 pub use current_time::TimeProvider;

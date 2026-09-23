@@ -192,7 +192,15 @@ async fn copy_paste_local_image_persists_rollout_request_shape() -> anyhow::Resu
     };
 
     assert_eq!(strip_response_item_id(strip_metadata(actual)), expected);
-    assert!(!rollout_text.contains(&abs_path.display().to_string()));
+    // UI history retains local attachment paths; model-visible response items must not.
+    let encoded_path = serde_json::to_string(&abs_path.display().to_string())?;
+    let escaped_path = &encoded_path[1..encoded_path.len() - 1];
+    for line in rollout_text.lines().filter(|line| !line.trim().is_empty()) {
+        let rollout: RolloutLine = serde_json::from_str(line)?;
+        if let RolloutItem::ResponseItem(envelope) = rollout.item {
+            assert!(!serde_json::to_string(&envelope.item)?.contains(escaped_path));
+        }
+    }
 
     Ok(())
 }

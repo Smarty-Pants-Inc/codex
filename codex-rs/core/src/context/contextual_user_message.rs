@@ -36,7 +36,11 @@ fn is_standard_contextual_user_text(text: &str) -> bool {
         .any(|matches_text| matches_text(text))
 }
 
-pub(crate) fn is_contextual_user_fragment(content_item: &ContentItem) -> bool {
+/// Returns true when a content item has the text shape of a contextual fragment.
+///
+/// Text shape alone does not prove provenance: a user can type or paste the same
+/// text. Callers must not use it to discard input that has direct-user provenance.
+pub fn is_contextual_user_fragment(content_item: &ContentItem) -> bool {
     let ContentItem::InputText { text } = content_item else {
         return false;
     };

@@ -230,13 +230,15 @@ pub(crate) fn prepare_response_items(
         };
         prepared_items.push(item);
         if let Some(notices) = user_notice.filter(|notices| !notices.is_empty()) {
-            prepared_items.push(ResponseItem::Message {
+            let mut notice = ResponseItem::Message {
                 id: None,
                 role: "developer".to_string(),
-                content: notices,
+                content: Vec::new(),
                 phase: None,
                 internal_chat_message_metadata_passthrough: None,
-            });
+            };
+            let _ = set_annotated_content(&mut notice, notices);
+            prepared_items.push(notice);
         }
         if let Some(typed_notice) = typed_notice {
             prepared_items.push(ContextualUserFragment::into(typed_notice));
@@ -252,7 +254,7 @@ fn prepare_user_message_content(
     metadata: &mut Vec<ImagePreparationMetadata>,
     mode: ImagePreparationMode,
     existing_texts: &HashSet<String>,
-) -> (Vec<AnnotatedContent>, Vec<ContentItem>) {
+) -> (Vec<AnnotatedContent>, Vec<AnnotatedContent>) {
     let image_count = items
         .iter()
         .filter(|item| matches!(item.content(), ContentItem::InputImage { .. }))
@@ -300,7 +302,10 @@ fn prepare_user_message_content(
                         warn!(%error, "failed to prepare message image");
                         let notice = error.placeholder().to_string();
                         if !existing_texts.contains(&notice) {
-                            developer_notices.push(ContentItem::InputText { text: notice });
+                            developer_notices.push(AnnotatedContent::input_text(
+                                notice,
+                                ContentItemKind("images.preparation_error".to_string()),
+                            ));
                         }
                     }
                 }
@@ -308,7 +313,10 @@ fn prepare_user_message_content(
             ContentItem::InputAudio { mut audio_url } => {
                 if let Some(placeholder) = prepare_audio_item(&mut audio_url) {
                     if !existing_texts.contains(&placeholder) {
-                        developer_notices.push(ContentItem::InputText { text: placeholder });
+                        developer_notices.push(AnnotatedContent::input_text(
+                            placeholder,
+                            ContentItemKind("audio.preparation_error".to_string()),
+                        ));
                     }
                 } else {
                     prepared_content.push(AnnotatedContent::new(
@@ -353,10 +361,11 @@ fn prepare_message_content(
     }
 }
 
-fn image_resize_notice(image: ResizedImage) -> ContentItem {
-    ContentItem::InputText {
-        text: ImageResizeNotice::new(ImageResizeNoticeSource::UserMessage, vec![image]).render(),
-    }
+fn image_resize_notice(image: ResizedImage) -> AnnotatedContent {
+    ImageResizeNotice::new(ImageResizeNoticeSource::UserMessage, vec![image])
+        .render_fragment()
+        .into_parts()
+        .1
 }
 
 fn prepare_tool_output_content(
