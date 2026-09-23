@@ -405,8 +405,18 @@ async fn repo_ancestry_without_project_marker_does_not_walk_parents() {
     let cwd = outer.join("nested/inner");
     fs::create_dir_all(outer.join(".agents/skills")).expect("create outer skills");
     fs::create_dir_all(cwd.join(".agents/skills")).expect("create cwd skills");
+    // Host ancestors of the temp dir, such as `/tmp`, can carry a stray `.git`.
+    // Use a marker that no ancestor has so that the probe must reach `/`.
+    let config_stack = stack(vec![ConfigLayerEntry::new(
+        ConfigLayerSource::User {
+            file: outer.join("config.toml"),
+            profile: None,
+        },
+        toml::from_str("project_root_markers = [\".codex-test-absent-project-marker\"]")
+            .expect("marker config"),
+    )]);
 
-    let roots = repo_agents_skill_roots(Some(Arc::clone(&LOCAL_FS)), &stack(Vec::new()), &cwd)
+    let roots = repo_agents_skill_roots(Some(Arc::clone(&LOCAL_FS)), &config_stack, &cwd)
         .await
         .into_iter()
         .map(|root| root.path)

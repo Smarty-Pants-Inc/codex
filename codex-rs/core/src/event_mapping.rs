@@ -60,6 +60,13 @@ const CONTEXTUAL_DEVELOPER_PREFIXES: &[&str] = &[
     "<rollout_budget>",
 ];
 
+/// Returns true when a user-role message carries any contextual fragment instead of
+/// user-authored input. Current sessions record context with the developer role, but
+/// legacy rollouts and imported histories can still hold it in user messages.
+pub fn is_contextual_user_message_content(message: &[ContentItem]) -> bool {
+    message.iter().any(is_contextual_user_fragment)
+}
+
 /// Returns true when a developer message contains any rollback-trimmable contextual fragment.
 ///
 /// `build_initial_context` can bundle these fragments together with persistent developer text in a

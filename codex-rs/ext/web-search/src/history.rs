@@ -1,4 +1,5 @@
 use codex_api::SearchInput;
+use codex_core::is_contextual_user_message_content;
 use codex_core::parse_turn_item;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
@@ -58,6 +59,7 @@ fn push_visible_message(messages: &mut Vec<ResponseItem>, item: &ResponseItem) {
             phase,
             internal_chat_message_metadata_passthrough: metadata,
         } if role == USER_ROLE
+            && !is_contextual_user_message_content(content)
             && matches!(parse_turn_item(item), Some(TurnItem::UserMessage(_))) =>
         {
             let content = content
