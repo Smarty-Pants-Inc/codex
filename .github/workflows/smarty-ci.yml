@@ -1,5 +1,8 @@
 name: smarty-ci
 
+# Mergify tests each queue head through its draft queue PR, and the pull_request
+# run on that PR gives the `smarty-ci` check. A push trigger on the queue branches
+# would run the same head a second time.
 on:
   pull_request:
     branches:
@@ -7,8 +10,6 @@ on:
   push:
     branches:
       - main
-      - mergify/merge-queue/**
-      - tmp-mergify/merge-queue/**
 
 permissions:
   contents: read
@@ -265,7 +266,8 @@ jobs:
 
   smarty-ci:
     name: smarty-ci
-    if: ${{ always() }}
+    # Skip on cancellation, so that a cancelled run cannot leave a failing aggregate.
+    if: ${{ !cancelled() }}
     needs:
       - lint
       - affected
