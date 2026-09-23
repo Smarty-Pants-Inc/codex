@@ -2,6 +2,7 @@ use super::*;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnInterruptParams;
 use codex_app_server_protocol::TurnStatus;
+use pretty_assertions::assert_eq;
 
 #[tokio::test]
 async fn interrupted_dynamic_call_cannot_resolve_reused_call_in_next_turn() -> Result<()> {
