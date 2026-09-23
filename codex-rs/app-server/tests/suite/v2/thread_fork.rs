@@ -1519,7 +1519,7 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
             "developer",
             Some(ThreadSource::Subagent),
         ),
-        MultiAgentVersion::V1 => (config, "user", None),
+        MultiAgentVersion::V1 => (config, "developer", None),
         MultiAgentVersion::Disabled => unreachable!("interruption markers require agent support"),
     };
     config.write(codex_home.path())?;

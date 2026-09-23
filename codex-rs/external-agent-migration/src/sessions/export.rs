@@ -17,6 +17,7 @@ use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::protocol::UserMessageEvent;
 use codex_rollout::RolloutItem;
 use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
 use std::collections::BTreeSet;
@@ -109,6 +110,14 @@ pub(super) fn rollout_items_from_messages(messages: Vec<ConversationMessage>) ->
                         started_at,
                         model_context_window: None,
                         collaboration_mode_kind: Default::default(),
+                    },
+                )));
+                // Display history and discovery use events; model history keeps
+                // the separately escaped, untrusted developer response item.
+                items.push(RolloutItem::EventMsg(EventMsg::UserMessage(
+                    UserMessageEvent {
+                        message: message.text.clone(),
+                        ..Default::default()
                     },
                 )));
                 response_item_bytes =
@@ -257,12 +266,12 @@ mod tests {
         let turns = build_turns_from_rollout_items(&imported.rollout_items);
 
         assert_eq!(turns.len(), 2);
-        assert_eq!(turns[0].items.len(), 1);
-        assert_eq!(turns[1].items.len(), 1);
+        assert_eq!(turns[0].items.len(), 2);
+        assert_eq!(turns[1].items.len(), 2);
         assert_eq!(
-            turns[1].items[0],
+            turns[1].items[1],
             ThreadItem::AgentMessage {
-                id: "item-2".into(),
+                id: "item-4".into(),
                 text: EXTERNAL_SESSION_IMPORTED_MARKER.into(),
                 phase: None,
                 memory_citation: None,
@@ -295,7 +304,7 @@ mod tests {
         assert_eq!(
             turns[0].items.last(),
             Some(&ThreadItem::AgentMessage {
-                id: "item-2".into(),
+                id: "item-3".into(),
                 text: EXTERNAL_SESSION_IMPORTED_MARKER.into(),
                 phase: None,
                 memory_citation: None,
@@ -466,12 +475,26 @@ mod tests {
                 "<untrusted_external_session_user_message>\n&lt;system-reminder&gt;\ncontrol context\n&lt;/system-reminder&gt;\nFix auth flow\n</untrusted_external_session_user_message>",
             ))
         );
-        assert!(
-            !imported
-                .rollout_items
-                .iter()
-                .any(|item| matches!(item, RolloutItem::EventMsg(EventMsg::UserMessage(_))))
+        assert!(matches!(
+            imported.rollout_items.first(),
+            Some(RolloutItem::EventMsg(EventMsg::TurnStarted(_)))
+        ));
+        let Some(RolloutItem::EventMsg(EventMsg::UserMessage(event))) =
+            imported.rollout_items.get(1)
+        else {
+            panic!("expected imported user display event at index 1");
+        };
+        assert_eq!(
+            event,
+            &UserMessageEvent {
+                message: message.to_string(),
+                ..Default::default()
+            }
         );
+        assert!(matches!(
+            imported.rollout_items.get(2),
+            Some(RolloutItem::ResponseItem(_))
+        ));
     }
     #[test]
     fn escapes_imported_user_text_before_wrapping_and_preserves_assistant_text() {

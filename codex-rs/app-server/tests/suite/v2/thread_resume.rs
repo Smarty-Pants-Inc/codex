@@ -79,6 +79,7 @@ use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::ARCHIVED_SESSIONS_SUBDIR;
 use codex_features::Feature;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
+use codex_protocol::ResponseItemId;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
@@ -5229,7 +5230,10 @@ async fn thread_resume_supports_history_and_overrides() -> Result<()> {
 
     let history_text = "Hello from history";
     let history = vec![ResponseItem::Message {
-        id: None,
+        id: Some(ResponseItemId::with_suffix(
+            "msg",
+            "explicit-resume-history",
+        )),
         role: "developer".to_string(),
         content: vec![ContentItem::InputText {
             text: history_text.to_string(),
@@ -5242,7 +5246,7 @@ async fn thread_resume_supports_history_and_overrides() -> Result<()> {
     let resume_id = mcp
         .send_thread_resume_request(ThreadResumeParams {
             thread_id,
-            history: Some(history),
+            history: Some(history.clone()),
             model: Some("mock-model".to_string()),
             model_provider: Some("mock_provider".to_string()),
             ..Default::default()
@@ -5255,8 +5259,47 @@ async fn thread_resume_supports_history_and_overrides() -> Result<()> {
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
     assert!(!resumed.id.is_empty());
     assert_eq!(model_provider, "mock_provider");
-    assert_eq!(resumed.preview, history_text);
+    assert_eq!(resumed.preview, "");
     assert_eq!(resumed.status, ThreadStatus::Idle);
+
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: resumed.id,
+            input: vec![UserInput::Text {
+                text: "continue with the supplied history".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        }),
+    )
+    .await??;
+    let requests = server.received_requests().await.expect("recorded requests");
+    let request = requests
+        .iter()
+        .rfind(|request| request.method == "POST" && request.url.path().ends_with("/responses"))
+        .expect("follow-up Responses request");
+    let body: serde_json::Value = serde_json::from_slice(&request.body)?;
+    let input: Vec<ResponseItem> = serde_json::from_value(body["input"].clone())?;
+    assert_eq!(
+        input
+            .iter()
+            .filter_map(|item| match item {
+                ResponseItem::Message { role, content, .. } if role == "user" => Some(content),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec![&vec![ContentItem::InputText {
+            text: "continue with the supplied history".to_string(),
+        }]]
+    );
+    assert_eq!(
+        input
+            .into_iter()
+            .filter(|item| history.contains(item))
+            .collect::<Vec<_>>(),
+        history
+    );
 
     Ok(())
 }

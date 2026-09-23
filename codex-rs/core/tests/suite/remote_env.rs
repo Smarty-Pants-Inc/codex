@@ -1096,9 +1096,22 @@ async fn serve_environment_with_agents_md(
 
     let mut agents_md_reads = 0;
     loop {
-        let request = tokio::select! {
-            request = read_exec_server_json(&mut websocket) => request,
+        // This service can be idle while model and subagent work continues.
+        let frame = tokio::select! {
+            frame = websocket.next() => frame,
             _ = &mut shutdown => return agents_md_reads,
+        }
+        .expect("websocket should stay open")
+        .expect("websocket frame should read");
+        let request: Value = match frame {
+            Message::Text(text) => {
+                serde_json::from_str(text.as_ref()).expect("valid JSON-RPC message")
+            }
+            Message::Binary(bytes) => {
+                serde_json::from_slice(bytes.as_ref()).expect("valid JSON-RPC message")
+            }
+            Message::Ping(_) | Message::Pong(_) => continue,
+            other => panic!("expected JSON-RPC message, got {other:?}"),
         };
         let is_agents_md = request["params"]["path"]
             .as_str()
