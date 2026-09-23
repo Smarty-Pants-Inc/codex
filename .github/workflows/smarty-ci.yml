@@ -17,9 +17,11 @@ concurrency:
   group: smarty-ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+# Gate jobs run in parallel on separate hosted runners. The required `smarty-ci`
+# check is the aggregate job at the end; it fails unless every gate job succeeds.
 jobs:
-  smarty-ci:
-    name: smarty-ci
+  lint:
+    name: smarty-ci-lint
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
@@ -32,16 +34,7 @@ jobs:
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
-        with:
-          components: rustfmt, clippy
-      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
-        with:
-          tool: just@1.51.0,nextest@0.9.103
-      - name: Install Linux sandbox build dependencies
-        run: |
-          sudo DEBIAN_FRONTEND=noninteractive apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev bubblewrap
+      - uses: ./.github/actions/smarty-ci-setup
       - name: Check bubblewrap netlink replies
         working-directory: codex-rs/bwrap
         run: |
@@ -54,33 +47,6 @@ jobs:
       - name: Check Rust formatting
         working-directory: codex-rs
         run: cargo fmt -- --config imports_granularity=Item --check
-      - name: Configure namespace prerequisites on the disposable Linux runner
-        run: |
-          set -euo pipefail
-          # Match setup-ci's namespace prerequisite; this changes policy for this job VM.
-          sysctl kernel.unprivileged_userns_clone
-          sudo sysctl -w kernel.unprivileged_userns_clone=1
-          test "$(sysctl -n kernel.unprivileged_userns_clone)" = 1
-          if test -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns; then
-            sysctl kernel.apparmor_restrict_unprivileged_userns
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-            test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = 0
-          fi
-      - name: Configure verified V8 artifacts for runtime test helpers
-        uses: ./.github/actions/setup-rusty-v8
-        with:
-          target: x86_64-unknown-linux-gnu
-      - name: Install DotSlash
-        uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2
-      - name: Make DotSlash available in stable PATH
-        run: |
-          if [[ -w /usr/local/bin ]]; then
-            cp "$(which dotslash)" /usr/local/bin
-          else
-            sudo cp "$(which dotslash)" /usr/local/bin
-          fi
-      - name: Observe disk after setup
-        run: python3 .github/scripts/ci_disk_observation.py after-setup
       - name: Check Core fix and format readiness without changing the candidate
         working-directory: codex-rs
         run: |
@@ -95,14 +61,44 @@ jobs:
             status=1
           fi
           exit "$status"
+      - name: Lint Core and guardian source
+        working-directory: codex-rs
+        run: just clippy -p codex-core -p codex-guardian-v2 --locked -- -D warnings
+      - name: Lint codex-http-client source
+        working-directory: codex-rs
+        run: just clippy -p codex-http-client --locked -- -D warnings
+      - name: Lint codex-api source
+        working-directory: codex-rs
+        run: just clippy -p codex-api --locked -- -D warnings
+      - name: Lint codex-client library
+        working-directory: codex-rs
+        run: just clippy -p codex-client --lib --locked -- -D warnings
+      - name: Check source remains unchanged
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+
+  affected:
+    name: smarty-ci-affected
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+      CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/smarty-ci-setup
       - name: Build runtime test helpers
         working-directory: codex-rs
         run: cargo build --locked -p codex-cli -p codex-exec -p codex-code-mode-host -p codex-linux-sandbox -p codex-rmcp-client -p codex-shell-escalation --bins
       - name: Observe disk after runtime helpers
         run: python3 .github/scripts/ci_disk_observation.py after-helpers
-      - name: Lint Core and guardian source
-        working-directory: codex-rs
-        run: just clippy -p codex-core -p codex-guardian-v2 --locked -- -D warnings
       - name: Test affected agent and import repair contracts
         working-directory: codex-rs
         run: |
@@ -183,30 +179,113 @@ jobs:
       - name: Test codex-http-client source contract
         working-directory: codex-rs
         run: just test -p codex-http-client --locked --retries 0 --test-threads 2
-      - name: Lint codex-http-client source
-        working-directory: codex-rs
-        run: just clippy -p codex-http-client --locked -- -D warnings
       - name: Test codex-api count wire source contract
         working-directory: codex-rs
         run: just test -p codex-api --locked --retries 0 --test-threads 2
-      - name: Lint codex-api source
-        working-directory: codex-rs
-        run: just clippy -p codex-api --locked -- -D warnings
-      - name: Lint codex-client library
-        working-directory: codex-rs
-        run: just clippy -p codex-client --lib --locked -- -D warnings
-      - name: Observe disk before full Core
-        run: python3 .github/scripts/ci_disk_observation.py pre-full-core
-      - name: Test codex-core source contract
-        working-directory: codex-rs
-        run: python3 ../.github/scripts/ci_disk_observation.py run full-core just test -p codex-core --locked --retries 0 --test-threads 2 --success-output final
-      - name: Observe disk before complete workspace
-        run: python3 .github/scripts/ci_disk_observation.py pre-workspace
-      - name: Test complete workspace after targeted checks
-        working-directory: codex-rs
-        run: python3 ../.github/scripts/ci_disk_observation.py run workspace just test --locked --retries 0 --test-threads 2
       - name: Check source remains unchanged
         run: |
           git diff --exit-code
           git diff --cached --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
+
+  core:
+    name: smarty-ci-core
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+      CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/smarty-ci-setup
+      - name: Build runtime test helpers
+        working-directory: codex-rs
+        run: cargo build --locked -p codex-cli -p codex-exec -p codex-code-mode-host -p codex-linux-sandbox -p codex-rmcp-client -p codex-shell-escalation --bins
+      - name: Observe disk before full Core
+        run: python3 .github/scripts/ci_disk_observation.py pre-full-core
+      - name: Test codex-core source contract
+        working-directory: codex-rs
+        run: python3 ../.github/scripts/ci_disk_observation.py run full-core just test -p codex-core --locked --retries 0 --test-threads 2 --success-output final
+      - name: Report sandbox metadata left in /tmp
+        if: always()
+        run: |
+          # Evidence only: a leaked sandbox mount target here becomes a project-root marker.
+          for path in /tmp/.git /tmp/.agents /tmp/.codex; do
+            stat -c '%n type=%F size=%s born=%w modified=%y' "$path" 2>/dev/null || echo "$path absent"
+          done
+      - name: Check source remains unchanged
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+
+  workspace:
+    name: smarty-ci-workspace
+    runs-on: ubuntu-24.04
+    # The complete workspace build and run took about 55 minutes of the former single job.
+    timeout-minutes: 120
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+      CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/smarty-ci-setup
+      - name: Build runtime test helpers
+        working-directory: codex-rs
+        run: cargo build --locked -p codex-cli -p codex-exec -p codex-code-mode-host -p codex-linux-sandbox -p codex-rmcp-client -p codex-shell-escalation --bins
+      - name: Observe disk before complete workspace
+        run: python3 .github/scripts/ci_disk_observation.py pre-workspace
+      - name: Test complete workspace
+        working-directory: codex-rs
+        # Workspace feature unification links the sandboxed V8 that code-mode-runtime
+        # requires, so codex-v8-poc must declare the matching sandbox feature.
+        run: python3 ../.github/scripts/ci_disk_observation.py run workspace just test --locked --retries 0 --test-threads 2 --features codex-v8-poc/sandbox
+      - name: Report sandbox metadata left in /tmp
+        if: always()
+        run: |
+          # Evidence only: a leaked sandbox mount target here becomes a project-root marker.
+          for path in /tmp/.git /tmp/.agents /tmp/.codex; do
+            stat -c '%n type=%F size=%s born=%w modified=%y' "$path" 2>/dev/null || echo "$path absent"
+          done
+      - name: Check source remains unchanged
+        run: |
+          git diff --exit-code
+          git diff --cached --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+
+  smarty-ci:
+    name: smarty-ci
+    if: ${{ always() }}
+    needs:
+      - lint
+      - affected
+      - core
+      - workspace
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every gate job to succeed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS"])
+          failed = {name: need["result"] for name, need in needs.items() if need["result"] != "success"}
+          for name, need in sorted(needs.items()):
+              print(f"{name}: {need['result']}")
+          sys.exit(1 if failed or len(needs) != 4 else 0)
+          PY
