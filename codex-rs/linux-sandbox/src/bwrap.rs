@@ -196,6 +196,14 @@ impl SyntheticMountTarget {
         self.pre_existing_path.is_some()
     }
 
+    /// Treats the object at this path as synthetic, not as a real pre-existing path.
+    pub(crate) fn without_pre_existing_path(&self) -> Self {
+        Self {
+            pre_existing_path: None,
+            ..self.clone()
+        }
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }

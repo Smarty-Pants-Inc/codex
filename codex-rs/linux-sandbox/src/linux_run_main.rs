@@ -957,18 +957,9 @@ fn register_synthetic_mount_targets(
                     )
                 });
                 let target = if target.preserves_pre_existing_path()
-                    && synthetic_mount_marker_dir_has_synthetic_owner(&marker_dir)
+                    && synthetic_mount_marker_dir_has_active_synthetic_owner(&marker_dir)
                 {
-                    match target.kind() {
-                        crate::bwrap::SyntheticMountTargetKind::EmptyFile => {
-                            crate::bwrap::SyntheticMountTarget::missing(target.path())
-                        }
-                        crate::bwrap::SyntheticMountTargetKind::EmptyDirectory => {
-                            crate::bwrap::SyntheticMountTarget::missing_empty_directory(
-                                target.path(),
-                            )
-                        }
-                    }
+                    target.without_pre_existing_path()
                 } else {
                     target.clone()
                 };
@@ -981,6 +972,9 @@ fn register_synthetic_mount_targets(
                         )
                     },
                 );
+                if !target.preserves_pre_existing_path() {
+                    crate::synthetic_mount_origin::create_and_record(&target, &marker_dir);
+                }
                 SyntheticMountTargetRegistration {
                     target,
                     marker_file,
@@ -1030,14 +1024,8 @@ fn synthetic_mount_marker_contents(target: &crate::bwrap::SyntheticMountTarget) 
     }
 }
 
-/// Reports whether a live or dead owner created the target at this marker path.
-///
-/// A dead owner's synthetic marker means that its helper was killed before
-/// cleanup, so the empty target that it left is still synthetic. Keeping that
-/// marker lets the next registration reclaim the target instead of treating it
-/// as a real pre-existing path.
-fn synthetic_mount_marker_dir_has_synthetic_owner(marker_dir: &Path) -> bool {
-    synthetic_mount_marker_dir_has_marker_matching(marker_dir, |path, _owner_is_active| {
+fn synthetic_mount_marker_dir_has_active_synthetic_owner(marker_dir: &Path) -> bool {
+    synthetic_mount_marker_dir_has_active_process_matching(marker_dir, |path| {
         match fs::read(path) {
             Ok(contents) => contents == SYNTHETIC_MOUNT_MARKER_SYNTHETIC,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => false,
@@ -1050,13 +1038,12 @@ fn synthetic_mount_marker_dir_has_synthetic_owner(marker_dir: &Path) -> bool {
 }
 
 fn synthetic_mount_marker_dir_has_active_process(marker_dir: &Path) -> bool {
-    synthetic_mount_marker_dir_has_marker_matching(marker_dir, |_, owner_is_active| owner_is_active)
+    synthetic_mount_marker_dir_has_active_process_matching(marker_dir, |_| true)
 }
 
-/// Checks each owner marker, then prunes the unmatched markers of dead owners.
-fn synthetic_mount_marker_dir_has_marker_matching(
+fn synthetic_mount_marker_dir_has_active_process_matching(
     marker_dir: &Path,
-    matches_marker: impl Fn(&Path, bool) -> bool,
+    matches_marker: impl Fn(&Path) -> bool,
 ) -> bool {
     let entries = match fs::read_dir(marker_dir) {
         Ok(entries) => entries,
@@ -1081,11 +1068,7 @@ fn synthetic_mount_marker_dir_has_marker_matching(
         else {
             continue;
         };
-        let owner_is_active = process_is_active(pid);
-        if matches_marker(&path, owner_is_active) {
-            return true;
-        }
-        if !owner_is_active {
+        if !process_is_active(pid) {
             match fs::remove_file(&path) {
                 Ok(()) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -1094,6 +1077,11 @@ fn synthetic_mount_marker_dir_has_marker_matching(
                     path.display()
                 ),
             }
+            continue;
+        }
+        let matches_marker = matches_marker(&path);
+        if matches_marker {
+            return true;
         }
     }
     false
@@ -1116,7 +1104,11 @@ fn cleanup_synthetic_mount_targets(targets: &[SyntheticMountTargetRegistration])
             if synthetic_mount_marker_dir_has_active_process(&target.marker_dir) {
                 continue;
             }
-            remove_synthetic_mount_target(&target.target);
+            remove_synthetic_mount_target(
+                &target.target,
+                crate::synthetic_mount_origin::recorded_identity(&target.marker_dir),
+            );
+            crate::synthetic_mount_origin::remove_record(&target.marker_dir);
             match fs::remove_dir(&target.marker_dir) {
                 Ok(()) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -1253,7 +1245,10 @@ fn make_directory_tree_writable(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn remove_synthetic_mount_target(target: &crate::bwrap::SyntheticMountTarget) {
+fn remove_synthetic_mount_target(
+    target: &crate::bwrap::SyntheticMountTarget,
+    created_identity: Option<String>,
+) {
     let path = target.path();
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -1263,7 +1258,18 @@ fn remove_synthetic_mount_target(target: &crate::bwrap::SyntheticMountTarget) {
             path.display()
         ),
     };
-    if !target.should_remove_after_bwrap(&metadata) {
+    // A helper-created object is removed only while it is still that object,
+    // even if a killed helper left it and this run saw it as pre-existing.
+    let should_remove = match created_identity {
+        Some(created_identity) => {
+            created_identity == crate::synthetic_mount_origin::identity(&metadata)
+                && target
+                    .without_pre_existing_path()
+                    .should_remove_after_bwrap(&metadata)
+        }
+        None => target.should_remove_after_bwrap(&metadata),
+    };
+    if !should_remove {
         return;
     }
     match target.kind() {
