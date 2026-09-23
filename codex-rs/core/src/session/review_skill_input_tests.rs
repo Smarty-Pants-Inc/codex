@@ -26,6 +26,7 @@ fn developer_skill_selection_requires_review_source_or_structured_skill() {
         TurnInput::UserInput {
             content: vec![direct.clone()],
             client_id: None,
+            acceptance_order: None,
         },
         TurnInput::DeveloperInput {
             content: vec![review.clone(), resolved_skill.clone(), mention.clone()],

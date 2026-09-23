@@ -8,7 +8,9 @@ use crate::safety_buffering::treatment_from_headers;
 use crate::telemetry::SseTelemetry;
 use codex_client::ByteStream;
 use codex_client::StreamResponse;
+use codex_protocol::ResponseUsageMetadata;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::MisalignmentErrorDetails;
 use codex_protocol::protocol::ModelVerification;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TurnModerationMetadataEvent;
@@ -119,6 +121,8 @@ struct Error {
     message: Option<String>,
     plan_type: Option<String>,
     resets_at: Option<i64>,
+    #[serde(default)]
+    misalignment: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -127,6 +131,7 @@ struct ResponseCompleted {
     id: String,
     #[serde(default)]
     usage: Option<ResponseCompletedUsage>,
+    usage_metadata: Option<ResponseUsageMetadata>,
     #[serde(default)]
     end_turn: Option<bool>,
 }
@@ -413,8 +418,12 @@ pub fn process_responses_event(
             }
         }
         "response.created" => {
-            if event.response.is_some() {
-                return Ok(Some(ResponseEvent::Created {}));
+            if let Some(response) = event.response {
+                let response_id = response
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                return Ok(Some(ResponseEvent::Created { response_id }));
             }
         }
         "response.failed" => {
@@ -440,7 +449,12 @@ pub fn process_responses_event(
                                 "This request was blocked due to a misalignment policy violation."
                                     .to_string()
                             });
-                        response_error = ApiError::MisalignmentPolicyViolation { message };
+                        response_error = ApiError::MisalignmentPolicyViolation {
+                            message,
+                            misalignment: error.misalignment.and_then(|details| {
+                                serde_json::from_value::<MisalignmentErrorDetails>(details).ok()
+                            }),
+                        };
                     } else if matches!(error.code.as_deref(), Some("invalid_prompt" | "bio_policy"))
                     {
                         let message = error
@@ -452,7 +466,12 @@ pub fn process_responses_event(
                     } else {
                         let delay = try_parse_retry_after(&error);
                         let message = error.message.unwrap_or_default();
-                        response_error = ApiError::Retryable { message, delay };
+                        response_error = match error.code.as_deref() {
+                            Some("rate_limit_exceeded") => {
+                                ApiError::RateLimitExceeded { message, delay }
+                            }
+                            _ => ApiError::Retryable { message, delay },
+                        };
                     }
                 }
                 return Err(ResponsesEventError::Api(response_error));
@@ -475,11 +494,19 @@ pub fn process_responses_event(
         }
         "response.completed" => {
             if let Some(resp_val) = event.response {
+                let metadata = resp_val
+                    .get("usage")
+                    .filter(|usage| !usage.is_null())
+                    .cloned();
                 match serde_json::from_value::<ResponseCompleted>(resp_val) {
-                    Ok(resp) => {
+                    Ok(mut resp) => {
+                        if let Some(metadata) = metadata {
+                            resp.usage_metadata.get_or_insert_default().metadata = Some(metadata);
+                        }
                         return Ok(Some(ResponseEvent::Completed {
                             response_id: resp.id,
                             token_usage: resp.usage.map(Into::into),
+                            usage_metadata: resp.usage_metadata,
                             end_turn: resp.end_turn,
                         }));
                     }
@@ -900,10 +927,12 @@ mod tests {
             Ok(ResponseEvent::Completed {
                 response_id,
                 token_usage,
+                usage_metadata,
                 end_turn,
             }) => {
                 assert_eq!(response_id, "resp1");
                 assert!(token_usage.is_none());
+                assert!(usage_metadata.is_none());
                 assert!(end_turn.is_none());
             }
             other => panic!("unexpected third event: {other:?}"),
@@ -1096,10 +1125,12 @@ mod tests {
             Ok(ResponseEvent::Completed {
                 response_id,
                 token_usage,
+                usage_metadata,
                 end_turn,
             }) => {
                 assert_eq!(response_id, "resp1");
                 assert!(token_usage.is_none());
+                assert!(usage_metadata.is_none());
                 assert!(end_turn.is_none());
             }
             other => panic!("unexpected event: {other:?}"),
@@ -1107,7 +1138,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn error_when_error_event() {
+    async fn rate_limit_error_preserves_retry_delay() {
         let raw_error = r#"{"type":"response.failed","sequence_number":3,"response":{"id":"resp_689bcf18d7f08194bf3440ba62fe05d803fee0cdac429894","object":"response","created_at":1755041560,"status":"failed","background":false,"error":{"code":"rate_limit_exceeded","message":"Rate limit reached for gpt-5.1 in organization org-AAA on tokens per min (TPM): Limit 30000, Used 22999, Requested 12528. Please try again in 11.054s. Visit https://platform.openai.com/account/rate-limits to learn more."}, "usage":null,"user":null,"metadata":{}}}"#;
 
         let sse1 = format!("event: response.failed\ndata: {raw_error}\n\n");
@@ -1117,14 +1148,55 @@ mod tests {
         assert_eq!(events.len(), 1);
 
         match &events[0] {
-            Err(ApiError::Retryable { message, delay }) => {
+            Err(ApiError::RateLimitExceeded { message, delay }) => {
                 assert_eq!(
                     message,
                     "Rate limit reached for gpt-5.1 in organization org-AAA on tokens per min (TPM): Limit 30000, Used 22999, Requested 12528. Please try again in 11.054s. Visit https://platform.openai.com/account/rate-limits to learn more."
                 );
                 assert_eq!(*delay, Some(Duration::from_secs_f64(11.054)));
             }
-            other => panic!("unexpected second event: {other:?}"),
+            other => panic!("unexpected rate-limit event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_response_classification_uses_error_code() {
+        for (code, message) in [
+            ("rate_limit_exceeded", "Temporary limit."),
+            (
+                "unknown_error",
+                "Rate limit reached. Please try again in 1s.",
+            ),
+        ] {
+            let event = json!({
+                "type": "response.failed",
+                "response": { "error": { "code": code, "message": message } },
+            });
+            let sse = format!("event: response.failed\ndata: {event}\n\n");
+            let events = collect_events(&[sse.as_bytes()]).await;
+            match (code, events.as_slice()) {
+                (
+                    "rate_limit_exceeded",
+                    [
+                        Err(ApiError::RateLimitExceeded {
+                            message: actual,
+                            delay,
+                        }),
+                    ],
+                )
+                | (
+                    "unknown_error",
+                    [
+                        Err(ApiError::Retryable {
+                            message: actual,
+                            delay,
+                        }),
+                    ],
+                ) => {
+                    assert_eq!((actual.as_str(), *delay), (message, None));
+                }
+                _ => panic!("unexpected events for {code}: {events:?}"),
+            }
         }
     }
 
@@ -1215,8 +1287,12 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         match &events[0] {
-            Err(ApiError::MisalignmentPolicyViolation { message }) => {
+            Err(ApiError::MisalignmentPolicyViolation {
+                message,
+                misalignment,
+            }) => {
                 assert_eq!(message, "This request violated the misalignment policy.");
+                assert_eq!(misalignment, &None);
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -1242,13 +1318,85 @@ mod tests {
 
             assert_eq!(events.len(), 1);
             match &events[0] {
-                Err(ApiError::MisalignmentPolicyViolation { message }) => assert_eq!(
+                Err(ApiError::MisalignmentPolicyViolation { message, .. }) => assert_eq!(
                     message,
                     "This request was blocked due to a misalignment policy violation."
                 ),
                 other => panic!("unexpected event: {other:?}"),
             }
         }
+    }
+
+    #[tokio::test]
+    async fn misalignment_policy_violation_preserves_public_continuation_details() {
+        let raw_error = json!({
+            "type": "response.failed",
+            "response": {
+                "id": "resp_fatal_misalignment",
+                "status": "failed",
+                "error": {
+                    "code": "misalignment_policy_violation",
+                    "message": "This request violated the misalignment policy.",
+                    "misalignment": {
+                        "error_type": "future_safety_category",
+                        "detailed_explanation": "The agent attempted an external transfer.",
+                        "steer": { "message": "Do not transfer the user's files." }
+                    }
+                }
+            }
+        });
+        let sse = format!("event: response.failed\ndata: {raw_error}\n\n");
+        let events = collect_events(&[sse.as_bytes()]).await;
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            Err(ApiError::MisalignmentPolicyViolation {
+                message,
+                misalignment,
+            }) => {
+                assert_eq!(message, "This request violated the misalignment policy.");
+                assert_eq!(
+                    misalignment,
+                    &Some(MisalignmentErrorDetails {
+                        error_type: Some("future_safety_category".to_string()),
+                        detailed_explanation: Some(
+                            "The agent attempted an external transfer.".to_string()
+                        ),
+                        steer: Some(codex_protocol::protocol::MisalignmentSteer {
+                            message: "Do not transfer the user's files.".to_string(),
+                        }),
+                    })
+                );
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_misalignment_details_preserve_the_fatal_policy_error() {
+        let raw_error = json!({
+            "type": "response.failed",
+            "response": {
+                "id": "resp_fatal_misalignment",
+                "status": "failed",
+                "error": {
+                    "code": "misalignment_policy_violation",
+                    "message": "This request violated the misalignment policy.",
+                    "misalignment": { "steer": { "message": 42 } }
+                }
+            }
+        });
+        let sse = format!("event: response.failed\ndata: {raw_error}\n\n");
+        let events = collect_events(&[sse.as_bytes()]).await;
+
+        assert_eq!(events.len(), 1);
+        assert_matches!(
+            &events[0],
+            Err(ApiError::MisalignmentPolicyViolation {
+                misalignment: None,
+                ..
+            })
+        );
     }
 
     #[tokio::test]
@@ -1301,7 +1449,7 @@ mod tests {
         }
 
         fn is_created(ev: &ResponseEvent) -> bool {
-            matches!(ev, ResponseEvent::Created)
+            matches!(ev, ResponseEvent::Created { .. })
         }
         fn is_output(ev: &ResponseEvent) -> bool {
             matches!(ev, ResponseEvent::OutputItemDone(_))
@@ -1483,12 +1631,13 @@ mod tests {
         .await;
 
         assert_eq!(events.len(), 2);
-        assert_matches!(&events[0], ResponseEvent::Created);
+        assert_matches!(&events[0], ResponseEvent::Created { .. });
         assert_matches!(
             &events[1],
             ResponseEvent::Completed {
                 response_id,
                 token_usage: None,
+                usage_metadata: None,
                 end_turn: None,
             } if response_id == "resp-1"
         );
@@ -1520,12 +1669,16 @@ mod tests {
             &events[0],
             ResponseEvent::ServerModel(model) if model == CYBER_RESTRICTED_MODEL_FOR_TESTS
         );
-        assert_matches!(&events[1], ResponseEvent::Created);
+        assert_matches!(
+            &events[1],
+            ResponseEvent::Created { response_id: Some(id) } if id == "resp-1"
+        );
         assert_matches!(
             &events[2],
             ResponseEvent::Completed {
                 response_id,
                 token_usage: None,
+                usage_metadata: None,
                 end_turn: None,
             } if response_id == "resp-1"
         );
@@ -1561,6 +1714,7 @@ mod tests {
             ResponseEvent::Completed {
                 response_id,
                 token_usage: None,
+                usage_metadata: None,
                 end_turn: None,
             } if response_id == "resp-1"
         );
@@ -1596,6 +1750,7 @@ mod tests {
             ResponseEvent::Completed {
                 response_id,
                 token_usage: None,
+                usage_metadata: None,
                 end_turn: None,
             } if response_id == "resp-1"
         );
@@ -1639,7 +1794,7 @@ mod tests {
         .await;
 
         assert_eq!(events.len(), 7);
-        assert_matches!(&events[0], ResponseEvent::Created);
+        assert_matches!(&events[0], ResponseEvent::Created { .. });
         assert_matches!(
             &events[1],
             ResponseEvent::SafetyBuffering(buffering)
@@ -1916,6 +2071,7 @@ mod tests {
             code: Some("rate_limit_exceeded".to_string()),
             plan_type: None,
             resets_at: None,
+            misalignment: None,
         };
 
         let delay = try_parse_retry_after(&err);
@@ -1930,6 +2086,7 @@ mod tests {
             code: Some("rate_limit_exceeded".to_string()),
             plan_type: None,
             resets_at: None,
+            misalignment: None,
         };
         let delay = try_parse_retry_after(&err);
         assert_eq!(delay, Some(Duration::from_secs_f64(1.898)));
@@ -1943,6 +2100,7 @@ mod tests {
             code: Some("rate_limit_exceeded".to_string()),
             plan_type: None,
             resets_at: None,
+            misalignment: None,
         };
         let delay = try_parse_retry_after(&err);
         assert_eq!(delay, Some(Duration::from_secs(35)));

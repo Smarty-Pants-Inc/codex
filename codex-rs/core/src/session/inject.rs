@@ -56,6 +56,35 @@ impl Session {
         }
     }
 
+    /// Injects hook context into the running turn atomically.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn provenance and turn state updates must remain atomic"
+    )]
+    pub(crate) async fn inject_hook_context_if_running(
+        &self,
+        input: Vec<ResponseItem>,
+    ) -> Result<(), Vec<ResponseItem>> {
+        let mut active = self.active_turn.lock().await;
+        let Some(active_turn) = active.as_mut() else {
+            return Err(input);
+        };
+        if active_turn.task.is_none() {
+            return Err(input);
+        }
+        self.input_queue
+            .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
+                active_turn.turn_state.as_ref(),
+                input
+                    .into_iter()
+                    .map(ResponseItemEnvelope::new)
+                    .map(PendingTurnInput::ResponseItem)
+                    .collect(),
+            )
+            .await;
+        Ok(())
+    }
+
     /// Preserves trusted client provenance while items wait for an active turn.
     #[expect(
         clippy::await_holding_invalid_type,
@@ -93,6 +122,7 @@ impl Session {
             && matches!(&item, ResponseItem::Message { role, .. } if role == "developer"))
         .then_some(CodexHarnessMetadata {
             client_authored: true,
+            ..Default::default()
         });
 
         ResponseItemEnvelope { item, metadata }
@@ -103,9 +133,7 @@ impl Session {
         turn_context: &TurnContext,
         items: Vec<ResponseItemEnvelope>,
     ) {
-        if !self.enabled(Feature::RetainClientDeveloperMessages)
-            || items.iter().all(|item| item.metadata.is_none())
-        {
+        if items.iter().all(|item| item.metadata.is_none()) {
             let items = items
                 .into_iter()
                 .map(ResponseItemEnvelope::into_item)
@@ -163,3 +191,7 @@ impl Session {
         self.record_conversation_items(turn_context, &items).await;
     }
 }
+
+#[cfg(test)]
+#[path = "inject_tests.rs"]
+mod tests;

@@ -27,6 +27,7 @@ fn request() -> ResponsesApiRequest {
         prompt_cache_key: None,
         text: None,
         client_metadata: None,
+        access_programs: None,
     }
 }
 
