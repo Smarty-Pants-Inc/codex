@@ -65,37 +65,59 @@ static int
 rtnl_read_reply (int          rtnl_fd,
                  unsigned int seq_nr)
 {
-  char buffer[1024];
+  union
+  {
+    struct nlmsghdr alignment;
+    char data[1024];
+  } buffer;
   ssize_t received;
   struct nlmsghdr *rheader;
 
   while (1)
     {
-      received = TEMP_FAILURE_RETRY (recv (rtnl_fd, buffer, sizeof (buffer), 0));
+      received = TEMP_FAILURE_RETRY (recv (rtnl_fd, buffer.data, sizeof (buffer.data), MSG_TRUNC));
       if (received < 0)
         return -1;
+      if (received == 0 || (size_t) received > sizeof (buffer.data))
+        goto protocol_error;
 
-      rheader = (struct nlmsghdr *) buffer;
-      while (received >= NLMSG_HDRLEN)
+      rheader = (struct nlmsghdr *) buffer.data;
+      while (received > 0)
         {
-          if (rheader->nlmsg_seq != seq_nr)
-            return -1;
-          if ((pid_t)rheader->nlmsg_pid != getpid ())
-            return -1;
+          if (!NLMSG_OK (rheader, received))
+            goto protocol_error;
+          if (rheader->nlmsg_seq != seq_nr || rheader->nlmsg_pid != (uint32_t) getpid ())
+            goto protocol_error;
           if (rheader->nlmsg_type == NLMSG_ERROR)
             {
-              uint32_t *err = NLMSG_DATA (rheader);
-              if (*err == 0)
+              const struct nlmsgerr *err = NLMSG_DATA (rheader);
+
+              if (rheader->nlmsg_len < NLMSG_LENGTH (sizeof (*err)))
+                goto protocol_error;
+              /* Linux encodes errno values in the range -4095..-1. */
+              if (err->error > 0 || err->error < -4095)
+                goto protocol_error;
+              if (err->error == 0)
                 return 0;
 
+              errno = -err->error;
               return -1;
             }
           if (rheader->nlmsg_type == NLMSG_DONE)
             return 0;
 
+          /* A final message need not include alignment padding. */
+          if (rheader->nlmsg_len == (size_t) received)
+            break;
+          if (NLMSG_ALIGN (rheader->nlmsg_len) > (size_t) received)
+            goto protocol_error;
           rheader = NLMSG_NEXT (rheader, received);
         }
     }
+
+protocol_error:
+  errno = EPROTO;
+  return -1;
 }
 
 static int
