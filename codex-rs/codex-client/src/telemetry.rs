@@ -4,8 +4,46 @@ use http::HeaderMap;
 use http::StatusCode;
 use std::time::Duration;
 
+/// Selects either the existing auth provider or an original private launch handle.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestAuthentication {
+    Provider,
+    Prepared,
+}
+
+/// Original-owner optional stream operation; errors never select fallback transport.
+pub type NativeStreamFuture<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = Result<Option<codex_http_client::StreamResponse>, String>>
+            + Send
+            + 'a,
+    >,
+>;
+
 /// API specific telemetry.
 pub trait RequestTelemetry: Send + Sync {
+    /// A native count route requires an explicit admitted output ceiling. None
+    /// preserves the ordinary serializer and transport; errors must not fall back.
+    fn native_output_limit(&self) -> Result<Option<std::num::NonZeroU64>, String> {
+        Ok(None)
+    }
+
+    /// Optional original-owner transport path after authentication. It owns all
+    /// count/inference admission and returns the actual stream, not a permit to
+    /// retry via the ordinary transport. Errors are terminal build refusals.
+    fn stream_native_request<'a>(&'a self, _request: &'a Request) -> NativeStreamFuture<'a> {
+        Box::pin(async { Ok(None) })
+    }
+
+    /// Runs before auth resolution. An installed native launch must either attach
+    /// its prepared credential or fail; it must never fall back to ambient auth.
+    fn authenticate_request(
+        &self,
+        _request: &mut Request,
+    ) -> Result<RequestAuthentication, String> {
+        Ok(RequestAuthentication::Provider)
+    }
+
     /// Called after successful auth and immediately before each transport invocation,
     /// including lower HTTP retries. Reserve bounded audit capacity here; returning
     /// a body-free error prevents this send and becomes a non-retryable build error.

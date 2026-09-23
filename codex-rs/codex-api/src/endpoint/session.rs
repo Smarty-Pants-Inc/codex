@@ -45,6 +45,15 @@ impl<T: HttpTransport> EndpointSession<T> {
         &self.provider
     }
 
+    pub(crate) fn native_output_limit(&self) -> Result<Option<std::num::NonZeroU64>, ApiError> {
+        self.request_telemetry
+            .as_ref()
+            .map(|hook| hook.native_output_limit())
+            .transpose()
+            .map(Option::flatten)
+            .map_err(|error| TransportError::Build(error).into())
+    }
+
     fn make_request(
         &self,
         method: &Method,
@@ -104,7 +113,19 @@ impl<T: HttpTransport> EndpointSession<T> {
                 let transport = &self.transport;
                 let telemetry = self.request_telemetry.clone();
                 async move {
-                    let req = auth.apply_auth(req).await.map_err(TransportError::from)?;
+                    let mut req = req;
+                    let selection = telemetry
+                        .as_ref()
+                        .map(|hook| hook.authenticate_request(&mut req))
+                        .transpose()
+                        .map_err(TransportError::Build)?
+                        .unwrap_or(codex_client::RequestAuthentication::Provider);
+                    let req = match selection {
+                        codex_client::RequestAuthentication::Provider => {
+                            auth.apply_auth(req).await.map_err(TransportError::from)?
+                        }
+                        codex_client::RequestAuthentication::Prepared => req,
+                    };
                     if let Some(telemetry) = telemetry {
                         telemetry
                             .on_request_prepared(&req)
@@ -151,8 +172,27 @@ impl<T: HttpTransport> EndpointSession<T> {
                 let transport = &self.transport;
                 let telemetry = self.request_telemetry.clone();
                 async move {
-                    let req = auth.apply_auth(req).await.map_err(TransportError::from)?;
+                    let mut req = req;
+                    let selection = telemetry
+                        .as_ref()
+                        .map(|hook| hook.authenticate_request(&mut req))
+                        .transpose()
+                        .map_err(TransportError::Build)?
+                        .unwrap_or(codex_client::RequestAuthentication::Provider);
+                    let req = match selection {
+                        codex_client::RequestAuthentication::Provider => {
+                            auth.apply_auth(req).await.map_err(TransportError::from)?
+                        }
+                        codex_client::RequestAuthentication::Prepared => req,
+                    };
                     if let Some(telemetry) = telemetry {
+                        if let Some(stream) = telemetry
+                            .stream_native_request(&req)
+                            .await
+                            .map_err(TransportError::Build)?
+                        {
+                            return Ok(stream);
+                        }
                         telemetry
                             .on_request_prepared(&req)
                             .map_err(TransportError::Build)?;
