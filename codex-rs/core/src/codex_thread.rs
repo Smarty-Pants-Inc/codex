@@ -1,3 +1,9 @@
+mod observation;
+mod observation_wake;
+mod pilot;
+pub use pilot::NativePilotRetirement;
+pub use pilot::PilotRetirementRemainder;
+
 use crate::agent::AgentStatus;
 use crate::config::ConstraintResult;
 use crate::context::ContextualUserFragment;
