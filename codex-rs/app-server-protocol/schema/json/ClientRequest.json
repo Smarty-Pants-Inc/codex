@@ -5531,6 +5531,96 @@
         }
       ]
     },
+    "WakeIntent": {
+      "additionalProperties": false,
+      "properties": {
+        "budgetGeneration": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "expectedCommitOrder": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "frameHash": {
+          "type": "string"
+        },
+        "frameRevision": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "sequence": {
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "budgetGeneration",
+        "expectedCommitOrder",
+        "frameHash",
+        "frameRevision",
+        "sequence"
+      ],
+      "type": "object"
+    },
+    "WakeReadQuery": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "operandDigest": {
+              "type": "string"
+            },
+            "sequence": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "attempt"
+              ],
+              "title": "AttemptWakeReadQueryType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "operandDigest",
+            "sequence",
+            "type"
+          ],
+          "title": "AttemptWakeReadQuery",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "sequence": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "type": {
+              "enum": [
+                "fence"
+              ],
+              "title": "FenceWakeReadQueryType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sequence",
+            "type"
+          ],
+          "title": "FenceWakeReadQuery",
+          "type": "object"
+        }
+      ]
+    },
     "WindowsSandboxSetupMode": {
       "enum": [
         "elevated",
