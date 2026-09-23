@@ -1,5 +1,5 @@
 use codex_api::SearchInput;
-use codex_core::is_contextual_user_message_content;
+use codex_core::is_contextual_user_fragment;
 use codex_core::parse_turn_item;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
@@ -11,6 +11,8 @@ use codex_tools::truncate_assistant_output_text_to_token_budget;
 const ASSISTANT_CONTEXT_TOKEN_LIMIT: usize = 1_000;
 const ASSISTANT_ROLE: &str = "assistant";
 const USER_ROLE: &str = "user";
+/// Content kind that the direct user-input boundary gives to typed text.
+const DIRECT_USER_TEXT_KIND: &str = "user.text";
 
 /// Builds the conversation tail for standalone web search.
 ///
@@ -59,13 +61,24 @@ fn push_visible_message(messages: &mut Vec<ResponseItem>, item: &ResponseItem) {
             phase,
             internal_chat_message_metadata_passthrough: metadata,
         } if role == USER_ROLE
-            && !is_contextual_user_message_content(content)
             && matches!(parse_turn_item(item), Some(TurnItem::UserMessage(_))) =>
         {
+            // Direct input marks each typed text item, and that text stays even when it
+            // looks like a context wrapper. Only unmarked items, such as legacy rollouts
+            // that stored context as user messages, are dropped for their wrapper shape.
+            let kinds = metadata
+                .as_ref()
+                .and_then(|metadata| metadata.content_item_kinds.as_deref())
+                .filter(|kinds| kinds.len() == content.len());
             let content = content
                 .iter()
-                .filter(|item| matches!(item, ContentItem::InputText { .. }))
-                .cloned()
+                .enumerate()
+                .filter(|(index, item)| {
+                    matches!(item, ContentItem::InputText { .. })
+                        && (kinds.is_some_and(|kinds| kinds[*index].0 == DIRECT_USER_TEXT_KIND)
+                            || !is_contextual_user_fragment(item))
+                })
+                .map(|(_, item)| item.clone())
                 .collect::<Vec<_>>();
             if !content.is_empty() {
                 messages.push(ResponseItem::Message {
@@ -86,10 +99,13 @@ mod tests {
     use codex_api::SearchInput;
     use codex_protocol::ResponseItemId;
     use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ContentItemKind;
+    use codex_protocol::models::InternalChatMessageMetadataPassthrough;
     use codex_protocol::models::ResponseItem;
     use pretty_assertions::assert_eq;
 
     use super::ASSISTANT_ROLE;
+    use super::DIRECT_USER_TEXT_KIND;
     use super::USER_ROLE;
     use super::recent_input;
 
@@ -193,6 +209,66 @@ mod tests {
                 "<environment_context>\n<cwd>/tmp</cwd>\n</environment_context>",
             ),
             message(USER_ROLE, "current user"),
+        ];
+
+        assert_eq!(
+            recent_input(&items),
+            Some(SearchInput::Items(vec![
+                message(USER_ROLE, "previous user"),
+                message(ASSISTANT_ROLE, "previous assistant"),
+                message(USER_ROLE, "current user"),
+            ]))
+        );
+    }
+
+    fn user_texts(texts: &[&str], kinds: Option<Vec<ContentItemKind>>) -> ResponseItem {
+        ResponseItem::Message {
+            id: None,
+            role: USER_ROLE.to_string(),
+            content: texts
+                .iter()
+                .map(|text| ContentItem::InputText {
+                    text: (*text).to_string(),
+                })
+                .collect(),
+            phase: None,
+            internal_chat_message_metadata_passthrough: kinds.map(|kinds| {
+                InternalChatMessageMetadataPassthrough {
+                    content_item_kinds: Some(kinds),
+                    ..Default::default()
+                }
+            }),
+        }
+    }
+
+    #[test]
+    fn keeps_direct_user_text_that_looks_like_context() {
+        let wrapper = "<environment_context>\n<cwd>/tmp</cwd>\n</environment_context>";
+        let direct_kinds = vec![ContentItemKind(DIRECT_USER_TEXT_KIND.to_string()); 2];
+        let current_user = user_texts(&["why does this cwd fail?", wrapper], Some(direct_kinds));
+        let items = vec![
+            message(USER_ROLE, "previous user"),
+            message(ASSISTANT_ROLE, "previous assistant"),
+            current_user.clone(),
+        ];
+
+        assert_eq!(
+            recent_input(&items),
+            Some(SearchInput::Items(vec![
+                message(USER_ROLE, "previous user"),
+                message(ASSISTANT_ROLE, "previous assistant"),
+                current_user,
+            ]))
+        );
+    }
+
+    #[test]
+    fn drops_only_context_shaped_text_without_direct_user_provenance() {
+        let wrapper = "<environment_context>\n<cwd>/tmp</cwd>\n</environment_context>";
+        let items = vec![
+            message(USER_ROLE, "previous user"),
+            message(ASSISTANT_ROLE, "previous assistant"),
+            user_texts(&["current user", wrapper], /*kinds*/ None),
         ];
 
         assert_eq!(
