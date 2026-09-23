@@ -2718,12 +2718,12 @@ private-home ownership. The native home lock excludes other cooperating
 observation launches; it is not protection against another same-user process
 which ignores that lock. Remote control is disabled for this launch only.
 
-After experimental initialization, request `observation: { "protocol": 1 }` in
+After experimental initialization, request `observation: { "protocol": 2 }` in
 `thread/start`. The response's experimental nullable `observation` capability is
 returned only after the same slot/profile is attached to the idle Core runtime
 and its sole relay task is retained by the native thread listener. Unsupported
 versions/profiles and non-stdio or unadmitted connections fail closed. Clients
-that opt out of captured/submitted notifications cannot acquire admission. Omission
+that opt out of captured/submitted/budget notifications cannot acquire admission. Omission
 keeps the ordinary start path. This API does not start a model turn automatically.
 
 For cold resume, the host must also supply
@@ -2739,7 +2739,8 @@ an observation binding. RPC fields and epochs cannot grant host admission.
 A failed start/resume is not a transaction rollback certificate for thread creation.
 
 Successful set/read ACKs share one slot FIFO with owner-only
-`thread/observation/captured` and `thread/observation/submitted` notifications.
+`thread/observation/captured`, `thread/observation/submitted`, and
+`thread/observation/budget` notifications.
 The method handler returns no success payload. A native UUID correlates the
 committed control event to its exact connection/request and reply kind. Pending
 correlations are bounded to32; slot capacity stays32 with one in-flight relay
@@ -2751,6 +2752,50 @@ replacement/teardown revokes the old binding and cancels its retained relay;
 Core keeps the revoked binding so an old runtime cannot silently send unobserved
 requests. Model compatibility is checked at installation and each decision.
 Normal/experimental generated schema and native execution evidence are pending.
+
+#### Native reservation state (observation protocol 2)
+
+Start/resume capabilities and set/read responses include `nativeReservation`:
+`{generation, state, model, profile, usableContextTokens, reservedTokens, maxFrameBytes}`.
+The state is `valid`, `invalid`, or `unsupported`; model and usable context tokens
+are required nullable fields. The profile is `harmonyGptOss`. Integers are JSON-safe.
+Current limits remain 4096 frame bytes and 4608 framed tokens. `valid` reports native
+capacity preconditions only, not external tokenizer/framing/provider qualification.
+It does not qualify a whole-request pilot bound or enable automatic admission.
+
+Set requires `expectedBudgetGeneration`, checked with the original owner under
+the publication lock. A non-null frame requires a valid matching generation.
+A higher-revision null clear remains possible with the current generation even
+when capacity is invalid or unsupported. Equal-revision renewal cannot move an
+old frame to a new generation; republish with a fresh revision instead.
+
+The existing `thread/observation/read` is the sole revalidation RPC. It rejoins
+committed session settings and the original slot generation after model lookup.
+Settings changes invalidate under the same session-state lock before commit;
+per-decision effective-model changes also fence captures and unsent attempts.
+An old configured model cannot revalidate over a known effective fallback.
+No slot lock is held across asynchronous model lookup.
+
+Set/read responses add `protocol:2` and `frameBudgetGeneration` (null only without
+a retained frame). The latter is the original publication's generation, never
+relabeled by revalidation. An old retained frame becomes `unavailable` until
+republished. Exact same-owner revision/hash/expiry/frame-generation readback can
+reconcile a lost ACK as a historical commit when only budget invalidation made it
+unavailable; it does not restore current eligibility, renewal or exposure.
+Expired, mismatched and lost-owner cases retain their existing refusal rules.
+
+`thread/observation/budget` carries `{protocol:2, threadId, ownerEpoch, commitOrder,
+nativeReservation}` on the original FIFO. Captured/submitted notifications add
+`protocol:2` and immutable `budgetGeneration`. A submission's wire `commitOrder`
+is its original capture order, even after a later budget event. The internal audit
+journal retains its distinct terminal/retry order. Already observed acceptance
+remains credited to the original attempt; invalidation cannot invent exposure.
+
+The native 4096-byte cap does not cover every host watch profile. For example,
+Sense's reservation formula `1024 + watches * (maxBodyBytes * 6 + 2048)` needs 5120
+bytes for two zero-body views, or 15360 for one default 2048-byte view. Assembly must
+report this scope mismatch, not silently reduce watch/body acceptance or widen
+native constants without independent physical qualification.
 
 ### Original-owner pilot controls (experimental, under development)
 
@@ -2806,7 +2851,7 @@ native semantics explicitly refuse `client_metadata` (including an empty object)
 Descriptor survival, independent semantic evidence and native execution remain
 separate qualification requirements; these flags alone do not permit effects.
 
-### Observation control rejections (protocol 1)
+### Observation control rejections (protocol 2)
 
 The owner-bound observation path uses the existing JSON-RPC error envelope, not
 an alternate rejected-success result. This contract does not itself enable
@@ -2820,7 +2865,7 @@ observation methods or grant ownership. A definite domain rejection has all of:
     "message": "observation control request rejected",
     "data": {
       "type": "threadObservationRejected",
-      "protocol": 1,
+      "protocol": 2,
       "code": "REVISION_MISMATCH"
     }
   }
@@ -2842,6 +2887,8 @@ error, a timeout or a lost response is not a no-commit certificate.
 | `RESOURCE_LIMIT` | Native sequence, in-flight or reserved FIFO capacity is unavailable before mutation. |
 | `UNSUPPORTED` | Protocol/profile/transport admission is unsupported before mutation. |
 | `INCOMPATIBLE_STATE` | Required local state or a valid native clock is unavailable before mutation. |
+| `BUDGET_INVALID` | Non-null publication requires valid native capacity. Cleanup clear is exempt from validity, not generation or owner checks. |
+| `BUDGET_GENERATION_MISMATCH` | Expected generation differs from the current one, or renewal would relabel an old frame. |
 
 For `thread/observation/set`, including clear and renewal, this certifies that the
 **correlated invocation did not commit the requested mutation**. Native expiry or

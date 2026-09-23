@@ -3,6 +3,24 @@ use crate::ObservationBinding;
 use crate::ObservationError;
 
 impl CodexThread {
+    /// Install the v2 reservation and binding before any turn can capture it.
+    pub async fn install_budgeted_observation_binding(
+        &self,
+        binding: ObservationBinding,
+        owner: crate::ObservationOwner,
+    ) -> Result<(), ObservationError> {
+        self.session
+            .install_budgeted_observation_binding(binding, owner)
+            .await
+    }
+
+    pub async fn revalidate_observation_budget(
+        &self,
+        owner: crate::ObservationOwner,
+    ) -> Result<(), ObservationError> {
+        self.session.revalidate_observation_budget(owner).await
+    }
+
     /// Attach the admitted slot/profile atomically while excluding native turn
     /// admission, including idle-start reservations. This grants no host authority.
     pub async fn install_observation_binding(

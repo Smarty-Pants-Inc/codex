@@ -24,7 +24,7 @@ impl ThreadRequestProcessor {
         let Some(options) = options else {
             return Ok(());
         };
-        if options.protocol != 1 {
+        if options.protocol != 2 {
             return Err(rejected(ThreadObservationRejectionCode::Unsupported));
         }
         let admission = self
@@ -55,6 +55,18 @@ impl ThreadRequestProcessor {
             .observation_bridge(thread_id, request.connection_id)
             .await
             .ok_or_else(denied)?;
+        bridge.validate_owner(request.connection_id, epoch)?;
+        if matches!(operation, ControlOperation::Read) {
+            let thread = self
+                .thread_manager
+                .get_thread(thread_id)
+                .await
+                .map_err(|_| denied())?;
+            thread
+                .revalidate_observation_budget(bridge.owner)
+                .await
+                .map_err(crate::observation_control::store_error)?;
+        }
         bridge.submit(request, epoch, operation)?;
         Ok(None) // The ordered relay, not this method return, sends success.
     }

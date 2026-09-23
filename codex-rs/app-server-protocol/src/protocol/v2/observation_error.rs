@@ -6,7 +6,7 @@ use serde::Serialize;
 /// Application error, distinct from the generic overloaded/internal errors.
 pub const THREAD_OBSERVATION_REJECTED_ERROR_CODE: i64 = -32002;
 
-/// Bounded data in the existing JSONRPCErrorError envelope. For protocol1 this
+/// Bounded data in the existing JSONRPCErrorError envelope. For protocol2 this
 /// discriminator certifies that the correlated control invocation did not
 /// commit a requested publication, replacement, clear or lease renewal. It does
 /// not establish the disposition of a previous invocation with a lost response.
@@ -16,7 +16,7 @@ pub const THREAD_OBSERVATION_REJECTED_ERROR_CODE: i64 = -32002;
 #[ts(tag = "type", rename_all = "camelCase", export_to = "v2/")]
 pub enum ThreadObservationErrorData {
     ThreadObservationRejected {
-        /// Exactly1 for the supported contract. Other versions are unknown.
+        /// Exactly2 for the supported contract. Other versions are unknown.
         protocol: u32,
         code: ThreadObservationRejectionCode,
     },
@@ -34,4 +34,6 @@ pub enum ThreadObservationRejectionCode {
     ResourceLimit,
     Unsupported,
     IncompatibleState,
+    BudgetInvalid,
+    BudgetGenerationMismatch,
 }

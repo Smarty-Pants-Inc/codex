@@ -30,6 +30,8 @@ fn capture(text: &str) -> ObservationCapture {
             hash: Some(format!("{:x}", Sha256::digest(text.as_bytes()))),
             expires_at: Some(1789392063),
             status: ObservationStatus::Current,
+            native_reservation: None,
+            frame_budget_generation: None,
         },
         captured_at: 1789392003,
         text: Some(Arc::from(text)),

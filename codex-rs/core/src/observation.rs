@@ -22,6 +22,11 @@ const MAX_SEQUENCE: u64 = (1_u64 << 53) - 1;
 const MAX_TIMESTAMP: i64 = 8_640_000_000_000;
 const EVENT_CAPACITY: usize = 32;
 
+#[path = "observation_budget.rs"]
+mod budget;
+pub use budget::ObservationReservation;
+pub use budget::ObservationReservationState;
+
 #[path = "observation_capture.rs"]
 mod capture;
 pub use capture::ObservationCapture;
@@ -96,12 +101,19 @@ pub struct ObservationMetadata {
     pub hash: Option<String>,
     pub expires_at: Option<i64>,
     pub status: ObservationStatus,
+    pub native_reservation: Option<ObservationReservation>,
+    pub frame_budget_generation: Option<u64>,
 }
 
 /// The app-server must forward this FIFO before sending corresponding set/read
 /// ACKs. Sending ACKs directly from the method return would break capture ordering.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ObservationEvent {
+    Budget {
+        owner: ObservationOwner,
+        commit_order: u64,
+        reservation: ObservationReservation,
+    },
     Published(ObservationMetadata),
     Read(ObservationMetadata),
     Captured(ObservationCapture),
@@ -125,6 +137,10 @@ pub enum ObservationError {
     ResourceLimit,
     #[error("observation state unavailable")]
     Unavailable,
+    #[error("observation budget invalid")]
+    BudgetInvalid,
+    #[error("observation budget generation mismatch")]
+    BudgetGenerationMismatch,
 }
 
 struct SlotState {
@@ -137,6 +153,8 @@ struct SlotState {
     revoked: bool,
     active_capture: Option<DecisionAudit>,
     pilot: Option<pilot::PilotLedger>,
+    budget: Option<budget::BudgetState>,
+    frame_budget_generation: Option<u64>,
 }
 
 impl SlotState {
@@ -164,12 +182,16 @@ impl SlotState {
             commit_order: self.commit_order,
             hash: self.frame.as_ref().map(|frame| frame.hash.clone()),
             expires_at: self.frame.as_ref().map(|frame| frame.expires_at),
+            native_reservation: self.budget.as_ref().map(|budget| budget.snapshot.clone()),
+            frame_budget_generation: self.frame_budget_generation,
             status: if self.revoked {
                 ObservationStatus::Unavailable
             } else if self.frame.is_none() {
                 ObservationStatus::Cleared
             } else if self.expired {
                 ObservationStatus::Expired
+            } else if !self.frame_budget_valid() {
+                ObservationStatus::Unavailable
             } else {
                 ObservationStatus::Current
             },
@@ -225,6 +247,8 @@ impl ObservationSlot {
                     revoked: false,
                     active_capture: None,
                     pilot: None,
+                    budget: None,
+                    frame_budget_generation: None,
                 }),
                 events,
                 clock: Box::new(move || {
@@ -249,7 +273,9 @@ impl ObservationSlot {
         revision: u64,
         frame: Option<ObservationFrame>,
     ) -> Result<ObservationMetadata, ObservationError> {
-        self.set_inner(owner, revision, frame, /*request_id*/ None)
+        self.set_inner(
+            owner, revision, frame, /*request_id*/ None, /*budget_generation*/ None,
+        )
     }
 
     /// The same publication boundary, with one correlated FIFO ACK instead of
@@ -261,8 +287,32 @@ impl ObservationSlot {
         frame: Option<ObservationFrame>,
         request_id: Uuid,
     ) -> Result<(), ObservationError> {
-        self.set_inner(owner, revision, frame, Some(request_id))
-            .map(|_| ())
+        self.set_inner(
+            owner,
+            revision,
+            frame,
+            Some(request_id),
+            /*budget_generation*/ None,
+        )
+        .map(|_| ())
+    }
+
+    pub fn set_for_request_at_budget(
+        &self,
+        owner: ObservationOwner,
+        revision: u64,
+        frame: Option<ObservationFrame>,
+        request_id: Uuid,
+        budget_generation: u64,
+    ) -> Result<(), ObservationError> {
+        self.set_inner(
+            owner,
+            revision,
+            frame,
+            Some(request_id),
+            Some(budget_generation),
+        )
+        .map(|_| ())
     }
 
     fn set_inner(
@@ -271,12 +321,23 @@ impl ObservationSlot {
         revision: u64,
         frame: Option<ObservationFrame>,
         request_id: Option<Uuid>,
+        budget_generation: Option<u64>,
     ) -> Result<ObservationMetadata, ObservationError> {
         let mut state = self
             .state
             .lock()
             .map_err(|_| ObservationError::Unavailable)?;
         state.authorize(owner)?;
+        if budget_generation.is_some() && state.budget.is_none() {
+            return Err(ObservationError::BudgetInvalid);
+        }
+        if state.budget.is_some() {
+            let generation = budget_generation.ok_or(ObservationError::BudgetGenerationMismatch)?;
+            state.require_budget(generation, frame.is_some())?;
+            if revision == state.revision && state.frame_budget_generation != Some(generation) {
+                return Err(ObservationError::BudgetGenerationMismatch);
+            }
+        }
         let now = (self.clock)()?;
         state.expire(now);
         if revision > MAX_SEQUENCE
@@ -332,6 +393,7 @@ impl ObservationSlot {
             .map_err(|_| ObservationError::ResourceLimit)?;
         state.revision = revision;
         state.commit_order += 1;
+        state.frame_budget_generation = frame.as_ref().and(budget_generation);
         state.frame = frame;
         state.deadline = deadline;
         let metadata = state.metadata();

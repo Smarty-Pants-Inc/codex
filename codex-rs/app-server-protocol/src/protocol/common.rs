@@ -1873,6 +1873,8 @@ server_notification_definitions! {
     ThreadStarted => "thread/started" (v2::ThreadStartedNotification),
     #[experimental("thread/observation/captured")]
     ThreadObservationCaptured => "thread/observation/captured" (v2::ThreadObservationCapturedNotification),
+    #[experimental("thread/observation/budget")]
+    ThreadObservationBudget => "thread/observation/budget" (v2::ThreadObservationBudgetNotification),
     #[experimental("thread/observation/submitted")]
     ThreadObservationSubmitted => "thread/observation/submitted" (v2::ThreadObservationSubmittedNotification),
     ThreadStatusChanged => "thread/status/changed" (v2::ThreadStatusChangedNotification),
