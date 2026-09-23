@@ -219,6 +219,7 @@ mod mcp_prewarm;
 mod mcp_refresh;
 mod mcp_runtime;
 pub(crate) mod multi_agents;
+mod observation_budget;
 mod observation_sampling;
 mod review;
 mod rollout_budget;
@@ -1643,6 +1644,9 @@ impl Session {
                     .turn_environments
                     .update_thread_config(&environment_config);
             }
+            if state.session_configuration.collaboration_mode != updated.collaboration_mode {
+                self.invalidate_observation_budget();
+            }
             state.session_configuration = updated;
             let new_config = notify_config_contributors
                 .then(|| self.build_effective_session_config(&state.session_configuration));
@@ -1780,6 +1784,7 @@ impl Session {
                 warn!("failed to refresh MCP auth storage config: {err}");
             }
             let config = Arc::new(config);
+            self.invalidate_observation_budget();
             state.session_configuration.original_config_do_not_use = Arc::clone(&config);
             self.mark_mcp_runtime_dirty();
             let new_config = notify_config_contributors

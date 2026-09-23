@@ -23,7 +23,7 @@ fn revision_rejection_has_exact_wire_envelope_and_does_not_publish() {
             "error": {
                 "code": -32002,
                 "message": "observation control request rejected",
-                "data": {"type": "threadObservationRejected", "protocol": 1, "code": "REVISION_MISMATCH"}
+                "data": {"type": "threadObservationRejected", "protocol": 2, "code": "REVISION_MISMATCH"}
             }
         })
     );
@@ -44,7 +44,7 @@ fn backpressure_rejection_does_not_claim_a_commit_or_leak_metadata() {
     );
     assert_eq!(
         error.data,
-        Some(json!({"type": "threadObservationRejected", "protocol": 1, "code": "RESOURCE_LIMIT"}))
+        Some(json!({"type": "threadObservationRejected", "protocol": 2, "code": "RESOURCE_LIMIT"}))
     );
     let mut last = None;
     while let Ok(event) = events.try_recv() {

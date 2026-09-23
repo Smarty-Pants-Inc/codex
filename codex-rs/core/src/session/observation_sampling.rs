@@ -44,6 +44,7 @@ impl ObservationSampling {
         canonical_input: Vec<ResponseItem>,
         model: &ModelInfo,
     ) -> Result<(Option<ResponseItem>, uuid::Uuid), ObservationError> {
+        self.slot.check_budget_model(model)?;
         if let Some(active) = &self.active
             && active.canonical_input == canonical_input
         {
@@ -53,11 +54,13 @@ impl ObservationSampling {
             self.slot.release(previous.capture.decision_id)?;
         }
         let mut item = None;
-        let capture = self.slot.capture_checked(&self.turn_id, |capture| {
-            item = CurrentObservations::new(self.profile, model, capture)?
-                .map(CurrentObservations::into_request_item);
-            Ok(())
-        })?;
+        let capture = self
+            .slot
+            .capture_checked(&self.turn_id, Some(model), |capture| {
+                item = CurrentObservations::new(self.profile, model, capture)?
+                    .map(CurrentObservations::into_request_item);
+                Ok(())
+            })?;
         let decision_id = capture.decision_id;
         self.active = Some(Active {
             canonical_input,
