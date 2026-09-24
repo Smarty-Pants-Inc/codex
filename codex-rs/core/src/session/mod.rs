@@ -39,6 +39,7 @@ use crate::exec_policy::default_policy_path;
 use crate::image_preparation::ImagePreparationMode;
 use crate::image_preparation::ImageResizeNoticeMode;
 use crate::image_preparation::prepare_response_items as prepare_image_response_items;
+use crate::image_preparation::prepare_response_items_with_removed_user_content as prepare_image_response_items_with_removed_user_content;
 use crate::image_preparation::unified_image_budget_enabled;
 use crate::parse_turn_item;
 use crate::realtime_conversation::RealtimeConversationManager;
@@ -3457,6 +3458,28 @@ impl Session {
         model_info: &ModelInfo,
         items: &'a [ResponseItem],
     ) -> (Cow<'a, [ResponseItem]>, Vec<ImagePreparationMetadata>) {
+        let (items, image_preparations, _) = self
+            .prepare_conversation_items_for_history_with_removed_user_content(
+                turn_context,
+                model_info,
+                items,
+            )
+            .await;
+        (items, image_preparations)
+    }
+
+    /// Prepares like [`Self::prepare_conversation_items_for_history`] and also returns the
+    /// original content indices that failed media removed from direct user messages.
+    pub(crate) async fn prepare_conversation_items_for_history_with_removed_user_content<'a>(
+        &self,
+        turn_context: &TurnContext,
+        model_info: &ModelInfo,
+        items: &'a [ResponseItem],
+    ) -> (
+        Cow<'a, [ResponseItem]>,
+        Vec<ImagePreparationMetadata>,
+        Vec<usize>,
+    ) {
         let mut items = items.to_vec();
         let image_preparation_mode =
             if unified_image_budget_enabled(&turn_context.config.features, model_info) {
@@ -3474,14 +3497,15 @@ impl Session {
             ImageResizeNoticeMode::Disabled
         };
         // Keep nested image-upload futures out of every caller's future frame.
-        let image_preparations = Box::pin(prepare_image_response_items(
-            &self.thread_id.to_string(),
-            &mut items,
-            image_preparation_mode,
-            image_resize_notice_mode,
-            self.services.image_store.as_ref(),
-        ))
-        .await;
+        let (image_preparations, removed_user_content_indices) =
+            Box::pin(prepare_image_response_items_with_removed_user_content(
+                &self.thread_id.to_string(),
+                &mut items,
+                image_preparation_mode,
+                image_resize_notice_mode,
+                self.services.image_store.as_ref(),
+            ))
+            .await;
         // Most response items get their passthrough turn ID at the durable history boundary.
         for item in &mut items {
             Self::stamp_response_item_for_history(item, &turn_context.sub_id);
@@ -3490,6 +3514,7 @@ impl Session {
         (
             Self::assign_missing_response_item_ids(items),
             image_preparations,
+            removed_user_content_indices,
         )
     }
 
@@ -5000,10 +5025,6 @@ impl Session {
             input.to_vec(),
             &mut user_image_content_indices,
         );
-        let original_user_content_len = response_items.first().map_or(0, |item| match item {
-            ResponseItem::Message { content, .. } => content.len(),
-            _ => 0,
-        });
         let mut acceptance_metadata = acceptance_order.map(|order| CodexHarnessMetadata {
             user_input_order: Some(order),
             ..Default::default()
@@ -5020,7 +5041,7 @@ impl Session {
                 ResponseItemEnvelope { item, metadata }
             })
             .collect();
-        let (prepared_items, image_preparations) = self
+        let (prepared_items, image_preparations, removed_user_content_indices) = self
             .prepare_annotated_conversation_items_for_history(turn_context, model_info, envelopes)
             .await;
         let mut user_message_item = UserMessageItem::new(input);
@@ -5028,7 +5049,7 @@ impl Session {
             &mut user_message_item,
             &prepared_items,
             &user_image_content_indices,
-            original_user_content_len,
+            &removed_user_content_indices,
         );
         self.record_prepared_conversation_items(
             turn_context,
@@ -5127,22 +5148,25 @@ fn apply_prepared_image_file_ids(
     user_message_item: &mut UserMessageItem,
     prepared_items: &[ResponseItemEnvelope],
     user_image_content_indices: &HashMap<usize, usize>,
-    original_user_content_len: usize,
+    removed_content_indices: &[usize],
 ) {
     // Preparation replaces image slots in place; resize notices are separate messages.
     // Read the references from the original message while retaining UI-only input spans.
-    // A failed media item moves to a developer notice and shifts the slots, so skip then.
+    // Failed media moves to a developer notice, so later slots shift left by the removed count.
     if let Some(ResponseItemEnvelope {
         item: ResponseItem::Message { content, .. },
         ..
     }) = prepared_items.first()
-        && content.len() == original_user_content_len
     {
         for (&input_index, &content_index) in user_image_content_indices {
+            let removed_before = removed_content_indices.partition_point(|&i| i < content_index);
+            if removed_content_indices.get(removed_before) == Some(&content_index) {
+                continue;
+            }
             if let Some(ContentItem::InputImage {
                 image: ImageReference::File { file_id },
                 ..
-            }) = content.get(content_index)
+            }) = content.get(content_index - removed_before)
                 && let UserInput::Image { detail, .. } | UserInput::LocalImage { detail, .. } =
                     &user_message_item.content[input_index]
             {

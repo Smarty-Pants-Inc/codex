@@ -127,7 +127,28 @@ pub(crate) async fn prepare_response_items(
     resize_notice_mode: ImageResizeNoticeMode,
     image_store: &dyn AttachmentStore,
 ) -> Vec<ImagePreparationMetadata> {
+    prepare_response_items_with_removed_user_content(
+        thread_id,
+        items,
+        mode,
+        resize_notice_mode,
+        image_store,
+    )
+    .await
+    .0
+}
+
+/// Prepares items like [`prepare_response_items`] and also returns the ascending original content
+/// indices that failed media removed from direct user messages. Pass one user message to map them.
+pub(crate) async fn prepare_response_items_with_removed_user_content(
+    thread_id: &str,
+    items: &mut Vec<ResponseItem>,
+    mode: ImagePreparationMode,
+    resize_notice_mode: ImageResizeNoticeMode,
+    image_store: &dyn AttachmentStore,
+) -> (Vec<ImagePreparationMetadata>, Vec<usize>) {
     let mut metadata = Vec::new();
+    let mut removed_user_content_indices = Vec::new();
     let mut prepared_items = Vec::with_capacity(items.len());
     for mut item in std::mem::take(items) {
         let had_metadata = matches!(
@@ -162,7 +183,7 @@ pub(crate) async fn prepare_response_items(
                 };
                 if role == "user" {
                     // Generated notices are host text, so they never join the direct user message.
-                    let (content, notices) = prepare_user_message_content(
+                    let (content, notices, removed_indices) = prepare_user_message_content(
                         thread_id,
                         content,
                         resize_notice_mode,
@@ -172,6 +193,7 @@ pub(crate) async fn prepare_response_items(
                         image_store,
                     )
                     .await;
+                    removed_user_content_indices.extend(removed_indices);
                     let content_is_empty = content.is_empty();
                     let _ = set_annotated_content(&mut item, content);
                     if content_is_empty
@@ -272,7 +294,7 @@ pub(crate) async fn prepare_response_items(
         }
     }
     *items = prepared_items;
-    metadata
+    (metadata, removed_user_content_indices)
 }
 
 async fn prepare_tool_output(
@@ -316,7 +338,7 @@ async fn prepare_user_message_content(
     mode: ImagePreparationMode,
     existing_texts: &HashSet<String>,
     image_store: &dyn AttachmentStore,
-) -> (Vec<AnnotatedContent>, Vec<AnnotatedContent>) {
+) -> (Vec<AnnotatedContent>, Vec<AnnotatedContent>, Vec<usize>) {
     // File-backed images are already prepared and pass through while retaining their positions in
     // resize notices.
     let image_count = items
@@ -326,7 +348,8 @@ async fn prepare_user_message_content(
     let mut image_number = 0;
     let mut prepared_content = Vec::with_capacity(items.len());
     let mut developer_notices = Vec::new();
-    for item in items {
+    let mut removed_indices = Vec::new();
+    for (index, item) in items.into_iter().enumerate() {
         let (content, kind) = item.into_parts();
         match content {
             ContentItem::InputImage {
@@ -368,6 +391,7 @@ async fn prepare_user_message_content(
                     }
                     Err(error) => {
                         warn!(%error, "failed to prepare message image");
+                        removed_indices.push(index);
                         let notice = error.placeholder().to_string();
                         if !existing_texts.contains(&notice) {
                             developer_notices.push(AnnotatedContent::input_text(
@@ -380,6 +404,7 @@ async fn prepare_user_message_content(
             }
             ContentItem::InputAudio { mut audio_url } => {
                 if let Some(placeholder) = prepare_audio_item(&mut audio_url) {
+                    removed_indices.push(index);
                     if !existing_texts.contains(&placeholder) {
                         developer_notices.push(AnnotatedContent::input_text(
                             placeholder,
@@ -396,7 +421,7 @@ async fn prepare_user_message_content(
             content => prepared_content.push(AnnotatedContent::new(content, kind)),
         }
     }
-    (prepared_content, developer_notices)
+    (prepared_content, developer_notices, removed_indices)
 }
 
 async fn prepare_message_content(
