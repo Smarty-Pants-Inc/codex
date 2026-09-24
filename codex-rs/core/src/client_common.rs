@@ -32,6 +32,9 @@ pub struct Prompt {
     /// Optional the output schema for the model's response.
     pub output_schema: Option<Value>,
 
+    /// Optional nonzero output ceiling for the Responses request.
+    pub max_output_tokens: Option<std::num::NonZeroU64>,
+
     /// Whether the Responses API should strictly validate `output_schema`.
     pub output_schema_strict: bool,
 }
@@ -44,6 +47,7 @@ impl Default for Prompt {
             parallel_tool_calls: false,
             base_instructions: BaseInstructions::default(),
             output_schema: None,
+            max_output_tokens: None,
             output_schema_strict: true,
         }
     }
