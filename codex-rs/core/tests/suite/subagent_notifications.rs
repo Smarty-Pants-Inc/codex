@@ -1261,11 +1261,20 @@ async fn grandchild_full_fork_preserves_context_baseline(
         ]),
     )
     .await;
+    // A final answer defers queued child-completion mail to the next turn. Without it, a
+    // grandchild completion that lands during the child's follow-up sample triggers a third
+    // follow-up request that no mock serves, and the child never reaches `Completed`.
     let _parent_followups = mount_sse_sequence(
         &server,
         vec![
-            sse(vec![ev_completed("baseline-parent-finished-1")]),
-            sse(vec![ev_completed("baseline-parent-finished-2")]),
+            sse(vec![
+                ev_assistant_message("baseline-parent-final-1", "done"),
+                ev_completed("baseline-parent-finished-1"),
+            ]),
+            sse(vec![
+                ev_assistant_message("baseline-parent-final-2", "done"),
+                ev_completed("baseline-parent-finished-2"),
+            ]),
         ],
     )
     .await;
