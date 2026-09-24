@@ -586,9 +586,10 @@ async fn guardians_retain_evidence_after_compaction_and_discard_it_after_rollbac
                 async_input.contains(&checkpoint),
                 (1..=3).contains(&index) && compatible
             );
+            // The fork submits the sync reviewer prompt as developer input.
             let sync_text = sync_input
                 .iter()
-                .filter(|item| item["role"] == "user")
+                .filter(|item| item["role"] == "developer")
                 .filter_map(|item| item["content"].as_array())
                 .flatten()
                 .filter_map(|part| part["text"].as_str())

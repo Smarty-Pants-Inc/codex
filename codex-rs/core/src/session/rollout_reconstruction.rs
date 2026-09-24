@@ -670,7 +670,7 @@ impl Session {
             if !item.is_user_message() {
                 continue;
             }
-            let Some(item_id) = item.id().map(|id| id.as_str()) else {
+            let Some(item_id) = item.id().map(codex_protocol::ResponseItemId::as_str) else {
                 continue;
             };
             if direct_user_provenance

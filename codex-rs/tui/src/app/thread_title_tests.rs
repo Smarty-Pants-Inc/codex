@@ -97,8 +97,9 @@ async fn automatic_thread_title_respects_origin_metadata_after_switching() -> co
         let mut app_server = crate::start_embedded_app_server_for_picker(&app.config).await?;
         let started = app_server.start_thread(&app.config).await?;
         let thread_id = started.session.thread_id;
+        // Injected user-role items are rejected; seed the thread with a developer item.
         let user_message = serde_json::from_str(
-            r#"{"type":"message","role":"user","content":[{"type":"input_text","text":"Fix the login timeout"}]}"#,
+            r#"{"type":"message","role":"developer","content":[{"type":"input_text","text":"Fix the login timeout"}]}"#,
         )?;
         app_server
             .thread_inject_items(thread_id, vec![user_message])

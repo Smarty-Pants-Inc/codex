@@ -3127,6 +3127,8 @@ async fn thread_goal_keeps_original_root_until_external_objective_edit() -> Resu
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_managed_config()
+        // Goal auto-continue is opt-in for fork app-server hosts.
+        .with_goal_auto_continue()
         .build_initialized()
         .await?;
     let thread = mcp.start_thread(ThreadStartParams::default()).await?.thread;
