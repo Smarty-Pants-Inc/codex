@@ -956,16 +956,7 @@ fn register_synthetic_mount_targets(
                 let target = if target.preserves_pre_existing_path()
                     && synthetic_mount_marker_dir_has_active_synthetic_owner(&marker_dir)
                 {
-                    match target.kind() {
-                        crate::bwrap::SyntheticMountTargetKind::EmptyFile => {
-                            crate::bwrap::SyntheticMountTarget::missing(target.path())
-                        }
-                        crate::bwrap::SyntheticMountTargetKind::EmptyDirectory => {
-                            crate::bwrap::SyntheticMountTarget::missing_empty_directory(
-                                target.path(),
-                            )
-                        }
-                    }
+                    target.without_pre_existing_path()
                 } else {
                     target.clone()
                 };
@@ -978,6 +969,9 @@ fn register_synthetic_mount_targets(
                         )
                     },
                 );
+                if !target.preserves_pre_existing_path() {
+                    crate::synthetic_mount_origin::create_and_record(&target, &marker_dir);
+                }
                 SyntheticMountTargetRegistration {
                     target,
                     marker_file,
@@ -1107,7 +1101,11 @@ fn cleanup_synthetic_mount_targets(targets: &[SyntheticMountTargetRegistration])
             if synthetic_mount_marker_dir_has_active_process(&target.marker_dir) {
                 continue;
             }
-            remove_synthetic_mount_target(&target.target);
+            remove_synthetic_mount_target(
+                &target.target,
+                crate::synthetic_mount_origin::recorded_identity(&target.marker_dir),
+            );
+            crate::synthetic_mount_origin::remove_record(&target.marker_dir);
             match fs::remove_dir(&target.marker_dir) {
                 Ok(()) => {}
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -1244,7 +1242,10 @@ fn make_directory_tree_writable(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn remove_synthetic_mount_target(target: &crate::bwrap::SyntheticMountTarget) {
+fn remove_synthetic_mount_target(
+    target: &crate::bwrap::SyntheticMountTarget,
+    created_identity: Option<String>,
+) {
     let path = target.path();
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
@@ -1254,7 +1255,18 @@ fn remove_synthetic_mount_target(target: &crate::bwrap::SyntheticMountTarget) {
             path.display()
         ),
     };
-    if !target.should_remove_after_bwrap(&metadata) {
+    // A helper-created object is removed only while it is still that object,
+    // even if a killed helper left it and this run saw it as pre-existing.
+    let should_remove = match created_identity {
+        Some(created_identity) => {
+            created_identity == crate::synthetic_mount_origin::identity(&metadata)
+                && target
+                    .without_pre_existing_path()
+                    .should_remove_after_bwrap(&metadata)
+        }
+        None => target.should_remove_after_bwrap(&metadata),
+    };
+    if !should_remove {
         return;
     }
     match target.kind() {

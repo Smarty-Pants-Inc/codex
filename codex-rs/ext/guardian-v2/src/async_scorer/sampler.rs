@@ -350,6 +350,7 @@ impl LunaSampler {
         }
         let mut request = ResponsesApiRequest {
             model: MODEL.to_owned(),
+            max_output_tokens: None,
             instructions: String::new(),
             input,
             tools: None,

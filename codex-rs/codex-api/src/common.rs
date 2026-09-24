@@ -281,6 +281,8 @@ impl Serialize for ResponsesApiTools {
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct ResponsesApiRequest {
     pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<std::num::NonZeroU64>,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub instructions: String,
     pub input: Vec<ResponseItem>,
@@ -310,6 +312,7 @@ impl<'a> From<&'a ResponsesApiRequest> for ResponseCreateWsRequest<'a> {
     fn from(request: &'a ResponsesApiRequest) -> Self {
         Self {
             model: &request.model,
+            max_output_tokens: request.max_output_tokens,
             instructions: &request.instructions,
             previous_response_id: None,
             input: &request.input,
@@ -334,6 +337,8 @@ impl<'a> From<&'a ResponsesApiRequest> for ResponseCreateWsRequest<'a> {
 #[derive(Debug, Serialize)]
 pub struct ResponseCreateWsRequest<'a> {
     pub model: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<std::num::NonZeroU64>,
     #[serde(skip_serializing_if = "str::is_empty")]
     pub instructions: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
