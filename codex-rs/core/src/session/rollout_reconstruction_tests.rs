@@ -18,6 +18,7 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
@@ -281,6 +282,7 @@ fn turn_started_event(turn_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnStarted(
         codex_protocol::protocol::TurnStartedEvent {
             turn_id: turn_id.to_string(),
+            root_turn_id: None,
             trace_id: None,
             started_at: None,
             model_context_window: Some(128_000),
@@ -372,64 +374,6 @@ fn completed_user_turn_rollout(
 }
 
 #[tokio::test]
-#[expect(
-    clippy::await_holding_invalid_type,
-    reason = "test mutates session history while holding its state lock"
-)]
-async fn ephemeral_direct_user_provenance_rejects_history_lookalikes() {
-    let (session, turn_context) = make_session_and_context().await;
-    let input = [UserInput::Text {
-        text: "DIRECT_SENTINEL".to_string(),
-        text_elements: Vec::new(),
-    }];
-    session
-        .record_user_prompt_and_emit_turn_item(
-            &turn_context,
-            turn_context.model_info(),
-            &input,
-            /*client_id*/ None,
-            /*acceptance_order*/ None,
-            PersistContext::Standard,
-        )
-        .await;
-
-    let direct_items = session
-        .direct_user_response_items_from_rollout()
-        .await
-        .expect("direct provenance should be available in memory");
-    assert_eq!(direct_items.len(), 1);
-    let direct_item = direct_items[0].clone();
-
-    let mut same_id_spoof = direct_item.clone();
-    if let ResponseItem::Message { content, .. } = &mut same_id_spoof {
-        *content = vec![ContentItem::InputText {
-            text: "SPOOFED_CONTENT".to_string(),
-        }];
-    }
-    let mut different_id = direct_item.clone();
-    different_id.set_id(Some(ResponseItemId::with_suffix("msg", "generated")));
-    let mut missing_id = direct_item.clone();
-    missing_id.set_id(None);
-
-    let mut state = session.state.lock().await;
-    state.history.replace_annotated(vec![
-        ResponseItemEnvelope::new(direct_item.clone()),
-        ResponseItemEnvelope::new(same_id_spoof),
-        ResponseItemEnvelope::new(different_id),
-        ResponseItemEnvelope::new(missing_id),
-    ]);
-    drop(state);
-
-    assert_eq!(
-        session
-            .direct_user_response_items_from_rollout()
-            .await
-            .expect("direct provenance should remain available"),
-        vec![direct_item],
-    );
-}
-
-#[tokio::test]
 async fn record_initial_history_reconstructs_typed_inter_agent_message() {
     let (session, _turn_context) = make_session_and_context().await;
     let communication = InterAgentCommunication::new(
@@ -515,7 +459,9 @@ async fn reconstruction_keeps_image_only_user_message_after_js_repl_output() {
         id: None,
         role: "user".to_string(),
         content: vec![ContentItem::InputImage {
-            image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==".to_string(),
+            image: ImageReference::Inline {
+                image_url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==".to_string(),
+            },
             detail: None,
         }],
         phase: None,

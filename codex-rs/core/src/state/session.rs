@@ -73,8 +73,6 @@ pub(crate) struct SessionState {
     /// Persisted origin of the session base instructions, when known.
     pub(crate) base_instructions_provenance: Option<BaseInstructionsProvenance>,
     pub(crate) history: ContextManager,
-    /// Trusted direct-user items for sessions without durable rollout provenance.
-    pub(crate) direct_user_response_items: Vec<ResponseItem>,
     /// Cancels work bound to discarded history or a superseded Guardian evidence policy.
     pub(crate) history_reset: CancellationToken,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
@@ -125,7 +123,6 @@ impl SessionState {
             session_configuration,
             base_instructions_provenance: None,
             history,
-            direct_user_response_items: Vec::new(),
             history_reset: CancellationToken::new(),
             latest_rate_limits: None,
             latest_token_usage_record: None,
@@ -153,7 +150,6 @@ impl SessionState {
         I::Item: std::ops::Deref<Target = ResponseItem>,
     {
         self.history.record_items(items, policy);
-        self.prune_direct_user_response_items();
     }
     pub(crate) fn record_annotated_items(
         &mut self,
@@ -161,7 +157,6 @@ impl SessionState {
         policy: TruncationPolicy,
     ) {
         self.history.record_annotated_items(items, policy);
-        self.prune_direct_user_response_items();
     }
 
     pub(crate) fn previous_turn_settings(&self) -> Option<PreviousTurnSettings> {
@@ -186,31 +181,6 @@ impl SessionState {
 
     pub(crate) fn clone_history(&self) -> ContextManager {
         self.history.clone()
-    }
-
-    pub(crate) fn direct_user_response_items(&self) -> Vec<ResponseItem> {
-        self.direct_user_response_items
-            .iter()
-            .filter(|direct_item| {
-                self.history.raw_items().any(|history_item| {
-                    response_items_match_for_provenance(direct_item, history_item)
-                })
-            })
-            .cloned()
-            .collect()
-    }
-
-    pub(crate) fn record_direct_user_response_items(&mut self, items: Vec<ResponseItem>) {
-        self.direct_user_response_items.extend(items);
-        self.prune_direct_user_response_items();
-    }
-
-    fn prune_direct_user_response_items(&mut self) {
-        self.direct_user_response_items.retain(|direct_item| {
-            self.history
-                .raw_items()
-                .any(|history_item| response_items_match_for_provenance(direct_item, history_item))
-        });
     }
 
     #[cfg(test)]
@@ -248,7 +218,6 @@ impl SessionState {
         }
         self.history
             .set_reference_context_item(reference_context_item);
-        self.prune_direct_user_response_items();
         self.auto_compact_window.clear_prefill();
     }
 
@@ -481,20 +450,6 @@ impl SessionState {
             .get(environment_id)
             .cloned()
     }
-}
-
-fn response_items_match_for_provenance(
-    direct_item: &ResponseItem,
-    history_item: &ResponseItem,
-) -> bool {
-    if direct_item.id() != history_item.id() || direct_item.id().is_none() {
-        return false;
-    }
-    let mut direct_item = direct_item.clone();
-    direct_item.clear_internal_chat_message_metadata_passthrough();
-    let mut history_item = history_item.clone();
-    history_item.clear_internal_chat_message_metadata_passthrough();
-    direct_item == history_item
 }
 
 // Sometimes new snapshots don't include credits or plan information.
