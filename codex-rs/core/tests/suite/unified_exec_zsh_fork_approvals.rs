@@ -313,8 +313,10 @@ async fn unified_exec_zsh_fork_guardian_reviews_intercepted_execve() -> Result<(
     skip_if_no_network!(Ok(()));
 
     let approval_policy = AskForApproval::OnRequest;
-    let permission_profile = restrictive_workspace_write_profile();
     let outside_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    // A denied read makes Guardian's execve review carry the parent permission context.
+    let denied_path = outside_dir.path().join("guardian-execve-private");
+    let permission_profile = denied_read_permission_profile(&denied_path)?;
     let outside_path = outside_dir
         .path()
         .join("unified-exec-zsh-fork-guardian-execve.txt");
@@ -448,6 +450,16 @@ async fn unified_exec_zsh_fork_guardian_reviews_intercepted_execve() -> Result<(
         .collect::<Vec<_>>();
     assert_eq!(guardian_requests.len(), 2);
     assert!(guardian_requests[1].body_contains_text(&outside_path.to_string_lossy()));
+    // The fork submits the Guardian review prompt as developer input.
+    let guardian_text = guardian_requests[1]
+        .message_input_texts("developer")
+        .join("");
+    let permissions = guardian_text
+        .split_once("PARENT TURN PERMISSION CONTEXT START")
+        .and_then(|(_, text)| text.split_once("PARENT TURN PERMISSION CONTEXT END"))
+        .map(|(permissions, _)| permissions)
+        .context("intercepted command's Guardian permissions")?;
+    assert!(permissions.contains(denied_path.to_string_lossy().as_ref()));
     assert!(
         outside_path.exists(),
         "Guardian-approved intercepted touch should create the out-of-workspace file"
@@ -467,9 +479,10 @@ async fn unified_exec_zsh_fork_guardian_reviews_persistent_terminal_in_current_t
         .path()
         .join("unified-exec-zsh-fork-current-turn.txt");
     // Any denied read in the terminal's owning environment rejects stdin to an escalated
-    // terminal before review; `stdin_denied_read_tests` covers that path, and
-    // `guardian::tests::background_approval_permissions_use_the_owning_environment` covers
-    // Guardian's use of the owning environment's denied reads.
+    // terminal before review (`stdin_denied_read_tests`). The parent permission context appears
+    // only with denied reads, so `unified_exec_zsh_fork_guardian_reviews_intercepted_execve`
+    // asserts it, and `guardian::tests::background_approval_permissions_use_the_owning_environment`
+    // covers Guardian's use of the owning environment's denied reads.
     let permission_profile = restrictive_workspace_write_profile();
     let rules = r#"prefix_rule(pattern=["touch"], decision="prompt")"#.to_string();
 
@@ -653,11 +666,6 @@ async fn unified_exec_zsh_fork_guardian_reviews_persistent_terminal_in_current_t
     assert!(guardian_requests[0].body_contains_text(&environment));
     assert!(guardian_requests[0].body_contains_text("The `cwd` field is its launch directory"));
     assert!(guardian_requests[1].body_contains_text(&outside_path.to_string_lossy()));
-    // The fork submits the Guardian review prompt as developer input.
-    let guardian_text = guardian_requests[1]
-        .message_input_texts("developer")
-        .join("");
-    assert!(guardian_text.contains("PARENT TURN PERMISSION CONTEXT START"));
 
     Ok(())
 }
