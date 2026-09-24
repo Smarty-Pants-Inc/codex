@@ -71,6 +71,10 @@ async fn terminal_transcript_survives_lagged_broadcast_and_poll_drains() -> anyh
     Ok(())
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "the held transcript lock stalls the output task on purpose"
+)]
 #[tokio::test]
 async fn local_output_is_lossless_while_output_task_is_stalled() -> anyhow::Result<()> {
     use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
