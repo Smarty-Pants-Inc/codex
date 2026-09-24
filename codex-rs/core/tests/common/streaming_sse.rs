@@ -21,6 +21,7 @@ pub struct StreamingSseChunk {
 pub struct StreamingSseServer {
     uri: String,
     requests: Arc<TokioMutex<Vec<Vec<u8>>>>,
+    request_lines: Arc<TokioMutex<Vec<String>>>,
     request_notify: Arc<Notify>,
     shutdown: oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
@@ -33,6 +34,11 @@ impl StreamingSseServer {
 
     pub async fn requests(&self) -> Vec<Vec<u8>> {
         self.requests.lock().await.clone()
+    }
+
+    /// Returns the method and path of every request received, in arrival order.
+    pub async fn request_lines(&self) -> Vec<String> {
+        self.request_lines.lock().await.clone()
     }
 
     pub async fn wait_for_request_count(&self, count: usize) {
@@ -79,8 +85,10 @@ pub async fn start_streaming_sse_server(
         completions: VecDeque::from(completion_senders),
     }));
     let requests = Arc::new(TokioMutex::new(Vec::new()));
+    let request_lines = Arc::new(TokioMutex::new(Vec::new()));
     let request_notify = Arc::new(Notify::new());
     let requests_for_task = Arc::clone(&requests);
+    let request_lines_for_task = Arc::clone(&request_lines);
     let request_notify_for_task = Arc::clone(&request_notify);
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
 
@@ -92,6 +100,7 @@ pub async fn start_streaming_sse_server(
                     let (mut stream, _) = accept_res.expect("accept streaming SSE connection");
                     let state = Arc::clone(&state);
                     let requests = Arc::clone(&requests_for_task);
+                    let request_lines = Arc::clone(&request_lines_for_task);
                     let request_notify = Arc::clone(&request_notify_for_task);
                     tokio::spawn(async move {
                         let (request, body_prefix) = read_http_request(&mut stream).await;
@@ -99,6 +108,7 @@ pub async fn start_streaming_sse_server(
                             let _ = write_http_response(&mut stream, /*status*/ 400, "bad request", "text/plain").await;
                             return;
                         };
+                        request_lines.lock().await.push(format!("{method} {path}"));
 
                         if method == "GET" && path == "/v1/models" {
                             if read_request_body(&mut stream, &request, body_prefix)
@@ -171,6 +181,7 @@ pub async fn start_streaming_sse_server(
         StreamingSseServer {
             uri,
             requests,
+            request_lines,
             request_notify,
             shutdown: shutdown_tx,
             task,
