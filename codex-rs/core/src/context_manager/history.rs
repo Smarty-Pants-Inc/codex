@@ -276,7 +276,8 @@ impl ContextManager {
                                 let ResponseItem::Message { role, content, .. } = item else {
                                     return false;
                                 };
-                                if role != "user" || is_contextual_user_message_content(content) {
+                                if role != "user" || content.iter().any(is_contextual_user_fragment)
+                                {
                                     return false;
                                 }
                                 let text = content
@@ -339,7 +340,7 @@ impl ContextManager {
             // Retain the legacy window through replay, including answers captured in its suffix.
             history.reset(self.raw_items().filter(|item| {
                 !matches!(item, ResponseItem::Message { role, content, .. }
-                    if role == "user" && is_contextual_user_message_content(content))
+                    if role == "user" && content.iter().any(is_contextual_user_fragment))
             }));
         }
         self.review_history = Some(history);

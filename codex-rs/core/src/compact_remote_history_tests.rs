@@ -1,12 +1,9 @@
 use super::*;
 use crate::compact_remote_v2::is_retained_for_remote_compaction_v2;
 use codex_history::CodexHarnessMetadata;
-use codex_protocol::ResponseItemId;
 use codex_protocol::items::HookPromptFragment;
 use codex_protocol::items::build_hook_prompt_message;
 use codex_protocol::models::ContentItem;
-use codex_protocol::models::ContentItemKind;
-use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 
 #[test]
 fn rewritten_output_preserves_harness_metadata() {
