@@ -113,6 +113,7 @@ pub(crate) struct UnifiedExecProcess {
     state_rx: watch::Receiver<ProcessState>,
     output_task: Option<JoinHandle<()>>,
     sandbox_type: SandboxType,
+    timed_out: AtomicBool,
     spawn_lifecycle: Option<SpawnLifecycleHandle>,
 }
 
@@ -154,6 +155,7 @@ impl UnifiedExecProcess {
             state_rx,
             output_task: None,
             sandbox_type,
+            timed_out: AtomicBool::new(false),
             spawn_lifecycle,
         }
     }
@@ -220,6 +222,9 @@ impl UnifiedExecProcess {
     }
 
     pub(super) fn exit_code(&self) -> Option<i32> {
+        if self.timed_out() {
+            return Some(124);
+        }
         let state = self.state_rx.borrow().clone();
         match &self.process_handle {
             ProcessHandle::Local(process_handle) => {
@@ -227,6 +232,14 @@ impl UnifiedExecProcess {
             }
             ProcessHandle::ExecServer(_) => state.exit_code,
         }
+    }
+
+    pub(super) fn mark_timed_out(&self) {
+        self.timed_out.store(true, Ordering::Release);
+    }
+
+    pub(super) fn timed_out(&self) -> bool {
+        self.timed_out.load(Ordering::Acquire)
     }
 
     fn finish_termination(&self) {

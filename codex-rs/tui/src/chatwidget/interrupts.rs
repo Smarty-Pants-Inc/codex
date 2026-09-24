@@ -181,6 +181,7 @@ mod tests {
         turn_id: &str,
     ) -> ExecApprovalRequestEvent {
         ExecApprovalRequestEvent {
+            kind: Default::default(),
             call_id: call_id.to_string(),
             approval_id: approval_id.map(str::to_string),
             turn_id: turn_id.to_string(),
