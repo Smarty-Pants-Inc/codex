@@ -230,10 +230,7 @@ async fn handle_spawn_agent(
         &[("role", role_tag), ("version", "v2")],
     );
     let task_name = String::from(new_agent_path);
-    let model = agent_snapshot
-        .as_ref()
-        .map(|snapshot| snapshot.model.clone())
-        .unwrap_or_else(|| turn.model_info().slug.clone());
+    let model = agent_snapshot.model.clone();
     let multi_agent_version = spawned_agent.multi_agent_version;
     let hide_agent_metadata = turn.config.multi_agent_v2.hide_spawn_agent_metadata;
     let output = if hide_agent_metadata {

@@ -4330,7 +4330,7 @@ impl Session {
     ) -> Vec<ResponseItem> {
         let turn_context = step_context.turn.as_ref();
         let mut developer_sections = Vec::<RenderedFragment>::with_capacity(8);
-        let mut contextual_user_sections = Vec::<RenderedFragment>::with_capacity(2);
+        let contextual_user_sections = Vec::<RenderedFragment>::with_capacity(2);
         let mut separate_developer_sections = Vec::<RenderedFragment>::new();
         let mut context_window_hints = Vec::new();
         let (session_source, auto_compact_window_ids) = {
