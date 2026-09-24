@@ -314,6 +314,7 @@ fn responses_request_properties_match(
 ) -> bool {
     let ResponsesApiRequest {
         model: previous_model,
+        max_output_tokens: previous_max_output_tokens,
         instructions: previous_instructions,
         input: _,
         tools: previous_tools,
@@ -331,6 +332,7 @@ fn responses_request_properties_match(
     } = previous;
     let ResponsesApiRequest {
         model: current_model,
+        max_output_tokens: current_max_output_tokens,
         instructions: current_instructions,
         input: _,
         tools: current_tools,
@@ -348,6 +350,7 @@ fn responses_request_properties_match(
     } = current;
 
     previous_model == current_model
+        && previous_max_output_tokens == current_max_output_tokens
         && previous_instructions == current_instructions
         && previous_tools == current_tools
         && previous_tool_choice == current_tool_choice
@@ -943,6 +946,7 @@ impl ModelClient {
         let service_tier = model_info.service_tier_for_request(service_tier);
         let request = ResponsesApiRequest {
             model: model_info.slug.clone(),
+            max_output_tokens: prompt.max_output_tokens,
             instructions,
             input,
             tools,
