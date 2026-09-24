@@ -11541,12 +11541,26 @@ async fn interrupting_compaction_fallback_retains_last_known_step_context() {
     };
 
     // The real turn loop has prepared both contexts before sending its first compact request.
-    timeout(
+    if timeout(
         Duration::from_secs(/*secs*/ 10),
         server.wait_for_request_count(/*count*/ 1),
     )
     .await
-    .expect("primary compaction request");
+    .is_err()
+    {
+        // Diagnostics for a rare CI hang: name the startup step that stalled.
+        let mut observed = std::collections::VecDeque::new();
+        while let Ok(event) = events.try_recv() {
+            if observed.len() == 50 {
+                observed.pop_front();
+            }
+            observed.push_back(format!("{}:{}", event.msg, event.id));
+        }
+        panic!(
+            "primary compaction request: Elapsed; last events (type:id): {observed:?}; server requests: {:?}",
+            server.request_lines().await
+        );
+    }
     let primary = state
         .lock()
         .await
