@@ -12384,6 +12384,10 @@ async fn set_total_token_usage(sess: &Session, total_token_usage: TokenUsage) {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "the held session state pauses background startup at a known point"
+)]
 async fn interrupted_pending_work_reservation_keeps_mailbox_mail() {
     let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
     let communication = InterAgentCommunication::new(

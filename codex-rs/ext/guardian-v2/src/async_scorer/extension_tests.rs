@@ -1633,7 +1633,7 @@ max_recent_non_user_entries = 8
             )
         }),
     )
-    .chain(decision_sequence.clone())
+    .chain(decision_sequence)
     .collect::<Vec<_>>();
     samples.sort();
     expected_samples.sort();

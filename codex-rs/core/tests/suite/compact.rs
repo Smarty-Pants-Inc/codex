@@ -619,10 +619,12 @@ async fn summarize_context_three_requests_and_instructions(
         "compaction request should include the summarize trigger"
     );
     // The last item is the synthesized compaction prompt.
-    let last2 = input2.last().unwrap();
-    assert_eq!(last2.get("type").unwrap().as_str().unwrap(), "message");
-    assert_eq!(last2.get("role").unwrap().as_str().unwrap(), "developer");
-    let text2 = last2["content"][0]["text"].as_str().unwrap();
+    let last2 = input2.last().expect("summarization prompt");
+    assert_eq!(last2["type"], "message");
+    assert_eq!(last2["role"], "developer");
+    let text2 = last2["content"][0]["text"]
+        .as_str()
+        .expect("summarization prompt text");
     assert_eq!(
         text2, SUMMARIZATION_PROMPT,
         "expected summarize trigger, got `{text2}`"

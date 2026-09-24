@@ -249,7 +249,9 @@ jobs:
         working-directory: codex-rs
         # Workspace feature unification links the sandboxed V8 that code-mode-runtime
         # requires, so codex-v8-poc must declare the matching sandbox feature.
-        run: python3 ../.github/scripts/ci_disk_observation.py run workspace just test --locked --retries 0 --test-threads 2 --features codex-v8-poc/sandbox
+        # codex-voice-host links GStreamer 1.28, which the hosted runner image does not provide;
+        # upstream builds and tests it only through Bazel.
+        run: python3 ../.github/scripts/ci_disk_observation.py run workspace just test --workspace --exclude codex-voice-host --locked --retries 0 --test-threads 2 --features codex-v8-poc/sandbox
       - name: Report sandbox metadata left in /tmp
         if: always()
         run: |
