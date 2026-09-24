@@ -850,7 +850,7 @@ mod tests {
                 item_id: "perm-1".to_string(),
                 environment_id: None,
                 started_at_ms: 0,
-                cwd: cwd.clone(),
+                cwd: cwd.clone().into(),
                 reason: None,
                 permissions: codex_app_server_protocol::RequestPermissionProfile {
                     network: None,
@@ -906,7 +906,8 @@ mod tests {
                     } else {
                         "/tmp"
                     }))
-                    .expect("path must be absolute"),
+                    .expect("path must be absolute")
+                    .into(),
                     reason: None,
                     permissions: codex_app_server_protocol::RequestPermissionProfile {
                         network: None,
