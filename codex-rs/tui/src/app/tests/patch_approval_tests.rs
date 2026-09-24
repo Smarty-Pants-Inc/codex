@@ -291,6 +291,7 @@ async fn replayed_patch_approval_pager_recovers_stored_turn_changes() {
     let cwd = app.chat_widget.config_ref().cwd.to_path_buf();
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
+            delegated_turns: Vec::new(),
             session: Some(test_thread_session(thread_id, cwd)),
             turns: vec![test_turn(
                 TURN_ID,
@@ -298,6 +299,7 @@ async fn replayed_patch_approval_pager_recovers_stored_turn_changes() {
                 vec![patch_item()],
             )],
             events: vec![ThreadBufferedEvent::Request(Box::new(request(thread_id)))],
+            active_reasoning_item: None,
             input_state: None,
         },
         /*resume_restored_queue*/ false,

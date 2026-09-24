@@ -3,6 +3,7 @@
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::BaseInstructionsProvenance;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_sandboxing::policy_transforms::merge_permission_profiles;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -27,18 +28,53 @@ use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TokenUsageRecord;
 use codex_protocol::protocol::TurnContextItem;
 use codex_utils_output_truncation::TruncationPolicy;
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
+
+/// Runtime request effort, initially unset and established by prewarm or sampling.
+/// Successful compaction allows a fresh baseline without an override.
+pub(crate) enum ReasoningEffortPin {
+    Unset,
+    Compacted,
+    Active {
+        model: String,
+        effort: ReasoningEffort,
+    },
+}
+
+impl ReasoningEffortPin {
+    pub(crate) fn get(&self, model: &str) -> Option<ReasoningEffort> {
+        match self {
+            Self::Active {
+                model: pinned_model,
+                effort,
+            } if pinned_model == model => Some(effort.clone()),
+            Self::Unset | Self::Compacted | Self::Active { .. } => None,
+        }
+    }
+
+    pub(crate) fn pin(&mut self, model: &str, effort: ReasoningEffort) -> ReasoningEffort {
+        if let Some(pinned) = self.get(model) {
+            return pinned;
+        }
+        *self = Self::Active {
+            model: model.to_owned(),
+            effort: effort.clone(),
+        };
+        effort
+    }
+}
 
 /// Persistent, session-scoped state previously stored directly on `Session`.
 pub(crate) struct SessionState {
     pub(crate) session_configuration: SessionConfiguration,
+    /// Plugin selection of the last admitted task; settings updates take effect on the next task.
+    pub(crate) active_disabled_plugin_ids: Vec<String>,
     /// Persisted origin of the session base instructions, when known.
     pub(crate) base_instructions_provenance: Option<BaseInstructionsProvenance>,
     pub(crate) history: ContextManager,
-    /// Trusted direct-user items for sessions without durable rollout provenance.
-    pub(crate) direct_user_response_items: Vec<ResponseItem>,
-    /// User messages restored without replay provenance, such as from a compaction checkpoint.
-    pub(crate) unverified_user_item_ids: HashSet<String>,
+    /// Cancels work bound to discarded history or a superseded Guardian evidence policy.
+    pub(crate) history_reset: CancellationToken,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) latest_token_usage_record: Option<TokenUsageRecord>,
     pub(crate) server_reasoning_included: bool,
@@ -48,8 +84,13 @@ pub(crate) struct SessionState {
     /// model/realtime handling on subsequent regular turns (including full-context
     /// reinjection after resume or `/compact`).
     previous_turn_settings: Option<PreviousTurnSettings>,
+    /// Latest task admitted in this runtime, retained across completion and history edits.
+    /// Cleared by standalone settings changes to invalidate pending continuation.
+    pub(crate) last_started_turn_id: Option<String>,
     /// Runtime accounting state for the active auto-compaction window.
     auto_compact_window: AutoCompactWindow,
+    /// Original request effort for the current model while configuration updates remain active.
+    pub(crate) reasoning_effort_pin: ReasoningEffortPin,
     /// Startup prewarmed session prepared during session initialization.
     pub(crate) startup_prewarm: Option<SessionStartupPrewarmHandle>,
     /// Retained after completion so later turns do not repeat speculative captures.
@@ -78,18 +119,20 @@ impl SessionState {
         history: ContextManager,
     ) -> Self {
         Self {
+            active_disabled_plugin_ids: Vec::new(),
             session_configuration,
             base_instructions_provenance: None,
             history,
-            direct_user_response_items: Vec::new(),
-            unverified_user_item_ids: HashSet::new(),
+            history_reset: CancellationToken::new(),
             latest_rate_limits: None,
             latest_token_usage_record: None,
             server_reasoning_included: false,
             mcp_dependency_prompted: HashSet::new(),
             additional_context: AdditionalContextStore::default(),
             previous_turn_settings: None,
+            last_started_turn_id: None,
             auto_compact_window: AutoCompactWindow::new_with_ids(auto_compact_window_ids),
+            reasoning_effort_pin: ReasoningEffortPin::Unset,
             startup_prewarm: None,
             shell_snapshot_prewarm: None,
             current_time_reminder: CurrentTimeReminderState::default(),
@@ -107,7 +150,6 @@ impl SessionState {
         I::Item: std::ops::Deref<Target = ResponseItem>,
     {
         self.history.record_items(items, policy);
-        self.prune_direct_user_response_items();
     }
     pub(crate) fn record_annotated_items(
         &mut self,
@@ -115,7 +157,6 @@ impl SessionState {
         policy: TruncationPolicy,
     ) {
         self.history.record_annotated_items(items, policy);
-        self.prune_direct_user_response_items();
     }
 
     pub(crate) fn previous_turn_settings(&self) -> Option<PreviousTurnSettings> {
@@ -142,56 +183,17 @@ impl SessionState {
         self.history.clone()
     }
 
-    pub(crate) fn direct_user_response_items(&self) -> Vec<ResponseItem> {
-        self.direct_user_response_items
-            .iter()
-            .filter(|direct_item| {
-                self.history.raw_items().any(|history_item| {
-                    response_items_match_for_provenance(direct_item, history_item)
-                })
-            })
-            .cloned()
-            .collect()
-    }
-
-    pub(crate) fn set_unverified_user_item_ids(&mut self, item_ids: HashSet<String>) {
-        self.unverified_user_item_ids = item_ids;
-    }
-
-    /// Returns whether history holds a user message whose provenance replay could not establish.
-    pub(crate) fn has_unverified_user_items(&self) -> bool {
-        self.history.raw_items().any(|item| {
-            item.is_user_message()
-                && item
-                    .id()
-                    .is_some_and(|id| self.unverified_user_item_ids.contains(id.as_str()))
-        })
-    }
-
-    pub(crate) fn record_direct_user_response_items(&mut self, items: Vec<ResponseItem>) {
-        self.direct_user_response_items.extend(items);
-        self.prune_direct_user_response_items();
-    }
-
-    fn prune_direct_user_response_items(&mut self) {
-        self.direct_user_response_items.retain(|direct_item| {
-            self.history
-                .raw_items()
-                .any(|history_item| response_items_match_for_provenance(direct_item, history_item))
-        });
-    }
-
     #[cfg(test)]
     pub(crate) fn replace_history(
         &mut self,
         items: Vec<ResponseItem>,
         reference_context_item: Option<TurnContextItem>,
     ) {
-        self.history.replace(items);
-        self.history
-            .set_reference_context_item(reference_context_item);
-        self.prune_direct_user_response_items();
-        self.auto_compact_window.clear_prefill();
+        self.replace_annotated_history(
+            items.into_iter().map(ResponseItemEnvelope::new).collect(),
+            reference_context_item,
+            HistoryReplacement::Reset,
+        );
     }
 
     pub(crate) fn replace_annotated_history(
@@ -200,13 +202,22 @@ impl SessionState {
         reference_context_item: Option<TurnContextItem>,
         replacement: HistoryReplacement,
     ) {
-        match replacement {
-            HistoryReplacement::Compaction => self.history.replace_compacted(items),
-            HistoryReplacement::Reset => self.history.replace_annotated(items),
+        let invalidate_reviews = match replacement {
+            HistoryReplacement::Compaction {
+                reviewer_compaction_hash,
+            } => self
+                .history
+                .replace_compacted(items, reviewer_compaction_hash.as_deref()),
+            HistoryReplacement::Reset => {
+                self.history.replace_annotated(items);
+                true
+            }
+        };
+        if invalidate_reviews {
+            std::mem::take(&mut self.history_reset).cancel();
         }
         self.history
             .set_reference_context_item(reference_context_item);
-        self.prune_direct_user_response_items();
         self.auto_compact_window.clear_prefill();
     }
 
@@ -439,20 +450,6 @@ impl SessionState {
             .get(environment_id)
             .cloned()
     }
-}
-
-fn response_items_match_for_provenance(
-    direct_item: &ResponseItem,
-    history_item: &ResponseItem,
-) -> bool {
-    if direct_item.id() != history_item.id() || direct_item.id().is_none() {
-        return false;
-    }
-    let mut direct_item = direct_item.clone();
-    direct_item.clear_internal_chat_message_metadata_passthrough();
-    let mut history_item = history_item.clone();
-    history_item.clear_internal_chat_message_metadata_passthrough();
-    direct_item == history_item
 }
 
 // Sometimes new snapshots don't include credits or plan information.

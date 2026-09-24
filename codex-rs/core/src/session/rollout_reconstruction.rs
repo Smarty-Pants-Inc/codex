@@ -24,11 +24,6 @@ pub(super) struct RolloutReconstruction {
     pub(super) first_window_id: Option<Uuid>,
     pub(super) previous_window_id: Option<Uuid>,
     pub(super) window_id: Option<Uuid>,
-    /// IDs of reconstructed user messages that replayed lifecycle events prove direct.
-    pub(super) direct_user_item_ids: HashSet<String>,
-    /// IDs of reconstructed user messages that the replayed rollout never observed as items,
-    /// such as messages restored from a compaction checkpoint. Their provenance is unknown.
-    pub(super) unverified_user_item_ids: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -130,54 +125,6 @@ impl DirectUserReplayProvenance {
     fn proves_generated(&self, item_id: &str) -> bool {
         self.observed_user_item_ids.contains(item_id)
             && !self.direct_user_item_ids.contains(item_id)
-    }
-}
-
-impl Session {
-    pub(crate) async fn direct_user_response_items_from_rollout(
-        &self,
-    ) -> CodexResult<Vec<ResponseItem>> {
-        let live_thread = {
-            // Threads without a rollout, and paginated rollouts that cannot load full history,
-            // use the in-memory provenance that resume and fork seed from replay and that live
-            // input extends.
-            let state = self.state.lock().await;
-            match self.live_thread() {
-                Some(live_thread)
-                    if state.session_configuration.history_mode != ThreadHistoryMode::Paginated =>
-                {
-                    live_thread
-                }
-                _ if state.has_unverified_user_items() => {
-                    // Fail closed: keep the current history rather than drop user messages
-                    // whose provenance replay could not establish.
-                    return Err(CodexErr::UnsupportedOperation(
-                        "remote compaction cannot prove the provenance of restored user messages"
-                            .to_string(),
-                    ));
-                }
-                _ => return Ok(state.direct_user_response_items()),
-            }
-        };
-        let history = live_thread
-            .load_history(/*include_archived*/ true)
-            .await
-            .map_err(|error| CodexErr::Fatal(error.to_string()))?;
-        let provenance = DirectUserReplayProvenance::from_rollout(&history.items);
-        Ok(history
-            .items
-            .into_iter()
-            .filter_map(|item| match item {
-                RolloutItem::ResponseItem(envelope)
-                    if envelope.item.id().is_some_and(|id| {
-                        provenance.direct_user_item_ids.contains(id.as_str())
-                    }) =>
-                {
-                    Some(envelope.item)
-                }
-                _ => None,
-            })
-            .collect())
     }
 }
 
@@ -539,6 +486,9 @@ impl Session {
             history.restore_review_context(
                 checkpoint.compacted.retained_context.as_ref(),
                 checkpoint.compacted.guardian_history.as_ref(),
+                // Keep the backup during replay; the installing session resolves its reviewer.
+                /*reviewer_compaction_hash*/
+                None,
             );
         }
         // Materialize exact history semantics from the replay-derived suffix. The eventual lazy
@@ -664,33 +614,10 @@ impl Session {
             previous_id: None,
             id: None,
         });
-        let mut direct_user_item_ids = HashSet::new();
-        let mut unverified_user_item_ids = HashSet::new();
-        for item in history.raw_items() {
-            if !item.is_user_message() {
-                continue;
-            }
-            let Some(item_id) = item.id().map(codex_protocol::ResponseItemId::as_str) else {
-                continue;
-            };
-            if direct_user_provenance
-                .direct_user_item_ids
-                .contains(item_id)
-            {
-                direct_user_item_ids.insert(item_id.to_string());
-            } else if !direct_user_provenance
-                .observed_user_item_ids
-                .contains(item_id)
-            {
-                unverified_user_item_ids.insert(item_id.to_string());
-            }
-        }
         RolloutReconstruction {
             retained_context: history.retained_context().clone(),
             guardian_history: history.guardian_history_checkpoint(),
             history: history.into_annotated_items(),
-            direct_user_item_ids,
-            unverified_user_item_ids,
             previous_turn_settings,
             reference_context_item,
             world_state_baseline,

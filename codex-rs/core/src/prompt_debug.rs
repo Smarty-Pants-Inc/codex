@@ -95,8 +95,12 @@ pub(crate) async fn build_prompt_input_from_session(
 
     if !input.is_empty() {
         let response_items = sess.response_items_from_user_input(input);
-        sess.record_conversation_items(turn_context.as_ref(), &response_items)
-            .await;
+        sess.record_conversation_items(
+            turn_context.as_ref(),
+            &step_context.settings.model_info,
+            &response_items,
+        )
+        .await;
     }
 
     let prompt_input = sess

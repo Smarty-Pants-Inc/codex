@@ -16,8 +16,10 @@ use codex_extension_api::ThreadResumeInput;
 use codex_extension_api::ThreadStartInput;
 use codex_extension_api::ThreadStopInput;
 use codex_extension_api::TokenUsageContributor;
+use codex_extension_api::ToolCall;
 use codex_extension_api::ToolCallOutcome;
 use codex_extension_api::ToolContributor;
+use codex_extension_api::ToolExecutor;
 use codex_extension_api::ToolFinishInput;
 use codex_extension_api::ToolLifecycleContributor;
 use codex_extension_api::ToolLifecycleFuture;
@@ -29,6 +31,7 @@ use codex_extension_api::TurnStopInput;
 use codex_extension_api::TurnSuspendInput;
 use codex_otel::MetricsClient;
 use codex_protocol::ThreadId;
+use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -189,11 +192,12 @@ where
         Box::pin(async move {
             let config = (self.goal_config)(input.config);
             let enabled = config.enabled;
-            let tools_available_for_thread = input.persistent_thread_state_available
-                && !matches!(
-                    input.session_source,
-                    SessionSource::SubAgent(SubAgentSource::Review)
-                );
+            let tools_visible_for_thread = !matches!(
+                input.session_source,
+                SessionSource::SubAgent(SubAgentSource::Review)
+            );
+            let tools_available_for_thread =
+                input.persistent_thread_state_available && tools_visible_for_thread;
             let auto_continue_capability =
                 auto_continue_capability_for(input.session_source, self.auto_continue_capability);
             input.thread_store.insert(config);
@@ -241,6 +245,7 @@ where
                         enabled,
                         tools_available_for_thread,
                         auto_continue_capability,
+                        tools_visible_for_thread,
                         root_accounting_state,
                     },
                 )
@@ -326,6 +331,11 @@ where
                 return;
             }
 
+            let Some(token_usage_at_turn_start) = input.token_usage_at_turn_start else {
+                tracing::warn!("skipping goal turn accounting: token baseline unavailable");
+                return;
+            };
+
             if let Err(err) = self
                 .state_dbs
                 .thread_goals()
@@ -344,8 +354,11 @@ where
                 input.turn_id,
                 input.collaboration_mode.mode,
                 idle_turn_source,
-                input.token_usage_at_turn_start,
+                token_usage_at_turn_start,
             );
+            if idle_turn_source == IdleTurnSource::GoalContinuation {
+                accounting.mark_goal_continuation(input.turn_id.to_string());
+            }
             if matches!(
                 input.collaboration_mode.mode,
                 codex_protocol::config_types::ModeKind::Plan
@@ -399,6 +412,23 @@ where
         })
     }
 
+    fn on_item_completed<'a>(
+        &'a self,
+        thread_store: &'a ExtensionData,
+        turn_store: &'a ExtensionData,
+        item: &'a TurnItem,
+    ) -> ExtensionFuture<'a, ()> {
+        Box::pin(async move {
+            if let Some(runtime) = goal_runtime_handle(thread_store)
+                && runtime.is_enabled()
+            {
+                runtime
+                    .accounting_state()
+                    .record_item(turn_store.level_id(), item);
+            }
+        })
+    }
+
     fn on_turn_stop<'a>(&'a self, input: TurnStopInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
@@ -422,6 +452,14 @@ where
                 tracing::warn!(
                     "failed to stop active goal after repeated execution failures for {turn_id}: {err}"
                 );
+                return;
+            }
+            if let Err(err) = runtime
+                .stop_active_goal_for_turn(turn_id, ActiveGoalStopReason::EmptyResponse)
+                .await
+            {
+                input.thread_store.remove::<TurnStartOptions>();
+                tracing::warn!("failed to stop goal after empty responses for {turn_id}: {err}");
                 return;
             }
             if let Err(err) = runtime
@@ -462,6 +500,7 @@ where
             let Some(runtime) = goal_runtime_handle(input.thread_store) else {
                 return;
             };
+            runtime.accounting_state().reset_empty_responses();
             if !runtime.is_enabled() {
                 return;
             }
@@ -639,16 +678,16 @@ where
             .get::<GoalExtensionConfig>()
             .and_then(|config| config.max_goal_token_budget);
 
-        vec![
-            Arc::new(GoalToolExecutor::get(
+        let tools = [
+            GoalToolExecutor::get(
                 runtime.thread_id(),
                 Arc::clone(&self.state_dbs),
                 runtime.accounting_state(),
                 self.analytics.clone(),
                 self.event_emitter.clone(),
                 self.metrics.clone(),
-            )),
-            Arc::new(GoalToolExecutor::create(
+            ),
+            GoalToolExecutor::create(
                 runtime.thread_id(),
                 Arc::clone(&self.state_dbs),
                 runtime.accounting_state(),
@@ -656,16 +695,23 @@ where
                 self.event_emitter.clone(),
                 self.metrics.clone(),
                 max_goal_token_budget,
-            )),
-            Arc::new(GoalToolExecutor::update(
+            ),
+            GoalToolExecutor::update(
                 runtime.thread_id(),
                 Arc::clone(&self.state_dbs),
                 runtime.accounting_state(),
                 self.analytics.clone(),
                 self.event_emitter.clone(),
                 self.metrics.clone(),
-            )),
-        ]
+            ),
+        ];
+        tools
+            .into_iter()
+            .map(|mut tool| {
+                tool.execution_allowed = runtime.tools_available();
+                Arc::new(tool) as Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>
+            })
+            .collect()
     }
 }
 
