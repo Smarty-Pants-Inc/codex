@@ -394,6 +394,7 @@ fn fail_process_with_message(process: &UnifiedExecProcess, message: String) -> U
 #[allow(clippy::too_many_arguments)]
 async fn emit_failed_initial_exec_end_if_unstored(
     process_started_alive: bool,
+    sandbox_type: Option<codex_protocol::sandbox::SandboxType>,
     context: &UnifiedExecContext,
     request: &ExecCommandRequest,
     cwd: PathUri,
@@ -408,6 +409,7 @@ async fn emit_failed_initial_exec_end_if_unstored(
     }
 
     emit_failed_exec_end_for_unified_exec(
+        sandbox_type,
         Arc::clone(&context.session),
         Arc::clone(&context.step_context.turn),
         Arc::clone(&context.step_context.settings.model_info),
@@ -555,7 +557,7 @@ impl UnifiedExecProcessManager {
             )
         });
 
-        let transcript = Arc::clone(&process.output_handles().transcript);
+        let transcript = process.transcript();
         let model_context = context.step_context.model_context();
         let mut event_ctx = ToolEventCtx::new(
             context.session.as_ref(),
@@ -677,6 +679,7 @@ impl UnifiedExecProcessManager {
             .await;
             emit_failed_initial_exec_end_if_unstored(
                 process_started_alive,
+                process.sandbox_type(),
                 context,
                 &request,
                 cwd.clone(),
@@ -698,6 +701,7 @@ impl UnifiedExecProcessManager {
             .await;
             emit_failed_initial_exec_end_if_unstored(
                 process_started_alive,
+                process.sandbox_type(),
                 context,
                 &request,
                 cwd.clone(),
@@ -776,6 +780,7 @@ impl UnifiedExecProcessManager {
             if let Err(message) = finish_result {
                 emit_failed_initial_exec_end_if_unstored(
                     process_started_alive,
+                    process.sandbox_type(),
                     context,
                     &request,
                     cwd.clone(),
@@ -795,6 +800,7 @@ impl UnifiedExecProcessManager {
                 .finish_plugin_metrics(context, exit)
                 .await;
             emit_exec_end_for_unified_exec(
+                process.sandbox_type(),
                 Arc::clone(&context.session),
                 Arc::clone(&context.step_context.turn),
                 Arc::clone(&context.step_context.settings.model_info),
@@ -898,11 +904,7 @@ impl UnifiedExecProcessManager {
         };
         let _interaction_guard = locked_process.interaction_lock().lock_owned().await;
         // A queued write must observe strict review enabled while it was waiting.
-        let strict_auto_review = context
-            .session
-            .active_turn_context_and_strict_auto_review()
-            .await
-            .is_some_and(|(_, _, strict)| strict);
+        let strict_auto_review = context.session.strict_auto_review_enabled().await;
         let approval = {
             let store = self.process_store.lock().await;
             let entry = store

@@ -367,7 +367,7 @@ impl Session {
         let Some(turn) = active.as_mut() else {
             return false;
         };
-        let agent_execution_guard = self.services.agent_control.execution_guard(
+        let agent_execution_guard = self.services.agent_control.admit_turn(
             turn_context.multi_agent_version,
             &turn_context.session_source,
         );
@@ -638,10 +638,19 @@ impl Session {
                 None
             }
         };
-        let Some(mut active_turn) = active_turn else {
+        let Some(active_turn) = active_turn else {
             return false;
         };
 
+        self.finish_turn_abort(active_turn, reason).await;
+        true
+    }
+
+    pub(crate) async fn finish_turn_abort(
+        self: &Arc<Self>,
+        mut active_turn: ActiveTurn,
+        reason: TurnAbortReason,
+    ) {
         let task = active_turn.task.take();
         let turn_context = task.as_ref().map(|task| Arc::clone(&task.turn_context));
         if let Some(task) = task {
@@ -659,8 +668,6 @@ impl Session {
         if reason == TurnAbortReason::Interrupted {
             self.maybe_start_turn_for_pending_work().await;
         }
-
-        true
     }
 
     pub async fn on_task_finished(

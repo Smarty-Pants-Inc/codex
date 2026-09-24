@@ -1,4 +1,4 @@
-//! Bridges the board extension to existing tree, clock and active-turn services.
+//! Bridges the board extension to the selected controller, clock and active-turn services.
 //!
 //! The extension owns storage and tools. This adapter never starts or restores
 //! recipients and never queues a notification for an idle agent.
@@ -15,7 +15,7 @@ use codex_agent_message_board_extension::AgentMessageBoard;
 use codex_agent_message_board_extension::LocalAgentMessageBoard;
 use codex_agent_message_board_extension::MessageBoardHost;
 use codex_agent_message_board_extension::NotificationDelivery;
-use codex_agent_message_board_extension::PostMetadata;
+use codex_agent_message_board_extension::PostPreview;
 use codex_extension_api::ExtensionRegistryBuilder;
 use codex_features::Feature;
 use codex_protocol::AgentPath;
@@ -24,6 +24,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
+use codex_protocol::protocol::InterAgentCommunication;
 use futures::future::BoxFuture;
 use std::sync::Arc;
 use std::sync::Weak;
@@ -67,68 +68,76 @@ struct LocalBoardHost {
 }
 
 impl LocalBoardHost {
-    async fn actor(&self) -> Result<Arc<CodexThread>> {
+    async fn actor(&self, caller: ThreadId) -> Result<Arc<CodexThread>> {
         let manager = self
             .manager
             .upgrade()
-            .ok_or_else(|| CodexErr::ThreadNotFound(self.caller))?;
-        let actor = manager.get_thread(self.caller).await?;
+            .ok_or_else(|| CodexErr::ThreadNotFound(caller))?;
+        let actor = manager.get_thread(caller).await?;
         if actor.session.session_id() != self.tree {
             return Err(CodexErr::InvalidRequest(
                 "agent belongs to another message board".into(),
             ));
         }
-        // Match existing collaboration resolution: roots are registered lazily.
-        if self.caller == ThreadId::from(self.tree) {
-            actor
-                .session
-                .services
-                .agent_control
-                .register_session_root(self.caller, /*current_parent_thread_id*/ None);
-        }
         Ok(actor)
+    }
+
+    async fn registered_path(&self, actor: &CodexThread) -> Result<AgentPath> {
+        let caller = actor.session.thread_id;
+        let path = actor
+            .session_source
+            .get_agent_path()
+            .or_else(|| (caller == ThreadId::from(self.tree)).then(AgentPath::root))
+            .ok_or_else(|| CodexErr::InvalidRequest("agent has no tree path".into()))?;
+        let resolved = actor
+            .session
+            .services
+            .agent_control
+            .resolve(
+                caller,
+                actor.session_source.parent_thread_id(),
+                &actor.session_source,
+                path.as_str(),
+            )
+            .await?;
+        if resolved != caller {
+            return Err(CodexErr::InvalidRequest(
+                "agent does not own its tree path".into(),
+            ));
+        }
+        Ok(path)
     }
 }
 
 impl MessageBoardHost for LocalBoardHost {
     fn agent_path(&self, caller: ThreadId) -> BoxFuture<'_, Result<AgentPath>> {
         Box::pin(async move {
-            self.actor()
-                .await?
-                .session
-                .services
-                .agent_control
-                .ensure_agent_known(caller)?
-                .agent_path
-                .ok_or_else(|| CodexErr::InvalidRequest("agent has no tree path".into()))
+            let actor = self.actor(caller).await?;
+            self.registered_path(&actor).await
         })
     }
 
     fn resolve_agent(&self, path: AgentPath) -> BoxFuture<'_, Result<ThreadId>> {
         Box::pin(async move {
-            let actor = self.actor().await?;
+            let actor = self.actor(self.caller).await?;
             actor
                 .session
                 .services
                 .agent_control
-                .resolve_agent_reference(self.caller, &actor.session_source, path.as_str())
+                .resolve(
+                    self.caller,
+                    actor.session_source.parent_thread_id(),
+                    &actor.session_source,
+                    path.as_str(),
+                )
                 .await
         })
     }
 
     fn current_time(&self, caller: ThreadId) -> BoxFuture<'_, Result<DateTime<Utc>>> {
         Box::pin(async move {
-            self.agent_path(caller).await?;
-            let manager = self
-                .manager
-                .upgrade()
-                .ok_or_else(|| CodexErr::ThreadNotFound(caller))?;
-            let actor = manager.get_thread(caller).await?;
-            if actor.session.session_id() != self.tree {
-                return Err(CodexErr::InvalidRequest(
-                    "agent belongs to another message board".into(),
-                ));
-            }
+            let actor = self.actor(caller).await?;
+            self.registered_path(&actor).await?;
             actor
                 .session
                 .services
@@ -141,14 +150,14 @@ impl MessageBoardHost for LocalBoardHost {
 
     fn notify(
         &self,
-        recipient: ThreadId,
-        post: PostMetadata,
+        recipient_id: ThreadId,
+        post: PostPreview,
     ) -> BoxFuture<'_, Result<NotificationDelivery>> {
         Box::pin(async move {
             let Some(manager) = self.manager.upgrade() else {
                 return Ok(NotificationDelivery::SkippedInactive);
             };
-            let recipient = match manager.get_thread(recipient).await {
+            let recipient = match manager.get_thread(recipient_id).await {
                 Ok(thread) => thread,
                 Err(error) if matches!(error.details(), CodexErrorDetails::ThreadNotFound(_)) => {
                     return Ok(NotificationDelivery::SkippedInactive);
@@ -160,13 +169,18 @@ impl MessageBoardHost for LocalBoardHost {
                     "notification recipient belongs to another board".into(),
                 ));
             }
-            let notice = AgentMessageBoardNotification {
-                message_id: post.message_id,
-                thread_id: post.thread_id,
-            };
+            let recipient_path = self.registered_path(&recipient).await?;
+            let notice = AgentMessageBoardNotification(post);
+            let communication = InterAgentCommunication::new(
+                notice.0.metadata.author.clone(),
+                recipient_path,
+                Vec::new(),
+                notice.render(),
+                /*trigger_turn*/ false,
+            );
             Ok(
                 match recipient
-                    .inject_if_running(vec![ContextualUserFragment::into(notice)])
+                    .inject_if_running(vec![communication.to_model_input_item()])
                     .await
                 {
                     Ok(()) => NotificationDelivery::Accepted,

@@ -19,7 +19,6 @@ use super::session::SessionSettingsUpdate;
 use super::thread_settings;
 use super::turn_context::NewTurnContextOptions;
 use super::turn_context::TurnContext;
-use crate::context::GuardianContextMode;
 use crate::state::ActiveTurn;
 use crate::state::TurnState;
 use crate::tasks::RegularTask;
@@ -851,7 +850,7 @@ impl Session {
                 TurnInput::UserInput {
                     content: std::mem::take(content),
                     client_id: client_id.clone(),
-                    acceptance_order: self.reserve_user_input_order().await,
+                    acceptance_order: Some(self.reserve_user_input_order().await),
                 }
             }
             input => pending_turn_input(self, input.clone(), active_turn_id).await,
@@ -961,7 +960,7 @@ async fn pending_turn_input(
         SubmittedTurnInput::UserInput { content, client_id } => TurnInput::UserInput {
             content,
             client_id,
-            acceptance_order: session.reserve_user_input_order().await,
+            acceptance_order: Some(session.reserve_user_input_order().await),
         },
         SubmittedTurnInput::DeveloperInput { content } => TurnInput::DeveloperInput { content },
         SubmittedTurnInput::ResponseItem(mut item)
@@ -971,15 +970,14 @@ async fn pending_turn_input(
             ) =>
         {
             Session::assign_missing_response_item_id(&mut item);
-            let metadata = if session.guardian_context_mode == GuardianContextMode::ThreadOwned
-                && let Some(messages) = session
-                    .services
-                    .agent_control
-                    .capture_sender_user_messages(&item, session.thread_id, turn_id)
-                    .await
+            let metadata = if let Some(messages) = session
+                .services
+                .local_agent_runtime
+                .capture_sender_user_messages(&item, session.thread_id, turn_id)
+                .await
             {
                 Some(CodexHarnessMetadata {
-                    user_input_order: session.reserve_user_input_order().await,
+                    user_input_order: Some(session.reserve_user_input_order().await),
                     sender_user_messages: Some(Box::new(messages)),
                     ..Default::default()
                 })

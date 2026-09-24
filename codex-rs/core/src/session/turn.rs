@@ -534,16 +534,12 @@ pub(crate) async fn run_turn(
             .instrument(trace_span!("run_turn.prepare_sampling_request_input"))
             .await;
 
-            let responses_metadata = sess
-                .responses_metadata(step_context.as_ref(), CodexResponsesRequestKind::Turn)
-                .await;
             run_sampling_request(
                 Arc::clone(&sess),
                 Arc::clone(&step_context),
                 Arc::clone(&turn_context.extension_data),
                 Arc::clone(&turn_diff_tracker),
                 &mut client_session,
-                &responses_metadata,
                 sampling_request_input,
                 cancellation_token.child_token(),
             )
@@ -1054,6 +1050,7 @@ async fn build_skills_and_plugins(
         sess.thread_id.to_string(),
         turn_context.sub_id.clone(),
         turn_context.originator.clone(),
+        Some(turn_context.turn_metadata_state.clone()),
     );
     let connector_snapshot = step_context.mcp.config().connector_snapshot.clone();
     let mcp_tools = if turn_context.apps_enabled() || !mentioned_plugins.is_empty() {
@@ -1621,7 +1618,6 @@ async fn run_sampling_request(
     turn_store: Arc<codex_extension_api::ExtensionData>,
     turn_diff_tracker: SharedTurnDiffTracker,
     client_session: &mut ModelClientSession,
-    responses_metadata: &CodexResponsesMetadata,
     input: Vec<ResponseItem>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
@@ -1662,13 +1658,16 @@ async fn run_sampling_request(
             step_context.as_ref(),
             base_instructions.clone(),
         );
+        let responses_metadata = sess
+            .responses_metadata(step_context.as_ref(), CodexResponsesRequestKind::Turn)
+            .await;
         if crate::guardian::is_basic_session_source(&turn_context.session_source) {
             crate::guardian::check_guardian_prompt_budget(
                 &sess,
                 &prompt,
                 &turn_context.config,
                 &step_context.settings.model_info,
-                responses_metadata,
+                &responses_metadata,
             )?;
         }
         let err = match try_run_sampling_request(
@@ -1677,7 +1676,7 @@ async fn run_sampling_request(
             Arc::clone(&step_context),
             Arc::clone(&turn_store),
             client_session,
-            responses_metadata,
+            &responses_metadata,
             Arc::clone(&turn_diff_tracker),
             &prompt,
             cancellation_token.child_token(),
@@ -2032,7 +2031,13 @@ pub(super) fn agent_message_text(item: &codex_protocol::items::AgentMessageItem)
         .collect()
 }
 
-pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<MessagePhase>)> {
+#[derive(Debug, PartialEq)]
+pub(super) enum RealtimeEventText {
+    Handoff(String, Option<MessagePhase>),
+    QuietReasoning(String),
+}
+
+pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<RealtimeEventText> {
     match msg {
         EventMsg::ElicitationRequest(request)
             if matches!(
@@ -2040,11 +2045,27 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
                 codex_protocol::approvals::ElicitationRequest::UserVerification { .. }
             ) =>
         {
-            Some((UserVerificationNotice.render(), None))
+            Some(RealtimeEventText::Handoff(
+                UserVerificationNotice.render(),
+                None,
+            ))
         }
-        EventMsg::AgentMessage(event) => Some((event.message.clone(), event.phase.clone())),
+        EventMsg::AgentMessage(event) => Some(RealtimeEventText::Handoff(
+            event.message.clone(),
+            event.phase.clone(),
+        )),
         EventMsg::ItemCompleted(event) => match &event.item {
-            TurnItem::AgentMessage(item) => Some((agent_message_text(item), item.phase.clone())),
+            TurnItem::AgentMessage(item) => Some(RealtimeEventText::Handoff(
+                agent_message_text(item),
+                item.phase.clone(),
+            )),
+            TurnItem::Reasoning(item) => item
+                .summary_text
+                .iter()
+                .rev()
+                .map(|summary| summary.trim())
+                .find(|summary| !summary.is_empty())
+                .map(|summary| RealtimeEventText::QuietReasoning(summary.to_owned())),
             _ => None,
         },
         EventMsg::ExecApprovalRequest(_)
@@ -2062,7 +2083,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<(String, Option<
             };
             serde_json::to_string(msg)
                 .ok()
-                .map(|request| (format!("{message}\n\n{request}"), None))
+                .map(|request| RealtimeEventText::Handoff(format!("{message}\n\n{request}"), None))
         }
         EventMsg::Error(_)
         | EventMsg::Warning(_)
@@ -2613,6 +2634,8 @@ async fn try_run_sampling_request(
             }
             ResponseEvent::OutputItemDone(mut item) => {
                 assign_missing_streamed_response_item_id(&mut item, active_item.as_ref());
+                sess.reserve_assistant_message_order(&turn_context, &item)
+                    .await;
                 if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
                     let call_id = match &item {
                         ResponseItem::FunctionCall { call_id, .. }
@@ -2725,6 +2748,8 @@ async fn try_run_sampling_request(
             }
             ResponseEvent::OutputItemAdded(mut item) => {
                 assign_missing_streamed_response_item_id(&mut item, /*active_item*/ None);
+                sess.reserve_assistant_message_order(&turn_context, &item)
+                    .await;
                 if let ResponseItem::CustomToolCall {
                     call_id,
                     name,

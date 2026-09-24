@@ -50,7 +50,7 @@ pub(super) async fn suspend_turn_and_shutdown(
     // sealed after the flush before handoff can be accepted.
     let live_subtree = match session
         .services
-        .agent_control
+        .local_agent_runtime
         .list_live_agent_subtree_thread_ids(session.thread_id)
         .await
     {
@@ -76,7 +76,7 @@ pub(super) async fn suspend_turn_and_shutdown(
 
     let spawn_admission = match session
         .services
-        .agent_control
+        .local_agent_runtime
         .begin_root_turn_suspension_admission(session.thread_id)
         .await
     {
