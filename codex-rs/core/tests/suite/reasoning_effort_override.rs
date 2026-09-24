@@ -278,6 +278,7 @@ async fn reasoning_effort_override_recovery_reuses_trusted_tail_update() -> anyh
         test.codex.suspend_turn_and_shutdown().await?,
         SuspendTurnOutcome::Suspended {
             turn_id: turn_id.clone(),
+            idle_turn_source: codex_protocol::turn_input::IdleTurnSource::Unspecified,
         },
     );
     let rollout_path = test.codex.rollout_path().expect("rollout path");
@@ -312,6 +313,7 @@ async fn reasoning_effort_override_recovery_reuses_trusted_tail_update() -> anyh
                 thread_settings: Default::default(),
                 trace: None,
                 cyber_access_program: None,
+                idle_turn_source: codex_protocol::turn_input::IdleTurnSource::Unspecified,
             })
             .await?,
         StartIfIdleSubmission::Started { turn_id },

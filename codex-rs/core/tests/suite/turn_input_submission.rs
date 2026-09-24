@@ -3,6 +3,7 @@ use codex_core::RecoverTurnRequest;
 use codex_core::StartIfIdleSubmission;
 use codex_core::StartThreadOptions;
 use codex_core::SteerSubmission;
+use codex_core::TurnInput;
 use codex_core::TurnInputRequest;
 use codex_core::TurnInputSubmission;
 use codex_core::TurnStartOptions;
@@ -82,9 +83,18 @@ async fn host_drain_rejects_turn_start_paths_without_recording_input() -> anyhow
     for request in [
         user_message_request("rejected queued input"),
         TurnInputRequest::user_input(Vec::new()),
-        TurnInputRequest::new(TurnInput::ResponseItem(responses::user_message_item(
-            "rejected continuation",
-        ))),
+        // Injected user-role items are rejected; automatic continuations are developer input.
+        TurnInputRequest::new(TurnInput::ResponseItem(
+            codex_protocol::models::ResponseItem::Message {
+                id: None,
+                role: "developer".to_string(),
+                content: vec![codex_protocol::models::ContentItem::InputText {
+                    text: "rejected continuation".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+        )),
     ] {
         assert_eq!(
             test.codex.start_turn_if_idle(request).await?,
