@@ -4982,7 +4982,7 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
     if reviewer_rollover {
         let second_request = guardian_requests[1];
         let second_prompt = second_request
-            .message_input_text_groups("user")
+            .message_input_text_groups("developer")
             .last()
             .expect("post-rollover Guardian review prompt")
             .join("");
@@ -4990,7 +4990,7 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
         assert!(!second_prompt.contains(">>> TRANSCRIPT DELTA START\n"));
         assert!(second_prompt.contains(NODE_REPL_DOM_MIDDLE));
         assert_eq!(
-            second_request.message_input_image_urls("user"),
+            second_request.message_input_image_urls("developer"),
             vec![PRIVATE_IMAGE.to_string()],
             "browser screenshots must be replayed into the fresh reviewer window"
         );
@@ -5004,7 +5004,7 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
     } else if reviewer_token_budget {
         let second_request = guardian_requests[1];
         let second_prompt = second_request
-            .message_input_text_groups("user")
+            .message_input_text_groups("developer")
             .last()
             .expect("buffered Guardian review prompt")
             .join("");

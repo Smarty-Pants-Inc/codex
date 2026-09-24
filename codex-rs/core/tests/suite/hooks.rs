@@ -1809,9 +1809,16 @@ async fn async_hook_finishing_while_idle_waits_for_the_next_turn(
     .context("gate the next prompt's async hook")?;
     let next_prompt = "observe the buffered async context";
     let next_turn = if automatic_continuation {
-        TurnInputRequest::new(TurnInput::ResponseItem(responses::user_message_item(
-            next_prompt,
-        )))
+        // Injected user-role response items are rejected; automatic input is developer-role.
+        TurnInputRequest::new(TurnInput::ResponseItem(ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: next_prompt.to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        }))
         .on_start(TurnStartOptions {
             root_turn_id: Some(first_turn_id.clone()),
             parent_turn_id: Some(first_turn_id.clone()),

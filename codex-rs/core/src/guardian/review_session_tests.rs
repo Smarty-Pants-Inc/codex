@@ -109,8 +109,10 @@ async fn run_review_preserves_evidence_during_parent_compaction() {
         let Op::TurnInput { request, reply, .. } = submission.op else {
             panic!("expected reviewer prompt");
         };
-        let codex_protocol::turn_input::TurnInput::UserInput { content, .. } = request.input else {
-            panic!("expected user input");
+        // Reviewer prompts are submitted as developer input.
+        let codex_protocol::turn_input::TurnInput::DeveloperInput { content } = request.input
+        else {
+            panic!("expected developer input");
         };
         let text = serde_json::to_string(&content).unwrap();
         reply

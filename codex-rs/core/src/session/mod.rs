@@ -3433,7 +3433,8 @@ impl Session {
                 .note_recorded_items(&response_items);
             state
                 .record_annotated_items(&items, turn_context.model_info().truncation_policy.into());
-            if self.live_thread().is_none()
+            if (self.live_thread().is_none()
+                || state.session_configuration.history_mode == ThreadHistoryMode::Paginated)
                 && let Some(direct_user_items) = direct_user_items
             {
                 state.record_direct_user_response_items(

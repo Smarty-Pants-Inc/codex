@@ -1009,8 +1009,9 @@ async fn run_review_on_session(
         .await
         .raw_items()
         .any(|item| {
+            // Reviewer prompts are recorded as developer input; older sessions used user input.
             matches!(item, ResponseItem::Message { role, content, .. }
-            if role == "user" && content.iter().any(|content| {
+            if (role == "developer" || role == "user") && content.iter().any(|content| {
                 matches!(content, ContentItem::InputText { text }
                     if text == GUARDIAN_TRANSCRIPT_START)
             }))

@@ -268,7 +268,7 @@ async fn guardian_session_inherits_parent_http_fallback(
             );
         }
     }
-    let guardian_context = guardian_request.message_input_texts("user").join("\n");
+    let guardian_context = guardian_request.message_input_texts("developer").join("\n");
     let executor_cwd = test
         .executor_environment()
         .selection()
@@ -377,7 +377,7 @@ async fn guardian_review_resends_full_transcript_after_reviewer_context_rollover
 
     let second_request = guardian_requests[1];
     let second_prompt = second_request
-        .message_input_text_groups("user")
+        .message_input_text_groups("developer")
         .last()
         .expect("post-rollover Guardian review prompt")
         .join("");

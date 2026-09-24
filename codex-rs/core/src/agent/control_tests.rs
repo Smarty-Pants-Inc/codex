@@ -2243,11 +2243,10 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(
         "only retained mode changes parent approval inheritance",
     );
     let mut inherited_context = codex_history::RetainedContext::default();
-    if thread_context_enabled {
-        inherited_context.reserve_order();
-    } else {
+    if !thread_context_enabled {
         inherited_context.mark_user_messages_incomplete();
     }
+    // Generated agent input is developer-role in the fork, so it reserves no acceptance order.
     assert_eq!(history.retained_context(), &inherited_context);
     assert!(
         history_contains_text(history.raw_items(), "compacted parent summary"),
