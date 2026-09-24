@@ -1,0 +1,19 @@
+---
+source: core/tests/suite/request_plugin_install.rs
+expression: "context_snapshot::format_request_history_snapshot(\"Startup recommendations share the developer message with other context.\",\n&model_response.requests(),\n&ContextSnapshotOptions::default().rewrite_known_segments(),)"
+---
+Scenario: Startup recommendations share the developer message with other context.
+
+## Window 1
+-- request 1 (turn) --
+00:message/developer[4]:
+    [01] <PERMISSIONS_INSTRUCTIONS>
+    [02] <ENVIRONMENT_CONTEXT>
+    [03] <APPS_INSTRUCTIONS>
+    [04] <recommended_plugins>
+        Here is a list of plugins that are available but not installed.
+
+        - GitHub (github@openai-curated-remote)
+        </recommended_plugins>
+01:message/user:
+    suggest a plugin

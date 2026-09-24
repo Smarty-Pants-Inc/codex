@@ -563,6 +563,8 @@ async fn executor_browser_and_computer_use_cleanup_hooks_use_separate_mcp_routes
             .await?;
         fixture.test.codex = child.thread;
         fixture.test.session_configured = child.session_configured;
+        // Hook MCP calls do not wait for startup, so match the root thread's startup barrier.
+        wait_for_mcp_server(&fixture.test.codex, "codex_apps").await?;
     }
     fixture.attach().await?;
     if hook_event == "SubagentStop" {
