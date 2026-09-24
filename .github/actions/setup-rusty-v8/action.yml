@@ -17,7 +17,7 @@ runs:
 
         version="$(python3 "${GITHUB_WORKSPACE}/.github/scripts/rusty_v8_bazel.py" resolved-v8-crate-version)"
         release_tag="rusty-v8-v${version}"
-        api_url="https://api.github.com/repos/openai/codex"
+        base_url="https://github.com/openai/codex/releases/download/${release_tag}"
         binding_dir="${RUNNER_TEMP}/rusty_v8"
         
         profile="ptrcomp_sandbox_release"
@@ -33,70 +33,25 @@ runs:
         archive_path="${binding_dir}/${archive_name}"
         binding_path="${binding_dir}/${binding_name}"
         checksums_path="${binding_dir}/${checksums_name}"
+        trusted_checksums="${GITHUB_WORKSPACE}/third_party/v8/rusty_v8_${version//./_}_release_manifests.sha256"
+
+        if command -v sha256sum >/dev/null 2>&1; then
+          checksum_command=(sha256sum --check -)
+        else
+          checksum_command=(shasum -a 256 --check -)
+        fi
 
         mkdir -p "${binding_dir}"
-        release_path="${binding_dir}/release.json"
-        printf 'Resolving V8 release %s\n' "${release_tag}"
-        metadata_headers="$(mktemp "${binding_dir}/metadata-headers.XXXXXX")"
-        trap 'rm -f "${metadata_headers}"' EXIT
-        if metadata_status="$(curl -fsSL --retry 1 --retry-max-time 30 --connect-timeout 10 --max-time 60 \
-          -H 'Accept: application/vnd.github+json' --max-filesize 2097152 \
-          --dump-header "${metadata_headers}" --write-out '%{http_code}' \
-          "${api_url}/releases/tags/${release_tag}" -o "${release_path}")"; then
-          rm -f "${metadata_headers}"
-        else
-          metadata_exit=$?
-          python3 - "${metadata_headers}" "${metadata_status}" <<'PY' || true
-        import json
-        import re
-        import sys
-
-        allowed = {"x-github-request-id", "x-ratelimit-limit", "x-ratelimit-remaining",
-                   "x-ratelimit-reset", "x-ratelimit-resource", "retry-after", "date"}
-        with open(sys.argv[1], "rb") as stream:
-            size = stream.seek(0, 2)
-            stream.seek(max(0, size - 65536))
-            headers = stream.read(65536).decode("ascii", errors="replace")
-        blocks = []
-        for line in headers.splitlines():
-            if re.fullmatch(r"HTTP/[0-9.]+ [0-9]{3}(?: .*)?", line):
-                blocks.append({"status": line[:256]})
-            elif blocks and ":" in line:
-                key, value = line.split(":", 1)
-                if key.lower() in allowed:
-                    blocks[-1][key.lower()] = "".join(
-                        c for c in value.strip() if 32 <= ord(c) <= 126
-                    )[:256]
-        result = {"final_http_status": sys.argv[2] if re.fullmatch(r"[0-9]{3}", sys.argv[2]) else "unknown",
-                  "headers_truncated": size > 65536, "omitted_blocks": max(0, len(blocks) - 8),
-                  "blocks": blocks[-8:]}
-        while len(json.dumps(result)) > 4000 and result["blocks"]:
-            result["blocks"].pop(0)
-            result["omitted_blocks"] += 1
-        print("V8 metadata failure: " + json.dumps(result), file=sys.stderr)
-        PY
-          exit "${metadata_exit}"
+        curl -fsSL "${base_url}/${checksums_name}" -o "${checksums_path}"
+        # Check the original manifest bytes even when either checksum file uses CRLF.
+        expected_manifest_checksum="$(grep -F "  ${checksums_name}" "${trusted_checksums}" | cut -d ' ' -f 1)"
+        actual_manifest_checksum="$(python3 -c 'import hashlib, pathlib, sys; print(hashlib.sha256(pathlib.Path(sys.argv[1]).read_bytes()).hexdigest())' "${checksums_path}")"
+        if [[ "${actual_manifest_checksum}" != "${expected_manifest_checksum}" ]]; then
+          echo "Checksum mismatch for ${checksums_name}: expected ${expected_manifest_checksum}, got ${actual_manifest_checksum}" >&2
+          exit 1
         fi
-        for artifact_name in "${archive_name}" "${binding_name}" "${checksums_name}"; do
-          asset_id="$(python3 - "${release_path}" "${release_tag}" "${artifact_name}" <<'PY'
-        import json
-        import sys
-
-        with open(sys.argv[1], encoding="utf-8") as stream:
-            release = json.load(stream)
-        if release.get("tag_name") != sys.argv[2]:
-            sys.exit("Unexpected V8 release tag")
-        assets = [asset for asset in release["assets"] if asset.get("name") == sys.argv[3]]
-        if len(assets) != 1 or type(assets[0].get("id")) is not int or assets[0]["id"] <= 0:
-            sys.exit(f"Expected one V8 release asset: {sys.argv[3]}")
-        print(assets[0]["id"])
-        PY
-          )"
-          printf 'Downloading %s (asset %s)\n' "${artifact_name}" "${asset_id}"
-          curl -fsSL --retry 1 --retry-max-time 30 --connect-timeout 10 --max-time 60 \
-            -H 'Accept: application/octet-stream' \
-            "${api_url}/releases/assets/${asset_id}" -o "${binding_dir}/${artifact_name}"
-        done
+        curl -fsSL "${base_url}/${archive_name}" -o "${archive_path}"
+        curl -fsSL "${base_url}/${binding_name}" -o "${binding_path}"
 
         if [[ "$(wc -l < "${checksums_path}")" -ne 2 ]]; then
           echo "Expected exactly two checksums for ${TARGET} in ${checksums_path}" >&2
@@ -104,10 +59,6 @@ runs:
         fi
 
         # Existing Windows-built release manifests use CRLF line endings.
-        if command -v sha256sum >/dev/null 2>&1; then
-          (cd "${binding_dir}" && tr -d '\r' < "${checksums_path}" | sha256sum -c -)
-        else
-          (cd "${binding_dir}" && tr -d '\r' < "${checksums_path}" | shasum -a 256 -c -)
-        fi
+        (cd "${binding_dir}" && tr -d '\r' < "${checksums_path}" | "${checksum_command[@]}")
         echo "RUSTY_V8_ARCHIVE=${archive_path}" >> "${GITHUB_ENV}"
         echo "RUSTY_V8_SRC_BINDING_PATH=${binding_path}" >> "${GITHUB_ENV}"
