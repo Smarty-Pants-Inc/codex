@@ -697,7 +697,7 @@ mod tests {
                 item_id: call_id.to_string(),
                 environment_id: None,
                 started_at_ms: 0,
-                cwd: test_path_buf("/tmp").abs(),
+                cwd: test_path_buf("/tmp").abs().into(),
                 reason: None,
                 permissions: codex_app_server_protocol::RequestPermissionProfile {
                     network: None,
