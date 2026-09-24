@@ -25,6 +25,7 @@ fn clipped_exec_approval_opens_the_complete_command() {
                 thread_id: ThreadId::new(),
                 thread_label: None,
                 id: "clipped-approval".into(),
+                turn_id: "turn".to_string(),
                 environment_id: Some("local".into()),
                 command: vec!["sh".into(), "-c".into(), command.clone()],
                 reason: Some(reason.clone()),

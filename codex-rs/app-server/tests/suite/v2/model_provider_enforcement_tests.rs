@@ -338,6 +338,7 @@ async fn malformed_system_defaults_do_not_block_existing_thread_turn() -> Result
             capabilities: None,
         },
         channel_capacity: in_process::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+        goal_auto_continue_enabled: false,
     })
     .await?;
     let response = client

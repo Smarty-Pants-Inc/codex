@@ -1579,24 +1579,19 @@ max_recent_non_user_entries = 8
         }
         sample => panic!("expected classification duration metric, got {sample:?}"),
     };
-    let classification_duration_ms = *classification_duration_ms;
-    let decision_sequence = [
-        RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 0, vec![]),
-        fast_decision_metric("deferred", "elevated_risk"),
-        RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 0, vec![]),
-        fast_decision_metric("approved", "low_risk"),
-        RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 2, vec![]),
-        fast_decision_metric("approved", "low_risk"),
-    ];
     assert_eq!(
         samples,
         [
-            ("original", original_action_bytes),
-            ("retained", retained_action_bytes),
-            ("omitted", original_action_bytes - retained_action_bytes),
+            ("total", 150),
+            ("input", 120),
+            ("cached_input", 40),
+            ("cache_write_input", 20),
+            ("non_cached_input", 80),
+            ("output", 30),
+            ("reasoning_output", 10),
         ]
         .into_iter()
-        .map(|(measurement, bytes)| {
+        .map(|(token_type, value)| {
             RecordedMetric::Histogram(
                 CLASSIFICATION_TOKEN_USAGE_METRIC.to_owned(),
                 value,
