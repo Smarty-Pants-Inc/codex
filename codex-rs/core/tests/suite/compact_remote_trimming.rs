@@ -64,9 +64,12 @@ async fn remote_compact_v2_token_estimate_ignores_message_bookkeeping_and_json_e
             "content": [{"type": "input_text", "text": text}],
             "internal_chat_message_metadata_passthrough": metadata,
         });
-        codex
-            .inject_response_items(vec![serde_json::from_value(message.clone())?])
-            .await?;
+        // Injected user-role items are rejected; record the user message as direct input.
+        codex_core::test_support::record_history_with_direct_user_input(
+            codex.as_ref(),
+            vec![serde_json::from_value(message.clone())?],
+        )
+        .await?;
         let mock = mount_sse_once(harness.server(), compact_response()).await;
         codex.submit(Op::Compact).await?;
         wait_for_turn_complete(&codex).await;
@@ -118,7 +121,9 @@ async fn remote_compact_v2_trims_tool_search_output_to_empty_tools_array() -> Re
         .into_iter()
         .map(serde_json::from_value)
         .collect::<serde_json::Result<Vec<ResponseItem>>>()?;
-        codex.inject_response_items(history).await?;
+        // Injected user-role items are rejected; record user messages as direct input.
+        codex_core::test_support::record_history_with_direct_user_input(codex.as_ref(), history)
+            .await?;
         let mock = mount_sse_once(harness.server(), compact_response()).await;
         codex.submit(Op::Compact).await?;
         wait_for_turn_complete(codex).await;
@@ -179,7 +184,9 @@ async fn remote_compact_v2_trim_estimate_uses_session_base_instructions() -> Res
         .into_iter()
         .map(serde_json::from_value)
         .collect::<serde_json::Result<Vec<ResponseItem>>>()?;
-        codex.inject_response_items(history).await?;
+        // Injected user-role items are rejected; record user messages as direct input.
+        codex_core::test_support::record_history_with_direct_user_input(codex.as_ref(), history)
+            .await?;
         let mock = mount_sse_once(harness.server(), compact_response()).await;
         codex.submit(Op::Compact).await?;
         wait_for_turn_complete(codex).await;

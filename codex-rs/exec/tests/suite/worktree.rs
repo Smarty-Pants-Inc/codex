@@ -235,9 +235,10 @@ async fn worktree_start_and_fork_use_host_pool_and_preserve_legacy_resume() -> a
     let legacy_cwd =
         AbsolutePathBuf::from_absolute_path(legacy.cwd.join("extra"))?.canonicalize()?;
     assert!(
+        // The environment context is developer-role in the fork.
         resume_mock
             .single_request()
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .iter()
             .any(|text| text.contains(legacy_cwd.to_string_lossy().as_ref()))
     );

@@ -1354,7 +1354,9 @@ async fn remote_compact_v2_rewrites_multiple_trailing_function_call_outputs(
     .into_iter()
     .map(serde_json::from_value)
     .collect::<serde_json::Result<Vec<ResponseItem>>>()?;
-    codex.inject_response_items(history).await?;
+    // Injected user-role items are rejected; record user messages as direct input.
+    codex_core::test_support::record_history_with_direct_user_input(codex.as_ref(), history)
+        .await?;
 
     let mut response_bodies = vec![sse(vec![
         json!({

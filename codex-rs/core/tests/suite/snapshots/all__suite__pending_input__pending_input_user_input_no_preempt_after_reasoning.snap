@@ -6,17 +6,16 @@ Scenario: /responses POST bodies with pending input
 
 ## Window 1
 -- request 1 (request; First request) --
-00:message/developer:
-    <PERMISSIONS_INSTRUCTIONS>
-01:message/developer:
-    <ENVIRONMENT_CONTEXT>
-02:message/user:
+00:message/developer[2]:
+    [01] <PERMISSIONS_INSTRUCTIONS>
+    [02] <ENVIRONMENT_CONTEXT>
+01:message/user:
     first prompt
 -- request 2 (request; Second request) --
-03:reasoning:summary=thinking:encrypted=true
-04:function_call/shell:{"command":"echo preserved tool call"}
-05:message/assistant:
+02:reasoning:summary=thinking:encrypted=true
+03:function_call/shell:{"command":"echo preserved tool call"}
+04:message/assistant:
     first answer
-06:function_call_output:unsupported call: shell
-07:message/user:
+05:function_call_output:unsupported call: shell
+06:message/user:
     second prompt

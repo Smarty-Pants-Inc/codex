@@ -144,8 +144,10 @@ async fn legacy_checkpoint_review_preserves_oversized_instruction_order() -> Res
         codex_guardian_context::MANUAL_APPROVAL_DEVELOPER_PREFIX
     );
     let restriction = "Revoke permission to edit files. Only run the echo command.";
-    test.codex
-        .inject_response_items(vec![
+    // Injected user-role items are rejected; record the user message as direct input.
+    codex_core::test_support::record_history_with_direct_user_input(
+        test.codex.as_ref(),
+        vec![
             responses::user_message_item(&followup),
             ResponseItem::Message {
                 id: None,
@@ -156,8 +158,9 @@ async fn legacy_checkpoint_review_preserves_oversized_instruction_order() -> Res
                 phase: None,
                 internal_chat_message_metadata_passthrough: None,
             },
-        ])
-        .await?;
+        ],
+    )
+    .await?;
     test.submit_text_turn(restriction).await?;
     ThreadIdle::wait(&test.codex).await;
     let (compactions, requests): (Vec<_>, Vec<_>) = responses

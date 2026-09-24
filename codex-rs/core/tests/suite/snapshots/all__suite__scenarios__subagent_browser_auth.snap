@@ -28,13 +28,12 @@ Settings:
     - tool_search: # Tool discovery  Searches over deferred tool metadata with BM25 and exposes matching tools for t...; args=[limit, query]; hash=cea8b3c4515459b0
     - web_search; hash=f103e327c6870a46
 -- request 1 (turn) --
-00:message/developer:
-    <PERMISSIONS_INSTRUCTIONS>
+00:message/developer[2]:
+    [01] <PERMISSIONS_INSTRUCTIONS>
+    [02] <ENVIRONMENT_CONTEXT>
 01:message/user:
-    <ENVIRONMENT_CONTEXT>
-02:message/user:
     Run the input tool.
 -- request 2 (turn) --
-03:function_call/mcp__elicitation.request_input:{}
-04:function_call_output:Wall time: <DURATION> seconds
+02:function_call/mcp__elicitation.request_input:{}
+03:function_call_output:Wall time: <DURATION> seconds
     Output: | {"action": "accept", "content": {}}

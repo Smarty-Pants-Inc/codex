@@ -6,13 +6,12 @@ Scenario: Pre-turn auto-compaction context-window failure: compaction request ex
 
 ## Window 1
 -- request 1 (compaction; Local Compaction Request (Incoming User Excluded)) --
-00:message/developer:
-    <PERMISSIONS_INSTRUCTIONS>
-01:message/developer:
-    <ENVIRONMENT_CONTEXT>
-02:message/user:
+00:message/developer[2]:
+    [01] <PERMISSIONS_INSTRUCTIONS>
+    [02] <ENVIRONMENT_CONTEXT>
+01:message/user:
     USER_ONE
-03:message/assistant:
+02:message/assistant:
     FIRST_REPLY
-04:message/developer:
+03:message/developer:
     <SUMMARIZATION_PROMPT>
