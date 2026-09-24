@@ -658,7 +658,7 @@ async fn process_sse_with_treatment(
 
         let response_model = event.response_model();
         let processed_event = process_responses_event(event);
-        if !accepted && matches!(&processed_event, Ok(Some(ResponseEvent::Created))) {
+        if !accepted && matches!(&processed_event, Ok(Some(ResponseEvent::Created { .. }))) {
             accepted = true;
             if let Some(callback) = response_created.as_ref() {
                 callback();

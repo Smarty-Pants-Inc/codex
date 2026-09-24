@@ -526,12 +526,13 @@ impl Session {
             .lock()
             .await
             .as_ref()
-            .is_none_or(|turn| !Arc::ptr_eq(&turn.turn_state, &turn_state))
+            .is_none_or(|turn| !Arc::ptr_eq(&turn.turn_state, &reserved_turn_state))
         {
             return;
         }
-        let (input, mut start_options) =
-            self.input_queue.get_pending_input(&self.active_turn).await;
+        // Peek rather than drain: an interrupt can remove this reservation while the turn context
+        // is built. The task start drains the mail only after it admits the reserved turn.
+        let (input, mut start_options) = self.input_queue.peek_mailbox_input_items().await;
         if !input.iter().any(
             |item| matches!(item, TurnInput::InterAgentCommunication(mail) if mail.trigger_turn),
         ) {
@@ -572,10 +573,6 @@ impl Session {
             turn_context.turn_metadata_state.set_root_turn_id(id);
         }
         self.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
-            .await;
-        // Task completion must still save this mail if pre-turn compaction fails.
-        self.input_queue
-            .extend_pending_input_for_turn_state(reserved_turn_state.as_ref(), input)
             .await;
         let mut task_input = Vec::new();
         self.start_reserved_task(
