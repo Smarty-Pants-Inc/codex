@@ -37,6 +37,8 @@ pub struct Prompt {
 
     /// Whether the Responses API should strictly validate `output_schema`.
     pub output_schema_strict: bool,
+
+    pub(crate) cyber_access_program: Option<codex_protocol::turn_input::CyberAccessProgram>,
 }
 
 impl Default for Prompt {
@@ -49,6 +51,7 @@ impl Default for Prompt {
             output_schema: None,
             max_output_tokens: None,
             output_schema_strict: true,
+            cyber_access_program: None,
         }
     }
 }
@@ -99,6 +102,7 @@ fn strip_image_details(items: &mut [ResponseItem]) {
             | ResponseItem::WebSearchCall { .. }
             | ResponseItem::ImageGenerationCall { .. }
             | ResponseItem::Compaction { .. }
+            | ResponseItem::ConfigurationUpdate { .. }
             | ResponseItem::CompactionTrigger { .. }
             | ResponseItem::ContextCompaction { .. }
             | ResponseItem::Other => {}

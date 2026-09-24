@@ -55,6 +55,7 @@ fn turn_user_input_returns_only_direct_user_content() {
         TurnInput::UserInput {
             content: vec![direct_user_input.clone()],
             client_id: None,
+            acceptance_order: None,
         },
     ];
 
@@ -99,5 +100,26 @@ async fn plan_mode_uses_contributed_turn_item_for_last_agent_message() {
     assert_eq!(
         last_agent_message.as_deref(),
         Some("plan contributed assistant text")
+    );
+}
+
+#[test]
+fn realtime_user_verification_notice_excludes_request_payload() {
+    let event = EventMsg::ElicitationRequest(codex_protocol::approvals::ElicitationRequestEvent {
+        turn_id: None,
+        server_name: "private-server-name".to_string(),
+        id: codex_protocol::mcp::RequestId::String("private-request-id".to_string()),
+        request: codex_protocol::approvals::ElicitationRequest::UserVerification {
+            title: "private-title".to_string(),
+            description: "private-description".to_string(),
+            challenge: "private-challenge".to_string(),
+        },
+    });
+    assert_eq!(
+        realtime_text_for_event(&event),
+        Some((
+            "<user_verification_notice>User verification is required. Please respond in the app.</user_verification_notice>".to_string(),
+            None,
+        )),
     );
 }
