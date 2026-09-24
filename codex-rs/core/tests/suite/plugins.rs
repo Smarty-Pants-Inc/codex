@@ -755,7 +755,7 @@ async fn thread_disabled_plugins_filter_skills_and_tools_without_changing_shared
         let requests = mock.requests();
         // Previously injected instructions remain in history; disabled turns must add none.
         for (role, marker) in [
-            ("user", "THREAD_PLUGIN_SKILL_BODY"),
+            ("developer", "THREAD_PLUGIN_SKILL_BODY"),
             ("developer", "Skills from this plugin"),
         ] {
             assert_eq!(

@@ -28,6 +28,9 @@ use crate::session::turn_context::TurnContext;
 #[derive(Clone)]
 pub(crate) struct PendingReviewContext(pub ComposedContext);
 
+/// Reviewer input after budget enforcement. Evidence admission compares the recorded prompt to it.
+pub(crate) struct FinalizedReviewInput(pub Vec<codex_protocol::user_input::UserInput>);
+
 /// Reject inputs that cannot fit even without history or tools before Core tries
 /// pre-turn compaction. This is only a feasibility check; its selected copy is
 /// discarded. Actual selection waits for the complete first-step overhead.
@@ -196,6 +199,10 @@ pub(crate) async fn finalize(
     *content = context
         .into_user_inputs()
         .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
+    session
+        .services
+        .thread_extension_data
+        .insert(FinalizedReviewInput(content.clone()));
     session
         .services
         .thread_extension_data

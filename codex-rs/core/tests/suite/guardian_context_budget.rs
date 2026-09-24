@@ -174,13 +174,13 @@ async fn legacy_checkpoint_review_preserves_oversized_instruction_order() -> Res
     assert_eq!((compactions.len(), reviews.len()), (1, 2));
     assert!(
         reviews[0]
-            .message_input_text_groups("user")
+            .message_input_text_groups("developer")
             .last()
             .expect("first review")
             .concat()
             .contains(&initial)
     );
-    let groups = reviews[1].message_input_text_groups("user");
+    let groups = reviews[1].message_input_text_groups("developer");
     let delta = groups.last().expect("follow-up review").concat();
     assert!(delta.contains("<truncated omitted_approx_tokens="));
     assert!(
@@ -531,7 +531,7 @@ async fn review_respects_complete_context_budget(
             );
         }
         let request = guardian_requests[0];
-        let context = request.message_input_texts("user").join("\n");
+        let context = request.message_input_texts("developer").join("\n");
         assert!(context.contains("<guardian_context_omission>"));
         assert!(!context.contains("optional old commentary"));
         assert!(context.contains("Run the command if the approval reviewer allows it."));
@@ -766,14 +766,18 @@ async fn oversized_action_preserves_review_policy_and_next_review(
         .collect::<Vec<_>>();
     assert_eq!(reviews.len(), if fits { 2 } else { 1 });
     if fits {
-        let parts = reviews[0].message_input_texts("user");
+        // The review input is the last developer message; earlier ones hold the fixed policy.
+        let parts = reviews[0]
+            .message_input_text_groups("developer")
+            .pop()
+            .expect("first review input");
         assert!(parts.concat().contains(&oversized_command));
         assert!(parts.iter().all(|part| part.len() <= 36_000));
     }
     let context = reviews
         .last()
         .expect("review of the next action")
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .concat();
     assert!(context.contains("echo complete-action-review"));
     assert!(

@@ -99,7 +99,7 @@ async fn provisioning_failure_reaches_model_and_turn_continues(
     } else {
         &requests[1]
     };
-    let context = context_request.message_input_texts("user").join("\n");
+    let context = context_request.message_input_texts("developer").join("\n");
     assert!(context.contains("<status>failed</status>"), "{context}");
     assert!(context.contains(REASON), "{context}");
     Ok(())

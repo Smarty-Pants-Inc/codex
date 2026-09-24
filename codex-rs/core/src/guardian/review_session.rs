@@ -281,9 +281,20 @@ pub(crate) fn prompt_cache_key_override_for_review_session(
 impl GuardianReviewSession {
     async fn admit_node_repl_evidence(&self, event: &Event) {
         let mut state = self.state.lock().await;
-        let Some(pending) = state.pending_node_repl_evidence_admission.as_ref() else {
+        let Some(pending) = state.pending_node_repl_evidence_admission.as_mut() else {
             return;
         };
+        // Budget enforcement may rewrite the submitted prompt before it is recorded.
+        if let Some(finalized) = self
+            .session
+            .services
+            .thread_extension_data
+            .remove::<super::input_budget::FinalizedReviewInput>()
+            && let ResponseInputItem::Message { content, .. } =
+                ResponseInputItem::from(finalized.0.clone())
+        {
+            pending.content = content;
+        }
         if pending.matches(event) {
             state.last_admitted_node_repl_response_sequence = state
                 .last_admitted_node_repl_response_sequence
@@ -647,6 +658,11 @@ async fn run_review_on_session(
         .insert(super::input_budget::PendingReviewContext(
             prompt_items.context,
         ));
+    review_session
+        .session
+        .services
+        .thread_extension_data
+        .remove::<super::input_budget::FinalizedReviewInput>();
     let request = codex_guardian_reviewer::ReviewerTurn {
         items,
         environments: codex_protocol::protocol::TurnEnvironmentSelections::new(

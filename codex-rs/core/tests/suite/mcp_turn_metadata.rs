@@ -936,7 +936,8 @@ approvals_reviewer = "auto_review"
         .expect("expected a Guardian request for the app MCP approval");
     assert!(guardian_request.body_contains_text("calendar_create_event"));
     assert!(guardian_request.body_contains_text("Lunch"));
-    let prompt = guardian_request.message_input_texts("user").join("\n");
+    // The fork submits the Guardian review prompt as developer input.
+    let prompt = guardian_request.message_input_texts("developer").join("\n");
     let action = prompt
         .rsplit_once("Planned action JSON:\n")
         .unwrap()

@@ -465,7 +465,8 @@ async fn unified_exec_zsh_fork_guardian_reviews_persistent_terminal_in_current_t
         .path()
         .join("unified-exec-zsh-fork-current-turn.txt");
     let initial_denied_path = outside_dir.path().join("original-environment-private");
-    let permission_profile = denied_read_permission_profile(&initial_denied_path)?;
+    let permission_profile =
+        denied_read_permission_profile_with_entry(&initial_denied_path, DeniedReadEntry::Glob)?;
     let rules = r#"prefix_rule(pattern=["touch"], decision="prompt")"#.to_string();
 
     let outside_path_for_hook = outside_path.clone();
@@ -565,7 +566,10 @@ async fn unified_exec_zsh_fork_guardian_reviews_persistent_terminal_in_current_t
     fs::create_dir(&next_cwd)?;
     let next_denied_path = next_cwd.join("next-environment-private");
     let (sandbox_policy, permission_profile) = turn_permission_fields(
-        denied_read_permission_profile(next_denied_path.as_path())?,
+        denied_read_permission_profile_with_entry(
+            next_denied_path.as_path(),
+            DeniedReadEntry::Glob,
+        )?,
         next_cwd.as_path(),
     );
     test.codex
@@ -651,7 +655,10 @@ async fn unified_exec_zsh_fork_guardian_reviews_persistent_terminal_in_current_t
     assert!(guardian_requests[0].body_contains_text(&environment));
     assert!(guardian_requests[0].body_contains_text("The `cwd` field is its launch directory"));
     assert!(guardian_requests[1].body_contains_text(&outside_path.to_string_lossy()));
-    let guardian_text = guardian_requests[1].message_input_texts("user").join("");
+    // The fork submits the Guardian review prompt as developer input.
+    let guardian_text = guardian_requests[1]
+        .message_input_texts("developer")
+        .join("");
     let permissions = guardian_text
         .split_once("PARENT TURN PERMISSION CONTEXT START")
         .and_then(|(_, text)| text.split_once("PARENT TURN PERMISSION CONTEXT END"))
@@ -714,10 +721,27 @@ where
     Ok(Some((server, test)))
 }
 
+/// How the test profile encodes its denied-read entry.
+#[derive(Clone, Copy)]
+enum DeniedReadEntry {
+    /// Exact path; the fork's zsh-fork sandbox enforces this form.
+    Path,
+    /// Upstream glob form; unmatched patterns keep the terminal sandbox context stable.
+    Glob,
+}
+
 fn denied_read_permission_profile(denied_path: &Path) -> Result<PermissionProfile> {
+    denied_read_permission_profile_with_entry(denied_path, DeniedReadEntry::Path)
+}
+
+fn denied_read_permission_profile_with_entry(
+    denied_path: &Path,
+    entry: DeniedReadEntry,
+) -> Result<PermissionProfile> {
     let denied_path_key = TomlKey::new(denied_path.to_string_lossy().into_owned());
-    permission_profile_from_toml(&format!(
-        r#"
+    permission_profile_from_toml(
+        &format!(
+            r#"
 [filesystem]
 "/" = "read"
 ":project_roots" = "write"
@@ -726,10 +750,15 @@ fn denied_read_permission_profile(denied_path: &Path) -> Result<PermissionProfil
 [network]
 enabled = false
 "#
-    ))
+        ),
+        entry,
+    )
 }
 
-fn permission_profile_from_toml(profile: &str) -> Result<PermissionProfile> {
+fn permission_profile_from_toml(
+    profile: &str,
+    denied_entry: DeniedReadEntry,
+) -> Result<PermissionProfile> {
     let profile = toml::from_str::<PermissionProfileToml>(profile)
         .context("test permission profile should deserialize")?;
     let filesystem = profile
@@ -750,8 +779,13 @@ fn permission_profile_from_toml(profile: &str) -> Result<PermissionProfile> {
                 ":project_roots" => FileSystemPath::Special {
                     value: FileSystemSpecialPath::project_roots(/*subpath*/ None),
                 },
-                _ if *access == FileSystemAccessMode::Deny => FileSystemPath::Path {
-                    path: PathUri::from_abs_path(&AbsolutePathBuf::try_from(path.as_str())?),
+                _ if *access == FileSystemAccessMode::Deny => match denied_entry {
+                    DeniedReadEntry::Path => FileSystemPath::Path {
+                        path: PathUri::from_abs_path(&AbsolutePathBuf::try_from(path.as_str())?),
+                    },
+                    DeniedReadEntry::Glob => FileSystemPath::GlobPattern {
+                        pattern: path.clone(),
+                    },
                 },
                 _ => anyhow::bail!("unexpected filesystem entry in test profile: {path}"),
             };

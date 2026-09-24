@@ -597,10 +597,26 @@ pub(crate) fn is_retained_for_remote_compaction_v2(
             matches!(
                 crate::event_mapping::parse_turn_item(item),
                 Some(TurnItem::HookPrompt(_))
-            ) || retain_client_developer_messages && is_client_authored_developer_message(envelope)
+            ) || is_guardian_review_prompt(item)
+                || retain_client_developer_messages
+                    && is_client_authored_developer_message(envelope)
         }
         _ => false,
     }
+}
+
+/// Guardian review prompts are developer input in this fork. Keep them as upstream keeps its
+/// user-role prompts, so a reviewer that compacts mid-review retains its prior transcript.
+/// ponytail: matches the transcript start markers from `codex-guardian-context`; revisit if the
+/// prompt gains typed metadata.
+fn is_guardian_review_prompt(item: &ResponseItem) -> bool {
+    let ResponseItem::Message { content, .. } = item else {
+        return false;
+    };
+    content.iter().any(|content| {
+        matches!(content, ContentItem::InputText { text }
+            if text == ">>> TRANSCRIPT START\n" || text == ">>> TRANSCRIPT DELTA START\n")
+    })
 }
 
 fn retained_input_image_count(item: &ResponseItem) -> usize {

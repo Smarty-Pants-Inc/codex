@@ -16,7 +16,8 @@ permissions:
 
 concurrency:
   group: smarty-ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Cancel only superseded PR heads. Each push to main is an acceptance run and must finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Gate jobs run in parallel on separate hosted runners. The required `smarty-ci`
 # check is the aggregate job at the end; it fails unless every gate job succeeds.

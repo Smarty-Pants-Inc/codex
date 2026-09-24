@@ -60,16 +60,15 @@ async fn remote_compact_v2_token_estimate_ignores_message_bookkeeping_and_json_e
         let message = json!({
             "type": "message",
             "id": id,
-            "role": "user",
+            "role": "developer",
             "content": [{"type": "input_text", "text": text}],
             "internal_chat_message_metadata_passthrough": metadata,
         });
-        // Injected user-role items are rejected; record the user message as direct input.
-        codex_core::test_support::record_history_with_direct_user_input(
-            codex.as_ref(),
-            vec![serde_json::from_value(message.clone())?],
-        )
-        .await?;
+        // Injected user-role items are rejected, and direct user input replaces the id and
+        // metadata under test, so inject the bookkeeping-bearing message as developer input.
+        codex
+            .inject_response_items(vec![serde_json::from_value(message.clone())?])
+            .await?;
         let mock = mount_sse_once(harness.server(), compact_response()).await;
         codex.submit(Op::Compact).await?;
         wait_for_turn_complete(&codex).await;
