@@ -6,30 +6,27 @@ Scenario: First post-resume turn where resumed config model differs from rollout
 
 ## Window 1
 -- request 1 (turn; Last Request Before Resume) --
-00:message/developer[2]:
+00:message/developer[3]:
     [01] <SKILLS_INSTRUCTIONS>
     [02] <PERMISSIONS_INSTRUCTIONS>
-01:message/developer:
-    <ENVIRONMENT_CONTEXT>
-02:message/user:
+    [03] <ENVIRONMENT_CONTEXT>
+01:message/user:
     seed resume history
 
 ## Window 2 (after request 1: settings changed (model))
 -- request 2 (turn; First Request After Resume) --
-00:message/developer[2]:
+00:message/developer[3]:
     [01] <SKILLS_INSTRUCTIONS>
     [02] <PERMISSIONS_INSTRUCTIONS>
-01:message/developer:
-    <ENVIRONMENT_CONTEXT>
-02:message/user:
+    [03] <ENVIRONMENT_CONTEXT>
+01:message/user:
     seed resume history
-03:message/assistant:
+02:message/assistant:
     recorded before resume
-04:message/developer:
+03:message/developer:
     <MODEL_SWITCH>
-05:message/developer:
-    <PERMISSIONS_INSTRUCTIONS>
-06:message/developer:
-    <ENVIRONMENT_CONTEXT>
-07:message/user:
+04:message/developer[2]:
+    [01] <PERMISSIONS_INSTRUCTIONS>
+    [02] <ENVIRONMENT_CONTEXT>
+05:message/user:
     resume and change personality
