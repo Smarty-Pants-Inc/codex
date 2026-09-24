@@ -930,7 +930,8 @@ async fn goal_continuation_only_bypasses_existing_plan_mode() {
     collaboration_mode.mode = ModeKind::Plan;
     {
         let mut state = session.state.lock().await;
-        state.session_configuration.step_settings.collaboration_mode = collaboration_mode;
+        Arc::make_mut(&mut state.session_configuration.step_settings).collaboration_mode =
+            collaboration_mode;
     }
 
     let submission = handle(

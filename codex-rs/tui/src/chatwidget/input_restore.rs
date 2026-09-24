@@ -1,6 +1,7 @@
 //! Input queue restore and thread-input snapshot behavior for `ChatWidget`.
 
 use std::collections::HashSet;
+use std::collections::VecDeque;
 
 use crate::bottom_pane::ComposerDraftSnapshot;
 

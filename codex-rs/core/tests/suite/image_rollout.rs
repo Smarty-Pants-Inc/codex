@@ -4,7 +4,6 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_core::TurnInputRequest;
 use codex_features::Feature;
 use codex_history::RolloutItem;
-use codex_history::RolloutLine;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
@@ -196,7 +195,7 @@ async fn copy_paste_local_image_persists_rollout_request_shape() -> anyhow::Resu
     let encoded_path = serde_json::to_string(&abs_path.display().to_string())?;
     let escaped_path = &encoded_path[1..encoded_path.len() - 1];
     for line in rollout_text.lines().filter(|line| !line.trim().is_empty()) {
-        let rollout: RolloutLine = serde_json::from_str(line)?;
+        let rollout = codex_rollout::parse_rollout_line(line)?;
         if let RolloutItem::ResponseItem(envelope) = rollout.item {
             assert!(!serde_json::to_string(&envelope.item)?.contains(escaped_path));
         }

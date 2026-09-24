@@ -12384,6 +12384,49 @@ async fn set_total_token_usage(sess: &Session, total_token_usage: TokenUsage) {
 }
 
 #[tokio::test]
+async fn interrupted_pending_work_reservation_keeps_mailbox_mail() {
+    let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
+    let communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/worker").expect("worker path should parse"),
+        Vec::new(),
+        "continue the task".to_string(),
+        /*trigger_turn*/ true,
+    );
+    sess.input_queue
+        .enqueue_mailbox_communication(communication.clone(), Default::default())
+        .await;
+
+    // Holding the session state pauses startup in turn-context creation, after it has reserved
+    // the turn and read the mailbox.
+    let state = sess.state.lock().await;
+    let startup = tokio::spawn({
+        let sess = Arc::clone(&sess);
+        async move {
+            sess.maybe_start_turn_for_pending_work_with_sub_id("mail-turn".to_string())
+                .await;
+        }
+    });
+    timeout(Duration::from_secs(5), async {
+        while sess.active_turn.lock().await.is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("startup should reserve the turn");
+
+    sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    drop(state);
+    startup.await.expect("startup should finish");
+
+    assert!(sess.active_turn.lock().await.is_none());
+    assert_eq!(
+        sess.input_queue.drain_mailbox_input_items().await.0,
+        vec![TurnInput::InterAgentCommunication(communication)],
+    );
+}
+
+#[tokio::test]
 async fn queue_only_mailbox_mail_waits_for_next_turn_after_answer_boundary() {
     let (sess, tc, _rx) = make_session_and_context_with_rx().await;
     let communication = InterAgentCommunication::new(

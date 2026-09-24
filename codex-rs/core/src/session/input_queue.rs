@@ -159,6 +159,27 @@ impl InputQueue {
             .await
             .drain(..)
             .collect::<Vec<_>>();
+        let start_options = Self::mailbox_start_options(&pending_mails);
+        let items = pending_mails
+            .into_iter()
+            .map(|mail| TurnInput::InterAgentCommunication(mail.communication))
+            .collect();
+        (items, start_options)
+    }
+
+    /// Returns queued mail and its start options without removing them. The turn start drains
+    /// the mail only after it admits the turn, so a rejected start leaves the mail queued.
+    pub(crate) async fn peek_mailbox_input_items(&self) -> (Vec<TurnInput>, TurnStartOptions) {
+        let mut pending_mails = self.mailbox_pending_mails.lock().await;
+        let pending_mails = pending_mails.make_contiguous();
+        let items = pending_mails
+            .iter()
+            .map(|mail| TurnInput::InterAgentCommunication(mail.communication.clone()))
+            .collect();
+        (items, Self::mailbox_start_options(pending_mails))
+    }
+
+    fn mailbox_start_options(pending_mails: &[PendingMailboxCommunication]) -> TurnStartOptions {
         // A later follow-up supersedes the earlier choice, including an omitted choice.
         let mut start_options = pending_mails
             .iter()
@@ -184,11 +205,7 @@ impl InputQueue {
                     .filter(|id| !id.trim().is_empty())
             })
             .map(str::to_string);
-        let items = pending_mails
-            .into_iter()
-            .map(|mail| TurnInput::InterAgentCommunication(mail.communication))
-            .collect();
-        (items, start_options)
+        start_options
     }
 
     pub(crate) async fn turn_state_for_sub_id(
