@@ -484,7 +484,7 @@ impl QueuedItemService {
         queued_item_id: Option<String>,
         trace: Option<W3cTraceContext>,
     ) -> Result<StartIfIdleSubmission, QueueServiceError> {
-        let thread_id = thread.session_configured().thread_id;
+        let thread_id = thread.startup_metadata().thread_id;
         let _dispatch_guard = self.dispatch_guard(thread_id).await;
         self.start_locked(thread, queued_item_id, trace).await
     }
@@ -495,7 +495,7 @@ impl QueuedItemService {
         thread: &CodexThread,
         automatic_request: TurnInputRequest,
     ) -> Result<StartIfIdleSubmission, QueueServiceError> {
-        let thread_id = thread.session_configured().thread_id;
+        let thread_id = thread.startup_metadata().thread_id;
         let dispatch = self.dispatch_state(thread_id);
         let _dispatch_guard = dispatch.lock.clone().lock_owned().await;
         if *dispatch
@@ -528,7 +528,7 @@ impl QueuedItemService {
         queued_item_id: Option<String>,
         trace: Option<W3cTraceContext>,
     ) -> Result<StartIfIdleSubmission, QueueServiceError> {
-        let thread_id = thread.session_configured().thread_id;
+        let thread_id = thread.startup_metadata().thread_id;
         let item = self
             .list(thread_id)
             .await?

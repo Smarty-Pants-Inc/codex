@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use codex_exec_server::EnvironmentManager;
-use codex_extension_api::LoadUserInstructionsFuture;
+use codex_extension_api::LoadInstructionsFuture;
 use codex_extension_api::LoadedUserInstructions;
 use codex_extension_api::UserInstructionsProvider;
 use codex_http_client::HttpClientFactory;
@@ -49,12 +49,27 @@ static TEST_MODEL_PRESETS: Lazy<Vec<ModelPreset>> = Lazy::new(|| {
     presets
 });
 
+/// Reattaches request-only observations to a completed turn's history for capture assertions.
+/// Tests inspect this separately from the destination-filtered HTTP/WS request.
+pub async fn history_with_tool_call_metadata(
+    thread: &crate::CodexThread,
+) -> Vec<codex_protocol::models::ResponseItem> {
+    let history = thread.conversation_history_snapshot().await;
+    let mut items = history.items().cloned().collect::<Vec<_>>();
+    thread
+        .session
+        .services
+        .executed_tool_calls
+        .attach_to_prompt(&mut items, &mut Default::default());
+    items
+}
+
 /// Test-only provider that supplies no user instructions.
 #[derive(Debug, Default)]
 pub struct EmptyUserInstructionsProvider;
 
 impl UserInstructionsProvider for EmptyUserInstructionsProvider {
-    fn load_user_instructions(&self) -> LoadUserInstructionsFuture<'_> {
+    fn load_user_instructions(&self) -> LoadInstructionsFuture<'_> {
         Box::pin(async { LoadedUserInstructions::default() })
     }
 }
@@ -251,8 +266,8 @@ pub async fn record_history_with_direct_user_input(
                     text: text.clone(),
                     text_elements: Vec::new(),
                 }),
-                ContentItem::InputImage { image_url, detail } => Some(UserInput::Image {
-                    image_url: image_url.clone(),
+                ContentItem::InputImage { image, detail } => Some(UserInput::Image {
+                    image: image.clone(),
                     detail: *detail,
                 }),
                 _ => None,
@@ -264,6 +279,7 @@ pub async fn record_history_with_direct_user_input(
         session
             .record_user_prompt_and_emit_turn_item(
                 turn_context.as_ref(),
+                turn_context.model_info(),
                 &input,
                 /*client_id*/ None,
                 acceptance_order,

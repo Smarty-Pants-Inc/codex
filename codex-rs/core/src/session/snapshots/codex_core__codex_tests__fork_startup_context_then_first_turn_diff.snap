@@ -4,12 +4,15 @@ expression: snapshot
 ---
 Scenario: First request after fork when startup preserves the parent baseline, the fork changes approval policy, and the first forked turn enters plan mode.
 
-## First Forked Turn Request
+## Window 1
+-- request 1 (turn; First Forked Turn Request) --
 00:message/developer[2]:
     [01] <PERMISSIONS_INSTRUCTIONS>
-    [02] <ENVIRONMENT_CONTEXT:cwd=<CWD>>
-01:message/user:fork seed
+    [02] <ENVIRONMENT_CONTEXT>
+01:message/user:
+    fork seed
 02:message/developer[2]:
     [01] <PERMISSIONS_INSTRUCTIONS>
-    [02] <collaboration_mode>Fork turn collaboration instructions.</collaboration_mode>
-03:message/user:after fork
+    [02] <COLLABORATION_MODE>
+03:message/user:
+    after fork

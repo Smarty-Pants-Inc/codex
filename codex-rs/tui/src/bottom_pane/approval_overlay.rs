@@ -323,7 +323,9 @@ impl ApprovalOverlay {
         };
 
         let header = Box::new(ColumnRenderable::with([
-            Line::from(title.bold()).into(),
+            Paragraph::new(title.bold())
+                .wrap(Wrap { trim: false })
+                .into(),
             Line::from("").into(),
             header,
         ]));
@@ -342,7 +344,9 @@ impl ApprovalOverlay {
             footer_hint: Some(approval_footer_hint(request, approval_keymap, list_keymap)),
             items,
             header,
-            ..Default::default()
+            header_view_all_hint: approval_keymap
+                .primary_hint("open_fullscreen", &approval_keymap.open_fullscreen),
+            ..SelectionViewParams::picker()
         };
 
         (options, params)
@@ -756,7 +760,7 @@ fn build_header(request: &ApprovalRequest) -> Box<dyn Renderable> {
             {
                 header.push(Line::from(vec![
                     "Permission rule: ".into(),
-                    rule_line.cyan(),
+                    rule_line.fg(crate::style::accent_color()),
                 ]));
                 header.push(Line::from(""));
             }
@@ -798,7 +802,7 @@ fn build_header(request: &ApprovalRequest) -> Box<dyn Renderable> {
             if let Some(rule_line) = format_requested_permissions_rule(&request.permissions) {
                 header.push(Line::from(vec![
                     "Permission rule: ".into(),
-                    rule_line.cyan(),
+                    rule_line.fg(crate::style::accent_color()),
                 ]));
             }
             Box::new(Paragraph::new(header).wrap(Wrap { trim: false }))
@@ -818,8 +822,7 @@ fn build_header(request: &ApprovalRequest) -> Box<dyn Renderable> {
                 Line::from(""),
                 Line::from(request.message.clone()),
             ]);
-            let header = Paragraph::new(lines).wrap(Wrap { trim: false });
-            Box::new(header)
+            Box::new(Paragraph::new(lines).wrap(Wrap { trim: false }))
         }
     }
 }
@@ -2593,3 +2596,7 @@ mod tests {
         assert_eq!(decision, Some(CommandExecutionApprovalDecision::Accept));
     }
 }
+
+#[cfg(test)]
+#[path = "approval_overlay/clipping_tests.rs"]
+mod clipping_tests;

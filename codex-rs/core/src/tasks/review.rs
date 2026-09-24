@@ -235,6 +235,7 @@ pub(crate) async fn exit_review_mode(
     session
         .record_conversation_items(
             &ctx,
+            ctx.model_info(),
             &[ResponseItem::Message {
                 id: Some(ResponseItemId::new("msg")),
                 role: "developer".to_string(),
@@ -254,6 +255,7 @@ pub(crate) async fn exit_review_mode(
     session
         .record_response_item_and_emit_turn_item(
             ctx.as_ref(),
+            ctx.model_info(),
             ResponseItem::Message {
                 id: Some(ResponseItemId::new("msg")),
                 role: "assistant".to_string(),

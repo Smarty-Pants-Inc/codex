@@ -1,20 +1,26 @@
+use std::borrow::Borrow;
+
 use super::TurnInput as PendingTurnInput;
 use super::session::Session;
 use super::turn_context::TurnContext;
+use codex_analytics::ImagePreparationMetadata;
 use codex_features::Feature;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ModelInfo;
 
 pub(crate) const USER_ROLE_RESPONSE_ITEM_ERROR: &str =
     "user-role response items cannot be injected; submit direct user input through the turn API";
 
-pub(crate) fn validate_live_response_items(items: &[ResponseItem]) -> CodexResult<()> {
+pub(crate) fn validate_live_response_items<T: Borrow<ResponseItem>>(
+    items: &[T],
+) -> CodexResult<()> {
     if items
         .iter()
-        .any(|item| matches!(item, ResponseItem::Message { role, .. } if role == "user"))
+        .any(|item| matches!(item.borrow(), ResponseItem::Message { role, .. } if role == "user"))
     {
         return Err(CodexErr::InvalidRequest(
             USER_ROLE_RESPONSE_ITEM_ERROR.to_string(),
@@ -30,10 +36,10 @@ impl Session {
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
     )]
-    pub async fn inject_if_running(
+    pub(crate) async fn inject_if_running<T: Into<ResponseItemEnvelope> + Borrow<ResponseItem>>(
         &self,
-        input: Vec<ResponseItem>,
-    ) -> Result<(), Vec<ResponseItem>> {
+        input: Vec<T>,
+    ) -> Result<(), Vec<T>> {
         if validate_live_response_items(&input).is_err() {
             return Err(input);
         }
@@ -45,7 +51,7 @@ impl Session {
                         active_turn.turn_state.as_ref(),
                         input
                             .into_iter()
-                            .map(ResponseItemEnvelope::new)
+                            .map(Into::into)
                             .map(PendingTurnInput::ResponseItem)
                             .collect(),
                     )
@@ -113,7 +119,7 @@ impl Session {
             return;
         }
         drop(active);
-        self.record_annotated_conversation_items(turn_context, items)
+        self.record_annotated_conversation_items(turn_context, turn_context.model_info(), items)
             .await;
     }
 
@@ -131,6 +137,7 @@ impl Session {
     pub(crate) async fn record_annotated_conversation_items(
         &self,
         turn_context: &TurnContext,
+        model_info: &ModelInfo,
         items: Vec<ResponseItemEnvelope>,
     ) {
         if items.iter().all(|item| item.metadata.is_none()) {
@@ -138,18 +145,47 @@ impl Session {
                 .into_iter()
                 .map(ResponseItemEnvelope::into_item)
                 .collect::<Vec<_>>();
-            self.record_conversation_items(turn_context, &items).await;
+            self.record_conversation_items(turn_context, model_info, &items)
+                .await;
             return;
         }
 
+        let (annotated_items, image_preparations, _) = self
+            .prepare_annotated_conversation_items_for_history(turn_context, model_info, items)
+            .await;
+        self.record_prepared_conversation_items(
+            turn_context,
+            model_info,
+            annotated_items,
+            image_preparations,
+        )
+        .await;
+    }
+
+    /// Also returns the original content indices that failed media removed from the first item.
+    pub(super) async fn prepare_annotated_conversation_items_for_history(
+        &self,
+        turn_context: &TurnContext,
+        model_info: &ModelInfo,
+        items: Vec<ResponseItemEnvelope>,
+    ) -> (
+        Vec<ResponseItemEnvelope>,
+        Vec<ImagePreparationMetadata>,
+        Vec<usize>,
+    ) {
         let mut annotated_items = Vec::with_capacity(items.len());
         let mut image_preparations = Vec::new();
+        let mut first_removed_content_indices = None;
         for envelope in items {
-            let (prepared_items, prepared_images) = self.prepare_conversation_items_for_history(
-                turn_context,
-                std::slice::from_ref(&envelope.item),
-            );
+            let (prepared_items, prepared_images, removed_content_indices) = self
+                .prepare_conversation_items_for_history_with_removed_user_content(
+                    turn_context,
+                    model_info,
+                    std::slice::from_ref(&envelope.item),
+                )
+                .await;
             image_preparations.extend(prepared_images);
+            first_removed_content_indices.get_or_insert(removed_content_indices);
 
             let mut metadata = envelope.metadata;
             annotated_items.extend(prepared_items.into_owned().into_iter().map(|item| {
@@ -159,13 +195,11 @@ impl Session {
                 }
             }));
         }
-        self.record_prepared_conversation_items(
-            turn_context,
+        (
             annotated_items,
             image_preparations,
-            None,
+            first_removed_content_indices.unwrap_or_default(),
         )
-        .await;
     }
 
     /// Injects items into active work, or records them without starting a turn.
@@ -188,7 +222,8 @@ impl Session {
                 default_turn_context.as_ref()
             }
         };
-        self.record_conversation_items(turn_context, &items).await;
+        self.record_conversation_items(turn_context, turn_context.model_info(), &items)
+            .await;
     }
 }
 

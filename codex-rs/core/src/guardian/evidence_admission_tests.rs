@@ -1,5 +1,6 @@
 use super::*;
 use codex_protocol::models::ContentItemKind;
+use codex_protocol::models::ImageReference;
 use codex_protocol::models::InternalChatMessageMetadataPassthrough;
 use codex_protocol::protocol::RawResponseItemEvent;
 use pretty_assertions::assert_eq;
@@ -10,11 +11,15 @@ fn admission_requires_exact_turn_role_text_and_media_slots() {
         text: "bound review evidence".to_string(),
     };
     let image = ContentItem::InputImage {
-        image_url: "data:image/png;base64,original".to_string(),
+        image: ImageReference::Inline {
+            image_url: "data:image/png;base64,original".to_string(),
+        },
         detail: None,
     };
     let prepared_image = ContentItem::InputImage {
-        image_url: "data:image/png;base64,prepared".to_string(),
+        image: ImageReference::Inline {
+            image_url: "data:image/png;base64,prepared".to_string(),
+        },
         detail: None,
     };
     let error = ContentItem::InputText {
