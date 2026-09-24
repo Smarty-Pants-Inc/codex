@@ -7472,7 +7472,7 @@ async fn request_permissions_response_is_bound_to_originating_turn() {
         .environments
         .primary()
         .expect("primary environment")
-        .selection();
+        .clone();
     let active_turn = ActiveTurn::default();
     let (tx_response, mut rx_response) = tokio::sync::oneshot::channel();
     assert!(
@@ -10509,7 +10509,7 @@ async fn build_initial_context_reuses_in_flight_recommendation_prewarm() {
 
     let (_, initial_context) = tokio::join!(prewarm, initial_context);
     assert_eq!(
-        user_input_texts(&initial_context),
+        developer_input_texts(&initial_context),
         vec![concat!(
             "<recommended_plugins>\n",
             "Here is a list of plugins that are available but not installed.\n\n",
