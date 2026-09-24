@@ -307,7 +307,7 @@ pub async fn record_history_with_direct_user_input(
             .collect::<Vec<_>>();
         let session = &thread.session;
         let turn_context = session.new_default_turn().await;
-        let acceptance_order = session.reserve_user_input_order().await;
+        let acceptance_order = Some(session.reserve_user_input_order().await);
         session
             .record_user_prompt_and_emit_turn_item(
                 turn_context.as_ref(),
