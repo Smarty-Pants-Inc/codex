@@ -295,12 +295,14 @@ impl GuardianReviewSession {
         {
             pending.content = content;
         }
-        if pending.matches(event) {
-            state.last_admitted_node_repl_response_sequence = state
-                .last_admitted_node_repl_response_sequence
-                .max(pending.response_sequence);
-            state.pending_node_repl_evidence_admission = None;
+        if !pending.matches(event) {
+            return;
         }
+        let response_sequence = pending.response_sequence;
+        state.last_admitted_node_repl_response_sequence = state
+            .last_admitted_node_repl_response_sequence
+            .max(response_sequence);
+        state.pending_node_repl_evidence_admission = None;
     }
 }
 
