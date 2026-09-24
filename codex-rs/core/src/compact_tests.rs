@@ -190,10 +190,12 @@ async fn local_compaction_respects_tool_metadata_state(
         );
     }
     let compacted_history = session.clone_history().await;
-    let expected_summary = format!("{SUMMARY_PREFIX}\nThe prior calls finished.");
+    // The fork records compaction summaries as framed developer content.
+    let expected_summary =
+        frame_compacted_summary(&format!("{SUMMARY_PREFIX}\nThe prior calls finished."));
     assert!(compacted_history.raw_items().any(|item| {
         matches!(item, ResponseItem::Message { role, content, .. }
-            if role == "user"
+            if role == "developer"
                 && content_items_to_text(content).as_deref() == Some(expected_summary.as_str()))
     }));
     Ok(())

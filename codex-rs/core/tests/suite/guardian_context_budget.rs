@@ -121,8 +121,10 @@ async fn review_preserves_user_instructions_until_request_budgeting(
     // V2 retains the first review's user input. The smallest window exercises
     // first-review truncation only; the larger windows cover follow-up delivery.
     if compactions_per_turn.len() == 2 {
-        test.codex
-            .inject_response_items(vec![
+        // Injected user-role items are rejected; record the user message as direct input.
+        codex_core::test_support::record_history_with_direct_user_input(
+            test.codex.as_ref(),
+            vec![
                 responses::user_message_item(&followup),
                 ResponseItem::Message {
                     id: None,
@@ -133,8 +135,9 @@ async fn review_preserves_user_instructions_until_request_budgeting(
                     phase: None,
                     internal_chat_message_metadata_passthrough: None,
                 },
-            ])
-            .await?;
+            ],
+        )
+        .await?;
         test.submit_text_turn(restriction).await?;
     }
     let (compact_requests, requests): (Vec<_>, Vec<_>) = responses
