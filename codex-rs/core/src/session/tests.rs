@@ -7122,7 +7122,6 @@ async fn request_permissions_response_is_bound_to_originating_turn() {
     let (session, turn_context) = make_session_and_context().await;
     let environment = turn_context
         .initial_environments
-        .environments
         .primary()
         .expect("primary environment")
         .clone();

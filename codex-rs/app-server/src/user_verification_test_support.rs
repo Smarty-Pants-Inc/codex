@@ -178,6 +178,7 @@ impl Harness {
             },
             remote_control_handle: None,
             plugin_startup_tasks: None,
+            goal_auto_continue_enabled: false,
         }));
         Ok(Self {
             processor,
