@@ -14,6 +14,11 @@ inherits = "default"
 [test-groups.app_server_protocol_codegen]
 max-threads = 1
 
+# The ChatGPT login tests bind the fixed callback port 1455. `serial_test` cannot
+# serialize them across nextest's per-test processes, so the group must.
+[test-groups.app_server_login_port]
+max-threads = 1
+
 [test-groups.app_server_integration]
 max-threads = 1
 
@@ -45,10 +50,22 @@ filter = 'package(codex-app-server-protocol) & (test(typescript_schema_fixtures_
 test-group = 'app_server_protocol_codegen'
 
 [[profile.default.overrides]]
+# The first matching override wins, so this must come before the app-server
+# integration group. It covers exactly the `#[serial(login_port)]` tests.
+filter = 'package(codex-app-server) & kind(test) & test(/^suite::v2::account::(login_account_chatgpt_(start_can_be_cancelled|uses_debug_oauth_overrides|redirects_to_hosted_success_page|includes_forced_workspace_query_param|includes_forced_workspace_allowlist_query_param)|set_auth_token_cancels_active_chatgpt_login)$/)'
+test-group = 'app_server_login_port'
+
+[[profile.default.overrides]]
 # These integration tests spawn a fresh app-server subprocess per case.
 # Keep the library unit tests parallel.
 filter = 'package(codex-app-server) & kind(test)'
 test-group = 'app_server_integration'
+
+[[profile.local.overrides]]
+# The first matching override wins, so this must come before the app-server
+# integration group. It covers exactly the `#[serial(login_port)]` tests.
+filter = 'package(codex-app-server) & kind(test) & test(/^suite::v2::account::(login_account_chatgpt_(start_can_be_cancelled|uses_debug_oauth_overrides|redirects_to_hosted_success_page|includes_forced_workspace_query_param|includes_forced_workspace_allowlist_query_param)|set_auth_token_cancels_active_chatgpt_login)$/)'
+test-group = 'app_server_login_port'
 
 [[profile.local.overrides]]
 # Use up to four app-server subprocesses locally. The global nextest pool still
