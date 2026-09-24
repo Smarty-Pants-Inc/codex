@@ -21,4 +21,4 @@ End the goal only by:
 - marking it complete when the objective and explicit acceptance criteria are satisfied with direct current evidence; or
 - marking it blocked when no meaningful progress is possible without user input or an external-state change, after one reasonable alternate route when one exists.
 
-Do not pause, resume, replace, drop, clear, or rebudget the goal. Those are user or system operations.
+Pause the goal only when the user explicitly requests it: call update_goal with status "paused", report the returned status, and stop goal work. Do not resume, replace, drop, clear, or rebudget the goal. Those are user or system operations.

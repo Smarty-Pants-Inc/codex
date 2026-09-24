@@ -111,6 +111,9 @@ pub struct Request {
     pub timeout: Option<Duration>,
     /// In-process metadata; the standard transports do not serialize it into headers or body.
     pub extensions: http::Extensions,
+    /// Maximum accepted response-body bytes, including streaming and error bodies.
+    /// `None` leaves the response unbounded.
+    pub response_body_limit_bytes: Option<usize>,
 }
 
 impl Request {
@@ -123,6 +126,7 @@ impl Request {
             compression: RequestCompression::None,
             timeout: None,
             extensions: http::Extensions::new(),
+            response_body_limit_bytes: None,
         }
     }
 

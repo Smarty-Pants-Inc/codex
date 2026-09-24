@@ -2,18 +2,15 @@
 source: core/tests/suite/pending_input.rs
 expression: snapshot
 ---
-Scenario: /responses POST bodies (input only, redacted like other suite snapshots)
+Scenario: /responses POST bodies with pending input
 
-## First request
+## Window 1
+-- request 1 (request; First request) --
 00:message/developer[2]:
     [01] <PERMISSIONS_INSTRUCTIONS>
-    [02] <ENVIRONMENT_CONTEXT:cwd=<CWD>>
-01:message/user:first prompt
-
-## Second request
-00:message/developer[2]:
-    [01] <PERMISSIONS_INSTRUCTIONS>
-    [02] <ENVIRONMENT_CONTEXT:cwd=<CWD>>
-01:message/user:first prompt
+    [02] <ENVIRONMENT_CONTEXT>
+01:message/user:
+    first prompt
+-- request 2 (request; Second request) --
 02:reasoning:summary=thinking:encrypted=true
 03:agent_message

@@ -1,7 +1,7 @@
 use super::analytics::ToolCallAnalytics;
 use super::*;
-use crate::agent::control::ListedAgent;
 use crate::tools::handlers::multi_agents_spec::create_list_agents_tool;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::ToolSpec;
 
 pub(crate) struct Handler;
@@ -52,6 +52,28 @@ impl Handler {
             .await
             .map_err(collab_spawn_error)?;
 
+        let mut listed_agents = Vec::with_capacity(agents.len());
+        for agent in agents {
+            let model = session
+                .services
+                .agent_control
+                .get_agent_config_snapshot(agent.thread_id)
+                .await
+                .map(|snapshot| snapshot.model)
+                .unwrap_or_default();
+            listed_agents.push(ListedAgent {
+                agent_name: agent
+                    .metadata
+                    .agent_path
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| agent.thread_id.to_string()),
+                agent_status: agent.status,
+                model,
+                multi_agent_version: agent.multi_agent_version,
+            });
+        }
+        let agents = listed_agents;
         Ok(boxed_tool_output(ListAgentsResult { agents }))
     }
 }
@@ -66,6 +88,14 @@ impl CoreToolRuntime for Handler {
 #[serde(deny_unknown_fields)]
 struct ListAgentsArgs {
     path_prefix: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ListedAgent {
+    agent_name: String,
+    agent_status: AgentStatus,
+    model: String,
+    multi_agent_version: Option<MultiAgentVersion>,
 }
 
 #[derive(Debug, Serialize)]

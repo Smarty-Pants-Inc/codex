@@ -39,6 +39,7 @@ pub(crate) struct GoalRuntimeConfig {
     pub(crate) enabled: bool,
     pub(crate) tools_available_for_thread: bool,
     pub(crate) auto_continue_capability: GoalAutoContinueCapability,
+    pub(crate) tools_visible_for_thread: bool,
     pub(crate) root_accounting_state: Option<Arc<GoalAccountingState>>,
 }
 
@@ -46,6 +47,7 @@ pub(crate) enum ActiveGoalStopReason {
     TurnError,
     UsageLimit,
     ExecutionUnavailable { expected_goal_id: String },
+    EmptyResponse,
 }
 
 struct GoalRuntimeInner {
@@ -61,6 +63,7 @@ struct GoalRuntimeInner {
     enabled: AtomicBool,
     tools_available_for_thread: bool,
     auto_continue_capability: GoalAutoContinueCapability,
+    tools_visible_for_thread: bool,
     goal_state_lock: Semaphore,
 }
 
@@ -116,6 +119,7 @@ impl GoalRuntimeHandle {
                 enabled: AtomicBool::new(config.enabled),
                 tools_available_for_thread: config.tools_available_for_thread,
                 auto_continue_capability: config.auto_continue_capability,
+                tools_visible_for_thread: config.tools_visible_for_thread,
                 goal_state_lock: Semaphore::new(/*permits*/ 1),
             }),
         }
@@ -130,6 +134,10 @@ impl GoalRuntimeHandle {
     }
 
     pub(crate) fn tools_visible(&self) -> bool {
+        self.is_enabled() && self.inner.tools_visible_for_thread
+    }
+
+    pub(crate) fn tools_available(&self) -> bool {
         self.is_enabled() && self.inner.tools_available_for_thread
     }
 
@@ -172,6 +180,8 @@ impl GoalRuntimeHandle {
         if !self.is_enabled() {
             return Ok(());
         }
+        // Invalidate the old turn before the persisted objective/status changes.
+        self.inner.accounting_state.reset_empty_responses();
 
         if let Some(turn_id) = self.inner.accounting_state.current_turn_id() {
             self.account_active_goal_progress(
@@ -202,6 +212,7 @@ impl GoalRuntimeHandle {
             return Ok(());
         }
 
+        self.inner.accounting_state.reset_empty_responses();
         let replaced_existing_goal = previous_goal
             .as_ref()
             .is_some_and(|previous_goal| previous_goal.goal_id != goal.goal_id);
@@ -277,7 +288,7 @@ impl GoalRuntimeHandle {
             .await
     }
 
-    /// Accounts the ending turn and stops its active goal after a terminal error.
+    /// Accounts the ending turn and stops its active goal after an error or repeated empty output.
     pub(crate) async fn stop_active_goal_for_turn(
         &self,
         turn_id: &str,
@@ -312,6 +323,21 @@ impl GoalRuntimeHandle {
                 codex_state::ThreadGoalStatus::UsageLimited,
                 None,
             ),
+            ActiveGoalStopReason::EmptyResponse => {
+                let Some(expected_goal_id) =
+                    self.inner.accounting_state.empty_response_goal(turn_id)
+                else {
+                    return Ok(());
+                };
+                if accounting_goal_id != expected_goal_id {
+                    return Ok(());
+                }
+                (
+                    "empty-response",
+                    codex_state::ThreadGoalStatus::Blocked,
+                    Some(expected_goal_id),
+                )
+            }
             ActiveGoalStopReason::ExecutionUnavailable { expected_goal_id } => (
                 "execution-unavailable",
                 codex_state::ThreadGoalStatus::Blocked,
@@ -416,7 +442,7 @@ impl GoalRuntimeHandle {
             return Ok(());
         }
 
-        if !self.tools_visible() {
+        if !self.tools_available() {
             self.inner.accounting_state.clear_active_goal();
             return Ok(());
         }
@@ -485,6 +511,8 @@ impl GoalRuntimeHandle {
                 .map_err(|error| error.to_string()),
         }?;
         match submission {
+            // The queue may start a queued user turn instead, so the continuation is identified
+            // by its idle-turn source when the turn starts (see the goal extension).
             StartIfIdleSubmission::Started { .. } => {}
             StartIfIdleSubmission::NotSubmitted {
                 reason: NotSubmittedReason::PendingTriggerTurn,
