@@ -1970,8 +1970,9 @@ async fn pending_attachment_installs_configuration_before_waiting_turn_resumes()
         Some("<ready_capability_roots>waiting-root</ready_capability_roots>".to_string())
     );
     assert!(
+        // Workspace roots are in the developer-role environment context.
         ready_request
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .iter()
             .any(|text| text.contains(&owner_workspace_root.inferred_native_path_string())),
         "waiting turn should observe owner-resolved workspace roots"

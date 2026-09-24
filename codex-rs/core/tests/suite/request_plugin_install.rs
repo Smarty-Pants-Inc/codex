@@ -547,13 +547,14 @@ async fn startup_recommendations(
     test.submit_turn("suggest a plugin").await?;
 
     let request = model_response.single_request();
-    let user_context = request.message_input_texts("user").join("\n");
+    // Recommended plugins are developer-role context.
+    let developer_context = request.message_input_texts("developer").join("\n");
     assert_eq!(
-        user_context.contains("<recommended_plugins>"),
+        developer_context.contains("<recommended_plugins>"),
         expect_recommendations,
     );
     assert_eq!(
-        user_context.contains("- GitHub (github@openai-curated-remote)"),
+        developer_context.contains("- GitHub (github@openai-curated-remote)"),
         expect_recommendations,
     );
     let tools = tool_names(&request.body_json());

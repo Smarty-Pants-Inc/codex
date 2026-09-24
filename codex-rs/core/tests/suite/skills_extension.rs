@@ -1466,10 +1466,11 @@ async fn production_turn_reuses_orchestrator_skills_until_mcp_invalidation() -> 
         developer_text.contains("- Root aliases: Pass short package locators directly"),
         "model request should explain how to read aliased packages: {developer_text}"
     );
-    let user_text = request.message_input_texts("user").join("\n");
+    // Skill instructions are developer-role context.
     assert!(
-        user_text.contains("<skill>\n<name>demo:search</name>") && user_text.contains(SKILL_BODY),
-        "orchestrator instruction reads must remain available without host discovery: {user_text}"
+        developer_text.contains("<skill>\n<name>demo:search</name>")
+            && developer_text.contains(SKILL_BODY),
+        "orchestrator instruction reads must remain available without host discovery: {developer_text}"
     );
 
     // A normal turn and a policy change must reuse the same Apps skill snapshot.
@@ -1801,14 +1802,17 @@ async fn opted_in_executor_provider_skips_host_discovery_but_injects_discovered_
                 "selected executor skill should remain advertised: {developer_text}"
             );
         }
+        // Skill instructions are developer-role context.
         assert!(
-            user_text.contains(&format!("<skill>\n<name>{EXECUTOR_SKILL_NAME}</name>"))
-                && user_text.contains(EXECUTOR_SKILL_BODY),
-            "turn {index} should inject the discovered executor skill: {user_text}"
+            developer_text.contains(&format!("<skill>\n<name>{EXECUTOR_SKILL_NAME}</name>"))
+                && developer_text.contains(EXECUTOR_SKILL_BODY),
+            "turn {index} should inject the discovered executor skill: {developer_text}"
         );
         assert!(
             !developer_text.contains(AMBIENT_SKILL_NAME)
                 && !developer_text.contains(HOST_SKILL_NAME)
+                && !developer_text.contains(AMBIENT_SKILL_BODY)
+                && !developer_text.contains(HOST_SKILL_DESCRIPTION)
                 && !user_text.contains(AMBIENT_SKILL_BODY)
                 && !user_text.contains(HOST_SKILL_DESCRIPTION)
                 && !user_text.contains(&format!("<skill>\n<name>{AMBIENT_SKILL_NAME}</name>"))
@@ -1944,11 +1948,12 @@ async fn executor_only_provider_preserves_structured_repo_skill_without_discover
     .await;
 
     let request = response.single_request();
-    let user_text = request.message_input_texts("user").join("\n");
+    // Skill instructions are developer-role context.
+    let developer_text = request.message_input_texts("developer").join("\n");
     assert!(
-        user_text.contains(&format!("<skill>\n<name>{AMBIENT_SKILL_NAME}</name>"))
-            && user_text.contains(AMBIENT_SKILL_BODY),
-        "desktop's structured absolute-path skill selection must remain available: {user_text}"
+        developer_text.contains(&format!("<skill>\n<name>{AMBIENT_SKILL_NAME}</name>"))
+            && developer_text.contains(AMBIENT_SKILL_BODY),
+        "desktop's structured absolute-path skill selection must remain available: {developer_text}"
     );
 
     Ok(())
@@ -2336,7 +2341,7 @@ async fn explicit_executor_skill_prompt_rejects_oversized_resource() -> Result<(
     )];
     let first_prompts = first_response
         .single_request()
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .filter(|text| text.starts_with("<skill>"))
         .collect::<Vec<_>>();
@@ -2358,7 +2363,7 @@ async fn explicit_executor_skill_prompt_rejects_oversized_resource() -> Result<(
     test.submit_turn("$live").await?;
     let prompts = second_response
         .single_request()
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .filter(|text| text.starts_with("<skill>"))
         .collect::<Vec<_>>();

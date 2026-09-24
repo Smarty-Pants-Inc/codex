@@ -594,7 +594,7 @@ async fn node_elicitations_attribute_independent_reviews_without_changing_action
             }
         );
         let request = guardian[index].single_request();
-        let prompt = request.message_input_texts("user").join("\n");
+        let prompt = request.message_input_texts("developer").join("\n");
         let action_text = prompt
             .rsplit_once("Planned action JSON:\n")
             .context("Guardian planned action")?

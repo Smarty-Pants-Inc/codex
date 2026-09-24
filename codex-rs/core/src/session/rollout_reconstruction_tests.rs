@@ -566,9 +566,13 @@ async fn reconstruction_preserves_non_root_direct_user_messages() {
 }
 
 #[tokio::test]
-async fn reconstruction_preserves_checkpoint_when_rollback_crosses_compaction() {
+async fn reconstruction_preserves_pre_compaction_history_when_rollback_crosses_compaction() {
     let (session, turn_context) = make_session_and_context().await;
+    // A checkpoint newer than a rolled-back turn is not a replay base; the raw items before it
+    // rebuild the surviving history.
     let rollout_items = [
+        RolloutItem::ResponseItem(user_message("u1").into()),
+        RolloutItem::ResponseItem(user_message("u2").into()),
         RolloutItem::Compacted(CompactedItem {
             message: "legacy summary".to_string(),
             replacement_history: Some(annotated(vec![

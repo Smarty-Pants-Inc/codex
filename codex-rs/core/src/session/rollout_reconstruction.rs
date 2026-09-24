@@ -135,6 +135,15 @@ impl Session {
         let Some(live_thread) = self.live_thread() else {
             return Ok(self.state.lock().await.direct_user_response_items());
         };
+        {
+            // ponytail: paginated rollouts cannot load full history, so use the live in-memory
+            // provenance. User items from before a paginated resume count as not direct (the
+            // conservative choice). Seed it from resume replay if that drops needed context.
+            let state = self.state.lock().await;
+            if state.session_configuration.history_mode == ThreadHistoryMode::Paginated {
+                return Ok(state.direct_user_response_items());
+            }
+        }
         let history = live_thread
             .load_history(/*include_archived*/ true)
             .await
@@ -239,12 +248,6 @@ fn finalize_active_segment<'a>(
     if *pending_rollback_turns > 0 {
         if active_segment.counts_as_user_turn {
             *pending_rollback_turns -= 1;
-        } else if base_compaction.is_none()
-            && let Some(segment_base_compaction) = active_segment.base_compaction
-        {
-            // A checkpoint inside a rolled-back user turn belongs to that turn. One outside
-            // every rolled-back turn remains a valid base; forward replay applies the rollback.
-            *base_compaction = Some(segment_base_compaction);
         }
         return;
     }

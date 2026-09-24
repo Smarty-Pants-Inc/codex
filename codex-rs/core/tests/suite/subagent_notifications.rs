@@ -1416,8 +1416,9 @@ async fn grandchild_full_fork_preserves_context_baseline(
                 .iter()
                 .filter(|text| text.contains(INSTRUCTIONS))
                 .count(),
+            // Environment context is developer-role context.
             request
-                .message_input_texts("user")
+                .message_input_texts("developer")
                 .iter()
                 .filter(|text| text.contains("<environment_context>"))
                 .count(),

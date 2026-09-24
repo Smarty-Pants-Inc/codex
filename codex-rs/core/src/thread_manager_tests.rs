@@ -1172,7 +1172,8 @@ async fn fork_internal_session_uses_only_the_selected_history() {
     ];
     parent
         .thread
-        .inject_response_items(vec![user_msg("unrelated parent work")])
+        // Injected user-role items are rejected; any parent history works here.
+        .inject_response_items(vec![assistant_msg("unrelated parent work")])
         .await
         .expect("inject parent history");
     let reviewer = manager

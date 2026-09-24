@@ -6446,7 +6446,7 @@ await tools.exec_command({ cmd: "printf second", sandbox_permissions: "require_e
         let compact_request = compact_requests[0];
         assert!(
             compact_request
-                .message_input_texts("user")
+                .message_input_texts("developer")
                 .concat()
                 .contains(NODE_REPL_DOM_MIDDLE)
         );

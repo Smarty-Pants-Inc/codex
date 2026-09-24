@@ -295,7 +295,7 @@ async fn guardian_session_inherits_parent_http_fallback(
             );
         }
     }
-    let guardian_context = guardian_request.message_input_texts("user").join("\n");
+    let guardian_context = guardian_request.message_input_texts("developer").join("\n");
     let executor_cwd = test
         .executor_environment()
         .selection()
@@ -628,7 +628,7 @@ async fn guardian_review_compacts_with_summary_despite_parent_token_budget(
     let compact_request = compact_requests[0];
     assert!(
         compact_request
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .join("\n")
             .contains(user_authorization)
     );
@@ -639,7 +639,7 @@ async fn guardian_review_compacts_with_summary_despite_parent_token_budget(
     );
     assert!(
         second_request
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .join("\n")
             .contains(user_authorization)
     );
@@ -1716,7 +1716,7 @@ async fn guardian_session_is_reused_for_consecutive_tool_reviews_without_prewarm
     ];
     // Both the full request and the next review's delta must carry the resolved policy.
     for request in [guardian_requests[0], guardian_requests[2]] {
-        let user_messages = request.message_input_text_groups("user");
+        let user_messages = request.message_input_text_groups("developer");
         let latest_input = user_messages.last().expect("Guardian assessment input");
         let section_start = latest_input
             .iter()
