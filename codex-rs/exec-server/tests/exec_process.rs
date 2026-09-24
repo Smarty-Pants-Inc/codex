@@ -858,8 +858,13 @@ async fn remote_process_preserves_empty_workspace_roots() -> Result<()> {
             network_proxy: None,
         })
         .await?;
+    // ponytail: a sandboxed remote process can take over 2 s to emit its first
+    // event on a loaded CI runner (2.14 s and 2.42 s seen; 1.0-1.3 s is normal).
+    // 10 s per event still catches a hang. Revisit if this test starts taking
+    // several seconds when the runner is idle.
     let (stdout, _stderr, exit_code, closed) =
-        collect_process_output_from_events(session.process).await?;
+        collect_process_output_from_events_with_timeout(session.process, Duration::from_secs(10))
+            .await?;
 
     assert!(!stdout.contains("excluded"), "unexpected stdout: {stdout}");
     assert_ne!(exit_code, Some(0));

@@ -123,8 +123,7 @@ async fn policy_resolution_retries_after_auth_refresh() {
         async move {
             resolve_attribution_policy(&auth_manager, &base_url, &http_client_factory())
                 .await
-                .ok()
-                .flatten()
+                .expect("policy resolution should not time out")
         }
     });
 
