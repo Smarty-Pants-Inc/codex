@@ -164,7 +164,7 @@ async fn board_active_notice_and_reads_reach_model_context() -> anyhow::Result<(
     )?;
     assert_eq!(result["results"][0]["text_preview"], "A shared decision.");
     let notice = requests[1]
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .find(|text| text.contains("<agent_message_board_notification>"))
         .expect("active notification");

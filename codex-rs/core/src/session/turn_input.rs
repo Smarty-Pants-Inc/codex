@@ -496,8 +496,9 @@ async fn start_if_idle(
     let _admission = session.services.extensions.admit_turn_start();
     // A one-shot review delegate completes its already-running parent's work.
     // Its explicit input carries parent lineage; automatic starts do not qualify.
+    // The fork submits the delegate prompt as developer input.
     if _admission.is_none()
-        && !(kind == TurnStartKind::User
+        && !(matches!(kind, TurnStartKind::User | TurnStartKind::Developer)
             && start.parent_turn_id.is_some()
             && matches!(
                 session

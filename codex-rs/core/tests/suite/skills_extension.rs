@@ -1500,7 +1500,7 @@ async fn production_turn_reuses_orchestrator_skills_until_mcp_invalidation() -> 
     assert_eq!(read_calls.load(Ordering::SeqCst), 2);
     assert!(
         response.requests()[3]
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .join("\n")
             .contains(UPDATED_SKILL_BODY)
     );

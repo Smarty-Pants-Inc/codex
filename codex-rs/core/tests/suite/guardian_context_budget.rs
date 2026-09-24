@@ -149,7 +149,7 @@ async fn review_preserves_user_instructions_until_request_budgeting(
         .filter(|request| request.body_json()["client_metadata"]["x-openai-subagent"] == "guardian")
         .collect::<Vec<_>>();
     assert_eq!(reviews.len(), compactions_per_turn.len());
-    let initial_inputs = reviews[0].message_input_text_groups("user");
+    let initial_inputs = reviews[0].message_input_text_groups("developer");
     let initial_context = initial_inputs.last().expect("first review input").concat();
     if compactions_per_turn[0] == 0 {
         assert!(initial_context.contains(&initial));
@@ -161,7 +161,7 @@ async fn review_preserves_user_instructions_until_request_budgeting(
         compactions_per_turn.iter().sum::<usize>()
     );
     if let Some(review) = reviews.get(1) {
-        let delta_inputs = review.message_input_text_groups("user");
+        let delta_inputs = review.message_input_text_groups("developer");
         let delta = delta_inputs.last().expect("delta review input");
         let delta_context = delta.concat();
         if window == 160_000 {
@@ -526,7 +526,7 @@ async fn review_respects_complete_context_budget(
             );
         }
         let request = guardian_requests[0];
-        let context = request.message_input_texts("user").join("\n");
+        let context = request.message_input_texts("developer").join("\n");
         assert!(context.contains("<guardian_context_omission>"));
         assert!(!context.contains("optional old commentary"));
         assert!(context.contains("Run the command if the approval reviewer allows it."));
@@ -761,14 +761,18 @@ async fn oversized_action_preserves_review_policy_and_next_review(
         .collect::<Vec<_>>();
     assert_eq!(reviews.len(), if fits { 2 } else { 1 });
     if fits {
-        let parts = reviews[0].message_input_texts("user");
+        // The review input is the last developer message; earlier ones hold the fixed policy.
+        let parts = reviews[0]
+            .message_input_text_groups("developer")
+            .pop()
+            .expect("first review input");
         assert!(parts.concat().contains(&oversized_command));
         assert!(parts.iter().all(|part| part.len() <= 36_000));
     }
     let context = reviews
         .last()
         .expect("review of the next action")
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .concat();
     assert!(context.contains("echo complete-action-review"));
     assert!(

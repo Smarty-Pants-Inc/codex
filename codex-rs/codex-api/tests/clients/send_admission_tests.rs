@@ -162,7 +162,7 @@ async fn prepared_admission_sees_post_auth_request_and_refuses_both_transports()
         let result = if method == http::Method::GET {
             ModelsClient::new(transport, provider, auth)
                 .with_telemetry(Some(admission.clone()))
-                .list_models(url, headers)
+                .list_models(url, headers, /*response_body_limit_bytes*/ None)
                 .await
                 .map(|_| ())
         } else {
@@ -309,7 +309,13 @@ async fn execute_admission_can_stop_initial_send_or_lower_retry() -> Result<()> 
         let request_url = ModelsClient::<ReqwestTransport>::request_url(&provider, "0.1.0");
         let client = ModelsClient::new(transport, provider, auth.clone())
             .with_telemetry(Some(admission.clone()));
-        let result = client.list_models(request_url, HeaderMap::new()).await;
+        let result = client
+            .list_models(
+                request_url,
+                HeaderMap::new(),
+                /*response_body_limit_bytes*/ None,
+            )
+            .await;
         if capacity < 2 {
             assert!(
                 matches!(result, Err(ApiError::Transport(TransportError::Build(ref message)))

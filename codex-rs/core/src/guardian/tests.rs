@@ -314,9 +314,12 @@ fn format_guardian_requests_snapshot(
         .map(|(_, request)| {
             let mut body = request.body_json();
             // Project instructions depend on the checkout. Leave discovery enabled and omit
-            // only this content from these snapshots, as the previous renderer did.
+            // only this content from these snapshots, as the previous renderer did. The fork
+            // sends project instructions as developer input.
             for item in body["input"].as_array_mut().expect("request input") {
-                if item["type"] == "message" && item["role"] == "user" {
+                if item["type"] == "message"
+                    && (item["role"] == "user" || item["role"] == "developer")
+                {
                     item["content"]
                         .as_array_mut()
                         .expect("message content")
@@ -2721,7 +2724,7 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
     for request in &requests[..2] {
         assert!(
             request
-                .message_input_texts("user")
+                .message_input_texts("developer")
                 .join("\n")
                 .contains(&format!(
                     "Reviewed Codex session id: {}",

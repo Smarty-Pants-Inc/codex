@@ -299,12 +299,11 @@ async fn history_injection_skips_skill_discovery_after_initial_context() -> Resu
         injected_texts,
         vec![FIRST_INSTRUCTIONS, SECOND_INSTRUCTIONS]
     );
-    let user_texts = request.message_input_texts("user");
     assert!(
-        user_texts.iter().any(|text| {
+        developer_texts.iter().any(|text| {
             text.contains("<skill>\n<name>demo</name>") && text.contains(SKILL_BODY)
         }),
-        "the real skill body must reach the model: {user_texts:?}"
+        "the real skill body must reach the model: {developer_texts:?}"
     );
 
     Ok(())

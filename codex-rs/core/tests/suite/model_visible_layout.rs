@@ -592,7 +592,7 @@ async fn snapshot_model_visible_layout_resume_with_personality_change() -> Resul
     let resumed_request = resumed_mock.single_request();
     assert!(
         resumed_request
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .iter()
             .any(|text| text.contains(&format!("{PRETURN_CONTEXT_DIFF_CWD}</cwd>")))
     );
@@ -686,7 +686,7 @@ async fn snapshot_model_visible_layout_resume_override_matches_rollout_model() -
     let resumed_request = resumed_mock.single_request();
     assert!(
         resumed_request
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .iter()
             .any(|text| text.contains(&format!("{PRETURN_CONTEXT_DIFF_CWD}</cwd>")))
     );

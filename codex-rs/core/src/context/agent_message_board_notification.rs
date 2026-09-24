@@ -11,7 +11,7 @@ pub(crate) struct AgentMessageBoardNotification {
 
 impl ContextualUserFragment for AgentMessageBoardNotification {
     fn role(&self) -> &'static str {
-        "user"
+        "developer"
     }
     fn content_kind(&self) -> ContentItemKind {
         ContentItemKind("agent_message_board.notification".into())

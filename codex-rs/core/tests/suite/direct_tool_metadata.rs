@@ -130,7 +130,7 @@ async fn direct_call_metadata_during_compaction_respects_provider_support(
     );
     match remote_compaction {
         RemoteCompactionSupport::Unsupported => assert!(compacted.iter().any(|item| {
-            item["role"] == "user"
+            item["role"] == "developer"
                 && item["content"][0]["text"]
                     == format!("{}\n{summary}", codex_core::compact::SUMMARY_PREFIX)
         })),

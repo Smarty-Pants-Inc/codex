@@ -285,7 +285,7 @@ async fn guardian_history_uses_deltas_between_eviction_batches() -> Result<()> {
         .iter()
         .map(|request| {
             request
-                .message_input_text_groups("user")
+                .message_input_text_groups("developer")
                 .last()
                 .expect("Guardian review prompt")
                 .join("")

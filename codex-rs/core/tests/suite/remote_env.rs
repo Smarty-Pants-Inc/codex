@@ -2130,7 +2130,7 @@ async fn future_pending_environment_can_finish_without_retargeting_the_active_tu
         .iter()
         .map(|request| {
             request
-                .message_input_texts("user")
+                .message_input_texts("developer")
                 .into_iter()
                 .rfind(|text| text.contains("<ready_capability_roots>"))
         })
