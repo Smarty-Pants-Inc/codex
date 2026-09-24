@@ -937,9 +937,12 @@ async fn sample_configured_conversation_history_with_source(
         arguments: arguments.to_owned(),
     };
     if !conversation_history.is_empty() {
+        // Live injection rejects user-role items; record user messages as direct input.
         Box::pin(
-            test.codex
-                .inject_response_items(conversation_history.clone()),
+            codex_core::test_support::record_history_with_direct_user_input(
+                test.codex.as_ref(),
+                conversation_history.clone(),
+            ),
         )
         .await?;
     }
@@ -2355,8 +2358,10 @@ async fn cached_score_survives_compaction_and_internal_context_but_not_user_inpu
         Some(ReviewDecision::Approved),
     );
 
-    test.codex
-        .inject_response_items(vec![ResponseItem::Message {
+    // Live injection rejects user-role items; record the user message as direct input.
+    codex_core::test_support::record_history_with_direct_user_input(
+        test.codex.as_ref(),
+        vec![ResponseItem::Message {
             id: None,
             role: "user".to_owned(),
             content: vec![ContentItem::InputText {
@@ -2364,8 +2369,9 @@ async fn cached_score_survives_compaction_and_internal_context_but_not_user_inpu
             }],
             phase: None,
             internal_chat_message_metadata_passthrough: None,
-        }])
-        .await?;
+        }],
+    )
+    .await?;
     assert_eq!(
         cached_approval(
             &registry,
@@ -3012,9 +3018,12 @@ async fn assert_parent_compaction_reuse(thread_context_enabled: bool) -> Result<
         user_instruction("Inspect the repository guidelines."),
     ]);
 
+    // Live injection rejects user-role items; record user messages as direct input.
     Box::pin(
-        test.codex
-            .inject_response_items(conversation_history.0.clone()),
+        codex_core::test_support::record_history_with_direct_user_input(
+            test.codex.as_ref(),
+            conversation_history.0.clone(),
+        ),
     )
     .await?;
     let mut retained: Vec<ResponseItem> = serde_json::from_value(json!([

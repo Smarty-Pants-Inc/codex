@@ -37,6 +37,8 @@ pub(crate) struct SessionState {
     pub(crate) history: ContextManager,
     /// Trusted direct-user items for sessions without durable rollout provenance.
     pub(crate) direct_user_response_items: Vec<ResponseItem>,
+    /// User messages restored without replay provenance, such as from a compaction checkpoint.
+    pub(crate) unverified_user_item_ids: HashSet<String>,
     pub(crate) latest_rate_limits: Option<RateLimitSnapshot>,
     pub(crate) latest_token_usage_record: Option<TokenUsageRecord>,
     pub(crate) server_reasoning_included: bool,
@@ -80,6 +82,7 @@ impl SessionState {
             base_instructions_provenance: None,
             history,
             direct_user_response_items: Vec::new(),
+            unverified_user_item_ids: HashSet::new(),
             latest_rate_limits: None,
             latest_token_usage_record: None,
             server_reasoning_included: false,
@@ -149,6 +152,20 @@ impl SessionState {
             })
             .cloned()
             .collect()
+    }
+
+    pub(crate) fn set_unverified_user_item_ids(&mut self, item_ids: HashSet<String>) {
+        self.unverified_user_item_ids = item_ids;
+    }
+
+    /// Returns whether history holds a user message whose provenance replay could not establish.
+    pub(crate) fn has_unverified_user_items(&self) -> bool {
+        self.history.raw_items().any(|item| {
+            item.is_user_message()
+                && item
+                    .id()
+                    .is_some_and(|id| self.unverified_user_item_ids.contains(id.as_str()))
+        })
     }
 
     pub(crate) fn record_direct_user_response_items(&mut self, items: Vec<ResponseItem>) {

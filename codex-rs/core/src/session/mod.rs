@@ -1572,6 +1572,8 @@ impl Session {
             first_window_id,
             previous_window_id,
             window_id,
+            direct_user_item_ids,
+            unverified_user_item_ids,
         } = self
             .reconstruct_history_from_rollout(turn_context, rollout_items)
             .await;
@@ -1605,6 +1607,21 @@ impl Session {
             state
                 .history
                 .restore_review_context(Some(&retained_context), guardian_history.as_ref());
+            // Paginated threads cannot reload full history later, so keep the replayed
+            // provenance for the surviving history in memory.
+            let direct_user_items = state
+                .history
+                .raw_items()
+                .filter(|item| {
+                    item.is_user_message()
+                        && item
+                            .id()
+                            .is_some_and(|id| direct_user_item_ids.contains(id.as_str()))
+                })
+                .cloned()
+                .collect();
+            state.record_direct_user_response_items(direct_user_items);
+            state.set_unverified_user_item_ids(unverified_user_item_ids);
             if let Some(world_state) = world_state_baseline {
                 state.history.set_world_state_baseline(world_state);
             }

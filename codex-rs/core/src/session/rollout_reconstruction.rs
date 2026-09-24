@@ -24,6 +24,11 @@ pub(super) struct RolloutReconstruction {
     pub(super) first_window_id: Option<Uuid>,
     pub(super) previous_window_id: Option<Uuid>,
     pub(super) window_id: Option<Uuid>,
+    /// IDs of reconstructed user messages that replayed lifecycle events prove direct.
+    pub(super) direct_user_item_ids: HashSet<String>,
+    /// IDs of reconstructed user messages that the replayed rollout never observed as items,
+    /// such as messages restored from a compaction checkpoint. Their provenance is unknown.
+    pub(super) unverified_user_item_ids: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -132,18 +137,28 @@ impl Session {
     pub(crate) async fn direct_user_response_items_from_rollout(
         &self,
     ) -> CodexResult<Vec<ResponseItem>> {
-        let Some(live_thread) = self.live_thread() else {
-            return Ok(self.state.lock().await.direct_user_response_items());
-        };
-        {
-            // ponytail: paginated rollouts cannot load full history, so use the live in-memory
-            // provenance. User items from before a paginated resume count as not direct (the
-            // conservative choice). Seed it from resume replay if that drops needed context.
+        let live_thread = {
+            // Threads without a rollout, and paginated rollouts that cannot load full history,
+            // use the in-memory provenance that resume and fork seed from replay and that live
+            // input extends.
             let state = self.state.lock().await;
-            if state.session_configuration.history_mode == ThreadHistoryMode::Paginated {
-                return Ok(state.direct_user_response_items());
+            match self.live_thread() {
+                Some(live_thread)
+                    if state.session_configuration.history_mode != ThreadHistoryMode::Paginated =>
+                {
+                    live_thread
+                }
+                _ if state.has_unverified_user_items() => {
+                    // Fail closed: keep the current history rather than drop user messages
+                    // whose provenance replay could not establish.
+                    return Err(CodexErr::UnsupportedOperation(
+                        "remote compaction cannot prove the provenance of restored user messages"
+                            .to_string(),
+                    ));
+                }
+                _ => return Ok(state.direct_user_response_items()),
             }
-        }
+        };
         let history = live_thread
             .load_history(/*include_archived*/ true)
             .await
@@ -649,10 +664,33 @@ impl Session {
             previous_id: None,
             id: None,
         });
+        let mut direct_user_item_ids = HashSet::new();
+        let mut unverified_user_item_ids = HashSet::new();
+        for item in history.raw_items() {
+            if !item.is_user_message() {
+                continue;
+            }
+            let Some(item_id) = item.id().map(|id| id.as_str()) else {
+                continue;
+            };
+            if direct_user_provenance
+                .direct_user_item_ids
+                .contains(item_id)
+            {
+                direct_user_item_ids.insert(item_id.to_string());
+            } else if !direct_user_provenance
+                .observed_user_item_ids
+                .contains(item_id)
+            {
+                unverified_user_item_ids.insert(item_id.to_string());
+            }
+        }
         RolloutReconstruction {
             retained_context: history.retained_context().clone(),
             guardian_history: history.guardian_history_checkpoint(),
             history: history.into_annotated_items(),
+            direct_user_item_ids,
+            unverified_user_item_ids,
             previous_turn_settings,
             reference_context_item,
             world_state_baseline,

@@ -4963,3 +4963,137 @@ async fn snapshot_request_shape_remote_manual_compact_without_previous_user_mess
 
     Ok(())
 }
+
+#[derive(Clone, Copy, Debug)]
+enum PaginatedReload {
+    Resume,
+    Fork,
+}
+
+/// A paginated thread reloaded by resume or fork must keep a genuine earlier user message that
+/// legacy remote compaction returns unchanged.
+#[test_case(PaginatedReload::Resume; "resume")]
+#[test_case(PaginatedReload::Fork; "fork")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn remote_compact_keeps_pre_reload_user_message_on_paginated_thread(
+    reload: PaginatedReload,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    const PRE_RELOAD_PROMPT: &str = "keep this instruction across reload";
+    let harness = TestCodexHarness::with_builder(
+        test_codex()
+            .with_history_mode(ThreadHistoryMode::Paginated)
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+    )
+    .await?;
+    let test = harness.test();
+    responses::mount_sse_once(
+        harness.server(),
+        responses::sse(vec![
+            responses::ev_assistant_message("m1", "FIRST_REPLY"),
+            responses::ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    test.codex
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: PRE_RELOAD_PROMPT.into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_turn_complete(&test.codex).await;
+
+    let thread_id = test.session_configured.thread_id;
+    test.codex.shutdown_and_wait().await?;
+    test.thread_manager.remove_thread(&thread_id).await;
+    let saved = test
+        .thread_store
+        .load_latest_model_context(codex_thread_store::LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await?
+        .items;
+    let history = InitialHistory::Resumed(codex_history::ResumedHistory {
+        conversation_id: thread_id,
+        history: std::sync::Arc::new(saved),
+        rollout_path: None,
+    });
+    let reloaded = match reload {
+        PaginatedReload::Resume => {
+            test.thread_manager
+                .resume_thread_with_history(
+                    test.config.clone(),
+                    history,
+                    test.thread_manager.auth_manager(),
+                    /*parent_trace*/ None,
+                    codex_protocol::mcp::ClientMcpExtensions::default(),
+                )
+                .await?
+                .thread
+        }
+        PaginatedReload::Fork => {
+            test.thread_manager
+                .fork_thread_from_history(
+                    codex_core::ForkSnapshot::Interrupted,
+                    test.config.clone(),
+                    history,
+                    /*thread_source*/ None,
+                    /*parent_trace*/ None,
+                    codex_protocol::mcp::ClientMcpExtensions::default(),
+                    /*reserved_thread_id*/ None,
+                )
+                .await?
+                .thread
+        }
+    };
+
+    // The compact endpoint returns the genuine earlier user message unchanged.
+    let pre_reload_message = reloaded
+        .conversation_history_snapshot()
+        .await
+        .items()
+        .find(|item| {
+            matches!(item, ResponseItem::Message { role, content, .. }
+                if role == "user"
+                    && matches!(content.as_slice(), [ContentItem::InputText { text }] if text == PRE_RELOAD_PROMPT))
+        })
+        .cloned()
+        .context("reloaded history keeps the earlier user message")?;
+    let compact_mock = responses::mount_compact_json_once(
+        harness.server(),
+        json!({
+            "output": [
+                pre_reload_message,
+                {"type": "compaction", "encrypted_content": "ENCRYPTED_COMPACTION_SUMMARY"},
+            ]
+        }),
+    )
+    .await;
+    let follow_up = responses::mount_sse_once(
+        harness.server(),
+        responses::sse(vec![
+            responses::ev_assistant_message("m2", "AFTER_COMPACT_REPLY"),
+            responses::ev_completed("resp-2"),
+        ]),
+    )
+    .await;
+
+    reloaded.submit(Op::Compact).await?;
+    wait_for_turn_complete(&reloaded).await;
+    reloaded
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "after compact".into(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    wait_for_turn_complete(&reloaded).await;
+
+    assert_eq!(compact_mock.requests().len(), 1);
+    assert_eq!(
+        follow_up.single_request().message_input_texts("user"),
+        vec![PRE_RELOAD_PROMPT.to_string(), "after compact".to_string()]
+    );
+    Ok(())
+}
