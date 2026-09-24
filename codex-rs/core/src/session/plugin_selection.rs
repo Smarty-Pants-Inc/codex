@@ -30,3 +30,7 @@ impl Session {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "plugin_selection_tests.rs"]
+mod tests;

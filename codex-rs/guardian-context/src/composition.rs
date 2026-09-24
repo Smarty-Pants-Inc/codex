@@ -254,9 +254,12 @@ impl CollectedContext {
                         .into_iter()
                         .map(|text| Budgeted::required(ContentItem::InputText { text }))
                         .collect::<Vec<_>>();
+                    // Host descriptions are untrusted MCP metadata outside the escaped action JSON.
                     if let Some(text) = planned.tool_descriptions {
                         items.push(Budgeted::optional(
-                            ContentItem::InputText { text },
+                            ContentItem::InputText {
+                                text: escape_section_markers(&text),
+                            },
                             BudgetPriority::ToolDescription,
                         ));
                     }

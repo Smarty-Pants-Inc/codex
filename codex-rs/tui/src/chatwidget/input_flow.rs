@@ -186,6 +186,11 @@ impl ChatWidget {
             && !self.input_queue.rate_limit_recovery_pending
             && self.thread_id.is_some()
             && self.input_queue.can_admit_to_server_queue()
+            // Keep FIFO order behind an earlier submission whose images are still being prepared.
+            && self.pending_image_submission.is_none()
+            // Client-local image paths must be snapshotted on this host before the server sees them;
+            // the local queue drains through the ordinary submission path, which prepares them.
+            && (user_message.local_images.is_empty() || !self.snapshot_local_images)
             && (user_message.local_images.is_empty() && user_message.remote_image_urls.is_empty()
                 || self.current_model_supports_images())
             && !self
