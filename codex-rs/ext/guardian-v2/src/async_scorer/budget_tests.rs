@@ -168,11 +168,14 @@ async fn assert_catalog_budget(evidence: BudgetEvidence) -> Result<()> {
             phase: Some(MessagePhase::Commentary),
             internal_chat_message_metadata_passthrough: None,
         }));
-        fixture
-            .test
-            .codex
-            .inject_response_items(history.clone())
-            .await?;
+        // Live injection rejects user-role items; record user messages as direct input.
+        Box::pin(
+            codex_core::test_support::record_history_with_direct_user_input(
+                fixture.test.codex.as_ref(),
+                history.clone(),
+            ),
+        )
+        .await?;
         let history: Arc<dyn ConversationHistorySnapshot> = match evidence {
             BudgetEvidence::Checkpoint => Arc::new(TestRetainedHistory {
                 retained_context: None,
