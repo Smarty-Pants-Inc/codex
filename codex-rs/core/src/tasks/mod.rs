@@ -316,7 +316,6 @@ impl Session {
         task: T,
         reserved_turn_state: Option<&Arc<tokio::sync::Mutex<crate::state::TurnState>>>,
     ) -> bool {
-        self.activate_plugin_selection(&turn_context).await;
         // Inherited or recovered roots are applied before task start. Otherwise this
         // task owns its turn, including background work. Later mail cannot change it.
         turn_context
@@ -353,6 +352,9 @@ impl Session {
             }
             Arc::clone(&turn.turn_state)
         };
+        // Activate only after admission, and while `active` is held, so a rejected or stale
+        // start cannot change the plugin state or hooks of the admitted turn.
+        self.activate_plugin_selection(&turn_context).await;
         self.record_started_turn(&turn_context.sub_id).await;
         // Drain mail only after admission succeeds so a rejected start cannot drop it.
         let (pending_items, _) = self.input_queue.drain_mailbox_input_items().await;

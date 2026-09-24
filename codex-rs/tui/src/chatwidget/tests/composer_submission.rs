@@ -2973,3 +2973,123 @@ fn image_preparation_keeps_input_responsive_and_preserves_pending_input() {
             });
     }
 }
+
+/// Returns the next user turn sent to the app server, preparing images on the way and
+/// failing if any message bypasses preparation through server-queue admission.
+async fn next_prepared_user_turn(
+    chat: &mut ChatWidget,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+) -> Vec<UserInput> {
+    loop {
+        match rx.recv().await.expect("app event channel closed") {
+            AppEvent::ImagesPrepared(id) => chat.on_images_prepared(id),
+            AppEvent::QueueFollowUpUserMessage { input, .. } => {
+                panic!("message bypassed client-side image preparation: {input:?}")
+            }
+            AppEvent::CodexOp(AppCommand::UserTurn { items, .. }) => break items,
+            _ => {}
+        }
+    }
+}
+
+fn local_image_message(dir: &tempfile::TempDir, text: &str) -> UserMessage {
+    let path = dir.path().join("image.png");
+    image::RgbImage::new(/*width*/ 2, /*height*/ 2)
+        .save(&path)
+        .unwrap();
+    UserMessage {
+        local_images: vec![LocalImageAttachment {
+            placeholder: "[Image #1]".into(),
+            path,
+        }],
+        ..UserMessage::from(text)
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_tab_queued_local_image_is_prepared_before_submission() {
+    let dir = tempfile::tempdir().unwrap();
+    let message = local_image_message(&dir, "describe");
+    for snapshot_local_images in [false, true] {
+        let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+        chat.codex_op_target = CodexOpTarget::AppEvent;
+        chat.thread_id = Some(ThreadId::new());
+        chat.snapshot_local_images = snapshot_local_images;
+        handle_turn_started(&mut chat, "turn");
+
+        assert!(chat.queue_user_message_with_options(
+            message.clone(),
+            QueuedInputAction::Plain,
+            Vec::new(),
+        ));
+        let admitted = std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|event| matches!(event, AppEvent::QueueFollowUpUserMessage { .. }));
+        // A server sharing this host's filesystem may still admit local image paths directly.
+        assert_eq!(admitted, !snapshot_local_images);
+        if !snapshot_local_images {
+            continue;
+        }
+        assert_eq!(chat.queued_user_message_texts(), vec!["describe"]);
+
+        handle_turn_completed(&mut chat, "turn", /*duration_ms*/ None);
+        let items = next_prepared_user_turn(&mut chat, &mut rx).await;
+        assert!(
+            matches!(
+                items.as_slice(),
+                [
+                    UserInput::Image {
+                        image: ImageReference::Inline { .. },
+                        ..
+                    },
+                    UserInput::Text { .. },
+                ]
+            ),
+            "queued local image must be sent as portable content: {items:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tab_queued_message_stays_behind_pending_image_preparation() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.codex_op_target = CodexOpTarget::AppEvent;
+    chat.thread_id = Some(ThreadId::new());
+    chat.snapshot_local_images = true;
+
+    chat.submit_user_message(local_image_message(&dir, "first with image"));
+    assert!(chat.pending_image_submission.is_some());
+    assert!(chat.queue_user_message_with_options(
+        UserMessage::from("second plain"),
+        QueuedInputAction::Plain,
+        Vec::new(),
+    ));
+    assert_eq!(chat.queued_user_message_texts(), vec!["second plain"]);
+
+    let first = next_prepared_user_turn(&mut chat, &mut rx).await;
+    assert!(
+        matches!(
+            first.as_slice(),
+            [
+                UserInput::Image {
+                    image: ImageReference::Inline { .. },
+                    ..
+                },
+                UserInput::Text { text, .. },
+            ] if text == "first with image"
+        ),
+        "the image-bearing message must be sent first: {first:?}"
+    );
+    assert_eq!(chat.queued_user_message_texts(), vec!["second plain"]);
+
+    handle_turn_started(&mut chat, "turn");
+    handle_turn_completed(&mut chat, "turn", /*duration_ms*/ None);
+    let second = next_prepared_user_turn(&mut chat, &mut rx).await;
+    assert_eq!(
+        second,
+        vec![UserInput::Text {
+            text: "second plain".to_string(),
+            text_elements: Vec::new(),
+        }]
+    );
+}
