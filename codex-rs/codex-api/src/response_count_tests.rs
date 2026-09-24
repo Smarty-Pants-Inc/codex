@@ -7,6 +7,7 @@ use std::sync::Arc;
 fn request() -> ResponsesApiRequest {
     ResponsesApiRequest {
         model: "fixture-model".into(),
+        max_output_tokens: None,
         instructions: "Complete instructions".into(),
         input: vec![
             serde_json::from_value(json!({
@@ -28,6 +29,29 @@ fn request() -> ResponsesApiRequest {
         text: None,
         client_metadata: None,
     }
+}
+
+#[test]
+fn output_ceiling_is_encoded_once_and_conflicting_limits_are_rejected() {
+    let output_tokens = NonZeroU64::new(/*n*/ 17).unwrap();
+    let mut request = request();
+    let implicit = prepare_response_count(&request, output_tokens).unwrap();
+    request.max_output_tokens = Some(output_tokens);
+    let explicit = prepare_response_count(&request, output_tokens).unwrap();
+    assert_eq!(
+        explicit.inference_body().as_bytes(),
+        implicit.inference_body().as_bytes()
+    );
+    assert_eq!(
+        explicit.count_body().as_bytes(),
+        implicit.count_body().as_bytes()
+    );
+    serde_json::from_slice::<UniqueJson>(explicit.inference_body().as_bytes()).unwrap();
+    let body: Value = serde_json::from_slice(explicit.inference_body().as_bytes()).unwrap();
+    assert_eq!(body["max_output_tokens"], json!(17));
+
+    request.max_output_tokens = NonZeroU64::new(/*n*/ 18);
+    assert!(prepare_response_count(&request, output_tokens).is_err());
 }
 
 #[test]
