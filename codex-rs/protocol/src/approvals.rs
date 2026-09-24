@@ -6,6 +6,7 @@ use crate::protocol::FileChange;
 use crate::protocol::ReviewDecision;
 use crate::request_permissions::RequestPermissionProfile;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -139,7 +140,7 @@ pub enum GuardianAssessmentAction {
     Command {
         source: GuardianCommandSource,
         command: String,
-        cwd: AbsolutePathBuf,
+        cwd: LegacyAppPathString,
     },
     Execve {
         source: GuardianCommandSource,
@@ -152,11 +153,12 @@ pub enum GuardianAssessmentAction {
         approval_id: String,
         process_id: String,
         stdin: String,
+        /// Launch directory of the existing terminal, not its current working directory.
         cwd: PathUri,
     },
     ApplyPatch {
-        cwd: AbsolutePathBuf,
-        files: Vec<AbsolutePathBuf>,
+        cwd: LegacyAppPathString,
+        files: Vec<LegacyAppPathString>,
     },
     NetworkAccess {
         target: String,
@@ -183,8 +185,29 @@ pub struct NetworkPolicyAmendment {
     pub action: NetworkPolicyRuleAction,
 }
 
+/// Why this approval needs a fresh Guardian assessment.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum GuardianReviewReason {
+    Policy,
+    FreshRequired,
+    MissingScore,
+    StaleScore,
+    InvalidScore,
+    IncompatibleCompaction,
+    ElevatedRisk,
+    ScoringFailure,
+    AuthorizationChanged,
+    #[serde(other)]
+    Unknown,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 pub struct GuardianAssessmentEvent {
+    /// Request-scoped trigger; absent in events recorded by older clients.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub review_reason: Option<GuardianReviewReason>,
     /// Stable identifier for this guardian review lifecycle.
     pub id: String,
     /// Thread item being reviewed, when the review maps to a concrete item.
@@ -279,8 +302,8 @@ pub struct ExecApprovalRequestEvent {
     pub started_at_ms: i64,
     /// The command to be executed.
     pub command: Vec<String>,
-    /// The command's working directory.
-    pub cwd: AbsolutePathBuf,
+    /// The command's working directory, or the launch directory for terminal input.
+    pub cwd: LegacyAppPathString,
     /// Optional human-readable reason for the approval (e.g. retry without sandbox).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
@@ -371,6 +394,13 @@ impl ExecApprovalRequestEvent {
 #[serde(tag = "mode", rename_all = "snake_case")]
 #[ts(tag = "mode")]
 pub enum ElicitationRequest {
+    #[serde(rename = "openai/userVerification")]
+    #[ts(rename = "openai/userVerification")]
+    UserVerification {
+        title: String,
+        description: String,
+        challenge: String,
+    },
     Form {
         #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
         #[ts(optional, rename = "_meta")]
@@ -381,6 +411,15 @@ pub enum ElicitationRequest {
     #[serde(rename = "openai/form")]
     #[ts(rename = "openai/form")]
     OpenAiForm {
+        #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional, rename = "_meta")]
+        meta: Option<JsonValue>,
+        message: String,
+        requested_schema: JsonValue,
+    },
+    #[serde(rename = "openaiForm")]
+    #[ts(rename = "openaiForm")]
+    OpenAiElicitationForm {
         #[serde(rename = "_meta", default, skip_serializing_if = "Option::is_none")]
         #[ts(optional, rename = "_meta")]
         meta: Option<JsonValue>,
@@ -458,7 +497,7 @@ mod tests {
             GuardianAssessmentAction::Command {
                 source: GuardianCommandSource::Shell,
                 command: "rm -rf /tmp/guardian".to_string(),
-                cwd: test_path_buf("/tmp").abs(),
+                cwd: test_path_buf("/tmp").abs().into(),
             }
         );
     }

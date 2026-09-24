@@ -24,7 +24,11 @@ def main():
     missing = []
     for required in args.required:
         matches = sorted(name for name in selected if re.search(required, name))
-        print(json.dumps({"required": required, "count": len(matches), "sample": matches[:3]}))
+        print(
+            json.dumps(
+                {"required": required, "count": len(matches), "sample": matches[:3]}
+            )
+        )
         if not matches:
             missing.append(required)
     if missing:

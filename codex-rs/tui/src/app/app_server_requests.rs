@@ -677,7 +677,7 @@ mod tests {
                     item_id: "perm-1".to_string(),
                     environment_id: None,
                     started_at_ms: 0,
-                    cwd,
+                    cwd: cwd.into(),
                     reason: None,
                     permissions,
                 },
@@ -717,7 +717,7 @@ mod tests {
                     item_id: "perm-1".to_string(),
                     environment_id: None,
                     started_at_ms: 0,
-                    cwd: absolute_path(if cfg!(windows) { r"C:\tmp" } else { "/tmp" }),
+                    cwd: absolute_path(if cfg!(windows) { r"C:\tmp" } else { "/tmp" }).into(),
                     reason: None,
                     permissions: serde_json::from_value(json!({
                         "network": { "enabled": null }
@@ -850,7 +850,7 @@ mod tests {
                 item_id: "perm-1".to_string(),
                 environment_id: None,
                 started_at_ms: 0,
-                cwd: cwd.clone(),
+                cwd: cwd.clone().into(),
                 reason: None,
                 permissions: codex_app_server_protocol::RequestPermissionProfile {
                     network: None,
@@ -906,7 +906,8 @@ mod tests {
                     } else {
                         "/tmp"
                     }))
-                    .expect("path must be absolute"),
+                    .expect("path must be absolute")
+                    .into(),
                     reason: None,
                     permissions: codex_app_server_protocol::RequestPermissionProfile {
                         network: None,

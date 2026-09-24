@@ -206,6 +206,7 @@ pub(crate) fn spawn_exit_watcher(
             .await;
         } else {
             let exit_code = process.exit_code().unwrap_or(-1);
+            let timed_out = process.timed_out();
             finish_and_track_measurements(
                 plugin_metrics_sidecar,
                 exit_code,
@@ -227,6 +228,7 @@ pub(crate) fn spawn_exit_watcher(
                 process.subcommand_approval_status(),
                 exit_code,
                 duration,
+                timed_out,
             )
             .await;
         }
@@ -332,6 +334,7 @@ pub(crate) async fn emit_exec_end_for_unified_exec(
     subcommand_approval_status: super::SubcommandApprovalStatus,
     exit_code: i32,
     duration: Duration,
+    timed_out: bool,
 ) {
     let aggregated_output = resolve_aggregated_output(&transcript, fallback_output).await;
     let output = ExecToolCallOutput {
@@ -340,7 +343,7 @@ pub(crate) async fn emit_exec_end_for_unified_exec(
         stderr: StreamOutput::new(String::new()),
         aggregated_output: StreamOutput::new(aggregated_output),
         duration,
-        timed_out: false,
+        timed_out,
     };
     let event_ctx = ToolEventCtx::new(
         session_ref.as_ref(),
