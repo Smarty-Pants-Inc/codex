@@ -150,7 +150,7 @@ impl Session {
             return;
         }
 
-        let (annotated_items, image_preparations) = self
+        let (annotated_items, image_preparations, _) = self
             .prepare_annotated_conversation_items_for_history(turn_context, model_info, items)
             .await;
         self.record_prepared_conversation_items(
@@ -162,23 +162,30 @@ impl Session {
         .await;
     }
 
+    /// Also returns the original content indices that failed media removed from the first item.
     pub(super) async fn prepare_annotated_conversation_items_for_history(
         &self,
         turn_context: &TurnContext,
         model_info: &ModelInfo,
         items: Vec<ResponseItemEnvelope>,
-    ) -> (Vec<ResponseItemEnvelope>, Vec<ImagePreparationMetadata>) {
+    ) -> (
+        Vec<ResponseItemEnvelope>,
+        Vec<ImagePreparationMetadata>,
+        Vec<usize>,
+    ) {
         let mut annotated_items = Vec::with_capacity(items.len());
         let mut image_preparations = Vec::new();
+        let mut first_removed_content_indices = None;
         for envelope in items {
-            let (prepared_items, prepared_images) = self
-                .prepare_conversation_items_for_history(
+            let (prepared_items, prepared_images, removed_content_indices) = self
+                .prepare_conversation_items_for_history_with_removed_user_content(
                     turn_context,
                     model_info,
                     std::slice::from_ref(&envelope.item),
                 )
                 .await;
             image_preparations.extend(prepared_images);
+            first_removed_content_indices.get_or_insert(removed_content_indices);
 
             let mut metadata = envelope.metadata;
             annotated_items.extend(prepared_items.into_owned().into_iter().map(|item| {
@@ -188,7 +195,11 @@ impl Session {
                 }
             }));
         }
-        (annotated_items, image_preparations)
+        (
+            annotated_items,
+            image_preparations,
+            first_removed_content_indices.unwrap_or_default(),
+        )
     }
 
     /// Injects items into active work, or records them without starting a turn.
