@@ -158,7 +158,6 @@ impl Session {
             model_info,
             annotated_items,
             image_preparations,
-            /*direct_user_items*/ None,
         )
         .await;
     }
