@@ -61,6 +61,8 @@ use wiremock::MockServer;
 
 #[path = "unified_exec_zsh_fork_cancel_tests.rs"]
 mod cancel_tests;
+#[path = "unified_exec_zsh_fork_stdin_denied_read_tests.rs"]
+mod stdin_denied_read_tests;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_zsh_fork_parent_approval_preserves_denied_reads() -> Result<()> {
@@ -464,8 +466,11 @@ async fn unified_exec_zsh_fork_guardian_reviews_persistent_terminal_in_current_t
     let outside_path = outside_dir
         .path()
         .join("unified-exec-zsh-fork-current-turn.txt");
-    let initial_denied_path = outside_dir.path().join("original-environment-private");
-    let permission_profile = denied_read_permission_profile(&initial_denied_path)?;
+    // Any denied read in the terminal's owning environment rejects stdin to an escalated
+    // terminal before review; `stdin_denied_read_tests` covers that path, and
+    // `guardian::tests::background_approval_permissions_use_the_owning_environment` covers
+    // Guardian's use of the owning environment's denied reads.
+    let permission_profile = restrictive_workspace_write_profile();
     let rules = r#"prefix_rule(pattern=["touch"], decision="prompt")"#.to_string();
 
     let outside_path_for_hook = outside_path.clone();
@@ -563,9 +568,6 @@ async fn unified_exec_zsh_fork_guardian_reviews_persistent_terminal_in_current_t
 
     let next_cwd = test.config.cwd.join("next-turn");
     fs::create_dir(&next_cwd)?;
-    // Denied reads in the current profile make stdin review reject a terminal
-    // launched outside the sandbox (see `TerminalPermissions::review_requirement`).
-    // Keep them only in the launch profile so Guardian must use that environment.
     let (sandbox_policy, permission_profile) =
         turn_permission_fields(restrictive_workspace_write_profile(), next_cwd.as_path());
     test.codex
@@ -655,12 +657,7 @@ async fn unified_exec_zsh_fork_guardian_reviews_persistent_terminal_in_current_t
     let guardian_text = guardian_requests[1]
         .message_input_texts("developer")
         .join("");
-    let permissions = guardian_text
-        .split_once("PARENT TURN PERMISSION CONTEXT START")
-        .and_then(|(_, text)| text.split_once("PARENT TURN PERMISSION CONTEXT END"))
-        .map(|(permissions, _)| permissions)
-        .context("intercepted command's Guardian permissions")?;
-    assert!(permissions.contains(initial_denied_path.to_string_lossy().as_ref()));
+    assert!(guardian_text.contains("PARENT TURN PERMISSION CONTEXT START"));
 
     Ok(())
 }
