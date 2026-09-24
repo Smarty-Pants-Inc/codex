@@ -5,6 +5,7 @@ use super::connection_handling_websocket::create_config_toml;
 use anyhow::Context;
 use anyhow::Result;
 use app_test_support::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
+use app_test_support::ENABLE_GOAL_AUTO_CONTINUE_FOR_TESTS_ARG;
 use app_test_support::create_final_assistant_message_sse_response;
 use codex_app_server_protocol::InitializeCapabilities;
 use codex_app_server_protocol::JSONRPCMessage;
@@ -813,6 +814,8 @@ fn spawn_server(home: &Path, socket_path: &Path) -> Result<Child> {
     Ok(Command::new(binary)
         .args(["--listen", &format!("unix://{}", socket_path.display())])
         .arg(DISABLE_PLUGIN_STARTUP_TASKS_ARG)
+        // Goal auto-continue is opt-in for app-server hosts; recovery resumes the goal.
+        .arg(ENABLE_GOAL_AUTO_CONTINUE_FOR_TESTS_ARG)
         .env("CODEX_HOME", home)
         .arg("--managed-daemon")
         .env(

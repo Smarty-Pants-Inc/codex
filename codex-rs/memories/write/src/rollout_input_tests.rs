@@ -9,7 +9,8 @@ fn extraction_chunks_preserve_unicode_evidence_with_bounded_messages() {
         let ResponseItem::Message { role, content, .. } = message else {
             panic!("message")
         };
-        assert_eq!(role, "user");
+        // Fork rule: generated extraction evidence is developer-role contextual input.
+        assert_eq!(role, "developer");
         let [ContentItem::InputText { text }] = content.as_slice() else {
             panic!("text")
         };

@@ -330,14 +330,6 @@ async fn managed_reviewers_reuse_fork_and_resume_after_parent_shutdown(
     let closed: ThreadClosedNotification =
         timeout(TIMEOUT, app.read_notification("thread/closed")).await??;
     assert_eq!(closed.thread_id, parent.id);
-    // Saved reviewers remain discoverable through the existing subagent filters.
-    for kind in [ThreadSourceKind::SubAgent, ThreadSourceKind::SubAgentOther] {
-        let params = serde_json::from_value(json!({"sourceKinds": [kind]}))?;
-        let listed: ThreadListResponse = app
-            .request(|request_id| ClientRequest::ThreadList { request_id, params })
-            .await?;
-        assert!(listed.data.iter().any(|thread| thread.id == reviewer_id));
-    }
     let resumed: ThreadResumeResponse = app
         .request(|request_id| ClientRequest::ThreadResume {
             request_id,
@@ -369,6 +361,24 @@ async fn managed_reviewers_reuse_fork_and_resume_after_parent_shutdown(
             ReviewEnding::Interrupt => 6,
         }
     );
+    // Saved reviewers remain discoverable through the existing subagent filters.
+    // Guardian prompts are developer input in this fork, so a reviewer has no list
+    // preview until it receives a real user turn.
+    for kind in [ThreadSourceKind::SubAgent, ThreadSourceKind::SubAgentOther] {
+        timeout(TIMEOUT, async {
+            loop {
+                let params = serde_json::from_value(json!({"sourceKinds": [kind]}))?;
+                let listed: ThreadListResponse = app
+                    .request(|request_id| ClientRequest::ThreadList { request_id, params })
+                    .await?;
+                if listed.data.iter().any(|thread| thread.id == reviewer_id) {
+                    return Ok::<(), anyhow::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await??;
+    }
     // Once the owner releases it, the resumed reviewer follows normal client removal.
     for method in ["thread/archive", "thread/delete"] {
         let id = app

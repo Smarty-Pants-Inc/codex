@@ -1571,60 +1571,72 @@ max_recent_non_user_entries = 8
     );
 
     let samples = initial_metrics.classification_samples();
-    let classification_duration_ms = match &samples[9] {
-        RecordedMetric::Histogram(name, duration_ms, _)
-            if name == CLASSIFICATION_DURATION_METRIC =>
-        {
-            *duration_ms
-        }
-        sample => panic!("expected classification duration metric, got {sample:?}"),
-    };
-    assert_eq!(
-        samples,
-        [
-            ("total", 150),
-            ("input", 120),
-            ("cached_input", 40),
-            ("cache_write_input", 20),
-            ("non_cached_input", 80),
-            ("output", 30),
-            ("reasoning_output", 10),
-        ]
-        .into_iter()
-        .map(|(token_type, value)| {
-            RecordedMetric::Histogram(
-                CLASSIFICATION_TOKEN_USAGE_METRIC.to_owned(),
-                value,
-                vec![("token_type".to_owned(), token_type.to_owned())],
-            )
+    let classification_duration_ms = samples
+        .iter()
+        .find_map(|sample| match sample {
+            RecordedMetric::Histogram(name, duration_ms, _)
+                if name == CLASSIFICATION_DURATION_METRIC =>
+            {
+                Some(*duration_ms)
+            }
+            _ => None,
         })
-        .chain([
-            RecordedMetric::Counter(
-                CLASSIFICATION_RISK_METRIC.to_owned(),
-                1,
-                vec![("risk_level".to_owned(), "high".to_owned())],
-            ),
-            RecordedMetric::Counter(
-                CLASSIFICATION_METRIC.to_owned(),
-                1,
-                vec![("outcome".to_owned(), "success".to_owned())],
-            ),
-            RecordedMetric::Histogram(
-                CLASSIFICATION_DURATION_METRIC.to_owned(),
-                classification_duration_ms,
-                vec![("outcome".to_owned(), "success".to_owned())],
-            ),
-        ])
-        .chain([
-            RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 0, vec![]),
-            fast_decision_metric("deferred", "elevated_risk"),
-            RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 0, vec![]),
-            fast_decision_metric("approved", "low_risk"),
-            RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 2, vec![]),
-            fast_decision_metric("approved", "low_risk"),
-        ])
-        .collect::<Vec<_>>()
-    );
+        .expect("expected classification duration metric");
+    let expected = [
+        ("total", 150),
+        ("input", 120),
+        ("cached_input", 40),
+        ("cache_write_input", 20),
+        ("non_cached_input", 80),
+        ("output", 30),
+        ("reasoning_output", 10),
+    ]
+    .into_iter()
+    .map(|(token_type, value)| {
+        RecordedMetric::Histogram(
+            CLASSIFICATION_TOKEN_USAGE_METRIC.to_owned(),
+            value,
+            vec![("token_type".to_owned(), token_type.to_owned())],
+        )
+    })
+    .chain([
+        RecordedMetric::Counter(
+            CLASSIFICATION_RISK_METRIC.to_owned(),
+            1,
+            vec![("risk_level".to_owned(), "high".to_owned())],
+        ),
+        RecordedMetric::Counter(
+            CLASSIFICATION_METRIC.to_owned(),
+            1,
+            vec![("outcome".to_owned(), "success".to_owned())],
+        ),
+        RecordedMetric::Histogram(
+            CLASSIFICATION_DURATION_METRIC.to_owned(),
+            classification_duration_ms,
+            vec![("outcome".to_owned(), "success".to_owned())],
+        ),
+    ])
+    .chain([
+        RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 0, vec![]),
+        fast_decision_metric("deferred", "elevated_risk"),
+        RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 0, vec![]),
+        fast_decision_metric("approved", "low_risk"),
+        RecordedMetric::Histogram(TOOL_CALL_LAG_METRIC.to_owned(), 2, vec![]),
+        fast_decision_metric("approved", "low_risk"),
+    ])
+    .collect::<Vec<_>>();
+    // The fork returns a label before draining token usage, so the seven token-usage metrics
+    // and the three classification metrics may arrive in either order.
+    let (samples_head, samples_tail) = samples.split_at(10);
+    let (expected_head, expected_tail) = expected.split_at(10);
+    assert_eq!(samples_head.len(), expected_head.len());
+    for metric in expected_head {
+        assert!(
+            samples_head.contains(metric),
+            "missing {metric:?} in {samples_head:?}"
+        );
+    }
+    assert_eq!(samples_tail, expected_tail);
     let metrics = thread_store.get::<RecordingMetrics>().unwrap();
     assert_eq!(
         *metrics.0.lock().unwrap(),
