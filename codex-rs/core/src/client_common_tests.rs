@@ -111,6 +111,7 @@ fn request_copies_project_image_details_for_receiving_model(
 fn serializes_text_verbosity_when_set() {
     let input: Vec<ResponseItem> = vec![];
     let req = ResponsesApiRequest {
+        max_output_tokens: None,
         model: "gpt-5.4".to_string(),
         instructions: "i".to_string(),
         input,
@@ -159,6 +160,7 @@ fn serializes_text_schema_with_strict_format() {
     .expect("text controls");
 
     let req = ResponsesApiRequest {
+        max_output_tokens: None,
         model: "gpt-5.4".to_string(),
         instructions: "i".to_string(),
         input,
@@ -221,6 +223,7 @@ fn serializes_text_schema_with_non_strict_format() {
 fn omits_text_when_not_set() {
     let input: Vec<ResponseItem> = vec![];
     let req = ResponsesApiRequest {
+        max_output_tokens: None,
         model: "gpt-5.4".to_string(),
         instructions: "i".to_string(),
         input,
@@ -246,6 +249,7 @@ fn omits_text_when_not_set() {
 #[test]
 fn serializes_flex_service_tier_when_set() {
     let req = ResponsesApiRequest {
+        max_output_tokens: None,
         model: "gpt-5.4".to_string(),
         instructions: "i".to_string(),
         input: vec![],
