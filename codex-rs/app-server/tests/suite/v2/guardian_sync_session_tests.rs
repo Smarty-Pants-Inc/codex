@@ -13,6 +13,8 @@ use codex_app_server_protocol::ThreadClosedNotification;
 use codex_app_server_protocol::ThreadListResponse;
 use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
+use codex_app_server_protocol::ThreadSetNameParams;
+use codex_app_server_protocol::ThreadSetNameResponse;
 use codex_app_server_protocol::ThreadSourceKind;
 use codex_app_server_protocol::ThreadUnsubscribeParams;
 use codex_app_server_protocol::ThreadUnsubscribeResponse;
@@ -330,6 +332,49 @@ async fn managed_reviewers_reuse_fork_and_resume_after_parent_shutdown(
     let closed: ThreadClosedNotification =
         timeout(TIMEOUT, app.read_notification("thread/closed")).await??;
     assert_eq!(closed.thread_id, parent.id);
+    let state_db = StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".into(),
+    )
+    .await?;
+    let metadata = state_db
+        .get_thread(codex_protocol::ThreadId::from_string(&reviewer_id)?)
+        .await?
+        .expect("reviewer metadata should be persisted");
+    assert_eq!(
+        (
+            metadata.title.as_str(),
+            metadata.name.as_deref(),
+            metadata.preview.as_deref(),
+            metadata.first_user_message.as_deref(),
+        ),
+        ("Guardian review", None, Some("Approval review"), None),
+    );
+    // Saved reviewers remain discoverable through the existing subagent filters.
+    for kind in [ThreadSourceKind::SubAgent, ThreadSourceKind::SubAgentOther] {
+        let params = serde_json::from_value(json!({"sourceKinds": [kind]}))?;
+        let listed: ThreadListResponse = app
+            .request(|request_id| ClientRequest::ThreadList { request_id, params })
+            .await?;
+        let reviewer = listed
+            .data
+            .iter()
+            .find(|thread| thread.id == reviewer_id)
+            .expect("reviewer should be listed");
+        assert_eq!(
+            (reviewer.name.as_deref(), reviewer.preview.as_str()),
+            (Some("Guardian review"), "Approval review"),
+        );
+    }
+    let _: ThreadSetNameResponse = app
+        .request(|request_id| ClientRequest::ThreadSetName {
+            request_id,
+            params: ThreadSetNameParams {
+                thread_id: reviewer_id.clone(),
+                name: "Named Guardian review".to_string(),
+            },
+        })
+        .await?;
     let resumed: ThreadResumeResponse = app
         .request(|request_id| ClientRequest::ThreadResume {
             request_id,
@@ -341,6 +386,11 @@ async fn managed_reviewers_reuse_fork_and_resume_after_parent_shutdown(
         .await?;
     assert_eq!(resumed.thread.id, reviewer_id);
     assert_eq!(resumed.thread.source, read.thread.source);
+    assert_eq!(
+        resumed.thread.name.as_deref(),
+        Some("Named Guardian review")
+    );
+    assert_eq!(resumed.thread.preview, "Approval review");
     let completed = timeout(
         TIMEOUT,
         app.start_turn_and_wait_for_completion(TurnStartParams {
@@ -361,24 +411,6 @@ async fn managed_reviewers_reuse_fork_and_resume_after_parent_shutdown(
             ReviewEnding::Interrupt => 6,
         }
     );
-    // Saved reviewers remain discoverable through the existing subagent filters.
-    // Guardian prompts are developer input in this fork, so a reviewer has no list
-    // preview until it receives a real user turn.
-    for kind in [ThreadSourceKind::SubAgent, ThreadSourceKind::SubAgentOther] {
-        timeout(TIMEOUT, async {
-            loop {
-                let params = serde_json::from_value(json!({"sourceKinds": [kind]}))?;
-                let listed: ThreadListResponse = app
-                    .request(|request_id| ClientRequest::ThreadList { request_id, params })
-                    .await?;
-                if listed.data.iter().any(|thread| thread.id == reviewer_id) {
-                    return Ok::<(), anyhow::Error>(());
-                }
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        })
-        .await??;
-    }
     // Once the owner releases it, the resumed reviewer follows normal client removal.
     for method in ["thread/archive", "thread/delete"] {
         let id = app

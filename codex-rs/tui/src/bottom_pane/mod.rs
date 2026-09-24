@@ -15,9 +15,12 @@
 //! hint. The pane schedules redraws so those hints can expire even when the UI is otherwise idle.
 //! Inline banners sit above the composer. Number shortcuts apply only to an empty, idle composer;
 //! drafts, paste bursts, and active dialogs keep their normal input routing.
+//! Owned transcripts separate activity from the transcript and reserve their shared hint row
+//! below activity and previews, above the composer.
 pub(crate) use chat_composer::CommandPopupPlacement;
 pub(crate) use chat_composer::ComposerRenderOptions;
 pub(crate) use chat_composer::TranscriptFooter;
+pub(crate) use composer_gap::ComposerGap;
 pub(crate) use footer::footer_hint_items_line;
 pub(crate) use footer::inset_footer_hint_area;
 use std::collections::VecDeque;
@@ -112,6 +115,7 @@ pub(crate) use status_line_style::status_line_from_segments;
 pub(crate) use voice_strip::VoiceStripPhase;
 pub(crate) use voice_strip::VoiceStripState;
 mod bottom_pane_view;
+mod composer_gap;
 mod effort_ignition;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -506,6 +510,9 @@ impl BottomPane {
         if let Some(questions) = &mut self.questions {
             questions.set_keymap(keymap);
         }
+        // Show the first shortcut from the same keymap ChatWidget uses to handle queued edits.
+        self.pending_input_preview
+            .set_edit_binding(keymap.primary_hint(KeymapContext::Chat, "edit_queued_message"));
         let interrupt_binding = keymap.primary_hint(KeymapContext::Chat, "interrupt_turn");
         self.pending_input_preview
             .set_interrupt_binding(interrupt_binding);
@@ -598,19 +605,6 @@ impl BottomPane {
 
     pub(crate) fn set_parent_owned_thread(&mut self) {
         self.composer.set_parent_owned_thread();
-        self.request_redraw();
-    }
-
-    /// Update the key hint shown next to queued messages so it matches the
-    /// binding that `ChatWidget` actually listens for.
-    pub(crate) fn set_queued_message_edit_binding(
-        &mut self,
-        binding: Option<crate::key_hint::ShortcutHint>,
-    ) {
-        self.pending_input_preview.set_edit_binding(binding);
-        if let Some(questions) = &mut self.questions {
-            questions.next_hint = binding;
-        }
         self.request_redraw();
     }
 
@@ -1071,13 +1065,15 @@ impl BottomPane {
         local_image_paths: Vec<PathBuf>,
         mention_bindings: Vec<MentionBinding>,
     ) {
-        self.composer.set_text_content_with_mention_bindings(
-            text,
-            text_elements,
-            local_image_paths,
-            mention_bindings,
-        );
-        self.composer.move_cursor_to_end();
+        self.composer.edit_stored_draft(|composer| {
+            composer.set_text_content_with_mention_bindings(
+                text,
+                text_elements,
+                local_image_paths,
+                mention_bindings,
+            );
+            composer.move_cursor_to_end();
+        });
         self.request_redraw();
     }
 
@@ -1146,7 +1142,7 @@ impl BottomPane {
     }
 
     pub(crate) fn composer_pending_pastes(&self) -> Vec<(String, String)> {
-        self.composer.pending_pastes()
+        self.composer.draft_snapshot().pending_pastes
     }
 
     pub(crate) fn apply_external_edit(&mut self, text: String) {
@@ -1169,7 +1165,8 @@ impl BottomPane {
     }
 
     pub(crate) fn set_remote_image_urls(&mut self, urls: Vec<String>) {
-        self.composer.set_remote_image_urls(urls);
+        self.composer
+            .edit_stored_draft(|composer| composer.set_remote_image_urls(urls));
         self.request_redraw();
     }
 
@@ -1184,7 +1181,8 @@ impl BottomPane {
     }
 
     pub(crate) fn set_composer_pending_pastes(&mut self, pending_pastes: Vec<(String, String)>) {
-        self.composer.set_pending_pastes(pending_pastes);
+        self.composer
+            .edit_stored_draft(|composer| composer.set_pending_pastes(pending_pastes));
         self.request_redraw();
     }
 
@@ -2189,8 +2187,10 @@ impl BottomPane {
                 },
             );
             let question_editor = self.questions.as_ref().filter(|q| q.expanded);
+            // An empty shared gap already separates activity from the composer.
             if !has_inline_previews
                 && has_status_or_footer
+                && options.composer_gap.is_none_or(|gap| gap.needs_separator)
                 && question_editor.is_none_or(|q| q.unanswered_count() > 1)
             {
                 flex.push(/*flex*/ 0, RenderableItem::Owned("".into()));
@@ -2212,7 +2212,19 @@ impl BottomPane {
                 );
             }
             let mut flex2 = FlexRenderable::new();
-            flex2.push(/*flex*/ 1, RenderableItem::Owned(flex.into()));
+            // Clip spacing and hints before activity and previews when the composer is tall.
+            let above_composer = if let Some(gap) = options.composer_gap {
+                let mut column = FlexRenderable::new();
+                if has_status_or_footer {
+                    column.push(/*flex*/ 1, RenderableItem::Owned("".into()));
+                }
+                column.push(/*flex*/ 0, RenderableItem::Owned(flex.into()));
+                column.push(/*flex*/ 1, RenderableItem::Borrowed(gap));
+                column.into()
+            } else {
+                flex.into()
+            };
+            flex2.push(/*flex*/ 1, RenderableItem::Owned(above_composer));
             let composer: RenderableItem<'_> = if let Some(questions) = question_editor {
                 RenderableItem::Borrowed(questions.as_ref())
             } else if options.textarea_right_reserve == 0
@@ -2374,7 +2386,7 @@ mod tests {
         lines.join("\n")
     }
 
-    fn render_snapshot(pane: &BottomPane, area: Rect) -> String {
+    fn render_snapshot(pane: &impl Renderable, area: Rect) -> String {
         let mut buf = Buffer::empty(area);
         pane.render(area, &mut buf);
         snapshot_buffer(&buf)
@@ -2549,7 +2561,9 @@ mod tests {
             .expect("valid optional banner");
             let (tx, mut rx) = unbounded_channel();
             let mut pane = test_pane(AppEventSender::new(tx));
-            pane.set_inline_banner(Some(banner.actionable_banner()));
+            pane.set_inline_banner(Some(
+                banner.actionable_banner(crate::clock_format::ClockFormat::TwentyFourHour),
+            ));
             let width = 44;
             let area = Rect::new(
                 /*x*/ 0,

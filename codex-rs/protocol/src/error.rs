@@ -18,6 +18,7 @@ use chrono::Utc;
 use codex_async_utils::CancelErr;
 use codex_async_utils::backoff;
 use codex_http_client::HttpError;
+use codex_http_client::RetryAfter;
 use codex_utils_string::truncate_middle_chars;
 use codex_utils_string::truncate_middle_with_token_budget;
 use http::StatusCode;
@@ -71,7 +72,7 @@ pub enum SandboxErr {
 
 pub struct CodexErr {
     details: CodexErrorDetails,
-    server_retry_delay: Option<Duration>,
+    retry_after: Option<RetryAfter>,
 }
 
 /// The semantic category and diagnostic payload for a [`CodexErr`].
@@ -126,6 +127,8 @@ pub enum CodexErrorDetails {
     /// Invalid request.
     #[error("{0}")]
     InvalidRequest(String),
+    #[error("{message}")]
+    InvalidPrompt { message: String },
     /// Multiple registered tools share the same effective name.
     #[error("duplicate tool: {0}")]
     ToolCollision(String),
@@ -205,7 +208,7 @@ impl fmt::Debug for CodexErr {
             CodexErrorDetails::Stream(message) => formatter
                 .debug_tuple("Stream")
                 .field(message)
-                .field(&self.server_retry_delay)
+                .field(&self.server_retry_delay())
                 .finish(),
             details => fmt::Debug::fmt(details, formatter),
         }
@@ -228,7 +231,7 @@ impl From<CodexErrorDetails> for CodexErr {
     fn from(details: CodexErrorDetails) -> Self {
         Self {
             details,
-            server_retry_delay: None,
+            retry_after: None,
         }
     }
 }
@@ -292,7 +295,7 @@ macro_rules! codex_err_unit_constructors {
             #[allow(non_upper_case_globals)]
             pub const $variant: Self = Self {
                 details: CodexErrorDetails::$variant,
-                server_retry_delay: None,
+                retry_after: None,
             };
         )*
     };
@@ -387,6 +390,7 @@ impl CodexErr {
             | CodexErrorDetails::QuotaExceeded
             | CodexErrorDetails::InvalidImageRequest()
             | CodexErrorDetails::InvalidRequest(_)
+            | CodexErrorDetails::InvalidPrompt { .. }
             | CodexErrorDetails::ToolCollision(_)
             | CodexErrorDetails::RefreshTokenFailed(_)
             | CodexErrorDetails::UnsupportedOperation(_)
@@ -415,7 +419,7 @@ impl CodexErr {
             | CodexErrorDetails::Io(_)
             | CodexErrorDetails::Json(_)
             | CodexErrorDetails::TokioJoin(_) => Some(
-                self.server_retry_delay
+                self.server_retry_delay()
                     .unwrap_or_else(|| backoff(retry_count)),
             ),
             #[cfg(target_os = "linux")]
@@ -423,13 +427,20 @@ impl CodexErr {
         }
     }
 
-    /// Returns only the delay advised by the server, without applying local retry policy.
-    pub fn server_retry_delay(&self) -> Option<Duration> {
-        self.server_retry_delay
+    /// Returns the original server-advised instant for callers that pass the error on.
+    pub fn retry_after(&self) -> Option<RetryAfter> {
+        self.retry_after
     }
 
-    pub fn with_retry_delay(mut self, retry_delay: Duration) -> Self {
-        self.server_retry_delay = Some(retry_delay);
+    /// Returns the remaining server-advised delay without applying local retry policy.
+    /// Expired advice stays present as zero instead of falling back to a local delay.
+    pub fn server_retry_delay(&self) -> Option<Duration> {
+        self.retry_after.map(RetryAfter::remaining_delay)
+    }
+
+    /// Retains an already captured server deadline without restarting it.
+    pub fn with_retry_after(mut self, retry_after: RetryAfter) -> Self {
+        self.retry_after = Some(retry_after);
         self
     }
 
@@ -452,6 +463,7 @@ impl CodexErr {
             CodexErrorDetails::ServerOverloaded => CodexErrorInfo::ServerOverloaded,
             CodexErrorDetails::CyberPolicy { .. } => CodexErrorInfo::CyberPolicy,
             CodexErrorDetails::BioPolicy { .. } => CodexErrorInfo::BioPolicy,
+            CodexErrorDetails::InvalidPrompt { .. } => CodexErrorInfo::InvalidPrompt,
             CodexErrorDetails::MisalignmentPolicyViolation { .. } => {
                 CodexErrorInfo::MisalignmentPolicyViolation
             }

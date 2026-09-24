@@ -394,6 +394,10 @@
           "description": "Experimental full Guardian prompt template containing the tenant policy placeholder.",
           "type": "string"
         },
+        "extra_policy": {
+          "description": "Additional policy text inserted into the Guardian template's `{{ extra_policy }}` slot.",
+          "type": "string"
+        },
         "policy": {
           "description": "Additional policy instructions inserted into the guardian prompt.",
           "type": "string"
@@ -501,6 +505,21 @@
         "enabled": {
           "default": true,
           "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "CloudToml": {
+      "additionalProperties": false,
+      "description": "Cloud-owned feature settings.",
+      "properties": {
+        "skills": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/FeatureToggleToml"
+            }
+          ],
+          "description": "Cloud skills are permitted by default; the host must supply a cloud provider."
         }
       },
       "type": "object"
@@ -932,6 +951,9 @@
             "powershell_shell_version": {
               "type": "boolean"
             },
+            "prefer_mxc": {
+              "type": "boolean"
+            },
             "prevent_idle_sleep": {
               "type": "boolean"
             },
@@ -1240,6 +1262,32 @@
       },
       "type": "object"
     },
+    "CopyOnSelect": {
+      "description": "When transcript mouse selections are copied on release.",
+      "oneOf": [
+        {
+          "description": "Use the terminal-specific default.",
+          "enum": [
+            "auto"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Copy every nonempty transcript mouse selection on release.",
+          "enum": [
+            "always"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "Require an explicit copy action.",
+          "enum": [
+            "never"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "CredentialAuthMethod": {
       "description": "Authentication formats supported by declarative credential providers.",
       "enum": [
@@ -1385,6 +1433,16 @@
           "default": {},
           "description": "Tracks which project paths have opted out of external config migration prompts.",
           "type": "object"
+        }
+      },
+      "type": "object"
+    },
+    "FeatureToggleToml": {
+      "additionalProperties": false,
+      "description": "Optional enablement of a configured feature.",
+      "properties": {
+        "enabled": {
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -1779,7 +1837,7 @@
           "type": "number"
         },
         "thread_context": {
-          "description": "Use thread-owned context for sync and async Guardian. Defaults to false. Independent of the Guardian v2 `enabled` toggle.",
+          "description": "Deprecated and ignored; thread-owned Guardian context is always enabled.",
           "type": "boolean"
         },
         "transcript": {
@@ -2631,6 +2689,10 @@
           "minimum": 0.0,
           "type": "integer"
         },
+        "disable_direct_message": {
+          "description": "Disable the model's direct-message tools; spawning and automatic child results remain available.",
+          "type": "boolean"
+        },
         "enabled": {
           "type": "boolean"
         },
@@ -3091,25 +3153,20 @@
         }
       ]
     },
-    "OrchestratorFeatureToml": {
-      "additionalProperties": false,
-      "description": "Settings for a feature owned by the orchestrator.",
-      "properties": {
-        "enabled": {
-          "type": "boolean"
-        }
-      },
-      "type": "object"
-    },
     "OrchestratorToml": {
       "additionalProperties": false,
       "description": "Orchestrator-owned feature settings.",
       "properties": {
         "mcp": {
-          "$ref": "#/definitions/OrchestratorFeatureToml"
+          "$ref": "#/definitions/FeatureToggleToml"
         },
         "skills": {
-          "$ref": "#/definitions/OrchestratorFeatureToml"
+          "allOf": [
+            {
+              "$ref": "#/definitions/FeatureToggleToml"
+            }
+          ],
+          "description": "Legacy no-op setting retained for compatibility. Use `cloud.skills` to configure cloud skills."
         }
       },
       "type": "object"
@@ -3129,6 +3186,10 @@
             }
           ],
           "description": "Optional log exporter"
+        },
+        "log_agent_responses": {
+          "description": "Opt in to logging final main-agent and spawned-subagent responses to an OTLP log exporter. Defaults to false. Response text can be sensitive and is capped at 64 KiB.",
+          "type": "boolean"
         },
         "log_user_prompt": {
           "description": "Log user prompt in traces",
@@ -4209,6 +4270,15 @@
           "description": "Generate automatic conversation recaps when the terminal is unfocused. Defaults to `true`. Disabling this leaves `/recap` available on demand.",
           "type": "boolean"
         },
+        "copy_on_select": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/CopyOnSelect"
+            }
+          ],
+          "default": "auto",
+          "description": "Copy selected transcript text when the mouse button is released. Defaults to `auto`: enabled in tmux/Zellij and in direct macOS terminals except Ghostty/Kitty. On other platforms, direct terminals default off except iTerm2/Terminal.app."
+        },
         "disable_paste_burst": {
           "description": "When true, disables burst-paste detection for typed input entirely. All characters are inserted as they are received, and no buffering or placeholder replacement will occur for fast keypress bursts. Overrides the legacy top-level `disable_paste_burst` setting. Defaults to `false`.",
           "type": "boolean"
@@ -4230,8 +4300,8 @@
           "description": "Individual visual effects. Each also requires animations to be enabled."
         },
         "fullscreen_transcript": {
-          "default": false,
-          "description": "Own the fullscreen transcript, including scrolling, selection, and search. Defaults to `false`; alternate-screen restrictions take precedence.",
+          "default": true,
+          "description": "Own the fullscreen transcript, including scrolling, selection, and search. Defaults to `true`; alternate-screen restrictions take precedence.",
           "type": "boolean"
         },
         "keymap": {
@@ -4489,6 +4559,7 @@
             }
           ],
           "default": {
+            "lists": true,
             "math": true,
             "mermaid": true,
             "tables": true
@@ -5632,6 +5703,11 @@
       "additionalProperties": false,
       "description": "Optional rich renderers. Disabled renderers preserve the original source.",
       "properties": {
+        "lists": {
+          "default": true,
+          "description": "Render Markdown bullets and task-list markers as Unicode symbols.",
+          "type": "boolean"
+        },
         "math": {
           "default": true,
           "description": "Render math expressions using Unicode notation.",
@@ -6454,6 +6530,14 @@
       "default": null,
       "description": "Preferred backend for storing CLI auth credentials. file (default): Use a file in the Codex home directory. keyring: Use an OS-specific keyring service. auto: Use the keyring if available, otherwise use a file."
     },
+    "cloud": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/CloudToml"
+        }
+      ],
+      "description": "Cloud-owned feature settings."
+    },
     "compact_prompt": {
       "description": "Compact prompt used for history compaction.",
       "type": "string"
@@ -6807,6 +6891,9 @@
           "type": "boolean"
         },
         "powershell_shell_version": {
+          "type": "boolean"
+        },
+        "prefer_mxc": {
           "type": "boolean"
         },
         "prevent_idle_sleep": {

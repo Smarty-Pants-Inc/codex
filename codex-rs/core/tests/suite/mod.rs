@@ -45,6 +45,7 @@ mod apply_patch_serialization;
 #[cfg(not(target_os = "windows"))]
 mod approvals;
 mod audio_truncation;
+mod auth_recovery_policy;
 mod auto_review;
 mod catalog_permission_messages;
 mod cli_stream;
@@ -53,6 +54,7 @@ mod client_websockets;
 mod cloud_config;
 mod code_mode;
 mod code_mode_elicitation;
+mod code_mode_model_messages;
 mod codex_apps_protocol;
 mod codex_delegate;
 mod collaboration_instructions;
@@ -127,6 +129,7 @@ mod mcp_user_verification;
 mod model_overrides;
 #[path = "model_provider_requirements_tests.rs"]
 mod model_provider_requirements;
+mod model_request;
 mod model_runtime_selectors;
 mod model_switching;
 mod model_visible_layout;
@@ -155,6 +158,7 @@ mod realtime_conversation;
 mod realtime_initial_items;
 mod realtime_misalignment;
 mod realtime_sideband_endpoint;
+mod realtime_system_proxy;
 mod reasoning_effort_override;
 mod remote_env;
 mod remote_models;
@@ -207,6 +211,8 @@ mod truncation;
 mod turn_input_submission;
 mod turn_state;
 mod unified_exec;
+#[path = "unified_exec_launch_failure_tests.rs"]
+mod unified_exec_launch_failure;
 mod unified_exec_process_events;
 mod unified_exec_stdin_approval;
 mod unified_exec_stdin_review_size;
@@ -217,6 +223,8 @@ mod user_notification;
 mod user_shell_cmd;
 mod view_image;
 mod web_search;
+#[path = "web_search_system_proxy_tests.rs"]
+mod web_search_system_proxy;
 mod websocket_fallback;
 mod window_headers;
 #[cfg(target_os = "windows")]

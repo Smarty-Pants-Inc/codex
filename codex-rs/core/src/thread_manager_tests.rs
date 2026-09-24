@@ -229,6 +229,7 @@ async fn thread_analytics_opt_out_overrides_shared_client() {
             }
             services.analytics_events_client.track_app_used(
                 codex_analytics::TrackEventsContext {
+                    turn_metadata: None,
                     model_slug: "test-model".to_string(),
                     turn_id: format!("test-turn-{thread_id}"),
                     thread_id,
@@ -288,8 +289,8 @@ fn thread_id_generator_defaults_to_standard_ids() {
     let agent_control = LocalAgentControl::default();
 
     assert_ne!(
-        agent_control.generate_thread_id(),
-        agent_control.generate_thread_id()
+        agent_control.runtime.generate_thread_id(),
+        agent_control.runtime.generate_thread_id()
     );
 }
 
@@ -379,20 +380,21 @@ async fn thread_id_generator_applies_to_roots_children_and_forks() {
         .thread
         .session
         .services
-        .agent_control
+        .local_agent_runtime
+        .control(root.thread.session.session_id())
         .spawn_agent_with_metadata(
             config.clone(),
             vec![UserInput::Text {
                 text: "child task".to_string(),
                 text_elements: Vec::new(),
             }],
-            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id: root.thread_id,
                 depth: 1,
                 agent_path: None,
                 agent_nickname: None,
                 agent_role: None,
-            })),
+            }),
             SpawnAgentOptions {
                 parent_thread_id: Some(root.thread_id),
                 ..Default::default()
@@ -1383,6 +1385,10 @@ async fn spawn_internal_session_preserves_parent_lineage_without_forking_history
         .await
         .expect("start internal reviewer");
     let reviewer_config = reviewer.thread.config_snapshot().await;
+    assert!(Arc::ptr_eq(
+        &reviewer.thread.session.services.agent_control,
+        &parent.thread.session.services.agent_control,
+    ));
 
     assert_eq!(
         reviewer.session_configured.session_id,
@@ -1393,10 +1399,11 @@ async fn spawn_internal_session_preserves_parent_lineage_without_forking_history
         .session
         .services
         .agent_control
-        .record_rollout_budget_usage(&TokenUsage {
+        .record_usage(TokenUsage {
             output_tokens: 25,
             ..Default::default()
         })
+        .await
         .expect("record reviewer usage");
     let reminder = parent
         .thread
@@ -1404,6 +1411,7 @@ async fn spawn_internal_session_preserves_parent_lineage_without_forking_history
         .services
         .agent_control
         .pending_budget_reminder(parent.thread_id, "window")
+        .await
         .expect("parent budget reminder");
     assert_eq!(reminder.remaining_tokens, 75);
     assert_eq!(reviewer_config.parent_thread_id, Some(parent.thread_id));
@@ -1498,7 +1506,10 @@ async fn spawn_internal_session_preserves_parent_lineage_without_forking_history
             internal_parent: Some(InternalSessionParent {
                 thread_id: parent.thread_id,
                 auth_manager: Arc::clone(&parent.thread.session.services.auth_manager),
-                agent_control: parent.thread.session.services.agent_control.clone(),
+                agent_control: AgentControlInit::Inherited {
+                    control: Arc::clone(&parent.thread.session.services.agent_control),
+                    runtime: parent.thread.session.services.local_agent_runtime.clone(),
+                },
                 originator: reviewer_config.originator.clone(),
                 inherited_instructions: None,
             }),
@@ -1928,6 +1939,7 @@ async fn prepared_root_fork_from_non_root_preserves_recorded_user_provenance() {
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record: None,
+            resume_metadata: None,
         }),
         RolloutItem::ResponseItem(user_msg(direct_user_message).into()),
         RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {

@@ -65,6 +65,7 @@ async fn outcome_callbacks_cover_lower_retries_and_counter_restart() {
                             headers: Some(headers),
                             url: None,
                             body: None,
+                            retry_after: None,
                         })
                     } else {
                         Ok(Response {
