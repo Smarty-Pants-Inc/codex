@@ -6,6 +6,7 @@ use std::sync::atomic::Ordering;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -380,14 +381,14 @@ impl UnifiedExecProcess {
             stderr_rx,
             mut exit_rx,
         } = spawned;
-        let output_rx = codex_utils_pty::combine_output_receivers(stdout_rx, stderr_rx);
         let mut managed = Self::new(
             ProcessHandle::Local(Box::new(process_handle)),
             Some(sandbox_type),
             Some(spawn_lifecycle),
         );
         managed.output_task = Some(Self::spawn_local_output_task(
-            output_rx,
+            stdout_rx,
+            stderr_rx,
             managed.output_handles().clone(),
             managed.transcript(),
             managed.output_tx.clone(),
@@ -635,8 +636,13 @@ impl UnifiedExecProcess {
         })
     }
 
+    /// Consume the bounded stdout/stderr channels directly. Their backpressure
+    /// pauses the readers while this task records a chunk, so no chunk can be
+    /// lost before the transcript and the poll buffer see it. A lossy broadcast
+    /// hop here dropped chunks for large, fast output.
     fn spawn_local_output_task(
-        mut receiver: tokio::sync::broadcast::Receiver<Vec<u8>>,
+        mut stdout_rx: mpsc::Receiver<Vec<u8>>,
+        mut stderr_rx: mpsc::Receiver<Vec<u8>>,
         output_handles: OutputHandles,
         transcript: Arc<Mutex<HeadTailBuffer>>,
         output_tx: broadcast::Sender<Vec<u8>>,
@@ -653,24 +659,31 @@ impl UnifiedExecProcess {
                 output_closed: Arc::clone(&output_closed),
                 output_closed_notify: Arc::clone(&output_closed_notify),
             };
-            loop {
-                match receiver.recv().await {
-                    Ok(chunk) => {
-                        transcript.lock().await.push_chunk(&chunk);
-                        let mut guard = output_buffer.lock().await;
-                        guard.push_chunk(&chunk);
-                        drop(guard);
-                        let _ = output_tx.send(chunk);
-                        output_notify.notify_waiters();
+            let mut stdout_open = true;
+            let mut stderr_open = true;
+            while stdout_open || stderr_open {
+                let received = tokio::select! {
+                    chunk = stdout_rx.recv(), if stdout_open => {
+                        stdout_open = chunk.is_some();
+                        chunk
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        output_closed.store(true, Ordering::Release);
-                        output_closed_notify.notify_waiters();
-                        break;
+                    chunk = stderr_rx.recv(), if stderr_open => {
+                        stderr_open = chunk.is_some();
+                        chunk
                     }
                 };
+                let Some(chunk) = received else {
+                    continue;
+                };
+                transcript.lock().await.push_chunk(&chunk);
+                let mut guard = output_buffer.lock().await;
+                guard.push_chunk(&chunk);
+                drop(guard);
+                let _ = output_tx.send(chunk);
+                output_notify.notify_waiters();
             }
+            output_closed.store(true, Ordering::Release);
+            output_closed_notify.notify_waiters();
         })
     }
 

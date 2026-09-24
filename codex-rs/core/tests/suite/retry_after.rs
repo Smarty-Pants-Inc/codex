@@ -45,9 +45,12 @@ use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
-const FIRST_RETRY_MIN_DELAY: Duration = Duration::from_millis(180);
+// Backoff truncates 200 ms × 0.9..1.1 to 180..=219 ms. Stream retries report the time left until
+// the deadline, measured just after the deadline is set, so a 180 ms backoff reports 179 ms.
+const FIRST_RETRY_MIN_DELAY: Duration = Duration::from_millis(179);
 const FIRST_RETRY_MAX_DELAY: Duration = Duration::from_millis(220);
-const SECOND_RETRY_MIN_DELAY: Duration = Duration::from_millis(360);
+// The same re-measurement can report a 360 ms second backoff as 359 ms.
+const SECOND_RETRY_MIN_DELAY: Duration = Duration::from_millis(359);
 const SECOND_RETRY_MAX_DELAY: Duration = Duration::from_millis(440);
 
 #[derive(Debug, PartialEq, Eq)]
@@ -305,7 +308,10 @@ async fn responses_http_uses_retry_after() -> Result<()> {
 
     submit_user_input(&test, "retry the upstream overload").await?;
     let retry = telemetry.next_retry().await;
-    assert!(retry.delay <= Duration::from_secs(1));
+    assert!(
+        retry.delay <= Duration::from_secs(1),
+        "unexpected retry: {retry:?}"
+    );
     assert_eq!(
         retry,
         RetryTelemetryEvent {
@@ -371,11 +377,13 @@ async fn http_retry_backoff_exhausts_attempts() {
         vec![0, 1, 2]
     );
     assert!(
-        (FIRST_RETRY_MIN_DELAY..=FIRST_RETRY_MAX_DELAY).contains(&(attempts[1].1 - attempts[0].1))
+        (FIRST_RETRY_MIN_DELAY..=FIRST_RETRY_MAX_DELAY).contains(&(attempts[1].1 - attempts[0].1)),
+        "unexpected retry attempts: {attempts:?}"
     );
     assert!(
         (SECOND_RETRY_MIN_DELAY..=SECOND_RETRY_MAX_DELAY)
-            .contains(&(attempts[2].1 - attempts[1].1))
+            .contains(&(attempts[2].1 - attempts[1].1)),
+        "unexpected retry attempts: {attempts:?}"
     );
 }
 
@@ -538,7 +546,10 @@ async fn compact_v2_uses_retry_after() -> Result<()> {
 
     test.codex.submit(Op::Compact).await?;
     let retry = telemetry.next_retry().await;
-    assert!(retry.delay <= Duration::from_secs(1));
+    assert!(
+        retry.delay <= Duration::from_secs(1),
+        "unexpected retry: {retry:?}"
+    );
     assert_eq!(
         retry,
         RetryTelemetryEvent {
@@ -613,7 +624,10 @@ async fn compact_v2_stream_failure_uses_local_backoff_despite_retry_after() -> R
 
     test.codex.submit(Op::Compact).await?;
     let retry = telemetry.next_retry().await;
-    assert!((FIRST_RETRY_MIN_DELAY..FIRST_RETRY_MAX_DELAY).contains(&retry.delay));
+    assert!(
+        (FIRST_RETRY_MIN_DELAY..FIRST_RETRY_MAX_DELAY).contains(&retry.delay),
+        "unexpected retry: {retry:?}"
+    );
     assert_eq!(
         retry,
         RetryTelemetryEvent {
@@ -682,7 +696,10 @@ async fn compact_v2_stream_failure_without_retry_after_exhausts_stream_retries()
 
     test.codex.submit(Op::Compact).await?;
     let retry = telemetry.next_retry().await;
-    assert!((FIRST_RETRY_MIN_DELAY..FIRST_RETRY_MAX_DELAY).contains(&retry.delay));
+    assert!(
+        (FIRST_RETRY_MIN_DELAY..FIRST_RETRY_MAX_DELAY).contains(&retry.delay),
+        "unexpected retry: {retry:?}"
+    );
     assert_eq!(
         retry,
         RetryTelemetryEvent {
@@ -783,7 +800,10 @@ async fn compact_v2_rate_limit_message_uses_server_advised_retry_delay() -> Resu
 
     test.codex.submit(Op::Compact).await?;
     let retry = telemetry.next_retry().await;
-    assert!(retry.delay <= Duration::from_secs(1));
+    assert!(
+        retry.delay <= Duration::from_secs(1),
+        "unexpected retry: {retry:?}"
+    );
     assert_eq!(
         retry,
         RetryTelemetryEvent {
@@ -858,7 +878,10 @@ async fn compact_v2_rate_limit_message_without_retry_after_uses_server_advised_d
 
     test.codex.submit(Op::Compact).await?;
     let retry = telemetry.next_retry().await;
-    assert!(retry.delay <= Duration::from_secs(1));
+    assert!(
+        retry.delay <= Duration::from_secs(1),
+        "unexpected retry: {retry:?}"
+    );
     assert_eq!(
         retry,
         RetryTelemetryEvent {
@@ -923,7 +946,10 @@ async fn compact_v2_overload_without_retry_after_exhausts_request_retries() -> R
 
     test.codex.submit(Op::Compact).await?;
     let first_retry = telemetry.next_retry().await;
-    assert!((FIRST_RETRY_MIN_DELAY..FIRST_RETRY_MAX_DELAY).contains(&first_retry.delay));
+    assert!(
+        (FIRST_RETRY_MIN_DELAY..FIRST_RETRY_MAX_DELAY).contains(&first_retry.delay),
+        "unexpected retry: {first_retry:?}"
+    );
     assert_eq!(
         first_retry,
         RetryTelemetryEvent {
@@ -935,7 +961,10 @@ async fn compact_v2_overload_without_retry_after_exhausts_request_retries() -> R
     );
     wait_for_retry(&mut telemetry, &first_retry).await;
     let second_retry = telemetry.next_retry().await;
-    assert!((SECOND_RETRY_MIN_DELAY..SECOND_RETRY_MAX_DELAY).contains(&second_retry.delay));
+    assert!(
+        (SECOND_RETRY_MIN_DELAY..SECOND_RETRY_MAX_DELAY).contains(&second_retry.delay),
+        "unexpected retry: {second_retry:?}"
+    );
     assert_eq!(
         second_retry,
         RetryTelemetryEvent {
@@ -1047,7 +1076,10 @@ async fn sse_failure_uses_local_backoff_despite_retry_after() -> Result<()> {
 
     submit_user_input(&test, "retry the rate-limited stream").await?;
     let retry = telemetry.next_retry().await;
-    assert!((FIRST_RETRY_MIN_DELAY..FIRST_RETRY_MAX_DELAY).contains(&retry.delay));
+    assert!(
+        (FIRST_RETRY_MIN_DELAY..FIRST_RETRY_MAX_DELAY).contains(&retry.delay),
+        "unexpected retry: {retry:?}"
+    );
     assert_eq!(
         retry,
         RetryTelemetryEvent {
@@ -1103,7 +1135,10 @@ async fn sse_failure_without_retry_after_exhausts_stream_retries(code: &str) -> 
 
     submit_user_input(&test, "exhaust the headerless rate-limited stream").await?;
     let retry = telemetry.next_retry().await;
-    assert!((FIRST_RETRY_MIN_DELAY..FIRST_RETRY_MAX_DELAY).contains(&retry.delay));
+    assert!(
+        (FIRST_RETRY_MIN_DELAY..FIRST_RETRY_MAX_DELAY).contains(&retry.delay),
+        "unexpected retry: {retry:?}"
+    );
     assert_eq!(
         retry,
         RetryTelemetryEvent {
@@ -1184,7 +1219,10 @@ async fn sse_rate_limit_message_uses_server_advised_retry_delay(code: &str) -> R
 
     submit_user_input(&test, "retry after the rate-limit message delay").await?;
     let retry = telemetry.next_retry().await;
-    assert!(retry.delay <= Duration::from_secs(1));
+    assert!(
+        retry.delay <= Duration::from_secs(1),
+        "unexpected retry: {retry:?}"
+    );
     assert_eq!(
         retry,
         RetryTelemetryEvent {
@@ -1240,7 +1278,10 @@ async fn sse_rate_limit_message_with_retry_after_uses_server_advised_retry_delay
 
     submit_user_input(&test, "retry after both rate-limit delay signals").await?;
     let retry = telemetry.next_retry().await;
-    assert!(retry.delay <= Duration::from_secs(1));
+    assert!(
+        retry.delay <= Duration::from_secs(1),
+        "unexpected retry: {retry:?}"
+    );
     assert_eq!(
         retry,
         RetryTelemetryEvent {
@@ -1522,7 +1563,10 @@ async fn websocket_connection_limit_retries_with_local_backoff() -> Result<()> {
     assert_eq!(warmup.body_json()["generate"].as_bool(), Some(false));
     submit_user_input(&test, "retry after reaching the websocket connection limit").await?;
     let retry = telemetry.next_retry().await;
-    assert!((FIRST_RETRY_MIN_DELAY..FIRST_RETRY_MAX_DELAY).contains(&retry.delay));
+    assert!(
+        (FIRST_RETRY_MIN_DELAY..FIRST_RETRY_MAX_DELAY).contains(&retry.delay),
+        "unexpected retry: {retry:?}"
+    );
     assert_eq!(
         retry,
         RetryTelemetryEvent {

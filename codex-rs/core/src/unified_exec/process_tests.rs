@@ -71,6 +71,60 @@ async fn terminal_transcript_survives_lagged_broadcast_and_poll_drains() -> anyh
     Ok(())
 }
 
+#[tokio::test]
+async fn local_output_is_lossless_while_output_task_is_stalled() -> anyhow::Result<()> {
+    use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
+    use crate::unified_exec::process::NoopSpawnLifecycle;
+    use codex_sandboxing::SandboxType;
+    use std::sync::atomic::Ordering;
+
+    // More chunks than any internal channel holds, all of them queued while
+    // the output task cannot record a chunk.
+    const CHUNK_COUNT: u32 = 600;
+
+    let (writer_tx, _writer_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+    let (stdout_tx, stdout_rx) = tokio::sync::broadcast::channel::<Vec<u8>>(1024);
+    let (_exit_tx, exit_rx) = tokio::sync::oneshot::channel::<i32>();
+    let spawned = codex_utils_pty::spawn_from_driver(codex_utils_pty::ProcessDriver {
+        writer_tx,
+        stdout_rx,
+        stderr_rx: None,
+        exit_rx,
+        terminator: None,
+        writer_handle: None,
+        resizer: None,
+        #[cfg(windows)]
+        tty: false,
+    });
+    let process =
+        UnifiedExecProcess::from_spawned(spawned, SandboxType::None, Box::new(NoopSpawnLifecycle))
+            .await?;
+
+    let mut expected = HeadTailBuffer::default();
+    let transcript = process.transcript();
+    let stalled = transcript.lock().await;
+    for index in 0..CHUNK_COUNT {
+        let chunk = vec![b'A' + u8::try_from(index % 26)?; 4 * 1024];
+        expected.push_chunk(&chunk);
+        stdout_tx.send(chunk)?;
+    }
+    // Let the readers forward everything they can while the output task waits.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    drop(stalled);
+    drop(stdout_tx);
+
+    let output = process.output_handles();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !output.output_closed.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(*transcript.lock().await, expected);
+    assert_eq!(*output.output_buffer.lock().await, expected);
+    Ok(())
+}
+
 struct MockExecProcess {
     process_id: ProcessId,
     write_response: WriteResponse,
