@@ -21,6 +21,7 @@ pub(super) fn explicit_skill_input<'a>(
             TurnInput::DeveloperInput { content } => Some(content.as_slice()),
             TurnInput::UserInput { .. }
             | TurnInput::ResponseItem(_)
+            | TurnInput::FunctionCallOutput(_)
             | TurnInput::InterAgentCommunication(_) => None,
         })
         .flatten()

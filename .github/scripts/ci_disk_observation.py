@@ -15,11 +15,23 @@ def snapshot(phase, sizes=False, stopped=None):
     target = Path(os.environ.get("CARGO_TARGET_DIR", workspace / "codex-rs/target"))
     cargo = Path(os.environ.get("CARGO_HOME", Path.home() / ".cargo"))
     temporary = Path(os.environ.get("RUNNER_TEMP", "/tmp"))
-    print(f"disk-observation phase={phase} at={datetime.datetime.now(datetime.timezone.utc).isoformat()} target={target}", flush=True)
+    print(
+        f"disk-observation phase={phase} at={datetime.datetime.now(datetime.timezone.utc).isoformat()} target={target}",
+        flush=True,
+    )
     roots = [workspace, target, temporary, cargo, Path("/tmp")]
-    measurements = [(flag, root) for root in dict.fromkeys(roots) for flag in ("-Pk", "-Pi")]
+    measurements = [
+        (flag, root) for root in dict.fromkeys(roots) for flag in ("-Pk", "-Pi")
+    ]
     if sizes:
-        roots = [target, *(target / "debug" / name for name in ("deps", "build", "incremental")), cargo / "registry", cargo / "git", temporary, Path("/tmp")]
+        roots = [
+            target,
+            *(target / "debug" / name for name in ("deps", "build", "incremental")),
+            cargo / "registry",
+            cargo / "git",
+            temporary,
+            Path("/tmp"),
+        ]
         measurements.extend(("size", root) for root in dict.fromkeys(roots))
     for flag, root in measurements:
         if stopped is not None and stopped.is_set():
@@ -27,14 +39,30 @@ def snapshot(phase, sizes=False, stopped=None):
         if not root.exists():
             print(f"disk-observation missing={root}", flush=True)
             continue
-        command = ["du", "-sx", "--block-size=1", "--", str(root)] if flag == "size" else ["df", flag, "--", str(root)]
+        command = (
+            ["du", "-sx", "--block-size=1", "--", str(root)]
+            if flag == "size"
+            else ["df", flag, "--", str(root)]
+        )
         try:
             # Fixed roots and summary-only commands; no filenames or file contents.
-            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5, check=False)
-            print(f"disk-observation command={command[0]} mode={flag} root={root} exit={result.returncode}", flush=True)
+            result = subprocess.run(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+                check=False,
+            )
+            print(
+                f"disk-observation command={command[0]} mode={flag} root={root} exit={result.returncode}",
+                flush=True,
+            )
             print(result.stdout[:4096].decode(errors="replace"), end="", flush=True)
         except (OSError, subprocess.TimeoutExpired) as error:
-            print(f"disk-observation unavailable mode={flag} root={root} reason={type(error).__name__}", flush=True)
+            print(
+                f"disk-observation unavailable mode={flag} root={root} reason={type(error).__name__}",
+                flush=True,
+            )
     # Parent/child and shared-filesystem measurements overlap; do not sum them.
 
 
