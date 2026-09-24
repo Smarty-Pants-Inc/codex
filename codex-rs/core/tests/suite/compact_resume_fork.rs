@@ -8,6 +8,7 @@
 use super::compact::COMPACT_WARNING_MESSAGE;
 use super::compact::FIRST_REPLY;
 use super::compact::SUMMARY_TEXT;
+use super::compact::assert_compacted_summary;
 use anyhow::Context;
 use anyhow::Result;
 use codex_core::CodexThread;
@@ -473,6 +474,8 @@ async fn snapshot_rollback_past_compaction_replays_append_only_history() -> Resu
         "compaction summary should remain for the preserved first turn",
     );
 
+    assert_compacted_summary(&requests[2], SUMMARY_TEXT);
+    assert_compacted_summary(&requests[3], SUMMARY_TEXT);
     insta::assert_snapshot!(
         "rollback_past_compaction_shapes",
         context_snapshot::format_labeled_requests_snapshot(
