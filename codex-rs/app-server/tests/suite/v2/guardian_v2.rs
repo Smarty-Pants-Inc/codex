@@ -1401,7 +1401,8 @@ async fn guardian_v2_routes_scoped_tool_approvals(
                 .as_array()
                 .expect("sync input")
                 .iter()
-                .rfind(|item| item["role"] == "user")
+                // The fork submits the sync review prompt as developer input.
+                .rfind(|item| item["role"] == "developer")
                 .expect("latest review input");
             let text = message["content"]
                 .as_array()
