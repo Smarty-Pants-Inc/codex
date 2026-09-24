@@ -3630,7 +3630,6 @@ impl Session {
             model_info,
             items,
             image_preparations,
-            /*direct_user_items*/ None,
         )
         .await;
     }
@@ -3641,7 +3640,6 @@ impl Session {
         model_info: &ModelInfo,
         mut items: Vec<ResponseItemEnvelope>,
         image_preparations: Vec<ImagePreparationMetadata>,
-        direct_user_items: Option<&[ResponseItem]>,
     ) {
         // Save the originating history budget for replay.
         // Preserve any existing tool-specific override.
@@ -3728,18 +3726,6 @@ impl Session {
                 }
             }
             state.record_annotated_items(&items, model_info.truncation_policy.into());
-            if (self.live_thread().is_none()
-                || state.session_configuration.history_mode == ThreadHistoryMode::Paginated)
-                && let Some(direct_user_items) = direct_user_items
-            {
-                state.record_direct_user_response_items(
-                    direct_user_items
-                        .iter()
-                        .filter(|item| item.is_user_message())
-                        .cloned()
-                        .collect(),
-                );
-            }
         }
         for image in image_preparations {
             self.services
@@ -5044,16 +5030,11 @@ impl Session {
             &user_image_content_indices,
             original_user_content_len,
         );
-        let direct_user_items = prepared_items
-            .iter()
-            .map(|envelope| envelope.item.clone())
-            .collect::<Vec<_>>();
         self.record_prepared_conversation_items(
             turn_context,
             model_info,
             prepared_items,
             image_preparations,
-            Some(&direct_user_items),
         )
         .await;
         user_message_item.client_id = client_id;

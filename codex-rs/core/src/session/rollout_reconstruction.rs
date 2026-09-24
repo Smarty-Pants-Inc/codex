@@ -129,44 +129,6 @@ impl DirectUserReplayProvenance {
     }
 }
 
-impl Session {
-    pub(crate) async fn direct_user_response_items_from_rollout(
-        &self,
-    ) -> CodexResult<Vec<ResponseItem>> {
-        let Some(live_thread) = self.live_thread() else {
-            return Ok(self.state.lock().await.direct_user_response_items());
-        };
-        {
-            // ponytail: paginated rollouts cannot load full history, so use the live in-memory
-            // provenance. User items from before a paginated resume count as not direct (the
-            // conservative choice). Seed it from resume replay if that drops needed context.
-            let state = self.state.lock().await;
-            if state.session_configuration.history_mode == ThreadHistoryMode::Paginated {
-                return Ok(state.direct_user_response_items());
-            }
-        }
-        let history = live_thread
-            .load_history(/*include_archived*/ true)
-            .await
-            .map_err(|error| CodexErr::Fatal(error.to_string()))?;
-        let provenance = DirectUserReplayProvenance::from_rollout(&history.items);
-        Ok(history
-            .items
-            .into_iter()
-            .filter_map(|item| match item {
-                RolloutItem::ResponseItem(envelope)
-                    if envelope.item.id().is_some_and(|id| {
-                        provenance.direct_user_item_ids.contains(id.as_str())
-                    }) =>
-                {
-                    Some(envelope.item)
-                }
-                _ => None,
-            })
-            .collect())
-    }
-}
-
 fn mark_latest_direct_user_item(
     pending_by_turn: &mut HashMap<String, Vec<(String, String)>>,
     direct_user_item_ids: &mut HashSet<String>,

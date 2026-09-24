@@ -12140,7 +12140,9 @@ max_concurrent_threads_per_session = 17
     }
 
     let subagent_hint = resolve_usage_hints(
-        &config, /*catalog*/ None, /*omit_update_plan_instructions*/ false,
+        &config,
+        ResolvedModelMessages::bundled().multi_agent(),
+        /*omit_update_plan_instructions*/ false,
     )
     .subagent
     .expect("default subagent usage hint should be present")

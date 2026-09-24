@@ -112,6 +112,7 @@ async fn execution_cancellation_respects_network_approval_boundary(
             session
                 .notify_approval(
                     &approval.effective_approval_id(),
+                    /*turn_id*/ None,
                     ReviewDecision::ApprovedForSession,
                 )
                 .await;
