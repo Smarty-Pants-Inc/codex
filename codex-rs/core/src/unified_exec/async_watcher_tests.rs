@@ -305,6 +305,7 @@ async fn terminal_status_uses_trusted_subcommand_approval(
         approval_status,
         /*exit_code*/ 1,
         Duration::from_millis(1),
+        /*timed_out*/ false,
     )
     .await;
     let event = events.recv().await.expect("command end event");

@@ -23,10 +23,34 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tracing::instrument;
 
+/// Responses-compatible inference routes supported by Codex backend.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ResponsesEndpoint {
+    /// Regular user-owned model inference.
+    #[default]
+    Responses,
+    /// Full Guardian approval-review agent inference.
+    Guardian,
+    /// Lightweight asynchronous Guardian risk classification.
+    GuardianClassifier,
+}
+
+impl ResponsesEndpoint {
+    /// Returns the provider-relative path for this inference surface.
+    pub const fn path(self) -> &'static str {
+        match self {
+            Self::Responses => "/responses",
+            Self::Guardian => "/guardian",
+            Self::GuardianClassifier => "/guardian-classifier",
+        }
+    }
+}
+
 pub struct ResponsesClient<T: HttpTransport> {
     session: EndpointSession<T>,
     sse_telemetry: Option<Arc<dyn SseTelemetry>>,
     redact_body_trace: bool,
+    endpoint: ResponsesEndpoint,
 }
 
 #[derive(Default)]
@@ -45,6 +69,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
             session: EndpointSession::new(transport, provider, auth),
             sse_telemetry: None,
             redact_body_trace: false,
+            endpoint: ResponsesEndpoint::Responses,
         }
     }
 
@@ -52,6 +77,12 @@ impl<T: HttpTransport> ResponsesClient<T> {
     /// The encoded bytes, signing input and retry behavior are unchanged.
     pub fn without_body_trace(mut self) -> Self {
         self.redact_body_trace = true;
+        self
+    }
+
+    /// Selects a Responses-compatible backend route for subsequent requests.
+    pub fn with_endpoint(mut self, endpoint: ResponsesEndpoint) -> Self {
+        self.endpoint = endpoint;
         self
     }
 
@@ -64,6 +95,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
             session: self.session.with_request_telemetry(request),
             sse_telemetry: sse,
             redact_body_trace: self.redact_body_trace,
+            endpoint: self.endpoint,
         }
     }
 
@@ -74,7 +106,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
         fields(
             transport = "responses_http",
             http.method = "POST",
-            api.path = "responses"
+            api.path = self.endpoint.path()
         )
     )]
     pub async fn stream_request(
@@ -90,7 +122,6 @@ impl<T: HttpTransport> ResponsesClient<T> {
             compression,
             turn_state,
         } = options;
-
         let body = EncodedJsonBody::encode(&request)
             .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
 
@@ -107,10 +138,6 @@ impl<T: HttpTransport> ResponsesClient<T> {
             .await
     }
 
-    fn path() -> &'static str {
-        "responses"
-    }
-
     #[instrument(
         name = "responses.stream",
         level = "info",
@@ -118,7 +145,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
         fields(
             transport = "responses_http",
             http.method = "POST",
-            api.path = "responses",
+            api.path = self.endpoint.path(),
             turn.has_state = turn_state.is_some()
         )
     )]
@@ -156,7 +183,7 @@ impl<T: HttpTransport> ResponsesClient<T> {
             .session
             .stream_encoded_json_with(
                 Method::POST,
-                Self::path(),
+                self.endpoint.path(),
                 extra_headers,
                 Some(body),
                 |req| {
