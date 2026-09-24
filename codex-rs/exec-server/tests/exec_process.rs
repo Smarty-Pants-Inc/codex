@@ -828,8 +828,13 @@ async fn remote_process_preserves_empty_workspace_roots() -> Result<()> {
             network_proxy: None,
         })
         .await?;
+    // ponytail: a sandboxed remote process can take over 2 s to emit its first
+    // event on a loaded CI runner (2.14 s and 2.42 s seen; 1.0-1.3 s is normal).
+    // 10 s per event still catches a hang. Revisit if this test starts taking
+    // several seconds when the runner is idle.
     let (stdout, _stderr, exit_code, closed) =
-        collect_process_output_from_events(session.process).await?;
+        collect_process_output_from_events_with_timeout(session.process, Duration::from_secs(10))
+            .await?;
 
     assert!(!stdout.contains("excluded"), "unexpected stdout: {stdout}");
     assert_ne!(exit_code, Some(0));
@@ -888,12 +893,19 @@ async fn collect_process_output_from_reads(
 async fn collect_process_output_from_events(
     session: Arc<dyn ExecProcess>,
 ) -> Result<(String, String, Option<i32>, bool)> {
+    collect_process_output_from_events_with_timeout(session, Duration::from_secs(2)).await
+}
+
+async fn collect_process_output_from_events_with_timeout(
+    session: Arc<dyn ExecProcess>,
+    event_timeout: Duration,
+) -> Result<(String, String, Option<i32>, bool)> {
     let mut events = session.subscribe_events();
     let mut stdout = String::new();
     let mut stderr = String::new();
     let mut exit_code = None;
     loop {
-        match timeout(Duration::from_secs(2), events.recv()).await?? {
+        match timeout(event_timeout, events.recv()).await?? {
             ExecProcessEvent::Output(chunk) => match chunk.stream {
                 ExecOutputStream::Stdout | ExecOutputStream::Pty => {
                     stdout.push_str(&String::from_utf8_lossy(&chunk.chunk.into_inner()));
