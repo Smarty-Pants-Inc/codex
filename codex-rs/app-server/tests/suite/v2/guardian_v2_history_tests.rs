@@ -558,9 +558,10 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
             let async_input = request["input"].as_array().expect("request input array");
             assert_eq!(sync_input.contains(&checkpoint), index > 0);
             assert_eq!(async_input.contains(&checkpoint), index > 0 && compatible);
+            // The fork submits the sync reviewer prompt as developer input.
             let sync_text = sync_input
                 .iter()
-                .filter(|item| item["role"] == "user")
+                .filter(|item| item["role"] == "developer")
                 .filter_map(|item| item["content"].as_array())
                 .flatten()
                 .filter_map(|part| part["text"].as_str())

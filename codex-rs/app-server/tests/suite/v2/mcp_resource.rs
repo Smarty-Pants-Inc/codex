@@ -854,7 +854,7 @@ async fn metadata_and_mcp_requests_complete_while_unrelated_resume_loads_config(
             cwd: Some(resume_cwd.path().to_string_lossy().into_owned()),
             history: Some(vec![ResponseItem::Message {
                 id: None,
-                role: "user".to_string(),
+                role: "developer".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "Resume this unrelated thread.".to_string(),
                 }],

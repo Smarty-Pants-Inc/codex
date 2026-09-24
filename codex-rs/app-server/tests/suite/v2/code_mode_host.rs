@@ -415,6 +415,8 @@ async fn app_server_blocks_goal_after_repeated_code_mode_host_failures() -> Resu
     let mut app_server = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .with_args(&["--code-mode-host", &host_url])
+        // Goal auto-continue is opt-in for fork app-server hosts.
+        .with_goal_auto_continue()
         .build_initialized_with_timeout(DEFAULT_READ_TIMEOUT)
         .await?;
     let thread = app_server
