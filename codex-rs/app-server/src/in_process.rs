@@ -63,6 +63,7 @@ use crate::outgoing_message::OutgoingEnvelope;
 use crate::outgoing_message::OutgoingMessage;
 use crate::outgoing_message::OutgoingMessageSender;
 use crate::outgoing_message::QueuedOutgoingMessage;
+use crate::plugin_config_reload::PluginStartupConfig;
 use crate::transport::CHANNEL_CAPACITY;
 use crate::transport::OutboundConnectionState;
 use crate::transport::route_outgoing_envelope;
@@ -489,7 +490,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                 rpc_transport: AppServerRpcTransport::InProcess,
                 goal_auto_continue_enabled: args.goal_auto_continue_enabled,
                 remote_control_handle: None,
-                plugin_startup_tasks: crate::PluginStartupTasks::Start,
+                plugin_startup_tasks: Some(PluginStartupConfig::Current),
             }));
             let mut thread_created_rx = processor.thread_created_receiver();
             let session = Arc::new(ConnectionSessionState::new());
@@ -632,12 +633,12 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                         }
                         Some(InProcessClientMessage::ServerRequestResponse { request_id, result }) => {
                             outgoing_message_sender
-                                .notify_client_response(request_id, result)
+                                .notify_client_response(IN_PROCESS_CONNECTION_ID, request_id, result)
                                 .await;
                         }
                         Some(InProcessClientMessage::ServerRequestError { request_id, error }) => {
                             outgoing_message_sender
-                                .notify_client_error(request_id, error)
+                                .notify_client_error(IN_PROCESS_CONNECTION_ID, request_id, error)
                                 .await;
                         }
                         Some(InProcessClientMessage::Shutdown { done_tx }) => {
@@ -706,7 +707,7 @@ async fn start_uninitialized(args: InProcessStartArgs) -> IoResult<InProcessClie
                                     _ => unreachable!("we just sent a ServerRequest variant"),
                                 };
                                 outgoing_message_sender
-                                    .notify_client_error(request_id, error)
+                                    .notify_client_error(IN_PROCESS_CONNECTION_ID, request_id, error)
                                     .await;
                             }
                         }
@@ -1034,6 +1035,7 @@ mod tests {
                     phase: None,
                     memory_citation: None,
                     delivery: Some(AgentMessageDelivery::Async),
+                    questions: None,
                 },
                 thread_id: "thread-1".to_string(),
                 turn_id: "turn-1".to_string(),

@@ -12,6 +12,7 @@ use codex_diagnostics::Gauge;
 use codex_extension_api::ThreadIdleCause;
 use futures::future::BoxFuture;
 use tokio::select;
+use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
@@ -30,10 +31,12 @@ use crate::hook_runtime::run_turn_interrupt_hooks;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::turn::run_hooks_and_record_inputs;
+use crate::session::turn_context::NewTurnContextOptions;
 use crate::session::turn_context::TurnContext;
 use crate::state::ActiveTurn;
 use crate::state::RunningTask;
 use crate::state::TaskKind;
+use crate::state::TurnState;
 use codex_analytics::TurnProfileFact;
 use codex_analytics::TurnTokenUsageFact;
 use codex_context_fragments::RenderedFragment;
@@ -69,11 +72,6 @@ const TASK_COMPACT_METRIC: &str = "codex.task.compact";
 static ACTIVE_TURNS: Gauge = Gauge::new("core.turns.active");
 
 pub(crate) type SessionTaskResult = CodexResult<Option<String>>;
-
-pub(crate) enum MailboxParentProvenance {
-    Ignore,
-    Attribute,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InterruptedTurnHistoryMarker {
@@ -278,8 +276,7 @@ impl Session {
     ) {
         self.abort_all_tasks(TurnAbortReason::Replaced).await;
         self.clear_connector_selection().await;
-        self.start_task(turn_context, input, task, MailboxParentProvenance::Ignore)
-            .await;
+        self.start_task(turn_context, input, task).await;
     }
 
     pub(crate) async fn start_task<T: SessionTask>(
@@ -287,14 +284,12 @@ impl Session {
         turn_context: Arc<TurnContext>,
         input: Vec<TurnInput>,
         task: T,
-        mailbox_parent_provenance: MailboxParentProvenance,
     ) {
         let mut input = input;
         self.start_task_inner(
             turn_context,
             &mut input,
             task,
-            mailbox_parent_provenance,
             /*reserved_turn_state*/ None,
         )
         .await;
@@ -305,17 +300,10 @@ impl Session {
         turn_context: Arc<TurnContext>,
         input: &mut Vec<TurnInput>,
         task: T,
-        mailbox_parent_provenance: MailboxParentProvenance,
         reserved_turn_state: &Arc<tokio::sync::Mutex<crate::state::TurnState>>,
     ) -> bool {
-        self.start_task_inner(
-            turn_context,
-            input,
-            task,
-            mailbox_parent_provenance,
-            Some(reserved_turn_state),
-        )
-        .await
+        self.start_task_inner(turn_context, input, task, Some(reserved_turn_state))
+            .await
     }
 
     #[expect(
@@ -327,9 +315,13 @@ impl Session {
         turn_context: Arc<TurnContext>,
         input: &mut Vec<TurnInput>,
         task: T,
-        mailbox_parent_provenance: MailboxParentProvenance,
         reserved_turn_state: Option<&Arc<tokio::sync::Mutex<crate::state::TurnState>>>,
     ) -> bool {
+        // Inherited or recovered roots are applied before task start. Otherwise this
+        // task owns its turn, including background work. Later mail cannot change it.
+        turn_context
+            .turn_metadata_state
+            .set_root_turn_id(turn_context.sub_id.clone());
         let task: Arc<dyn AnySessionTask> = Arc::new(task);
         let task_kind = task.kind();
         let span_name = task.span_name();
@@ -352,11 +344,6 @@ impl Session {
             .await
             .clear_turn(&turn_context.sub_id);
 
-        let pending_input = if reserved_turn_state.is_none() {
-            Some(self.input_queue.get_pending_input(&self.active_turn).await)
-        } else {
-            None
-        };
         let mut active = self.active_turn.lock().await;
         let turn_state = if let Some(reserved_turn_state) = reserved_turn_state {
             let Some(turn) = active.as_ref().filter(|turn| {
@@ -372,48 +359,8 @@ impl Session {
             }
             Arc::clone(&turn.turn_state)
         };
-        let (pending_items, parent_turn_id, root_turn_id) = match pending_input {
-            Some(pending_input) => pending_input,
-            None => {
-                let pending_items = self
-                    .input_queue
-                    .take_pending_input_for_turn_state(turn_state.as_ref())
-                    .await;
-                let (mailbox_items, parent_turn_id, root_turn_id) =
-                    self.input_queue.drain_mailbox_input_items().await;
-                let mut pending_items = pending_items;
-                pending_items.extend(mailbox_items);
-                (pending_items, parent_turn_id, root_turn_id)
-            }
-        };
-        if let MailboxParentProvenance::Attribute = mailbox_parent_provenance {
-            if let Some(id) = parent_turn_id {
-                if let Some(initiating_agent_path) = pending_items.iter().find_map(|item| {
-                    let TurnInput::InterAgentCommunication(communication) = item else {
-                        return None;
-                    };
-                    communication
-                        .trigger_turn
-                        .then(|| communication.author.clone())
-                }) {
-                    turn_context
-                        .turn_metadata_state
-                        .set_initiating_agent_path(initiating_agent_path);
-                }
-                turn_context.turn_metadata_state.set_parent_turn_id(id);
-            }
-            if let Some(id) = root_turn_id {
-                turn_context.turn_metadata_state.set_root_turn_id(id);
-            }
-        } else if pending_items.iter().any(|item| {
-            matches!(
-                item,
-                TurnInput::InterAgentCommunication(communication) if communication.trigger_turn
-            )
-        }) && turn_context.turn_metadata_state.root_turn_id() != root_turn_id
-        {
-            turn_context.turn_metadata_state.mark_root_turn_ambiguous();
-        }
+        // Drain mail only after admission succeeds so a rejected start cannot drop it.
+        let (pending_items, _) = self.input_queue.drain_mailbox_input_items().await;
         turn_state.lock().await.token_usage_at_turn_start = token_usage_at_turn_start.clone();
         self.input_queue
             .extend_pending_input_for_turn_state(turn_state.as_ref(), pending_items)
@@ -439,7 +386,7 @@ impl Session {
             otel.name = span_name,
             thread.id = %self.thread_id,
             turn.id = %turn_context.sub_id,
-            model = %turn_context.model_info.slug,
+            model = %turn_context.model_info().slug,
             codex.turn.reasoning_effort = %reasoning_effort,
             codex.turn.token_usage.input_tokens = field::Empty,
             codex.turn.token_usage.cached_input_tokens = field::Empty,
@@ -558,16 +505,53 @@ impl Session {
             let active_turn = active_turn.insert(ActiveTurn::default());
             Arc::clone(&active_turn.turn_state)
         };
-        let turn_context = self.new_default_turn_with_sub_id(sub_id).await;
+
+        // Peek rather than drain: an interrupt can remove this reservation while the turn context
+        // is built. The task start drains the mail only after it admits the reserved turn.
+        let (input, mut start_options) = self.input_queue.peek_mailbox_input_items().await;
+        if !input.iter().any(
+            |item| matches!(item, TurnInput::InterAgentCommunication(mail) if mail.trigger_turn),
+        ) {
+            // Queue-only mail wakes durable sleep without selecting a new task's settings.
+            start_options.cyber_access_program = self
+                .reference_context_item()
+                .await
+                .and_then(|context| context.cyber_access_program);
+        }
+        let turn_context = self
+            .new_turn_with_default_settings(
+                sub_id,
+                NewTurnContextOptions {
+                    final_output_json_schema: start_options.final_output_json_schema,
+                    cyber_access_program: start_options.cyber_access_program,
+                },
+            )
+            .await;
+        if let Some(id) = start_options.parent_turn_id {
+            if let Some(initiating_agent_path) = input.iter().find_map(|item| {
+                let TurnInput::InterAgentCommunication(communication) = item else {
+                    return None;
+                };
+                communication
+                    .trigger_turn
+                    .then(|| communication.author.clone())
+            }) {
+                turn_context
+                    .turn_metadata_state
+                    .set_initiating_agent_path(initiating_agent_path);
+            }
+            turn_context.turn_metadata_state.set_parent_turn_id(id);
+        }
+        if let Some(id) = start_options.root_turn_id {
+            turn_context.turn_metadata_state.set_root_turn_id(id);
+        }
         self.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
             .await;
-
         let mut task_input = Vec::new();
         self.start_reserved_task(
             turn_context,
             &mut task_input,
             RegularTask::new(),
-            MailboxParentProvenance::Attribute,
             &reserved_turn_state,
         )
         .await;
@@ -582,7 +566,8 @@ impl Session {
             aborted_turn = task.is_some();
             turn_context = task.as_ref().map(|task| Arc::clone(&task.turn_context));
             if let Some(task) = task {
-                self.handle_task_abort(task, reason.clone()).await;
+                self.handle_task_abort(task, reason.clone(), &active_turn.turn_state)
+                    .await;
             }
             if aborted_turn {
                 active_turn_to_clear = Some(active_turn);
@@ -633,7 +618,8 @@ impl Session {
         let task = active_turn.task.take();
         let turn_context = task.as_ref().map(|task| Arc::clone(&task.turn_context));
         if let Some(task) = task {
-            self.handle_task_abort(task, reason.clone()).await;
+            self.handle_task_abort(task, reason.clone(), &active_turn.turn_state)
+                .await;
         }
         if let Some(turn_context) = turn_context.as_deref() {
             self.emit_turn_abort_lifecycle(reason.clone(), turn_context.extension_data.as_ref())
@@ -869,7 +855,7 @@ impl Session {
         };
         let event = if let Some(reason) = abort_reason {
             if reason == TurnAbortReason::Interrupted {
-                run_turn_interrupt_hooks(self, &turn_context).await;
+                run_turn_interrupt_hooks(self, &turn_context, &turn_state).await;
             }
             self.emit_turn_abort_lifecycle(reason.clone(), turn_context.extension_data.as_ref())
                 .await;
@@ -974,7 +960,12 @@ impl Session {
             .await
     }
 
-    async fn handle_task_abort(self: &Arc<Self>, task: RunningTask, reason: TurnAbortReason) {
+    async fn handle_task_abort(
+        self: &Arc<Self>,
+        task: RunningTask,
+        reason: TurnAbortReason,
+        turn_state: &Mutex<TurnState>,
+    ) {
         let sub_id = task.turn_context.sub_id.clone();
         if task.cancellation_token.is_cancelled() {
             return;
@@ -1034,7 +1025,7 @@ impl Session {
         }
 
         if reason == TurnAbortReason::Interrupted {
-            run_turn_interrupt_hooks(self, &task.turn_context).await;
+            run_turn_interrupt_hooks(self, &task.turn_context, turn_state).await;
         }
 
         let started_at = task
