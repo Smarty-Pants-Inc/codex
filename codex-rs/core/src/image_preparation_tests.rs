@@ -565,6 +565,7 @@ async fn mixed_user_media_notices_preserve_content_source_order() {
     }];
 
     prepare_response_items(
+        "image-preparation-thread",
         &mut items,
         ImagePreparationMode::DetailBased,
         ImageResizeNoticeMode::Enabled,
@@ -663,6 +664,7 @@ async fn all_failed_user_media_preserves_the_user_boundary_and_source_order() {
     }];
 
     prepare_response_items(
+        "image-preparation-thread",
         &mut items,
         ImagePreparationMode::DetailBased,
         ImageResizeNoticeMode::Enabled,
@@ -723,6 +725,7 @@ async fn failed_non_user_audio_remains_in_its_original_message() {
     }];
 
     prepare_response_items(
+        "image-preparation-thread",
         &mut items,
         ImagePreparationMode::DetailBased,
         ImageResizeNoticeMode::Enabled,

@@ -818,7 +818,9 @@ async fn resumed_history_only_emits_resize_notices_for_new_images() -> anyhow::R
     replayed
         .codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Image {
-            image_url: original_image_url,
+            image: ImageReference::Inline {
+                image_url: original_image_url,
+            },
             detail: Some(ImageDetail::High),
         }]))
         .await?;

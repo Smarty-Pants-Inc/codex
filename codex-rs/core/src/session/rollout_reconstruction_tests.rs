@@ -526,6 +526,7 @@ async fn reconstruction_preserves_pre_compaction_history_when_rollback_crosses_c
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record: None,
+            resume_metadata: None,
         }),
         RolloutItem::ResponseItem(user_message("u3").into()),
         RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
@@ -773,6 +774,7 @@ async fn reconstruction_migrates_only_proven_generated_items_in_replacement_hist
                     window_id: None,
                     compaction_response_id: None,
                     latest_token_usage_record: None,
+                    resume_metadata: None,
                 }),
             ],
         )
@@ -802,6 +804,7 @@ async fn reconstruction_migrates_only_local_legacy_compaction_summary_for_root_t
         window_id: None,
         compaction_response_id: None,
         latest_token_usage_record: None,
+        resume_metadata: None,
     })];
 
     let reconstruction = session
@@ -838,6 +841,7 @@ async fn reconstruction_preserves_direct_user_message_equal_to_legacy_compaction
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record: None,
+            resume_metadata: None,
         }),
     ];
 

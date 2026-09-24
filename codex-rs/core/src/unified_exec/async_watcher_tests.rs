@@ -380,6 +380,7 @@ async fn terminal_status_uses_trusted_subcommand_approval(
     let cwd = codex_utils_path_uri::PathUri::from_abs_path(&turn.cwd);
     let model_info = Arc::clone(turn.model_info());
     super::emit_exec_end_for_unified_exec(
+        /*sandbox_type*/ None,
         session,
         turn,
         model_info,

@@ -1939,6 +1939,7 @@ async fn prepared_root_fork_from_non_root_preserves_recorded_user_provenance() {
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record: None,
+            resume_metadata: None,
         }),
         RolloutItem::ResponseItem(user_msg(direct_user_message).into()),
         RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
