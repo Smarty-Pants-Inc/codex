@@ -11,6 +11,8 @@ use codex_guardian_context::effective_input_token_limit;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
+use codex_protocol::models::LocalImagePreparation;
+use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 
 use crate::context::ContextualUserFragment;
@@ -78,10 +80,15 @@ pub(crate) async fn finalize(
     else {
         return Ok(());
     };
-    let [TurnInput::UserInput { content, .. }] = input else {
-        return Err(CodexErr::InvalidRequest(
-            "Guardian expects one review input".to_owned(),
-        ));
+    // The fork submits review prompts as developer input; accept either input role.
+    let (content, is_developer_input) = match input {
+        [TurnInput::UserInput { content, .. }] => (content, false),
+        [TurnInput::DeveloperInput { content }] => (content, true),
+        _ => {
+            return Err(CodexErr::InvalidRequest(
+                "Guardian expects one review input".to_owned(),
+            ));
+        }
     };
     let context = pending.0.clone();
     let model = &step.settings.model_info;
@@ -137,7 +144,14 @@ pub(crate) async fn finalize(
     // Reserve the real input annotations as well as the shared content cost.
     // Removing optional items can only reduce this metadata. The remaining
     // margin covers IDs and timestamps assigned when recording the message.
-    let mut framing = session.response_item_from_user_input(content.clone());
+    let mut framing = if is_developer_input {
+        ResponseItem::from(ResponseInputItem::from_developer_input(
+            content.clone(),
+            LocalImagePreparation::Defer,
+        ))
+    } else {
+        session.response_item_from_user_input(content.clone())
+    };
     if let ResponseItem::Message { content, .. } = &mut framing {
         content.clear();
     }

@@ -205,6 +205,7 @@ async fn browser_login_bootstraps_through_system_proxy() -> Result<()> {
             capabilities: None,
         },
         channel_capacity: in_process::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+        goal_auto_continue_enabled: false,
     })
     .await?;
     let login: LoginAccountResponse = serde_json::from_value(
