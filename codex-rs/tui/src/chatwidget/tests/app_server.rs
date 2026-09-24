@@ -1132,6 +1132,7 @@ async fn live_app_server_command_execution_strips_shell_wrapper() {
             started_at_ms: 0,
             item: AppServerThreadItem::CommandExecution {
                 model_context: None,
+                sandbox_type: None,
                 id: "cmd-1".to_string(),
                 command: command.clone(),
                 cwd: test_path_buf("/tmp").abs().into(),
@@ -1157,6 +1158,7 @@ async fn live_app_server_command_execution_strips_shell_wrapper() {
             completed_at_ms: 0,
             item: AppServerThreadItem::CommandExecution {
                 model_context: None,
+                sandbox_type: None,
                 id: "cmd-1".to_string(),
                 command,
                 cwd: test_path_buf("/tmp").abs().into(),
@@ -1555,7 +1557,10 @@ async fn live_app_server_turn_completion_repairs_dropped_message_deltas() {
         phase: Some(MessagePhase::FinalAnswer),
         memory_citation: None,
         delivery: None,
-        questions: None,
+        questions: Some(vec![codex_protocol::items::AsyncUserInputQuestion {
+            title: "Which way?".into(),
+            options: None,
+        }]),
     }];
     chat.handle_server_notification(
         ServerNotification::TurnCompleted(TurnCompletedNotification {
@@ -1586,6 +1591,11 @@ async fn live_app_server_turn_completion_repairs_dropped_message_deltas() {
         })
         .collect::<Vec<_>>();
     assert_eq!(consolidations.len(), 1);
+    assert_eq!(chat.bottom_pane.question_editor().unanswered_count(), 0);
+    assert!(matches!(
+        chat.pending_notification,
+        Some(Notification::AgentTurnComplete { .. })
+    ));
 }
 
 #[tokio::test]

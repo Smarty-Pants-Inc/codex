@@ -34,6 +34,8 @@ use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
 use codex_utils_path_uri::PathUri;
 use core_test_support::apps_test_server::AppsTestServer;
+use core_test_support::context_snapshot;
+use core_test_support::context_snapshot::ContextSnapshotOptions;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
@@ -457,7 +459,7 @@ async fn mount_remote_calendar_installed_plugins(server: &wiremock::MockServer) 
 #[test_case(Feature::RecommendedPlugins, Some(Feature::RemotePlugin); "remote plugins disabled")]
 #[test_case(Feature::RecommendedPlugins, Some(Feature::RecommendedPlugins); "recommendations disabled")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn startup_recommendations(
+async fn startup_recommendations_use_developer_message(
     feature: Feature,
     disabled_feature: Option<Feature>,
 ) -> Result<()> {
@@ -546,8 +548,18 @@ async fn startup_recommendations(
 
     test.submit_turn("suggest a plugin").await?;
 
+    if feature == Feature::RecommendedPlugins && disabled_feature.is_none() {
+        insta::assert_snapshot!(
+            "startup_recommendations_developer_context",
+            context_snapshot::format_request_history_snapshot(
+                "Startup recommendations share the developer message with other context.",
+                &model_response.requests(),
+                &ContextSnapshotOptions::default().rewrite_known_segments(),
+            )
+        );
+    }
+
     let request = model_response.single_request();
-    // Recommended plugins are developer-role context.
     let developer_context = request.message_input_texts("developer").join("\n");
     assert_eq!(
         developer_context.contains("<recommended_plugins>"),
@@ -557,6 +569,32 @@ async fn startup_recommendations(
         developer_context.contains("- GitHub (github@openai-curated-remote)"),
         expect_recommendations,
     );
+    if expect_recommendations {
+        let developer_messages = request.message_input_text_groups("developer");
+        let recommendation_message = developer_messages
+            .iter()
+            .find(|message| {
+                message
+                    .iter()
+                    .any(|text| text.starts_with("<recommended_plugins>"))
+            })
+            .expect("developer message with recommendations");
+        assert!(
+            recommendation_message
+                .iter()
+                .any(|text| text.starts_with("<permissions instructions>")),
+            "recommendations should share the developer message with other context"
+        );
+        assert_eq!(
+            recommendation_message.last().map(String::as_str),
+            Some(concat!(
+                "<recommended_plugins>\n",
+                "Here is a list of plugins that are available but not installed.\n\n",
+                "- GitHub (github@openai-curated-remote)\n",
+                "</recommended_plugins>",
+            ))
+        );
+    }
     let tools = tool_names(&request.body_json());
     assert_eq!(
         tools
@@ -1029,10 +1067,23 @@ async fn endpoint_mode_injects_candidates_hides_list_and_rejects_invented_ids() 
 
     let requests = mock.requests();
     assert_eq!(requests.len(), 2);
-    let contextual_developer_message = requests[0].message_input_texts("developer").join("\n");
-    assert!(contextual_developer_message.contains("<recommended_plugins>"));
-    assert!(contextual_developer_message.contains("github@openai-curated-remote"));
-    assert!(contextual_developer_message.contains("google-calendar@openai-curated-remote"));
+    for request in &requests {
+        let recommendations = request
+            .message_input_texts("developer")
+            .into_iter()
+            .filter(|text| text.starts_with("<recommended_plugins>"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            recommendations,
+            vec![concat!(
+                "<recommended_plugins>\n",
+                "Here is a list of plugins that are available but not installed.\n\n",
+                "- GitHub (github@openai-curated-remote)\n",
+                "- Google Calendar (google-calendar@openai-curated-remote)\n",
+                "</recommended_plugins>",
+            )]
+        );
+    }
     let body = requests[0].body_json();
     let tools = tool_names(&body);
     assert!(

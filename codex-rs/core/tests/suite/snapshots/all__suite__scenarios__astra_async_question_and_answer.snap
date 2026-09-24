@@ -7,7 +7,7 @@ Scenario: Astra asks who a launch update is for, keeps working, and receives the
 
 ## Window 1
 -- request 1 (request) --
-00:additional_tools/developer (3; hash=c6db2873bb55d711):
+00:additional_tools/developer (3; hash=5e2f8ae708c2cb1e):
         - namespace/functions; hash=e7db0a45c4ec3157
           - custom/exec
           - function/wait
@@ -15,7 +15,7 @@ Scenario: Astra asks who a launch update is for, keeps working, and receives the
           - function/request_user_input_async
         - namespace/clock: Tools for reading and waiting on time.; hash=f402e8c5e9b5e317
           - function/sleep
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=62f0e3e9a8f6a0db
+        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=a0f3641ef6b9bb5c
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents

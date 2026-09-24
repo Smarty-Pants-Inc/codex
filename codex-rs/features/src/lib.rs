@@ -109,9 +109,10 @@ pub enum Feature {
     /// Store CLI auth in the encrypted local secrets backend when keyring storage is selected.
     SecretAuthStorage,
 
-    // Experimental
     /// Automatically start the shared local daemon for eligible interactive launches.
     DaemonAutoStart,
+
+    // Experimental
     /// Send per-content-entry classifications in internal Responses metadata.
     ContentItemKinds,
     /// Record model-attempted tool calls in internal Responses metadata.
@@ -319,8 +320,7 @@ pub enum Feature {
     SendMessageToUserAsync,
     /// Enable automatic review for approval prompts.
     GuardianApproval,
-    /// Select thread-owned context for both Guardian reviewers.
-    /// Read once from the thread's fixed feature set when Guardian evidence is initialized.
+    /// Removed compatibility flag for always-on thread-owned Guardian context.
     GuardianThreadContext,
     /// Reuse encrypted parent compaction when restarting Guardian review sessions.
     GuardianReuseParentCompaction,
@@ -396,6 +396,8 @@ pub enum Feature {
     WindowsSandboxElevated,
     /// Attempt elevated Windows sandbox provisioning through the installed service.
     WindowsSandboxService,
+    /// Prefer the local native Windows sandbox when available, retaining legacy fallback.
+    PreferMxc,
     /// Legacy remote models flag kept for backward compatibility.
     RemoteModels,
     /// Removed legacy git commit attribution guidance flag.
@@ -637,6 +639,13 @@ impl Features {
                         Feature::UseLegacyLandlock,
                     );
                 }
+                "guardianv2.thread_context" => {
+                    self.record_legacy_usage_force(
+                        "features.guardianv2.thread_context",
+                        Feature::GuardianThreadContext,
+                    );
+                    continue;
+                }
                 _ => {}
             }
             if k == "imagegenext" && m.contains_key(Feature::ImageGeneration.key()) {
@@ -702,6 +711,10 @@ impl Features {
 fn legacy_usage_notice(alias: &str, feature: Feature) -> (String, Option<String>) {
     let canonical = feature.key();
     match feature {
+        Feature::GuardianThreadContext => (
+            "`[features.guardianv2].thread_context` is deprecated and ignored.".to_string(),
+            Some("Thread-owned Guardian context is always enabled. Remove `thread_context` from [features.guardianv2] in config.toml, including profile overrides.".to_string()),
+        ),
         Feature::TranscriptV2 => (
             "`[features].transcript_v2` is deprecated and ignored.".to_string(),
             Some("Use `[tui].fullscreen_transcript` in config.toml instead.".to_string()),
@@ -937,12 +950,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::DaemonAutoStart,
         key: "daemon_auto_start",
-        stage: Stage::Experimental {
-            name: "Automatically start the background server",
-            menu_description: "Use the shared local server for new, resumed, and forked sessions. Takes effect next launch.",
-            announcement: "Automatic background server startup can now be enabled from /experimental.",
-        },
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::TranscriptV2,
@@ -1254,6 +1263,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::WindowsSandboxService,
         key: "windows_sandbox_service",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::PreferMxc,
+        key: "prefer_mxc",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
@@ -1630,7 +1645,7 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::GuardianThreadContext,
         key: "guardianv2.thread_context",
-        stage: Stage::UnderDevelopment,
+        stage: Stage::Removed,
         default_enabled: false,
     },
     FeatureSpec {

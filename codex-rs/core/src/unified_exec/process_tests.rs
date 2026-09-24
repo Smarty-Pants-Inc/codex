@@ -60,21 +60,72 @@ async fn terminal_transcript_survives_lagged_broadcast_and_poll_drains() -> anyh
                 tokio::task::yield_now().await;
             }
         }
-        while process
-            .output_handles()
-            .transcript
-            .lock()
-            .await
-            .total_bytes()
-            < expected.total_bytes()
-        {
+        while process.transcript().lock().await.total_bytes() < expected.total_bytes() {
             tokio::task::yield_now().await;
         }
         anyhow::Ok(())
     })
     .await??;
     assert!(matches!(lagged.recv().await, Err(RecvError::Lagged(_))));
-    assert_eq!(*process.output_handles().transcript.lock().await, expected);
+    assert_eq!(*process.transcript().lock().await, expected);
+    Ok(())
+}
+
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "the held transcript lock stalls the output task on purpose"
+)]
+#[tokio::test]
+async fn local_output_is_lossless_while_output_task_is_stalled() -> anyhow::Result<()> {
+    use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
+    use crate::unified_exec::process::NoopSpawnLifecycle;
+    use codex_sandboxing::SandboxType;
+    use std::sync::atomic::Ordering;
+
+    // More chunks than any internal channel holds, all of them queued while
+    // the output task cannot record a chunk.
+    const CHUNK_COUNT: u32 = 600;
+
+    let (writer_tx, _writer_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(1);
+    let (stdout_tx, stdout_rx) = tokio::sync::broadcast::channel::<Vec<u8>>(1024);
+    let (_exit_tx, exit_rx) = tokio::sync::oneshot::channel::<i32>();
+    let spawned = codex_utils_pty::spawn_from_driver(codex_utils_pty::ProcessDriver {
+        writer_tx,
+        stdout_rx,
+        stderr_rx: None,
+        exit_rx,
+        terminator: None,
+        writer_handle: None,
+        resizer: None,
+        #[cfg(windows)]
+        tty: false,
+    });
+    let process =
+        UnifiedExecProcess::from_spawned(spawned, SandboxType::None, Box::new(NoopSpawnLifecycle))
+            .await?;
+
+    let mut expected = HeadTailBuffer::default();
+    let transcript = process.transcript();
+    let stalled = transcript.lock().await;
+    for index in 0..CHUNK_COUNT {
+        let chunk = vec![b'A' + u8::try_from(index % 26)?; 4 * 1024];
+        expected.push_chunk(&chunk);
+        stdout_tx.send(chunk)?;
+    }
+    // Let the readers forward everything they can while the output task waits.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    drop(stalled);
+    drop(stdout_tx);
+
+    let output = process.output_handles();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !output.output_closed.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert_eq!(*transcript.lock().await, expected);
+    assert_eq!(*output.output_buffer.lock().await, expected);
     Ok(())
 }
 
@@ -150,7 +201,7 @@ impl ExecProcess for MockExecProcess {
 pub(super) async fn remote_process(
     write_status: WriteStatus,
     terminate_error: Option<String>,
-    sandbox_type: codex_sandboxing::SandboxType,
+    sandbox_type: impl Into<Option<codex_sandboxing::SandboxType>>,
 ) -> UnifiedExecProcess {
     let (wake_tx, _wake_rx) = watch::channel(0);
     let started = StartedExecProcess {
@@ -163,7 +214,7 @@ pub(super) async fn remote_process(
             terminate_error,
             wake_tx,
         }),
-        sandbox_type: Some(sandbox_type),
+        sandbox_type: sandbox_type.into(),
     };
 
     UnifiedExecProcess::from_exec_server_started(started)
@@ -260,15 +311,18 @@ async fn remote_terminate_confirmed_updates_state_on_success_only() {
 
 #[tokio::test]
 async fn remote_process_preserves_executor_sandbox_type() {
-    let process = remote_process(
-        WriteStatus::Accepted,
-        /*terminate_error*/ None,
-        codex_sandboxing::SandboxType::LinuxSeccomp,
-    )
-    .await;
-
-    assert_eq!(
-        process.sandbox_type(),
-        codex_sandboxing::SandboxType::LinuxSeccomp
-    );
+    use codex_sandboxing::SandboxType;
+    for sandbox_type in [
+        None,
+        Some(SandboxType::None),
+        Some(SandboxType::LinuxSeccomp),
+    ] {
+        let process = remote_process(
+            WriteStatus::Accepted,
+            /*terminate_error*/ None,
+            sandbox_type,
+        )
+        .await;
+        assert_eq!(process.sandbox_type(), sandbox_type);
+    }
 }
