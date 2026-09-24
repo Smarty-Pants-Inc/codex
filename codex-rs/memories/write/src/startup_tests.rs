@@ -1466,7 +1466,8 @@ async fn memories_startup_phase1_v2_preserves_human_evidence_and_redacts_storage
     let mut memories = startup_test_memories_config();
     memories.version = codex_protocol::MemoryVersion::V2;
     let request = run_memory_phase_one_model_request_test(&server, home, memories).await?;
-    let input = request.message_input_texts("user").join("");
+    // Fork rule: generated extraction evidence is developer-role contextual input.
+    let input = request.message_input_texts("developer").join("");
     for marker in [
         "Keep the migration read-only.",
         "human correction in the middle",

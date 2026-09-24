@@ -407,6 +407,8 @@ async fn editing_server_admitted_follow_up_requests_server_deletion() {
     assert!(
         chat.mark_server_queue_admitted(&client_user_message_id, "queued-for-edit".to_string(),)
     );
+    // Queueing also requests `FollowTranscript`; drain it so the next event is the edit's.
+    while rx.try_recv().is_ok() {}
 
     chat.handle_key_event(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
 

@@ -55,6 +55,7 @@ pub use rollout::rollout_path;
 use serde::de::DeserializeOwned;
 pub use test_app_server::DEFAULT_CLIENT_NAME;
 pub use test_app_server::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
+pub use test_app_server::ENABLE_GOAL_AUTO_CONTINUE_FOR_TESTS_ARG;
 pub use test_app_server::TestAppServer;
 pub use test_app_server::TestAppServerBuilder;
 

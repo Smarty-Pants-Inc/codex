@@ -927,7 +927,7 @@ impl ElicitationRoundTripFixture {
             );
             assert!(
                 guardian_request
-                    .message_input_texts("user")
+                    .message_input_texts("developer")
                     .iter()
                     .any(|text| {
                         text.starts_with("<guardian_tool_descriptions>")
