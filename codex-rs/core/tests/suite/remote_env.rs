@@ -2373,7 +2373,7 @@ async fn active_environment_update_wakes_the_old_wait_with_the_new_selection() -
         let context = request
             .message_input_texts("developer")
             .into_iter()
-            .rfind(|text| text.contains("<environment_context>"))
+            .rfind(|text| text.starts_with("<environment_context>"))
             .context("environment context should be model visible")?;
         assert!(context.contains(&format!(
             "<cwd>{}</cwd>",

@@ -338,7 +338,10 @@ fn native_tls_pool() -> RouteAwareClientPool {
     pool.clients
         .lock()
         .expect("fixture client cache should not be poisoned")
-        .insert(OutboundProxyRoute::Direct, HttpClient::new(client));
+        .insert(
+            OutboundProxyRoute::Direct,
+            TransportClient::new(client, RequestLogging::Enabled, http::HeaderMap::new()),
+        );
     pool
 }
 
