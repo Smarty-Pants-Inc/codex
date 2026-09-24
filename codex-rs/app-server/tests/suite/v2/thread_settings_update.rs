@@ -19,7 +19,10 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_core::test_support::all_model_presets;
+use codex_protocol::ThreadId;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
+use codex_state::StateRuntime;
+use codex_utils_absolute_path::test_support::PathExt;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -160,6 +163,74 @@ async fn thread_settings_update_cwd_retargets_default_environment() -> Result<()
         "default workspace root should use the updated cwd: {environment_context}"
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_read_of_loaded_thread_reports_live_cwd_over_stale_metadata() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(vec![
+        create_final_assistant_message_sse_response("done")?,
+    ])
+    .await;
+    let codex_home = TempDir::new()?;
+    let initial_workspace = TempDir::new()?;
+    let workspace = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized_with_timeout(DEFAULT_TIMEOUT)
+        .await?;
+    let request_id = mcp
+        .send_thread_start_request(ThreadStartParams {
+            cwd: Some(initial_workspace.path().to_string_lossy().into_owned()),
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadStartResponse { thread, .. } =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
+    // Materialize the thread so that thread/read uses its saved metadata.
+    start_text_turn(&mut mcp, thread.id.clone()).await?;
+    timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    send_thread_settings_update(
+        &mut mcp,
+        ThreadSettingsUpdateParams {
+            thread_id: thread.id.clone(),
+            cwd: Some(workspace.path().to_path_buf()),
+            ..Default::default()
+        },
+    )
+    .await?;
+    read_thread_settings_updated(&mut mcp).await?;
+
+    // Simulate the skipped best-effort SQLite write: the saved row keeps the old cwd.
+    let state_db = StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".into(),
+    )
+    .await?;
+    let mut metadata = state_db
+        .get_thread(ThreadId::from_string(&thread.id)?)
+        .await?
+        .context("saved thread metadata")?;
+    metadata.cwd = initial_workspace.path().to_path_buf();
+    state_db.upsert_thread(&metadata).await?;
+
+    let request_id = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: thread.id,
+            include_turns: false,
+        })
+        .await?;
+    let ThreadReadResponse { thread: read } =
+        timeout(DEFAULT_TIMEOUT, mcp.read_response(request_id)).await??;
+    assert_eq!(read.cwd.as_path(), workspace.path());
     Ok(())
 }
 
