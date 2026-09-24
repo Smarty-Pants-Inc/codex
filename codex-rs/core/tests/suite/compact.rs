@@ -4507,8 +4507,17 @@ async fn paginated_compaction_cold_resume_from_bounded_suffix() -> Result<()> {
     let submission = resumed
         .thread
         .continue_turn_if_idle(
+            // Injected user-role response items are rejected; continuation input is developer-role.
             TurnInputRequest::new(codex_core::TurnInput::ResponseItem(
-                core_test_support::responses::user_message_item("continue after cold resume"),
+                codex_protocol::models::ResponseItem::Message {
+                    id: None,
+                    role: "developer".to_string(),
+                    content: vec![codex_protocol::models::ContentItem::InputText {
+                        text: "continue after cold resume".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
             )),
             turn_id,
         )

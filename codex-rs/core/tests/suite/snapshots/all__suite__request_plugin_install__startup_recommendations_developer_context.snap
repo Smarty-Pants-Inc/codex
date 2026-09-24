@@ -6,15 +6,14 @@ Scenario: Startup recommendations share the developer message with other context
 
 ## Window 1
 -- request 1 (turn) --
-00:message/developer[3]:
+00:message/developer[4]:
     [01] <PERMISSIONS_INSTRUCTIONS>
-    [02] <APPS_INSTRUCTIONS>
-    [03] <recommended_plugins>
+    [02] <ENVIRONMENT_CONTEXT>
+    [03] <APPS_INSTRUCTIONS>
+    [04] <recommended_plugins>
         Here is a list of plugins that are available but not installed.
 
         - GitHub (github@openai-curated-remote)
         </recommended_plugins>
 01:message/user:
-    <ENVIRONMENT_CONTEXT>
-02:message/user:
     suggest a plugin

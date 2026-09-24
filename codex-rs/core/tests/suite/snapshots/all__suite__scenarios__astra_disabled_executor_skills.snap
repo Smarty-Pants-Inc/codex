@@ -16,7 +16,7 @@ Settings:
   text: {"verbosity":"low"}
   tool_choice: "auto"
 -- request 1 (request) --
-00:additional_tools/developer (3; hash=61ac4d92c828cbf9):
+00:additional_tools/developer (3; hash=7fa33898114cbfcd):
         - namespace/functions; hash=99a630cff25563aa
           - custom/exec
           - function/wait
@@ -24,7 +24,7 @@ Settings:
           - function/request_user_input_async
         - namespace/clock: Tools for reading and waiting on time.; hash=f402e8c5e9b5e317
           - function/sleep
-        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=fd994b11525da73c
+        - namespace/collaboration: Tools for spawning and managing sub-agents.; hash=a0f3641ef6b9bb5c
           - function/followup_task
           - function/interrupt_agent
           - function/list_agents
@@ -49,7 +49,7 @@ Settings:
     - Relevance: Determine what a plugin can help with from explicit user mention or from the plugin-associa..., MCP tools, and apps exposed elsewhere in this turn. [hash=620459a4e7b590f0]
     - Missing/blocked: If the user requests a plugin that does not have relevant callable capabilities for t..., say so briefly and continue with the best fallback. [hash=746b0469a8f6cb3e]
 
-02:message/developer[3]:
+02:message/developer[4]:
     [01] <permissions instructions>
         Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The san... permits reading files. Network access is restricted. [hash=be7da4425f89053c]
         # Escalation Requests
@@ -83,7 +83,14 @@ Settings:
 
         Never use the `request_user_input` tool for permission requests or permission-related escalations.
         </collaboration_mode>
-    [03] <skills_instructions>
+    [03] <environment_context>
+          <cwd><CWD></cwd>
+          <shell><HOST_SHELL></shell>
+          <current_date><CURRENT_DATE></current_date>
+          <timezone><HOST_TIMEZONE></timezone>
+          <filesystem><workspace_roots><root><WORKSPACE_ROOT 1></root></workspace_roots><permission_profile type...ntry></file_system></permission_profile></filesystem> [hash=911722cc43b4c3b8]
+        </environment_context>
+    [04] <skills_instructions>
         ## Skills
         A skill is a set of instructions provided through a `SKILL.md` source. Below is the list of skills that ...locators can be expanded using the skill roots table. [hash=f00d6a4d3e192f06]
         ### Skill roots
@@ -101,11 +108,11 @@ Settings:
 
     You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
     `send_message` calls may be read by a human, so ensure they are legible. Always put proper spaces between words and/or numbers.
-    <OMITTED 17 LINES; ~246 TOKENS; hash=780031e2df907944>
+    <OMITTED 17 LINES; ~194 TOKENS; hash=d7bac852ab8e265f>
     - All agents use the same current working directory.
     - As a result, edits made by one agent are immediately visible to all other agents.
 
-    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
+    When a provided collaboration wait tool supports long waits, prefer minutes to avoid busy polling.
 
     There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
 
@@ -113,12 +120,4 @@ Settings:
 04:message/developer:
     <multi_agent_mode>Any earlier instruction enabling proactive multi-agent delegation no longer applies. D...elegation, or parallel agent work.</multi_agent_mode> [hash=2b6e037067b4390c]
 05:message/user:
-    <environment_context>
-      <cwd><CWD></cwd>
-      <shell><HOST_SHELL></shell>
-      <current_date><CURRENT_DATE></current_date>
-      <timezone><HOST_TIMEZONE></timezone>
-      <filesystem><workspace_roots><root><WORKSPACE_ROOT 1></root></workspace_roots><permission_profile type...ntry></file_system></permission_profile></filesystem> [hash=911722cc43b4c3b8]
-    </environment_context>
-06:message/user:
     Which workflow skills are available?

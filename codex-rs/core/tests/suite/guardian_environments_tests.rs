@@ -150,7 +150,7 @@ async fn guardian_reviews_target_environment_and_reuses_prefix(tool: &str) -> Re
         .collect::<Vec<_>>();
     assert_eq!(reviews.len(), targets.len());
     for (review, environment_id) in reviews.iter().zip(targets) {
-        let groups = review.message_input_text_groups("user");
+        let groups = review.message_input_text_groups("developer");
         let latest = groups.last().context("current review input")?;
         let start = latest
             .iter()

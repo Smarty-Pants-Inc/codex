@@ -207,8 +207,7 @@ text({ names: result.skills.map(skill => skill.name), warnings: result.warnings,
             .all(|message| !message.contains("- demo:explicit-only:")),
         "model-visible skills should omit the explicit-only skill: {developer_messages:?}"
     );
-    let user_messages = request.message_input_texts("user");
-    let skill_instructions = user_messages
+    let skill_instructions = developer_messages
         .iter()
         .find(|message| {
             message.contains("<name>demo:explicit-only</name>")
@@ -540,10 +539,10 @@ async fn production_turn_aliases_discovered_singleton_cloud_root() -> Result<()>
         developer_text.contains("- Root aliases: Pass short package locators directly"),
         "model request should explain how to read aliased packages: {developer_text}"
     );
-    let user_text = request.message_input_texts("user").join("\n");
     assert!(
-        user_text.contains("<skill>\n<name>demo:search</name>") && user_text.contains(SKILL_BODY),
-        "cloud instruction reads must remain available without host discovery: {user_text}"
+        developer_text.contains("<skill>\n<name>demo:search</name>")
+            && developer_text.contains(SKILL_BODY),
+        "cloud instruction reads must remain available without host discovery: {developer_text}"
     );
 
     Ok(())
@@ -753,7 +752,7 @@ async fn cloud_skill_can_read_referenced_resource_without_an_executor() -> Resul
     );
     assert!(
         first_request
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .into_iter()
             .all(|text| !text.starts_with("<skill>"))
     );
@@ -817,7 +816,7 @@ async fn cloud_skill_can_read_referenced_resource_without_an_executor() -> Resul
     let requests = response_mock.requests();
     assert_eq!(requests.len(), 6);
     let skill_fragments = requests[5]
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .filter(|text| text.starts_with("<skill>"))
         .collect::<Vec<_>>();

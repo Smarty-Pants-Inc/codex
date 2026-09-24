@@ -235,7 +235,7 @@ async fn combined_active_model_and_environment_updates_apply_or_reject_together(
             .collect::<Vec<_>>(),
         [MODEL_A, MODEL_A, MODEL_B, MODEL_B].map(|model| json!(model)),
     );
-    let context = requests[1].message_input_texts("user");
+    let context = requests[1].message_input_texts("developer");
     let original_cwd = format!("<cwd>{}</cwd>", original.cwd.inferred_native_path_string());
     let rejected_cwd = format!("<cwd>{}</cwd>", next_cwd.inferred_native_path_string());
     assert!(context.iter().any(|text| text.contains(&original_cwd)));
@@ -405,7 +405,7 @@ async fn inherited_permission_update_applies_to_the_next_turn_not_the_next_step(
         .iter()
         .map(|request| {
             let filesystem = request
-                .message_input_texts("user")
+                .message_input_texts("developer")
                 .into_iter()
                 .rfind(|text| text.contains("<filesystem>"))
                 .expect("model request includes filesystem permissions");

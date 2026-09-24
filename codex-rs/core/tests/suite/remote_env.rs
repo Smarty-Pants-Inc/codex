@@ -1135,7 +1135,7 @@ async fn active_environment_update_waits_for_a_configured_executor_to_connect(
     .await;
     let requests = responses.requests();
     let context = requests[1]
-        .message_input_texts("user")
+        .message_input_texts("developer")
         .into_iter()
         .rfind(|text| text.contains("<environment_context>"))
         .context("remote environment should be model visible")?;
@@ -2371,7 +2371,7 @@ async fn active_environment_update_wakes_the_old_wait_with_the_new_selection() -
         (&requests[2], &switched, false),
     ] {
         let context = request
-            .message_input_texts("user")
+            .message_input_texts("developer")
             .into_iter()
             .rfind(|text| text.contains("<environment_context>"))
             .context("environment context should be model visible")?;
