@@ -1,8 +1,12 @@
 use std::borrow::Borrow;
+use std::sync::Arc;
+
+use tokio::sync::Mutex;
 
 use super::TurnInput as PendingTurnInput;
 use super::session::Session;
 use super::turn_context::TurnContext;
+use crate::state::TurnState;
 use codex_analytics::ImagePreparationMetadata;
 use codex_features::Feature;
 use codex_history::CodexHarnessMetadata;
@@ -121,6 +125,59 @@ impl Session {
         drop(active);
         self.record_annotated_conversation_items(turn_context, turn_context.model_info(), items)
             .await;
+    }
+
+    /// Releases a finished turn's state so that no input queued on it is lost.
+    ///
+    /// Invariant, shared with [`Self::inject_client_response_items`]: input queued on a turn
+    /// state under the `active_turn` lock is consumed by that turn, moved to the active turn
+    /// that replaced it, or returned to the caller to record. The caller must first drain the
+    /// state and detach its task.
+    ///
+    /// Returns whether this call cleared the active turn, and late input the caller must record.
+    /// - This state is active with a task: a new task reuses it and owns its input.
+    /// - This state is active without a task: clear the active turn and return its input.
+    /// - A running turn replaced it: move its input to that turn, as a later inject would.
+    /// - A taskless reservation replaced it, or no turn is active: return its input. A rejected
+    ///   start clears a reservation without draining it, and the caller records the input
+    ///   before the new submission's input.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "active turn checks and turn state updates must remain atomic"
+    )]
+    pub(crate) async fn release_finished_turn_state(
+        &self,
+        turn_state: &Arc<Mutex<TurnState>>,
+    ) -> (bool, Vec<PendingTurnInput>) {
+        let mut active = self.active_turn.lock().await;
+        let mut cleared_active_turn = false;
+        if let Some(active_turn) = active.as_ref()
+            && Arc::ptr_eq(&active_turn.turn_state, turn_state)
+        {
+            if active_turn.task.is_some() {
+                return (false, Vec::new());
+            }
+            *active = None;
+            cleared_active_turn = true;
+        }
+        let late_input = self
+            .input_queue
+            .take_pending_input_for_turn_state(turn_state.as_ref())
+            .await;
+        match active.as_ref() {
+            Some(successor) if successor.task.is_some() => {
+                if !late_input.is_empty() {
+                    self.input_queue
+                        .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
+                            successor.turn_state.as_ref(),
+                            late_input,
+                        )
+                        .await;
+                }
+                (false, Vec::new())
+            }
+            Some(_) | None => (cleared_active_turn, late_input),
+        }
     }
 
     pub(crate) fn annotate_client_response_item(&self, item: ResponseItem) -> ResponseItemEnvelope {
