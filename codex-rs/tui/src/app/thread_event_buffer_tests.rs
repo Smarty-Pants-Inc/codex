@@ -25,6 +25,7 @@ fn turn_started_notification(thread_id: ThreadId, turn_id: &str) -> ServerNotifi
             started_at: Some(0),
             completed_at: None,
             duration_ms: None,
+            turn_trigger: None,
         },
     })
 }

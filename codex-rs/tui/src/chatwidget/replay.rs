@@ -17,9 +17,8 @@ impl ChatWidget {
         let turn_id = started.turn_id;
         let id = started.item.id().to_string();
         self.realtime_conversation
-            .agent_items
-            .entry((turn_id, id.clone()))
-            .or_insert(realtime::RealtimeAgentItemOrigin::Typed);
+            .item_owners
+            .note_typed_item(&turn_id, &id);
         self.on_reasoning_item_started(id);
         self.status_state.reasoning_recovered_after_refresh = true;
         if let Some((summary, content)) = parts {
@@ -114,7 +113,17 @@ impl ChatWidget {
                 crate::app_backtrack::is_hidden_nested_review_turn(&turns[0], &turns[1])
             }))
             .collect::<Vec<_>>();
-        for (turn, hidden_nested_review_turn) in turns.into_iter().zip(hidden_nested_review_turns) {
+        // Record each item's owner as it started; voice-private items stay hidden. One walk
+        // over all saved turns keeps the installed boundary ownership from being evicted.
+        let visibilities = self
+            .realtime_conversation
+            .item_owners
+            .history_visibility(&turns);
+        for ((turn, hidden_nested_review_turn), visibility) in turns
+            .into_iter()
+            .zip(hidden_nested_review_turns)
+            .zip(visibilities)
+        {
             self.restore_realtime_transcripts_before_turn(&turn.id);
             // Defer completed metadata-only turns until their page loads. Active
             // turns must restore their lifecycle even before any items are available.
@@ -133,15 +142,9 @@ impl ChatWidget {
                 started_at,
                 completed_at,
                 duration_ms,
+                turn_trigger,
             } = turn;
-            let delegated = items.iter().any(|item| {
-                matches!(item, ThreadItem::UserMessage { content, .. }
-                    if realtime::realtime_delegation_input(content).is_some())
-            });
             if matches!(status, TurnStatus::InProgress) {
-                if delegated {
-                    self.remember_realtime_delegated_reasoning_turn(&turn_id);
-                }
                 self.warning_display_state.startup_complete = true;
                 self.turn_lifecycle.last_turn_id = Some(turn_id.clone());
                 self.last_non_retry_error = None;
@@ -154,16 +157,8 @@ impl ChatWidget {
                     ThreadItem::Reasoning { id, .. } => Some(id.clone()),
                     _ => None,
                 });
-            let mut replaying_delegation = false;
-            for item in items {
-                if matches!(&item, ThreadItem::UserMessage { content, .. }
-                    if realtime::realtime_delegation_input(content).is_some())
-                {
-                    replaying_delegation = true;
-                }
-                // Voice can steer a typed turn already in progress. Its earlier
-                // commentary and reasoning still belong to the typed request.
-                if replaying_delegation && realtime::is_private_realtime_agent_item(&item) {
+            for (item, visible) in items.into_iter().zip(visibility) {
+                if !visible {
                     continue;
                 }
                 if hidden_nested_review_turn && matches!(item, ThreadItem::UserMessage { .. }) {
@@ -231,6 +226,7 @@ impl ChatWidget {
                             started_at,
                             completed_at,
                             duration_ms,
+                            turn_trigger,
                         },
                     },
                     Some(replay_kind),

@@ -52,6 +52,7 @@ fn turn(status: TurnStatus) -> Turn {
         started_at: None,
         completed_at: None,
         duration_ms: None,
+        turn_trigger: None,
     }
 }
 

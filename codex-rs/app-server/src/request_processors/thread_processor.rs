@@ -5862,6 +5862,7 @@ fn stored_turn_to_api_turn(
         started_at: turn.started_at,
         completed_at: turn.completed_at,
         duration_ms: turn.duration_ms,
+        turn_trigger: None,
     })
 }
 

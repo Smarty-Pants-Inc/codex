@@ -322,15 +322,10 @@ impl ChatWidget {
         self.transcript.take_active_cell();
         self.transcript.reset_copy_history();
         self.transcript.reset_turn_flags();
-        for turn in retained_turns {
-            let mut replaying_delegation = false;
-            for item in &turn.items {
-                if matches!(item, ThreadItem::UserMessage { content, .. }
-                    if realtime::realtime_delegation_input(content).is_some())
-                {
-                    replaying_delegation = true;
-                }
-                if replaying_delegation && realtime::is_private_realtime_agent_item(item) {
+        let visibility = realtime::RealtimeItemOwners::default().history_visibility(retained_turns);
+        for (turn, visibility) in retained_turns.iter().zip(visibility) {
+            for (item, visible) in turn.items.iter().zip(visibility) {
+                if !visible {
                     continue;
                 }
                 let (markdown, source) = match item {

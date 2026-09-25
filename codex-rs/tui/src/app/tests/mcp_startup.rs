@@ -37,6 +37,7 @@ async fn subagent_mcp_startup_settles_while_cached_servers_remain_deferred() {
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
             delegated_turns: Vec::new(),
+            realtime_owners: Default::default(),
             session: Some(test_thread_session(
                 subagent_thread_id,
                 test_path_buf("/tmp/subagent"),

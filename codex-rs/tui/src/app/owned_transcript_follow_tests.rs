@@ -36,6 +36,7 @@ async fn follow_control_click_preserves_draft_caret_and_composer_geometry() -> R
                             started_at: None,
                             completed_at: None,
                             duration_ms: None,
+                            turn_trigger: None,
                         },
                     },
                 ),

@@ -281,6 +281,7 @@ async fn replayed_turn_completions_do_not_start_live_billing_refreshes() {
                     started_at: None,
                     completed_at: None,
                     duration_ms: None,
+                    turn_trigger: None,
                 }],
                 replay_kind,
             );
