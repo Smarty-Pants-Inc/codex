@@ -450,6 +450,7 @@ impl LegacyRolloutCanonicalizer {
                 id: self.next_item_id()?,
                 summary_text: Vec::new(),
                 raw_content: Vec::new(),
+                origin: None,
             },
         };
         match kind {

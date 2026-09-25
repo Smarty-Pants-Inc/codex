@@ -333,6 +333,7 @@ impl ChatWidget {
                         }),
                         delivery,
                         questions,
+                        origin: None,
                     },
                     &turn_id,
                     from_replay,

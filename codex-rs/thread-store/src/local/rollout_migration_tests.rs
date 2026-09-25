@@ -226,6 +226,7 @@ fn item_completed(turn_id: &str, item_id: &str) -> RolloutItem {
             id: item_id.to_string(),
             summary_text: vec!["summary".to_string()],
             raw_content: Vec::new(),
+            origin: None,
         }),
         started_at_ms: None,
         completed_at_ms: 1_735_905_601_000,

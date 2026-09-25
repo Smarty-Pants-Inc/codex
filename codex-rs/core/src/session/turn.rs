@@ -880,6 +880,7 @@ pub(crate) async fn run_hooks_and_record_inputs(
             if matches!(input_item, TurnInput::UserInput { content, .. } if !content.is_empty()) {
                 accepted_user_input = true;
             }
+            super::item_origin::note_accepted_input(turn_context, input_item);
             // Tool outputs retain their durability barrier, including in mixed input batches.
             let input_persist_context = if persist_context == PersistContext::SteeredUserInput
                 && matches!(input_item, TurnInput::FunctionCallOutput(_))
@@ -2356,6 +2357,7 @@ async fn emit_agent_message_in_plan_mode(
                     memory_citation: None,
                     delivery: None,
                     questions: None,
+                    origin: None,
                 })
             });
         sess.emit_turn_item_started(turn_context, &start_item).await;

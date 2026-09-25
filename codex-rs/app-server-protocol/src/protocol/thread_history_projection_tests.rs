@@ -134,6 +134,7 @@ fn projects_completed_canonical_turn_items() {
         memory_citation: None,
         delivery: None,
         questions: None,
+        origin: None,
     });
 
     let user_changes = project(item_completed(thread_id, "turn-1", user_item.clone()));

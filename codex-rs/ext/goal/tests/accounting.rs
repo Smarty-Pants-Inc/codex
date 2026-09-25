@@ -99,6 +99,7 @@ fn empty_continuations_require_three_turns_without_activity_or_goal_changes() {
         memory_citation: None,
         delivery: None,
         questions: None,
+        origin: None,
     });
     for (interruption, blocking_turn) in [
         ("none", 3),
