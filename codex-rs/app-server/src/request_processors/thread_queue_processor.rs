@@ -247,6 +247,7 @@ impl ThreadQueueRequestProcessor {
                 started_at: None,
                 completed_at: None,
                 duration_ms: None,
+                turn_trigger: None,
             },
         })
     }

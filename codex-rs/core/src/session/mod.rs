@@ -2310,6 +2310,7 @@ impl Session {
                     .root_turn_id()
                     .unwrap_or_else(|| turn_context.sub_id.clone()),
             ),
+            turn_trigger: turn_context.turn_metadata_state.current_turn_trigger(),
             trace_id: turn_context.trace_id.clone(),
             started_at: turn_context.turn_timing_state.started_at_unix_secs().await,
             model_context_window: turn_context.model_context_window(),

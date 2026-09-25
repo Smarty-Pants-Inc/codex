@@ -21,6 +21,7 @@ fn turn(id: &str, status: TurnStatus, item_ids: &[&str]) -> Turn {
         started_at: None,
         completed_at: Some(1_700_000_000),
         duration_ms: Some(125_000),
+        turn_trigger: None,
     }
 }
 

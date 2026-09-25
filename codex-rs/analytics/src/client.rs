@@ -789,6 +789,7 @@ fn session_event_to_analytics_notification(
                 thread_id: thread_id.to_string(),
                 turn: Turn {
                     started_at: started.started_at,
+                    turn_trigger: started.turn_trigger.clone(),
                     ..analytics_turn(&started.turn_id, TurnStatus::InProgress)
                 },
             })
@@ -854,6 +855,7 @@ fn analytics_turn(turn_id: &str, status: TurnStatus) -> Turn {
         started_at: None,
         completed_at: None,
         duration_ms: None,
+        turn_trigger: None,
     }
 }
 
