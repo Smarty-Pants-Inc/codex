@@ -110,6 +110,7 @@ pub(crate) async fn finalize(
         &session
             .responses_metadata(step, CodexResponsesRequestKind::Turn)
             .await,
+        /*include_internal*/ true,
     )?;
     let mut existing = super::request_budget::estimate_request_tokens(&request)
         .max(usize::try_from(session.get_total_token_usage().await).unwrap_or(usize::MAX));
@@ -134,6 +135,7 @@ pub(crate) async fn finalize(
         .services
         .agent_control
         .pending_budget_reminder(session.thread_id(), &session.current_window_id().await)
+        .await
     {
         let reminder = ContextualUserFragment::into(crate::context::RolloutBudgetContext {
             remaining_tokens: reminder.remaining_tokens,

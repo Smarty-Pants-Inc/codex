@@ -262,6 +262,9 @@ async fn guardian_session_inherits_parent_http_fallback(
         guardian_request.header("x-codex-guardian").as_deref(),
         credits_enabled.then_some("reviewer")
     );
+    if credits_enabled {
+        assert_eq!(guardian_request.header("x-codex-routing-hint"), None);
+    }
     let body = guardian_request.body_json();
     assert_eq!(
         (
@@ -497,11 +500,7 @@ for (const phase of ["before", "after"]) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[test_case(false; "legacy_transcript")]
-#[test_case(true; "thread_owned_transcript")]
-async fn guardian_review_compacts_with_summary_despite_parent_token_budget(
-    thread_owned: bool,
-) -> Result<()> {
+async fn guardian_review_compacts_with_summary_despite_parent_token_budget() -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_wine_exec!(
         Ok(()),
@@ -532,10 +531,6 @@ async fn guardian_review_compacts_with_summary_despite_parent_token_budget(
             });
         })
         .with_config(move |config| {
-            config
-                .features
-                .set_enabled(Feature::GuardianThreadContext, thread_owned)
-                .expect("configure Guardian context mode");
             config.model_context_window = Some(100_000);
             config.model_auto_compact_token_limit = Some(50_000);
             config.permissions.approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
@@ -655,9 +650,7 @@ async fn guardian_review_compacts_with_summary_despite_parent_token_budget(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[test_case(false; "legacy_transcript")]
-#[test_case(true; "thread_owned_transcript")]
-async fn guardian_requests_record_only_their_own_tool_calls(thread_owned: bool) -> Result<()> {
+async fn guardian_requests_record_only_their_own_tool_calls() -> Result<()> {
     skip_if_no_network!(Ok(()));
     skip_if_wine_exec!(
         Ok(()),
@@ -666,10 +659,6 @@ async fn guardian_requests_record_only_their_own_tool_calls(thread_owned: bool) 
 
     let server = start_mock_server().await;
     let mut builder = test_codex().with_config(move |config| {
-        config
-            .features
-            .set_enabled(Feature::GuardianThreadContext, thread_owned)
-            .expect("configure Guardian context mode");
         config
             .features
             .enable(Feature::ExecutedToolCallMetadata)
@@ -1708,7 +1697,7 @@ async fn guardian_session_is_reused_for_consecutive_tool_reviews_without_prewarm
     let permission_section = [
         "\n>>> PARENT TURN PERMISSION CONTEXT START\n".to_string(),
         format!(
-            "The parent turn's active permission profile denies reading these paths/globs. These are policy restrictions; do not approve escalation whose purpose is to read them.\n- path `{}`\n- glob `{}`\n",
+            "For this action on environment \"local\", the active permission profile denies reading these paths/globs. These are policy restrictions; do not approve escalation whose purpose is to read them.\n- path `{}`\n- glob `{}`\n",
             fs::canonicalize(&secret_file)?.display(),
             test.config.cwd.join("guardian-*.key").display(),
         ),

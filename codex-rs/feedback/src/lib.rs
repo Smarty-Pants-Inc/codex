@@ -222,6 +222,8 @@ impl CodexFeedback {
     pub fn logger_filter() -> Targets {
         Targets::new()
             .with_default(Level::TRACE)
+            // Opted-in content belongs to the configured OTLP destination, not feedback.
+            .with_target("codex_otel.log_only", LevelFilter::OFF)
             .with_target("codex_http_client::transport", LevelFilter::DEBUG)
             .with_target("codex_api::sse", LevelFilter::DEBUG)
             // `tracing-log` checks legacy log records against their original
@@ -711,8 +713,15 @@ impl FeedbackSnapshot {
         if let Some(source) = session_source {
             tags.insert(String::from("session_source"), source.to_string());
         }
-        if let Some(r) = reason {
-            tags.insert(String::from("reason"), r.to_string());
+        if let Some(reason) = reason {
+            // Sentry tags cannot contain newlines or exceed 200 characters. Keep the
+            // full comment in the exception body and a preview for tag consumers.
+            let preview = reason
+                .chars()
+                .take(200)
+                .map(|ch| if matches!(ch, '\r' | '\n') { ' ' } else { ch })
+                .collect();
+            tags.insert(String::from("reason"), preview);
         }
 
         let reserved = [
@@ -937,6 +946,10 @@ mod tests {
             .set_default();
 
         tracing::trace!(target: "codex_api::responses_websocket_timing", payload = "secret");
+        tracing::event!(
+            target: "codex_otel.log_only", tracing::Level::INFO,
+            event.name = "codex.agent_response", response = "private-agent-response"
+        );
         tracing::trace!(target: "codex_http_client::transport", "transport-trace");
         tracing::trace!(target: "codex_api::sse", "sse-trace");
         tracing::trace!(target: "codex_api::sse::responses", "nested-sse-trace");
@@ -954,6 +967,7 @@ mod tests {
         let logs = String::from_utf8(fb.snapshot(/*session_id*/ None).bytes).unwrap();
         for excluded in [
             "secret",
+            "private-agent-response",
             "transport-trace",
             "sse-trace",
             "nested-sse-trace",

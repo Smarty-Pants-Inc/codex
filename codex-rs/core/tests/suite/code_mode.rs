@@ -26,6 +26,8 @@ use codex_extension_api::ToolLifecycleFuture;
 use codex_extension_api::ToolStartInput;
 use codex_features::CurrentTimeSource;
 use codex_features::Feature;
+use codex_http_client::DestinationPolicy;
+use codex_http_client::NetworkPolicyController;
 use codex_login::CodexAuth;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_mcp::codex_apps_mcp_server_config;
@@ -108,6 +110,7 @@ use image::codecs::png::PngEncoder;
 use image::metadata::Orientation;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fs;
 use std::io::Cursor;
@@ -211,7 +214,10 @@ fn custom_tool_output_body_and_success(
     (output, success)
 }
 
-fn custom_tool_output_last_non_empty_text(req: &ResponsesRequest, call_id: &str) -> Option<String> {
+pub(super) fn custom_tool_output_last_non_empty_text(
+    req: &ResponsesRequest,
+    call_id: &str,
+) -> Option<String> {
     match req.custom_tool_call_output(call_id).get("output") {
         Some(Value::String(text)) if !text.trim().is_empty() => Some(text.clone()),
         Some(Value::Array(items)) => items
@@ -483,28 +489,68 @@ async fn disabled_process_host_with_fallback_disabled_attempts_the_host() -> Res
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_mode_can_call_standalone_web_search() -> Result<()> {
-    assert_code_mode_standalone_web_search(WebSearchMode::Live, serde_json::json!(true)).await
+    assert_code_mode_standalone_web_search(
+        WebSearchMode::Live,
+        serde_json::json!(true),
+        SearchPolicy::Unmanaged,
+    )
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn code_mode_can_call_indexed_standalone_web_search() -> Result<()> {
-    assert_code_mode_standalone_web_search(WebSearchMode::Indexed, serde_json::json!("indexed"))
+    assert_code_mode_standalone_web_search(
+        WebSearchMode::Indexed,
+        serde_json::json!("indexed"),
+        SearchPolicy::Unmanaged,
+    )
+    .await
+}
+
+#[test_case(SearchPolicy::DenySearch; "initial_request")]
+#[test_case(SearchPolicy::DenyRedirect; "redirect")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_web_search_preserves_managed_policy(policy: SearchPolicy) -> Result<()> {
+    assert_code_mode_standalone_web_search(WebSearchMode::Live, serde_json::json!(true), policy)
         .await
+}
+
+enum SearchPolicy {
+    Unmanaged,
+    DenySearch,
+    DenyRedirect,
 }
 
 async fn assert_code_mode_standalone_web_search(
     web_search_mode: WebSearchMode,
     expected_external_web_access: Value,
+    policy: SearchPolicy,
 ) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = responses::start_mock_server().await;
+    let denied = responses::start_mock_server().await;
+    let managed = !matches!(policy, SearchPolicy::Unmanaged);
+    let deny_search = matches!(policy, SearchPolicy::DenySearch);
+    let search_response = match policy {
+        SearchPolicy::DenyRedirect => {
+            ResponseTemplate::new(/*s*/ 307).insert_header("location", denied.uri())
+        }
+        SearchPolicy::Unmanaged | SearchPolicy::DenySearch => {
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"output": "Search result"}))
+        }
+    };
+    let controller = NetworkPolicyController::default();
+    let mut allowed_endpoints = BTreeSet::from([format!("{}/v1/responses", server.uri()).parse()?]);
+    if !deny_search {
+        allowed_endpoints.insert(format!("{}/v1/alpha/search", server.uri()).parse()?);
+    }
+    let policy = controller.policy().restrict_to_endpoints(allowed_endpoints);
+    assert!(controller.publish(policy.revision(), DestinationPolicy::Unrestricted));
     Mock::given(method("POST"))
         .and(path("/v1/alpha/search"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "output": "Search result",
-        })))
-        .expect(1)
+        .respond_with(search_response)
+        .expect(if deny_search { 0 } else { 1 })
         .mount(&server)
         .await;
 
@@ -544,6 +590,10 @@ text(result);
         .with_extensions(Arc::new(extension_builder.build()))
         .with_model("test-gpt-5.1-codex")
         .with_config(move |config| {
+            if managed {
+                config.application_network_policy = policy;
+                config.respect_system_proxy = false;
+            }
             config
                 .features
                 .enable(Feature::CodeMode)
@@ -557,9 +607,20 @@ text(result);
                 .set(web_search_mode)
                 .expect("web search mode should be accepted");
         });
-    let test = builder.build(&server).await?;
+    let test = builder.build_with_auto_env(&server).await?;
 
     test.submit_turn("Search the web from code mode").await?;
+
+    if managed {
+        let output =
+            custom_tool_output_body_and_success(&follow_up_mock.single_request(), "call-1").0;
+        assert!(
+            output.contains("destination denied by application network policy"),
+            "{output}"
+        );
+        assert!(denied.received_requests().await.unwrap().is_empty());
+        return Ok(());
+    }
 
     let search_request = server
         .received_requests()
@@ -2552,17 +2613,19 @@ async fn code_mode_resumed_wait_does_not_certify_a_reused_runtime_cell() -> Resu
     Ok(())
 }
 
-struct MappingPressureObserver {
+struct ExecCompletionObserver {
+    call_id_prefix: &'static str,
+    expected_count: usize,
     finished: AtomicUsize,
     release: Mutex<Option<oneshot::Sender<()>>>,
 }
 
-impl ToolLifecycleContributor for MappingPressureObserver {
+impl ToolLifecycleContributor for ExecCompletionObserver {
     fn on_tool_finish<'a>(&'a self, input: ToolFinishInput<'a>) -> ToolLifecycleFuture<'a> {
         Box::pin(async move {
-            if input.tool_name.name == "exec" && input.call_id.starts_with("seed-") {
+            if input.tool_name.name == "exec" && input.call_id.starts_with(self.call_id_prefix) {
                 assert_eq!(input.outcome, ToolCallOutcome::Completed { success: true });
-                if self.finished.fetch_add(1, Ordering::SeqCst) == 511 {
+                if self.finished.fetch_add(1, Ordering::SeqCst) + 1 == self.expected_count {
                     self.release
                         .lock()
                         .unwrap()
@@ -2620,7 +2683,9 @@ async fn code_mode_recovers_complete_inventory_after_orphaned_mapping_pressure()
     ])
     .await;
     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
-    extensions.tool_lifecycle_contributor(Arc::new(MappingPressureObserver {
+    extensions.tool_lifecycle_contributor(Arc::new(ExecCompletionObserver {
+        call_id_prefix: "seed-",
+        expected_count: 512,
         finished: AtomicUsize::new(0),
         release: Mutex::new(Some(release)),
     }));
@@ -2665,6 +2730,132 @@ async fn code_mode_recovers_complete_inventory_after_orphaned_mapping_pressure()
         serde_json::json!([{"name": "test_sync_tool", "arguments": {}}]),
     );
     assert_eq!(metadata["cell_id"], "call-fresh");
+    assert_eq!(metadata["tool_calls_complete"], true);
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_wait_serializes_empty_inventory_under_pending_call_pressure() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    // The recorder unit test covers eviction ordering. This host test covers wait
+    // serialization under pressure; the empty cell is still recording until wait.
+    let (release, pressure_reached) = oneshot::channel();
+    let (server, _) = start_streaming_sse_server(vec![
+        vec![StreamingSseChunk {
+            gate: None,
+            body: sse(vec![
+                ev_custom_tool_call(
+                    "call-empty",
+                    "exec",
+                    "yield_control(); await new Promise(() => {});",
+                ),
+                ev_completed("resp-empty"),
+            ]),
+        }],
+        vec![
+            StreamingSseChunk {
+                gate: None,
+                body: sse(vec![ev_custom_tool_call(
+                    "call-pressure",
+                    "exec",
+                    r#"// @exec: {"yield_time_ms": 60000}
+for (let index = 0; index < 256; index++) await tools.test_sync_tool({});
+text("pressure ready");"#,
+                )]),
+            },
+            StreamingSseChunk {
+                // Finish the pressure cell before waiting, but keep this response
+                // open so no follow-up request can drain its pending inventory.
+                gate: Some(pressure_reached),
+                body: sse(vec![
+                    responses::ev_function_call(
+                        "call-wait",
+                        "wait",
+                        r#"{"cell_id":"1","terminate":true}"#,
+                    ),
+                    ev_completed("resp-pressure"),
+                ]),
+            },
+        ],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: sse(vec![
+                ev_assistant_message("msg-done", "done"),
+                ev_completed("resp-done"),
+            ]),
+        }],
+    ])
+    .await;
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    extensions.tool_lifecycle_contributor(Arc::new(ExecCompletionObserver {
+        call_id_prefix: "call-pressure",
+        expected_count: 1,
+        finished: AtomicUsize::new(0),
+        release: Mutex::new(Some(release)),
+    }));
+    let base_url = format!("{}/v1", server.uri());
+    let config_server = responses::start_mock_server().await;
+    let test = test_codex()
+        .with_model("test-gpt-5.1-codex")
+        .with_extensions(Arc::new(extensions.build()))
+        .with_config(move |config| {
+            config.model_provider.base_url = Some(base_url);
+            let _ = config.features.enable(Feature::CodeMode);
+            let _ = config.features.enable(Feature::ExecutedToolCallMetadata);
+            let _ = config.features.disable(Feature::RemoteCompactionV2);
+        })
+        .build_with_auto_env(&config_server)
+        .await?;
+    test.submit_turn("Wait for an empty cell while the pending-call budget is full")
+        .await?;
+    test.codex.shutdown_and_wait().await?;
+
+    let requests = server
+        .requests()
+        .await
+        .iter()
+        .map(|request| serde_json::from_slice::<Value>(request))
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    assert_eq!(requests.len(), 3);
+    let output_for = |request_index: usize, call_id: &str| {
+        requests[request_index]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| {
+                item["call_id"] == call_id
+                    && matches!(
+                        item["type"].as_str(),
+                        Some("custom_tool_call_output" | "function_call_output")
+                    )
+            })
+            .unwrap()
+    };
+    let initial = output_for(/*request_index*/ 1, "call-empty");
+    assert_eq!(
+        extract_running_cell_id(initial["output"].as_str().unwrap()),
+        "1",
+    );
+    assert!(
+        initial["internal_chat_message_metadata_passthrough"]
+            .get("tool_calls_complete")
+            .is_none()
+    );
+    let pressure = &output_for(/*request_index*/ 2, "call-pressure")["internal_chat_message_metadata_passthrough"];
+    assert_eq!(
+        pressure["executed_tool_calls"],
+        serde_json::json!(vec![
+            serde_json::json!({"name": "test_sync_tool", "arguments": {}});
+            256
+        ]),
+    );
+    assert_eq!(pressure["tool_calls_complete"], true);
+    let metadata =
+        &output_for(/*request_index*/ 2, "call-wait")["internal_chat_message_metadata_passthrough"];
+    assert_eq!(metadata["cell_id"], "call-empty");
+    assert_eq!(metadata["executed_tool_calls"], serde_json::json!([]));
     assert_eq!(metadata["tool_calls_complete"], true);
     server.shutdown().await;
     Ok(())
@@ -5936,6 +6127,41 @@ isError=false
 contentLength=0"
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn code_mode_records_mcp_completion_even_when_result_is_not_printed() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let (test, second_mock) = run_code_mode_turn_with_rmcp(
+        &server,
+        "call the rmcp echo tool without printing its result",
+        r#"await tools.mcp__rmcp__echo({ message: "discarded" }); text("done");"#,
+    )
+    .await?;
+    let request = second_mock.single_request();
+    assert_eq!(
+        custom_tool_output_body_and_success(&request, "call-1").0,
+        "done"
+    );
+
+    let first_turn_id = request.body_json()["client_metadata"]["turn_id"].clone();
+    assert!(first_turn_id.is_string());
+    assert_eq!(
+        serde_json::to_value(codex_core::test_support::mcp_attribution_snapshot(
+            &test.codex
+        ))?,
+        serde_json::json!({
+            "status": "complete",
+            "sources": [{
+                "server_name": "rmcp",
+                "tool_name": "echo",
+                "first_turn_id": first_turn_id,
+            }],
+        })
+    );
     Ok(())
 }
 
