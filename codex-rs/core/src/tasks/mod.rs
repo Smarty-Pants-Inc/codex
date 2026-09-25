@@ -668,6 +668,10 @@ impl Session {
         }
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "clearing the active turn and taking its late input must remain atomic"
+    )]
     pub async fn on_task_finished(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
@@ -897,18 +901,36 @@ impl Session {
             self.send_event(turn_context.as_ref(), event.clone()).await;
         }
 
-        let cleared_active_turn = {
+        let (cleared_active_turn, late_input) = {
             let mut active = self.active_turn.lock().await;
             if let Some(active_turn) = active.as_ref()
                 && active_turn.task.is_none()
                 && Arc::ptr_eq(&active_turn.turn_state, &turn_state)
             {
                 *active = None;
-                true
+                // Injects queue onto the active turn under this lock. Input queued
+                // after the final drain above would be dropped with the turn state,
+                // so take it before releasing the lock. Later injects see no active
+                // turn and record directly.
+                let late_input = self
+                    .input_queue
+                    .take_pending_input_for_turn_state(turn_state.as_ref())
+                    .await;
+                (true, late_input)
             } else {
-                false
+                (false, Vec::new())
             }
         };
+        if !late_input.is_empty() {
+            run_hooks_and_record_inputs(
+                self,
+                &turn_context,
+                &turn_context.capture_current_model_info(),
+                &late_input,
+                PersistContext::Standard,
+            )
+            .await;
+        }
         if saved_guardian_completion {
             // The parent can request another review as soon as it receives this event.
             self.send_event(turn_context.as_ref(), event).await;
