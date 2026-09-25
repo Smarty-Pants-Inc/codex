@@ -51,6 +51,11 @@ fn assert_seatbelt_denied(stderr: &[u8], path: &Path) {
     let expected = format!("bash: {}: Operation not permitted\n", path.display());
     assert!(
         stderr == expected
+            || stderr
+                == format!(
+                    "bash: line 1: {}: Operation not permitted\n",
+                    path.display()
+                )
             || stderr.contains("sandbox-exec: sandbox_apply: Operation not permitted"),
         "unexpected stderr: {stderr}"
     );
@@ -218,6 +223,7 @@ fn filesystem_helper_platform_defaults_do_not_grant_applications_directory() {
                 extra_allow_unix_sockets: &[],
             },
             profile,
+            /*allowed_symlinked_codex_home*/ None,
         )
         .expect("build restricted seatbelt command");
 
@@ -256,6 +262,132 @@ fn filesystem_helper_platform_defaults_do_not_grant_applications_directory() {
         !denied.status.success() && denied_stderr.contains("Operation not permitted"),
         "filesystem helper platform defaults should not grant /Applications: {denied_stderr}"
     );
+}
+
+#[test]
+fn process_platform_defaults_allow_scratch_without_granting_it_to_filesystem_helpers() {
+    let workspace = tempfile::Builder::new()
+        .prefix("codex-seatbelt-approved-project-")
+        .tempdir_in("/private/tmp")
+        .expect("approved project directory");
+    let approved_file = workspace.path().join("approved.txt");
+    fs::write(&approved_file, "approved-project").expect("write approved project file");
+    let workspace_root = AbsolutePathBuf::from_absolute_path(workspace.path())
+        .expect("workspace path should be absolute");
+    let file_system_policy = FileSystemSandboxPolicy::restricted(vec![
+        FileSystemSandboxEntry::new(
+            FileSystemPath::Path {
+                path: workspace_root.into(),
+            },
+            FileSystemAccessMode::Read,
+        ),
+        FileSystemSandboxEntry::new(
+            FileSystemPath::Special {
+                value: FileSystemSpecialPath::Minimal,
+            },
+            FileSystemAccessMode::Read,
+        ),
+    ]);
+
+    let sandboxed_args = |command: Vec<String>, profile: MacosSeatbeltProfile| {
+        create_seatbelt_command_args_with_profile(
+            CreateSeatbeltCommandArgsParams {
+                command,
+                file_system_sandbox_policy: &file_system_policy,
+                network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+                sandbox_policy_cwd: workspace.path(),
+                enforce_managed_network: false,
+                managed_network: None,
+                environment_id: None,
+                network: None,
+                extra_allow_unix_sockets: &[],
+            },
+            profile,
+            /*allowed_symlinked_codex_home*/ None,
+        )
+        .expect("build restricted seatbelt command")
+    };
+
+    let run_sandboxed = |command: Vec<String>, profile: MacosSeatbeltProfile| {
+        Command::new(MACOS_PATH_TO_SEATBELT_EXECUTABLE)
+            .args(sandboxed_args(command, profile))
+            .current_dir(workspace.path())
+            .output()
+            .expect("run restricted seatbelt command")
+    };
+
+    for scratch_root in ["/private/tmp", "/private/var/tmp"] {
+        let scratch = tempfile::Builder::new()
+            .prefix("codex-seatbelt-process-scratch-")
+            .tempdir_in(scratch_root)
+            .expect("scratch directory");
+        let scratch_file = scratch.path().join("scratch.txt");
+        let process_result = run_sandboxed(
+            vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "printf '%s' 'scratch-access' > \"$1\" && /bin/cat \"$1\"".to_string(),
+                "seatbelt-scratch".to_string(),
+                scratch_file.display().to_string(),
+            ],
+            MacosSeatbeltProfile::Process,
+        );
+        let process_stderr = String::from_utf8_lossy(&process_result.stderr);
+        if !process_result.status.success()
+            && process_stderr.contains("sandbox-exec: sandbox_apply: Operation not permitted")
+        {
+            eprintln!("nested Seatbelt is unavailable; scratch access behavior was not verified");
+            break;
+        }
+        assert!(
+            process_result.status.success(),
+            "processes should retain scratch read/write access to {scratch_root}: {process_stderr}"
+        );
+        assert_eq!(process_result.stdout, b"scratch-access");
+
+        let helper_result = run_sandboxed(
+            vec!["/bin/cat".to_string(), scratch_file.display().to_string()],
+            MacosSeatbeltProfile::FileSystemHelper,
+        );
+        let helper_stderr = String::from_utf8_lossy(&helper_result.stderr);
+        assert!(
+            !helper_result.status.success() && helper_stderr.contains("Operation not permitted"),
+            "filesystem helpers should not inherit scratch access to {scratch_root}: {helper_stderr}"
+        );
+
+        if scratch_root == "/private/tmp" {
+            let approved_read = run_sandboxed(
+                vec!["/bin/cat".to_string(), approved_file.display().to_string()],
+                MacosSeatbeltProfile::FileSystemHelper,
+            );
+            let approved_stderr = String::from_utf8_lossy(&approved_read.stderr);
+            assert!(
+                approved_read.status.success(),
+                "filesystem helpers should read files in the approved project: {approved_stderr}"
+            );
+            assert_eq!(approved_read.stdout, b"approved-project");
+
+            let canonicalized = run_sandboxed(
+                vec![
+                    "/bin/realpath".to_string(),
+                    approved_file.display().to_string(),
+                ],
+                MacosSeatbeltProfile::FileSystemHelper,
+            );
+            let canonicalize_stderr = String::from_utf8_lossy(&canonicalized.stderr);
+            assert!(
+                canonicalized.status.success(),
+                "filesystem helpers should canonicalize approved project files: {canonicalize_stderr}"
+            );
+            let expected_path = approved_file
+                .canonicalize()
+                .expect("canonicalize approved project file");
+            assert_eq!(
+                canonicalized.stdout,
+                format!("{}\n", expected_path.display()).as_bytes()
+            );
+        }
+    }
 }
 
 #[test]
@@ -608,6 +740,7 @@ fn prepared_managed_network_context_allows_only_its_proxy_ports() {
     let managed_network = ManagedNetworkSandboxContext {
         loopback_ports: vec![43123, 48081],
         allow_local_binding: false,
+        ..Default::default()
     };
     let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
         command: vec!["/bin/true".to_string()],
@@ -628,6 +761,113 @@ fn prepared_managed_network_context_allows_only_its_proxy_ports() {
     assert!(!policy.contains("(allow network-outbound (remote ip \"localhost:9999\"))"));
     assert!(!policy.contains("(allow network-bind (local ip \"*:*\"))"));
     assert!(!policy.contains("(allow network-outbound)\n"));
+    assert!(!policy.contains("(allow system-socket (socket-domain AF_UNIX))"));
+    assert!(!policy.contains("(allow network-outbound (remote unix-socket))"));
+}
+
+#[tokio::test]
+async fn prepared_managed_network_context_takes_precedence_over_live_proxy_socket_policy()
+-> anyhow::Result<()> {
+    let cwd = TempDir::new().expect("temp cwd");
+    let file_system_policy = FileSystemSandboxPolicy::from_legacy_sandbox_policy_for_cwd(
+        &SandboxPolicy::new_read_only_policy(),
+        cwd.path(),
+    );
+    let network_config = NetworkProxyConfig {
+        enabled: true,
+        mode: NetworkMode::Full,
+        dangerously_allow_all_unix_sockets: Some(true),
+        ..Default::default()
+    };
+    let state = build_config_state(
+        network_config,
+        NetworkProxyConstraints::default(),
+        codex_utils_path_uri::Platform::native(),
+    )?;
+    let network_proxy = NetworkProxy::builder()
+        .state(Arc::new(NetworkProxyState::with_reloader(
+            state,
+            Arc::new(TestConfigReloader),
+        )))
+        .managed_by_codex(/*managed_by_codex*/ false)
+        .build()
+        .await?;
+    let prepared_socket = "/tmp/codex-prepared-use";
+    let explicit_socket = "/tmp/codex-browser-use";
+    let managed_network = ManagedNetworkSandboxContext {
+        loopback_ports: vec![43123],
+        allow_unix_sockets: vec![prepared_socket.to_string(), "relative.sock".to_string()],
+        ..Default::default()
+    };
+    let extra_allow_unix_sockets = vec![absolute_path(explicit_socket)];
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec!["/usr/bin/true".to_string()],
+        file_system_sandbox_policy: &file_system_policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: cwd.path(),
+        enforce_managed_network: true,
+        managed_network: Some(&managed_network),
+        environment_id: None,
+        network: Some(&network_proxy),
+        extra_allow_unix_sockets: &extra_allow_unix_sockets,
+    })
+    .expect("create seatbelt args");
+
+    let policy = seatbelt_policy_arg(&args);
+    assert!(policy.contains("(allow network-outbound (remote ip \"localhost:43123\"))"));
+    assert!(policy.contains("(allow system-socket (socket-domain AF_UNIX))"));
+    assert!(!policy.contains("(allow network-bind (local unix-socket))"));
+    assert!(!policy.contains("(allow network-outbound (remote unix-socket))"));
+    let expected_explicit_socket = normalize_path_for_sandbox(Path::new(explicit_socket))
+        .expect("explicit socket root should normalize");
+    let expected_prepared_socket = normalize_path_for_sandbox(Path::new(prepared_socket))
+        .expect("prepared socket root should normalize");
+    assert_eq!(
+        args.iter()
+            .filter(|arg| arg.starts_with("-DUNIX_SOCKET_PATH_"))
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![
+            format!(
+                "-DUNIX_SOCKET_PATH_0={}",
+                expected_explicit_socket.display()
+            ),
+            format!(
+                "-DUNIX_SOCKET_PATH_1={}",
+                expected_prepared_socket.display()
+            ),
+        ]
+    );
+
+    // An empty prepared policy must not inherit the live proxy's allow-all grant.
+    let managed_network = ManagedNetworkSandboxContext {
+        loopback_ports: vec![43123],
+        ..Default::default()
+    };
+    let args = create_seatbelt_command_args(CreateSeatbeltCommandArgsParams {
+        command: vec!["/usr/bin/true".to_string()],
+        file_system_sandbox_policy: &file_system_policy,
+        network_sandbox_policy: NetworkSandboxPolicy::Restricted,
+        sandbox_policy_cwd: cwd.path(),
+        enforce_managed_network: true,
+        managed_network: Some(&managed_network),
+        environment_id: None,
+        network: Some(&network_proxy),
+        extra_allow_unix_sockets: &[],
+    })
+    .expect("create seatbelt args for empty prepared policy");
+
+    let policy = seatbelt_policy_arg(&args);
+    assert!(policy.contains("(allow network-outbound (remote ip \"localhost:43123\"))"));
+    assert!(!policy.contains("(allow system-socket (socket-domain AF_UNIX))"));
+    assert!(!policy.contains("(allow network-bind (local unix-socket))"));
+    assert!(!policy.contains("(allow network-outbound (remote unix-socket))"));
+    assert!(
+        !args
+            .iter()
+            .any(|arg| arg.starts_with("-DUNIX_SOCKET_PATH_"))
+    );
+    Ok(())
 }
 
 #[test]
@@ -854,6 +1094,7 @@ fn preferences_access_requires_unrestricted_reads() {
                     extra_allow_unix_sockets: &[],
                 },
                 profile,
+                /*allowed_symlinked_codex_home*/ None,
             )
             .expect("build seatbelt policy");
             let policy = seatbelt_policy_arg(&args);
@@ -1250,7 +1491,11 @@ async fn create_seatbelt_args_merges_proxy_and_explicit_unix_socket_paths() -> a
         ..Default::default()
     };
     network_config.set_allow_unix_sockets(vec![network_socket.to_string()]);
-    let state = build_config_state(network_config, NetworkProxyConstraints::default())?;
+    let state = build_config_state(
+        network_config,
+        NetworkProxyConstraints::default(),
+        codex_utils_path_uri::Platform::native(),
+    )?;
     let network_proxy = NetworkProxy::builder()
         .state(Arc::new(NetworkProxyState::with_reloader(
             state,

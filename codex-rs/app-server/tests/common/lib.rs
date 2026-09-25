@@ -16,6 +16,7 @@ pub use analytics_server::start_analytics_events_server;
 pub use auth_fixtures::ChatGptAuthFixture;
 pub use auth_fixtures::ChatGptIdTokenClaims;
 pub use auth_fixtures::encode_id_token;
+pub use auth_fixtures::mount_workspace_routing;
 pub use auth_fixtures::write_chatgpt_auth;
 use codex_app_server_protocol::JSONRPCResponse;
 pub use config::MockResponsesConfig;
@@ -54,6 +55,7 @@ pub use rollout::rollout_path;
 use serde::de::DeserializeOwned;
 pub use test_app_server::DEFAULT_CLIENT_NAME;
 pub use test_app_server::DISABLE_PLUGIN_STARTUP_TASKS_ARG;
+pub use test_app_server::ENABLE_GOAL_AUTO_CONTINUE_FOR_TESTS_ARG;
 pub use test_app_server::TestAppServer;
 pub use test_app_server::TestAppServerBuilder;
 

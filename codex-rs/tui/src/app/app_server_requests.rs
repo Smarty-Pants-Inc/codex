@@ -80,6 +80,7 @@ pub(super) struct PendingAppServerRequests {
     permissions_approvals: HashMap<(String, String), (String, AppServerRequestId)>,
     user_inputs: HashMap<String, VecDeque<PendingUserInputRequest>>,
     mcp_requests: HashMap<McpRequestKey, AppServerRequestId>,
+    pub(super) user_verification: super::user_verification_requests::UserVerificationRequests,
 }
 
 impl PendingAppServerRequests {
@@ -95,6 +96,16 @@ impl PendingAppServerRequests {
         self.permissions_approvals.clear();
         self.user_inputs.clear();
         self.mcp_requests.clear();
+        self.user_verification.clear();
+    }
+
+    pub(super) fn cancel_thread_verification(&mut self, thread_id: &str) {
+        for (server_name, request_id) in self.user_verification.cancel_thread(thread_id) {
+            self.mcp_requests.remove(&McpRequestKey {
+                server_name,
+                request_id,
+            });
+        }
     }
 
     pub(super) fn note_server_request(
@@ -161,6 +172,7 @@ impl PendingAppServerRequests {
                 None
             }
             ServerRequest::McpServerElicitationRequest { request_id, params } => {
+                self.user_verification.note_request(request_id, params);
                 self.mcp_requests.insert(
                     McpRequestKey {
                         server_name: params.server_name.clone(),
@@ -210,7 +222,43 @@ impl PendingAppServerRequests {
         T: Into<AppCommand>,
     {
         let thread_id = Self::canonical_thread_id(thread_id);
-        let op: AppCommand = op.into();
+        let op: AppCommand = match op.into() {
+            AppCommand::ResolveUserVerification {
+                server_name,
+                request_id,
+                response,
+            } => {
+                let (decision, content) = match response {
+                    crate::app_command::UserVerificationResponse::Accept { proof } => (
+                        codex_app_server_protocol::McpServerElicitationAction::Accept,
+                        Some(
+                            serde_json::to_value(proof)
+                                .map_err(|_| "Invalid verification proof".to_string())?,
+                        ),
+                    ),
+                    crate::app_command::UserVerificationResponse::Cancel => (
+                        codex_app_server_protocol::McpServerElicitationAction::Cancel,
+                        None,
+                    ),
+                };
+                AppCommand::ResolveElicitation {
+                    server_name,
+                    request_id,
+                    decision,
+                    content,
+                    meta: None,
+                }
+            }
+            op => op,
+        };
+        if let AppCommand::ResolveElicitation {
+            server_name,
+            request_id,
+            ..
+        } = &op
+        {
+            self.user_verification.remove(server_name, request_id);
+        }
         let resolution = match &op {
             AppCommand::ExecApproval {
                 id,
@@ -394,6 +442,8 @@ impl PendingAppServerRequests {
             .find_map(|(key, value)| (value == request_id).then(|| key.clone()))
         {
             self.mcp_requests.remove(&key);
+            self.user_verification
+                .remove(&key.server_name, &key.request_id);
             return Some(ResolvedAppServerRequest::McpElicitation {
                 server_name: key.server_name,
                 request_id: key.request_id,
@@ -677,7 +727,7 @@ mod tests {
                     item_id: "perm-1".to_string(),
                     environment_id: None,
                     started_at_ms: 0,
-                    cwd,
+                    cwd: cwd.into(),
                     reason: None,
                     permissions,
                 },
@@ -717,7 +767,7 @@ mod tests {
                     item_id: "perm-1".to_string(),
                     environment_id: None,
                     started_at_ms: 0,
-                    cwd: absolute_path(if cfg!(windows) { r"C:\tmp" } else { "/tmp" }),
+                    cwd: absolute_path(if cfg!(windows) { r"C:\tmp" } else { "/tmp" }).into(),
                     reason: None,
                     permissions: serde_json::from_value(json!({
                         "network": { "enabled": null }
@@ -850,7 +900,7 @@ mod tests {
                 item_id: "perm-1".to_string(),
                 environment_id: None,
                 started_at_ms: 0,
-                cwd: cwd.clone(),
+                cwd: cwd.clone().into(),
                 reason: None,
                 permissions: codex_app_server_protocol::RequestPermissionProfile {
                     network: None,
@@ -906,7 +956,8 @@ mod tests {
                     } else {
                         "/tmp"
                     }))
-                    .expect("path must be absolute"),
+                    .expect("path must be absolute")
+                    .into(),
                     reason: None,
                     permissions: codex_app_server_protocol::RequestPermissionProfile {
                         network: None,

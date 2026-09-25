@@ -4,6 +4,16 @@ description: Prepare a disposable Linux runner for one smarty-ci gate job.
 runs:
   using: composite
   steps:
+    - name: Free hosted-runner disk before the build
+      shell: bash
+      run: |
+        set -euo pipefail
+        # ponytail: the workspace job fell to 0.2-1.9 GiB free on 145 GiB runners (one ENOSPC).
+        # Remove preinstalled SDKs this Rust-only gate never uses (~20 GiB). Revisit if a job
+        # needs dotnet, Android, GHC or CodeQL, or if runners gain disk.
+        df -h /
+        sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+        df -h /
     - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
       with:
         components: rustfmt, clippy

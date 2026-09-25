@@ -25,12 +25,17 @@ use codex_app_server_protocol::McpServerConnectionStatus;
 use codex_app_server_protocol::McpServerOauthLoginCompletedNotification;
 use codex_app_server_protocol::McpServerOauthLoginResponse;
 use codex_app_server_protocol::McpServerStatusDetail;
+use codex_app_server_protocol::PluginInstallParams;
+use codex_app_server_protocol::PluginInstallResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_core::config::set_project_trust_level;
 use codex_http_client::HttpClientBuilder;
 use codex_protocol::config_types::TrustLevel;
+use codex_rmcp_client::McpOAuthCallbackMode;
+use codex_rmcp_client::resolve_mcp_oauth_callback_url;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use core_test_support::skip_if_remote;
 use core_test_support::stdio_server_bin;
 use pretty_assertions::assert_eq;
@@ -67,16 +72,73 @@ use wiremock::matchers::path;
 
 const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(10);
 
+#[test_case(false, None, None, None, true; "legacy callback")]
+#[test_case(
+    false,
+    Some("http://127.0.0.1/callback/registered"),
+    None,
+    None,
+    true;
+    "ordinary configured callback falls back to default"
+)]
+#[test_case(
+    false,
+    Some("http://127.0.0.1/callback/registered"),
+    Some("http://127.0.0.1/global/callback"),
+    None,
+    true;
+    "ordinary configured callback falls back to global"
+)]
+#[test_case(
+    false,
+    Some("http://127.0.0.1/callback/registered"),
+    Some("http://127.0.0.1/global/callback"),
+    Some("https://unexpected.example"),
+    false;
+    "legacy callback fallback rejects mismatched issuer"
+)]
+#[test_case(
+    true,
+    Some("http://127.0.0.1/callback"),
+    None,
+    Some("matching"),
+    true;
+    "matching issuer"
+)]
+#[test_case(
+    true,
+    Some("http://127.0.0.1/callback"),
+    None,
+    Some("https://unexpected.example"),
+    false;
+    "mismatched issuer"
+)]
+#[test_case(
+    true,
+    Some("http://127.0.0.1/callback"),
+    None,
+    None,
+    false;
+    "missing issuer"
+)]
 #[tokio::test]
-async fn oauth_login_uses_http_headers_helper() -> Result<()> {
+async fn oauth_login_validates_callback_issuer_and_uses_http_headers_helper(
+    issuer_supported: bool,
+    configured_callback: Option<&str>,
+    global_callback: Option<&str>,
+    callback_issuer: Option<&str>,
+    expected_success: bool,
+) -> Result<()> {
     let oauth = MockServer::start().await;
+    let issuer = format!("{}/mcp", oauth.uri());
     Mock::given(method("GET"))
         .and(path("/.well-known/oauth-authorization-server/mcp"))
         .and(header("x-gateway", "gateway-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "issuer": format!("{}/mcp", oauth.uri()),
+            "issuer": issuer,
             "authorization_endpoint": format!("{}/oauth/authorize", oauth.uri()),
             "token_endpoint": format!("{}/oauth/token", oauth.uri()),
+            "authorization_response_iss_parameter_supported": issuer_supported,
         })))
         .mount(&oauth)
         .await;
@@ -87,7 +149,7 @@ async fn oauth_login_uses_http_headers_helper() -> Result<()> {
             "access_token": "oauth-token",
             "token_type": "Bearer",
         })))
-        .expect(1)
+        .expect(u64::from(expected_success))
         .mount(&oauth)
         .await;
 
@@ -97,15 +159,23 @@ async fn oauth_login_uses_http_headers_helper() -> Result<()> {
     } else {
         r#"printf '{"X-Gateway":"gateway-token"}'"#
     };
+    let saved_callback = configured_callback
+        .map(|callback| format!("callback_url = \"{callback}\"\n"))
+        .unwrap_or_default();
+    let global_callback_config = global_callback
+        .map(|callback| format!("mcp_oauth_callback_url = \"{callback}\"\n"))
+        .unwrap_or_default();
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!(
             "mcp_oauth_credentials_store = \"file\"\n\
+             {global_callback_config}\
              [mcp_servers.gateway]\n\
              url = \"{}/mcp\"\n\
              http_headers_helper = {}\n\
              [mcp_servers.gateway.oauth]\n\
-             client_id = \"test-client\"\n",
+             client_id = \"test-client\"\n\
+             {saved_callback}",
             oauth.uri(),
             toml::Value::String(helper_command.to_string()),
         ),
@@ -126,10 +196,32 @@ async fn oauth_login_uses_http_headers_helper() -> Result<()> {
     let authorization_url = Url::parse(&response.authorization_url)?;
     let query: BTreeMap<_, _> = authorization_url.query_pairs().into_owned().collect();
     let mut callback_url = Url::parse(&query["redirect_uri"])?;
+    let expected_callback = if issuer_supported {
+        configured_callback
+            .expect("issuer-bound cases configure a stable callback")
+            .to_string()
+    } else {
+        resolve_mcp_oauth_callback_url(
+            &issuer,
+            global_callback,
+            McpOAuthCallbackMode::CallbackSpecific,
+        )?
+    };
+    assert_eq!(callback_url.path(), Url::parse(&expected_callback)?.path());
     callback_url
         .query_pairs_mut()
         .append_pair("code", "test-code")
         .append_pair("state", &query["state"]);
+    if let Some(callback_issuer) = callback_issuer {
+        let callback_issuer = if callback_issuer == "matching" {
+            issuer.as_str()
+        } else {
+            callback_issuer
+        };
+        callback_url
+            .query_pairs_mut()
+            .append_pair("iss", callback_issuer);
+    }
     HttpClientBuilder::new()
         .build_direct()?
         .get(callback_url)
@@ -142,13 +234,13 @@ async fn oauth_login_uses_http_headers_helper() -> Result<()> {
     )
     .await??;
     assert_eq!(
-        completed,
-        McpServerOauthLoginCompletedNotification {
-            name: "gateway".to_string(),
-            thread_id: None,
-            success: true,
-            error: None,
-        }
+        (
+            completed.name.as_str(),
+            completed.thread_id,
+            completed.success,
+            completed.error.is_some(),
+        ),
+        ("gateway", None, expected_success, !expected_success)
     );
     oauth.verify().await;
     Ok(())
@@ -260,6 +352,7 @@ async fn oauth_login_automatically_selects_callback_specific_cimd_without_metada
         move || {
             Ok(McpStatusServer {
                 tool_name: Arc::clone(&tool_name),
+                tools_error: None,
             })
         },
         Arc::new(LocalSessionManager::default()),
@@ -435,14 +528,30 @@ async fn oauth_login_automatically_selects_callback_specific_cimd_without_metada
     Ok(())
 }
 
+#[test_case(false; "configured server")]
+#[test_case(true; "plugin server")]
 #[tokio::test]
-async fn mcp_server_status_list_returns_raw_server_and_tool_names() -> Result<()> {
+async fn mcp_server_status_list_returns_raw_server_and_tool_names(plugin: bool) -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
-    let (mcp_server_url, mcp_server_handle) = start_mcp_server("look-up.raw").await?;
+    let (mcp_server_url, mcp_server_handle) =
+        start_mcp_server("look-up.raw", /*tools_error*/ None).await?;
     let codex_home = TempDir::new()?;
+    let endpoint = format!("{mcp_server_url}/mcp?secret=not-for-clients");
+    let http_config = if plugin {
+        "[features]\nplugins = true\n".to_string()
+    } else {
+        format!("[mcp_servers.some-server]\nurl = {endpoint:?}\n")
+    };
     mock_responses_config(&server.uri())
         .with_extra_config(&format!(
-            "[mcp_servers.some-server]\nurl = \"{mcp_server_url}/mcp\""
+            "{http_config}[mcp_servers.broken-server]\ncommand = {}",
+            toml::Value::String(
+                codex_home
+                    .path()
+                    .join("missing-mcp-server")
+                    .display()
+                    .to_string()
+            )
         ))
         .write(codex_home.path())?;
 
@@ -451,6 +560,39 @@ async fn mcp_server_status_list_returns_raw_server_and_tool_names() -> Result<()
         .without_auto_env()
         .build_initialized()
         .await?;
+    let plugin_root = TempDir::new()?;
+    if plugin {
+        std::fs::create_dir_all(plugin_root.path().join(".git"))?;
+        std::fs::create_dir_all(plugin_root.path().join(".agents/plugins"))?;
+        std::fs::create_dir_all(plugin_root.path().join("sample/.codex-plugin"))?;
+        std::fs::write(
+            plugin_root.path().join("sample/.codex-plugin/plugin.json"),
+            serde_json::to_vec(&json!({"name": "sample"}))?,
+        )?;
+        std::fs::write(
+            plugin_root.path().join("sample/.mcp.json"),
+            serde_json::to_vec(
+                &json!({"mcpServers": {"some-server": {"type": "http", "url": endpoint}}}),
+            )?,
+        )?;
+        let marketplace_path = plugin_root.path().join(".agents/plugins/marketplace.json");
+        std::fs::write(
+            &marketplace_path,
+            serde_json::to_vec(&json!({
+                "name": "debug", "plugins": [{"name": "sample", "source": {"source": "local", "path": "./sample"}}]
+            }))?,
+        )?;
+        let request_id = mcp
+            .send_plugin_install_request(PluginInstallParams {
+                marketplace_path: Some(AbsolutePathBuf::try_from(marketplace_path)?),
+                remote_marketplace_name: None,
+                install_attempt_id: None,
+                plugin_name: "sample".to_string(),
+            })
+            .await?;
+        let _: PluginInstallResponse =
+            timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
+    }
     let response: ListMcpServerStatusResponse = mcp
         .request(|request_id| ClientRequest::McpServerStatusList {
             request_id,
@@ -464,11 +606,43 @@ async fn mcp_server_status_list_returns_raw_server_and_tool_names() -> Result<()
         .await?;
 
     assert_eq!(response.next_cursor, None);
-    assert_eq!(response.data.len(), 1);
-    let status = &response.data[0];
+    assert_eq!(response.data.len(), 2);
+    let failed = response
+        .data
+        .iter()
+        .find(|status| status.name == "broken-server")
+        .expect("broken server status");
+    assert!(failed.tools.is_empty());
+    assert_eq!(failed.server_capabilities, None);
+    assert_eq!(failed.http_origin, None);
+    assert!(
+        failed
+            .tools_error
+            .as_deref()
+            .is_some_and(|error| error.contains("MCP startup failed"))
+    );
+    let status = response
+        .data
+        .iter()
+        .find(|status| status.name == "some-server")
+        .expect("configured server status");
+    assert_eq!(
+        status
+            .server_capabilities
+            .as_ref()
+            .and_then(|caps| caps.get("extensions")),
+        Some(&json!({
+            "openai/settings": { "readTool": "settings.read", "updateTool": "settings.update" }
+        }))
+    );
+    assert_eq!(status.tools_error, None);
     assert_eq!(status.name, "some-server");
     assert_eq!(status.runtime_status, None);
-    assert_eq!(status.plugin_id, None);
+    assert_eq!(
+        status.plugin_id.as_deref(),
+        plugin.then_some("sample@debug")
+    );
+    assert_eq!(status.http_origin.as_deref(), Some(mcp_server_url.as_str()));
     assert_eq!(
         status.tools.keys().cloned().collect::<BTreeSet<_>>(),
         BTreeSet::from(["look-up.raw".to_string()])
@@ -570,7 +744,8 @@ MCP_TEST_PID_FILE = {}
 #[tokio::test]
 async fn mcp_server_status_list_uses_thread_project_local_config() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
-    let (mcp_server_url, mcp_server_handle) = start_mcp_server("project_lookup").await?;
+    let (mcp_server_url, mcp_server_handle) =
+        start_mcp_server("project_lookup", /*tools_error*/ None).await?;
     let codex_home = TempDir::new()?;
     let workspace = TempDir::new()?;
     mock_responses_config(&server.uri()).write(codex_home.path())?;
@@ -644,7 +819,8 @@ url = "{mcp_server_url}/mcp"
 #[tokio::test]
 async fn mcp_server_status_list_reports_thread_runtime_connections() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
-    let (mcp_server_url, mcp_server_handle) = start_mcp_server("lookup").await?;
+    let (mcp_server_url, mcp_server_handle) =
+        start_mcp_server("lookup", /*tools_error*/ None).await?;
     let codex_home = TempDir::new()?;
     mock_responses_config(&server.uri())
         .with_extra_config(&format!(
@@ -697,7 +873,8 @@ async fn mcp_server_status_list_reports_thread_runtime_connections() -> Result<(
     );
     // Inventory uses the latest config, but a same-name replacement is not the
     // connection that this thread started. Unchanged registrations retain status.
-    let (replacement_url, replacement_handle) = start_mcp_server("replacement_lookup").await?;
+    let (replacement_url, replacement_handle) =
+        start_mcp_server("replacement_lookup", /*tools_error*/ None).await?;
     mock_responses_config(&server.uri())
         .with_extra_config(&format!(
             "[mcp_servers.connected]\nurl = \"{replacement_url}/mcp\"\n\
@@ -814,14 +991,81 @@ async fn mcp_server_status_list_reports_disconnected_stdio_transport() -> Result
     Ok(())
 }
 
+#[tokio::test]
+async fn mcp_server_status_retains_capabilities_when_tool_discovery_fails() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+    let (url, handle) = start_mcp_server(
+        "lookup",
+        Some(rmcp::ErrorData::internal_error(
+            "tool discovery unavailable",
+            /*data*/ None,
+        )),
+    )
+    .await?;
+    let codex_home = TempDir::new()?;
+    mock_responses_config(&server.uri())
+        .with_extra_config(&format!("[mcp_servers.degraded]\nurl = \"{url}/mcp\""))
+        .write(codex_home.path())?;
+    let mut app = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    for detail in [None, Some(McpServerStatusDetail::ToolsAndAuthOnly)] {
+        let response: ListMcpServerStatusResponse = app
+            .request(|request_id| ClientRequest::McpServerStatusList {
+                request_id,
+                params: ListMcpServerStatusParams {
+                    cursor: None,
+                    limit: None,
+                    detail,
+                    thread_id: None,
+                },
+            })
+            .await?;
+        let status = response
+            .data
+            .iter()
+            .find(|status| status.name == "degraded")
+            .expect("configured server is included");
+        assert!(status.tools.is_empty());
+        assert!(
+            status
+                .tools_error
+                .as_ref()
+                .is_some_and(|error| error.contains("tool discovery unavailable"))
+        );
+        assert_eq!(
+            status
+                .server_capabilities
+                .as_ref()
+                .and_then(|caps| caps.get("extensions")),
+            Some(&json!({
+                "openai/settings": { "readTool": "settings.read", "updateTool": "settings.update" }
+            }))
+        );
+    }
+    handle.abort();
+    let _ = handle.await;
+    Ok(())
+}
+
 #[derive(Clone)]
 struct McpStatusServer {
     tool_name: Arc<String>,
+    tools_error: Option<rmcp::ErrorData>,
 }
 
 impl ServerHandler for McpStatusServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
+        let mut capabilities = ServerCapabilities::builder().enable_tools().build();
+        capabilities.extensions = Some(BTreeMap::from([(
+            "openai/settings".to_string(),
+            serde_json::from_value(
+                json!({ "readTool": "settings.read", "updateTool": "settings.update" }),
+            )
+            .expect("settings capability is a JSON object"),
+        )]));
+        ServerInfo::new(capabilities).with_server_info(
             Implementation::new("lookup-server", "1.0.0").with_title("Lookup Server"),
         )
     }
@@ -831,6 +1075,9 @@ impl ServerHandler for McpStatusServer {
         _request: Option<rmcp::model::PaginatedRequestParams>,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        if let Some(error) = &self.tools_error {
+            return Err(error.clone());
+        }
         let input_schema: JsonObject = serde_json::from_value(json!({
             "type": "object",
             "additionalProperties": false
@@ -951,9 +1198,10 @@ async fn mcp_server_status_list_tools_and_auth_only_skips_slow_inventory_calls()
 #[tokio::test]
 async fn mcp_server_status_list_keeps_tools_for_sanitized_name_collisions() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
-    let (dash_server_url, dash_server_handle) = start_mcp_server("dash_lookup").await?;
+    let (dash_server_url, dash_server_handle) =
+        start_mcp_server("dash_lookup", /*tools_error*/ None).await?;
     let (underscore_server_url, underscore_server_handle) =
-        start_mcp_server("underscore_lookup").await?;
+        start_mcp_server("underscore_lookup", /*tools_error*/ None).await?;
     let codex_home = TempDir::new()?;
     mock_responses_config(&server.uri())
         .with_extra_config(&format!(
@@ -1014,7 +1262,10 @@ url = "{underscore_server_url}/mcp"
     Ok(())
 }
 
-async fn start_mcp_server(tool_name: &str) -> Result<(String, JoinHandle<()>)> {
+async fn start_mcp_server(
+    tool_name: &str,
+    tools_error: Option<rmcp::ErrorData>,
+) -> Result<(String, JoinHandle<()>)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
     let tool_name = Arc::new(tool_name.to_string());
@@ -1022,6 +1273,7 @@ async fn start_mcp_server(tool_name: &str) -> Result<(String, JoinHandle<()>)> {
         move || {
             Ok(McpStatusServer {
                 tool_name: Arc::clone(&tool_name),
+                tools_error: tools_error.clone(),
             })
         },
         Arc::new(LocalSessionManager::default()),

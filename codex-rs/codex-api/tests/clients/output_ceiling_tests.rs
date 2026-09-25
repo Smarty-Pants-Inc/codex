@@ -38,6 +38,7 @@ async fn ordinary_http_request_omits_or_transmits_output_ceiling() -> Result<()>
             prompt_cache_key: None,
             text: None,
             client_metadata: None,
+            access_programs: None,
         };
         let mut expected = serde_json::json!({
             "model": "gpt-test", "instructions": "Say hi", "input": [],

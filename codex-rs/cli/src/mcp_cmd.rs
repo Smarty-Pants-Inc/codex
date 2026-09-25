@@ -24,23 +24,25 @@ use codex_exec_server::RouteAwareHttpClient;
 use codex_login::AuthManager;
 use codex_mcp::McpOAuthLoginSupport;
 use codex_mcp::McpRuntimeContext;
-use codex_mcp::ResolvedMcpOAuthScopes;
 use codex_mcp::apply_http_headers_helper;
 use codex_mcp::compute_auth_statuses;
 use codex_mcp::discover_supported_scopes;
 use codex_mcp::oauth_login_support;
+use codex_mcp::resolve_oauth_callback;
 use codex_mcp::resolve_oauth_scopes;
-use codex_mcp::should_retry_without_scopes;
 use codex_protocol::protocol::McpAuthStatus;
+use codex_rmcp_client::McpOAuthCallbackMode;
 use codex_rmcp_client::McpOAuthClientRegistration;
 use codex_rmcp_client::OAuthDiscoveryTimeout;
 use codex_rmcp_client::StreamableHttpRedirectMode;
 use codex_rmcp_client::delete_oauth_tokens;
-use codex_rmcp_client::perform_oauth_login;
+use codex_rmcp_client::resolve_mcp_oauth_callback_url;
 use codex_utils_cli::CliConfigOverrides;
 use codex_utils_cli::format_env_display;
 
 use crate::cloud_config;
+use crate::mcp_login::McpLoginMode;
+use crate::mcp_login::perform_oauth_login_retry_without_scopes;
 use crate::plugin_cmd::load_cli_auth_manager;
 
 /// Subcommands:
@@ -194,6 +196,10 @@ pub struct LoginArgs {
     /// Name of the MCP server to authenticate with oauth.
     pub name: String,
 
+    /// Print the authorization URL and accept the callback URL without opening a browser.
+    #[arg(long)]
+    pub no_browser: bool,
+
     /// Comma-separated list of OAuth scopes to request.
     #[arg(long, value_delimiter = ',', value_name = "SCOPE,SCOPE")]
     pub scopes: Vec<String>,
@@ -253,66 +259,6 @@ impl McpCli {
     }
 }
 
-/// Preserve compatibility with servers that still expect the legacy empty-scope
-/// OAuth request. If a discovered-scope request is rejected by the provider,
-/// retry the login flow once without scopes.
-#[allow(clippy::too_many_arguments)]
-async fn perform_oauth_login_retry_without_scopes(
-    name: &str,
-    url: &str,
-    store_mode: codex_config::types::OAuthCredentialsStoreMode,
-    keyring_backend_kind: codex_config::types::AuthKeyringBackendKind,
-    http_headers: Option<HashMap<String, String>>,
-    env_http_headers: Option<HashMap<String, String>>,
-    resolved_scopes: &ResolvedMcpOAuthScopes,
-    oauth_client_id: Option<&str>,
-    client_registration: McpOAuthClientRegistration,
-    oauth_resource: Option<&str>,
-    callback_port: Option<u16>,
-    callback_url: Option<&str>,
-    http_client: Arc<dyn HttpClient>,
-) -> Result<()> {
-    match perform_oauth_login(
-        name,
-        url,
-        store_mode,
-        keyring_backend_kind,
-        http_headers.clone(),
-        env_http_headers.clone(),
-        &resolved_scopes.scopes,
-        oauth_client_id,
-        client_registration,
-        oauth_resource,
-        callback_port,
-        callback_url,
-        Arc::clone(&http_client),
-    )
-    .await
-    {
-        Ok(()) => Ok(()),
-        Err(err) if should_retry_without_scopes(resolved_scopes, &err) => {
-            println!("OAuth provider rejected discovered scopes. Retrying without scopes…");
-            perform_oauth_login(
-                name,
-                url,
-                store_mode,
-                keyring_backend_kind,
-                http_headers,
-                env_http_headers,
-                &[],
-                oauth_client_id,
-                client_registration,
-                oauth_resource,
-                callback_port,
-                callback_url,
-                http_client,
-            )
-            .await
-        }
-        Err(err) => Err(err),
-    }
-}
-
 async fn validate_profile_v2_migration(
     config_overrides: &CliConfigOverrides,
     loader_overrides: LoaderOverrides,
@@ -346,9 +292,6 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
     validate_server_name(&name)?;
 
     let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
-    let mut servers = load_global_mcp_servers(&codex_home)
-        .await
-        .with_context(|| format!("failed to load MCP servers from {}", codex_home.display()))?;
 
     let (transport, oauth_client_id, client_registration, oauth_resource) = match transport_args {
         AddMcpTransportArgs {
@@ -405,6 +348,43 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
         AddMcpTransportArgs { .. } => bail!("exactly one of --command or --url must be provided"),
     };
 
+    // Discover once before saving so a new registered client keeps the exact
+    // callback its provider expects, including issuer-bound stable callbacks.
+    let http_client: Arc<dyn HttpClient> = Arc::new(
+        RouteAwareHttpClient::new(config.http_client_factory()).with_tls_backend_fallback(),
+    );
+    let login_support = oauth_login_support(
+        &transport,
+        Arc::clone(&http_client),
+        OAuthDiscoveryTimeout::LOCAL,
+        StreamableHttpRedirectMode::Legacy,
+    )
+    .await;
+    // A stable callback requires confirmed issuer support. Discovery failures
+    // and servers without support both retain the callback-ID mix-up defense.
+    let callback_mode = match &login_support {
+        McpOAuthLoginSupport::Supported(oauth_config) => oauth_config.callback_mode,
+        McpOAuthLoginSupport::Unsupported | McpOAuthLoginSupport::Unknown(_) => {
+            McpOAuthCallbackMode::CallbackSpecific
+        }
+    };
+
+    // DCR and CIMD register their callbacks during login; only an existing
+    // client ID has a redirect that must be persisted with the MCP server.
+    let callback_url = oauth_client_id
+        .as_ref()
+        .map(|_| {
+            let McpServerTransportConfig::StreamableHttp { url, .. } = &transport else {
+                bail!("OAuth client IDs require a streamable HTTP MCP server");
+            };
+            resolve_mcp_oauth_callback_url(
+                url,
+                config.mcp_oauth_callback_url.as_deref(),
+                callback_mode,
+            )
+        })
+        .transpose()?;
+
     let new_entry = McpServerConfig {
         auth: Default::default(),
         transport: transport.clone(),
@@ -424,12 +404,18 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
             .clone()
             .map(|client_id| McpServerOAuthConfig {
                 client_id: Some(client_id),
+                callback_url: callback_url.clone(),
                 callback_port: None,
+                ..Default::default()
             }),
         oauth_resource: oauth_resource.clone(),
         tools: HashMap::new(),
     };
 
+    let mut servers = load_global_mcp_servers(&codex_home)
+        .await
+        .with_context(|| format!("failed to load MCP servers from {}", codex_home.display()))?;
+    let credential_name = new_entry.oauth_credential_name(&name);
     servers.insert(name.clone(), new_entry);
 
     ConfigEditsBuilder::new(&codex_home)
@@ -439,19 +425,9 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
         .with_context(|| format!("failed to write MCP servers to {}", codex_home.display()))?;
 
     println!("Added global MCP server '{name}'.");
-
-    // `mcp add` assigns new servers to the local environment, so its immediate
-    // OAuth discovery uses the local route-aware HTTP client.
-    let http_client: Arc<dyn HttpClient> = Arc::new(
-        RouteAwareHttpClient::new(config.http_client_factory()).with_tls_backend_fallback(),
-    );
-    let login_support = oauth_login_support(
-        &transport,
-        Arc::clone(&http_client),
-        OAuthDiscoveryTimeout::LOCAL,
-        StreamableHttpRedirectMode::Legacy,
-    )
-    .await;
+    if let Some(callback_url) = &callback_url {
+        println!("OAuth callback URL: {callback_url}");
+    }
     match login_support {
         McpOAuthLoginSupport::Supported(oauth_config) => {
             println!("Detected OAuth support. Starting OAuth flow…");
@@ -461,7 +437,7 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
                 oauth_config.discovered_scopes.clone(),
             );
             perform_oauth_login_retry_without_scopes(
-                &name,
+                credential_name.as_ref(),
                 &oauth_config.url,
                 config.mcp_oauth_credentials_store_mode,
                 config.auth_keyring_backend_kind(),
@@ -472,8 +448,12 @@ async fn run_add(config_overrides: &CliConfigOverrides, add_args: AddArgs) -> Re
                 client_registration,
                 oauth_resource.as_deref(),
                 config.mcp_oauth_callback_port,
+                callback_url
+                    .as_deref()
+                    .or(config.mcp_oauth_callback_url.as_deref()),
                 config.mcp_oauth_callback_url.as_deref(),
                 http_client,
+                McpLoginMode::Browser,
             )
             .await?;
             println!("Successfully logged in.");
@@ -534,6 +514,7 @@ async fn run_login(config: &Config, login_args: LoginArgs) -> Result<()> {
 
     let LoginArgs {
         name,
+        no_browser,
         scopes,
         oauth_client_registration,
     } = login_args;
@@ -544,6 +525,12 @@ async fn run_login(config: &Config, login_args: LoginArgs) -> Result<()> {
     let Some(server) = mcp_servers.get(&name) else {
         bail!("No MCP server named '{name}' found.");
     };
+
+    if matches!(server.auth, codex_config::types::McpServerAuth::EmaAuth) {
+        bail!(
+            "Enterprise MCP authorization is managed by Codex account sign-in. Open Codex to sign in."
+        );
+    }
 
     let (url, http_headers, env_http_headers) = match &server.transport {
         McpServerTransportConfig::StreamableHttp {
@@ -577,6 +564,8 @@ async fn run_login(config: &Config, login_args: LoginArgs) -> Result<()> {
     let resolved_scopes =
         resolve_oauth_scopes(explicit_scopes, server.scopes.clone(), discovered_scopes);
     let credential_name = server.oauth_credential_name(&name);
+    let callback_url =
+        resolve_oauth_callback(server, &url, config.mcp_oauth_callback_url.as_deref())?;
 
     perform_oauth_login_retry_without_scopes(
         credential_name.as_ref(),
@@ -590,8 +579,14 @@ async fn run_login(config: &Config, login_args: LoginArgs) -> Result<()> {
         client_registration,
         server.oauth_resource.as_deref(),
         server.oauth_callback_port(config.mcp_oauth_callback_port),
+        callback_url.as_deref(),
         config.mcp_oauth_callback_url.as_deref(),
         http_client,
+        if no_browser {
+            McpLoginMode::PasteCallback
+        } else {
+            McpLoginMode::Browser
+        },
     )
     .await?;
     println!("Successfully logged in to MCP server '{name}'.");
@@ -619,7 +614,9 @@ async fn run_logout(config: &Config, logout_args: LogoutArgs) -> Result<()> {
         &url,
         config.mcp_oauth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
-    ) {
+    )
+    .await
+    {
         Ok(true) => println!("Removed OAuth credentials for '{name}'."),
         Ok(false) => println!("No OAuth credentials stored for '{name}'."),
         Err(err) => return Err(anyhow!("failed to delete OAuth credentials: {err}")),
@@ -1083,12 +1080,12 @@ fn validate_server_name(name: &str) -> Result<()> {
     let is_valid = !name.is_empty()
         && name
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ':' | '@' | '/' | '.'));
 
     if is_valid {
         Ok(())
     } else {
-        bail!("invalid server name '{name}' (use letters, numbers, '-', '_')");
+        bail!("invalid server name '{name}' (use letters, numbers, '-', '_', ':', '@', '/', '.')");
     }
 }
 

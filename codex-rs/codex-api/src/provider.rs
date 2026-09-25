@@ -83,6 +83,7 @@ impl Provider {
             compression: RequestCompression::None,
             timeout: None,
             extensions: http::Extensions::new(),
+            response_body_limit_bytes: None,
         }
     }
 

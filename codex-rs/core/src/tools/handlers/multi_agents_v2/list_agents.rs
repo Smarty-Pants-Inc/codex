@@ -1,6 +1,7 @@
+use super::analytics::ToolCallAnalytics;
 use super::*;
-use crate::agent::control::ListedAgent;
 use crate::tools::handlers::multi_agents_spec::create_list_agents_tool;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::ToolSpec;
 
 pub(crate) struct Handler;
@@ -14,8 +15,16 @@ impl ToolExecutor<ToolInvocation> for Handler {
         create_list_agents_tool()
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
-        Box::pin(self.handle_call(invocation))
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
+        Box::pin(async move {
+            let analytics = ToolCallAnalytics::new(&invocation, CollabAgentTool::ListAgents);
+            let result = self.handle_call(invocation).await;
+            analytics.finish(&result);
+            result
+        })
     }
 }
 
@@ -32,17 +41,42 @@ impl Handler {
         } = invocation;
         let arguments = function_arguments(payload)?;
         let args: ListAgentsArgs = parse_arguments(&arguments)?;
-        session
-            .services
-            .agent_control
-            .register_session_root(session.thread_id, turn.parent_thread_id);
         let agents = session
             .services
             .agent_control
-            .list_agents(&turn.session_source, args.path_prefix.as_deref())
+            .list(
+                session.thread_id,
+                turn.parent_thread_id,
+                &turn.session_source,
+                args.path_prefix.as_deref(),
+            )
             .await
             .map_err(collab_spawn_error)?;
 
+        let local_agent_control = session
+            .services
+            .local_agent_runtime
+            .control(session.session_id());
+        let mut listed_agents = Vec::with_capacity(agents.len());
+        for agent in agents {
+            let model = local_agent_control
+                .get_agent_config_snapshot(agent.thread_id)
+                .await
+                .map(|snapshot| snapshot.model)
+                .unwrap_or_default();
+            listed_agents.push(ListedAgent {
+                agent_name: agent
+                    .metadata
+                    .agent_path
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| agent.thread_id.to_string()),
+                agent_status: agent.status,
+                model,
+                multi_agent_version: agent.multi_agent_version,
+            });
+        }
+        let agents = listed_agents;
         Ok(boxed_tool_output(ListAgentsResult { agents }))
     }
 }
@@ -57,6 +91,14 @@ impl CoreToolRuntime for Handler {
 #[serde(deny_unknown_fields)]
 struct ListAgentsArgs {
     path_prefix: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ListedAgent {
+    agent_name: String,
+    agent_status: AgentStatus,
+    model: String,
+    multi_agent_version: Option<MultiAgentVersion>,
 }
 
 #[derive(Debug, Serialize)]

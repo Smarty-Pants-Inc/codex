@@ -26,14 +26,18 @@ use codex_protocol::approvals::GuardianAssessmentDecisionSource as CoreGuardianA
 use codex_protocol::approvals::GuardianCommandSource as CoreGuardianCommandSource;
 use codex_protocol::items::AgentMessageContent as CoreAgentMessageContent;
 pub use codex_protocol::items::AgentMessageDelivery;
+pub use codex_protocol::items::AsyncUserInputQuestion;
 use codex_protocol::items::CollabAgentTool as CoreCollabAgentTool;
 use codex_protocol::items::CollabAgentToolCallStatus as CoreCollabAgentToolCallStatus;
 use codex_protocol::items::CommandExecutionStatus as CoreCommandExecutionStatus;
 use codex_protocol::items::DynamicToolCallStatus as CoreDynamicToolCallStatus;
+pub use codex_protocol::items::McpAppDisplayMode;
+pub use codex_protocol::items::McpAppUi;
 use codex_protocol::items::McpToolCallStatus as CoreMcpToolCallStatus;
 use codex_protocol::items::TurnItem as CoreTurnItem;
 use codex_protocol::memory_citation::MemoryCitation as CoreMemoryCitation;
 use codex_protocol::memory_citation::MemoryCitationEntry as CoreMemoryCitationEntry;
+use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
@@ -254,6 +258,16 @@ pub enum ThreadItem {
         memory_citation: Option<MemoryCitation>,
         #[serde(default)]
         delivery: Option<AgentMessageDelivery>,
+        #[serde(default)]
+        questions: Option<Vec<AsyncUserInputQuestion>>,
+    },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    FunctionCallOutput {
+        id: String,
+        name: String,
+        namespace: Option<String>,
+        output: FunctionCallOutputBody,
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
@@ -275,6 +289,14 @@ pub enum ThreadItem {
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     CommandExecution {
+        #[serde(skip)]
+        #[schemars(skip)]
+        #[ts(skip)]
+        sandbox_type: Option<codex_protocol::sandbox::SandboxType>,
+        #[serde(skip)]
+        #[schemars(skip)]
+        #[ts(skip)]
+        model_context: Option<codex_protocol::items::ModelInvocationContext>,
         id: String,
         /// Trusted first-party plugin id when this command resolves to one plugin script.
         #[serde(default)]
@@ -321,8 +343,10 @@ pub enum ThreadItem {
         app_context: Option<McpToolCallAppContext>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[ts(optional)]
-        /// Deprecated: use `appContext.resourceUri` instead.
+        /// Legacy compatibility field; prefer `mcpAppUi.resourceUri` when available.
         mcp_app_resource_uri: Option<String>,
+        /// Presentation captured from the invoked descriptor; absent in older history.
+        mcp_app_ui: Option<McpAppUi>,
         plugin_id: Option<String>,
         read_only_hint: Option<bool>,
         result: Option<Box<McpToolCallResult>>,
@@ -429,6 +453,7 @@ impl ThreadItem {
             ThreadItem::UserMessage { id, .. }
             | ThreadItem::HookPrompt { id, .. }
             | ThreadItem::AgentMessage { id, .. }
+            | ThreadItem::FunctionCallOutput { id, .. }
             | ThreadItem::Plan { id, .. }
             | ThreadItem::Reasoning { id, .. }
             | ThreadItem::CommandExecution { id, .. }
@@ -566,7 +591,7 @@ impl From<GuardianCommandSource> for CoreGuardianCommandSource {
 pub struct GuardianCommandReviewAction {
     pub source: GuardianCommandSource,
     pub command: String,
-    pub cwd: AbsolutePathBuf,
+    pub cwd: LegacyAppPathString,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -583,8 +608,8 @@ pub struct GuardianExecveReviewAction {
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct GuardianApplyPatchReviewAction {
-    pub cwd: AbsolutePathBuf,
-    pub files: Vec<AbsolutePathBuf>,
+    pub cwd: LegacyAppPathString,
+    pub files: Vec<LegacyAppPathString>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
@@ -626,7 +651,7 @@ pub enum GuardianApprovalReviewAction {
     Command {
         source: GuardianCommandSource,
         command: String,
-        cwd: AbsolutePathBuf,
+        cwd: LegacyAppPathString,
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
@@ -648,8 +673,8 @@ pub enum GuardianApprovalReviewAction {
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
     ApplyPatch {
-        cwd: AbsolutePathBuf,
-        files: Vec<AbsolutePathBuf>,
+        cwd: LegacyAppPathString,
+        files: Vec<LegacyAppPathString>,
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
@@ -871,8 +896,15 @@ impl From<CoreTurnItem> for ThreadItem {
                     phase: agent.phase,
                     memory_citation: agent.memory_citation.map(Into::into),
                     delivery: agent.delivery,
+                    questions: agent.questions,
                 }
             }
+            CoreTurnItem::FunctionCallOutput(output) => ThreadItem::FunctionCallOutput {
+                id: output.id,
+                name: output.name,
+                namespace: output.namespace,
+                output: output.output,
+            },
             CoreTurnItem::Plan(plan) => ThreadItem::Plan {
                 id: plan.id,
                 text: plan.text,
@@ -890,6 +922,8 @@ impl From<CoreTurnItem> for ThreadItem {
                 );
                 ThreadItem::CommandExecution {
                     id: command.id,
+                    model_context: command.model_context,
+                    sandbox_type: command.sandbox_type,
                     plugin_id: command.plugin_id,
                     script_path: command.script_path,
                     command: presentation.command,
@@ -973,6 +1007,8 @@ impl From<CoreTurnItem> for ThreadItem {
                     transparent_background: None,
                     failure: None,
                     saved_path: image.saved_path,
+                    imagegen_request_id: None,
+                    generation_id: None,
                 })
             }
             CoreTurnItem::EnteredReviewMode(review) => ThreadItem::EnteredReviewMode {
@@ -1011,6 +1047,7 @@ impl From<CoreTurnItem> for ThreadItem {
                         action_name: mcp.action_name,
                     }),
                     mcp_app_resource_uri: mcp.mcp_app_resource_uri,
+                    mcp_app_ui: mcp.mcp_app_ui,
                     plugin_id: mcp.plugin_id,
                     read_only_hint: mcp.read_only_hint,
                     result: mcp.result.map(McpToolCallResult::from).map(Box::new),
@@ -1091,6 +1128,10 @@ pub enum CollabAgentTool {
     ResumeAgent,
     Wait,
     CloseAgent,
+    SendMessage,
+    FollowupTask,
+    InterruptAgent,
+    ListAgents,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -1183,6 +1224,7 @@ pub enum CollabAgentToolCallStatus {
     InProgress,
     Completed,
     Failed,
+    Interrupted,
 }
 
 impl From<CoreCollabAgentTool> for CollabAgentTool {
@@ -1193,6 +1235,10 @@ impl From<CoreCollabAgentTool> for CollabAgentTool {
             CoreCollabAgentTool::ResumeAgent => Self::ResumeAgent,
             CoreCollabAgentTool::Wait => Self::Wait,
             CoreCollabAgentTool::CloseAgent => Self::CloseAgent,
+            CoreCollabAgentTool::SendMessage => Self::SendMessage,
+            CoreCollabAgentTool::FollowupTask => Self::FollowupTask,
+            CoreCollabAgentTool::InterruptAgent => Self::InterruptAgent,
+            CoreCollabAgentTool::ListAgents => Self::ListAgents,
         }
     }
 }
@@ -1203,6 +1249,7 @@ impl From<CoreCollabAgentToolCallStatus> for CollabAgentToolCallStatus {
             CoreCollabAgentToolCallStatus::InProgress => Self::InProgress,
             CoreCollabAgentToolCallStatus::Completed => Self::Completed,
             CoreCollabAgentToolCallStatus::Failed => Self::Failed,
+            CoreCollabAgentToolCallStatus::Interrupted => Self::Interrupted,
         }
     }
 }

@@ -4,7 +4,10 @@ use codex_config::permissions_toml::FilesystemPermissionToml;
 use codex_config::permissions_toml::PermissionProfileToml;
 use codex_config::types::ApprovalsReviewer;
 use codex_core::TurnInputRequest;
+use codex_core::config::Config;
 use codex_core::sandboxing::SandboxPermissions;
+use codex_extension_api::ExtensionRegistryBuilder;
+use codex_features::Feature;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Settings;
@@ -42,21 +45,24 @@ use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_with_timeout;
-use core_test_support::zsh_fork::build_zsh_fork_test;
 use core_test_support::zsh_fork::restrictive_workspace_write_profile;
 use core_test_support::zsh_fork::zsh_fork_runtime;
+use core_test_support::zsh_fork::zsh_fork_test_builder;
 use pretty_assertions::assert_eq;
 use regex_lite::Regex;
 use serde_json::Value;
 use serde_json::json;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use toml_edit::Key as TomlKey;
 use wiremock::MockServer;
 
 #[path = "unified_exec_zsh_fork_cancel_tests.rs"]
 mod cancel_tests;
+#[path = "unified_exec_zsh_fork_stdin_denied_read_tests.rs"]
+mod stdin_denied_read_tests;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_zsh_fork_parent_approval_preserves_denied_reads() -> Result<()> {
@@ -307,8 +313,10 @@ async fn unified_exec_zsh_fork_guardian_reviews_intercepted_execve() -> Result<(
     skip_if_no_network!(Ok(()));
 
     let approval_policy = AskForApproval::OnRequest;
-    let permission_profile = restrictive_workspace_write_profile();
     let outside_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
+    // A denied read makes Guardian's execve review carry the parent permission context.
+    let denied_path = outside_dir.path().join("guardian-execve-private");
+    let permission_profile = denied_read_permission_profile(&denied_path)?;
     let outside_path = outside_dir
         .path()
         .join("unified-exec-zsh-fork-guardian-execve.txt");
@@ -442,6 +450,16 @@ async fn unified_exec_zsh_fork_guardian_reviews_intercepted_execve() -> Result<(
         .collect::<Vec<_>>();
     assert_eq!(guardian_requests.len(), 2);
     assert!(guardian_requests[1].body_contains_text(&outside_path.to_string_lossy()));
+    // The fork submits the Guardian review prompt as developer input.
+    let guardian_text = guardian_requests[1]
+        .message_input_texts("developer")
+        .join("");
+    let permissions = guardian_text
+        .split_once("PARENT TURN PERMISSION CONTEXT START")
+        .and_then(|(_, text)| text.split_once("PARENT TURN PERMISSION CONTEXT END"))
+        .map(|(permissions, _)| permissions)
+        .context("intercepted command's Guardian permissions")?;
+    assert!(permissions.contains(denied_path.to_string_lossy().as_ref()));
     assert!(
         outside_path.exists(),
         "Guardian-approved intercepted touch should create the out-of-workspace file"
@@ -456,11 +474,16 @@ async fn unified_exec_zsh_fork_guardian_reviews_persistent_terminal_in_current_t
     skip_if_no_network!(Ok(()));
 
     let approval_policy = AskForApproval::OnRequest;
-    let permission_profile = restrictive_workspace_write_profile();
     let outside_dir = tempfile::tempdir_in(std::env::current_dir()?)?;
     let outside_path = outside_dir
         .path()
         .join("unified-exec-zsh-fork-current-turn.txt");
+    // Any denied read in the terminal's owning environment rejects stdin to an escalated
+    // terminal before review (`stdin_denied_read_tests`). The parent permission context appears
+    // only with denied reads, so `unified_exec_zsh_fork_guardian_reviews_intercepted_execve`
+    // asserts it, and `guardian::tests::background_approval_permissions_use_the_owning_environment`
+    // covers Guardian's use of the owning environment's denied reads.
+    let permission_profile = restrictive_workspace_write_profile();
     let rules = r#"prefix_rule(pattern=["touch"], decision="prompt")"#.to_string();
 
     let outside_path_for_hook = outside_path.clone();
@@ -522,9 +545,14 @@ async fn unified_exec_zsh_fork_guardian_reviews_persistent_terminal_in_current_t
                 ev_completed("resp-cross-turn-write"),
             ]),
             sse(vec![
-                ev_response_created("resp-cross-turn-guardian"),
-                ev_assistant_message("msg-cross-turn-guardian", r#"{"outcome":"allow"}"#),
-                ev_completed("resp-cross-turn-guardian"),
+                ev_response_created("resp-cross-turn-write-guardian"),
+                ev_assistant_message("msg-cross-turn-write-guardian", r#"{"outcome":"allow"}"#),
+                ev_completed("resp-cross-turn-write-guardian"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-cross-turn-execve-guardian"),
+                ev_assistant_message("msg-cross-turn-execve-guardian", r#"{"outcome":"allow"}"#),
+                ev_completed("resp-cross-turn-execve-guardian"),
             ]),
             sse(vec![
                 ev_response_created("resp-cross-turn-second-done"),
@@ -551,15 +579,28 @@ async fn unified_exec_zsh_fork_guardian_reviews_persistent_terminal_in_current_t
         unreachable!("completion wait only returns turn-complete events");
     };
 
-    submit_turn_with_session_permissions(
-        &test,
-        "run a command in the persistent terminal with Guardian approvals",
-        approval_policy,
-        ApprovalsReviewer::AutoReview,
-    )
-    .await?;
+    let next_cwd = test.config.cwd.join("next-turn");
+    fs::create_dir(&next_cwd)?;
+    let (sandbox_policy, permission_profile) =
+        turn_permission_fields(restrictive_workspace_write_profile(), next_cwd.as_path());
+    test.codex
+        .start_or_steer_turn(
+            TurnInputRequest::user_input(vec![UserInput::Text {
+                text: "run a command in the persistent terminal with Guardian approvals".into(),
+                text_elements: Vec::new(),
+            }])
+            .with_thread_settings(ThreadSettingsOverrides {
+                environments: Some(local_selections(next_cwd)),
+                approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+                sandbox_policy: Some(sandbox_policy),
+                permission_profile,
+                ..Default::default()
+            }),
+        )
+        .await?;
 
     let mut current_turn_id = None;
+    let mut stdin_assessment = None;
     let mut intercepted_assessment = None;
     loop {
         let event = tokio::time::timeout(Duration::from_secs(30), test.codex.next_event())
@@ -567,6 +608,16 @@ async fn unified_exec_zsh_fork_guardian_reviews_persistent_terminal_in_current_t
             .context("timed out waiting for current-turn intercepted execve Guardian review")??;
         match event.msg {
             EventMsg::TurnStarted(started) => current_turn_id = Some(started.turn_id),
+            EventMsg::GuardianAssessment(assessment)
+                if assessment.status == GuardianAssessmentStatus::Approved
+                    && matches!(
+                        &assessment.action,
+                        GuardianAssessmentAction::WriteStdin { approval_id, .. }
+                            if approval_id == write_call_id
+                    ) =>
+            {
+                stdin_assessment = Some(assessment);
+            }
             EventMsg::GuardianAssessment(assessment)
                 if assessment.status == GuardianAssessmentStatus::Approved
                     && matches!(assessment.action, GuardianAssessmentAction::Execve { .. }) =>
@@ -583,6 +634,15 @@ async fn unified_exec_zsh_fork_guardian_reviews_persistent_terminal_in_current_t
 
     let current_turn_id = current_turn_id.context("expected the second turn to start")?;
     assert_ne!(current_turn_id, first_completion.turn_id);
+    let stdin_assessment =
+        stdin_assessment.context("expected an approved Guardian assessment for stdin")?;
+    assert_eq!(
+        (
+            stdin_assessment.turn_id.as_str(),
+            stdin_assessment.target_item_id.as_deref(),
+        ),
+        (current_turn_id.as_str(), Some(open_call_id)),
+    );
     let assessment = intercepted_assessment
         .context("expected an approved Guardian assessment for the persistent terminal")?;
     assert_eq!(assessment.turn_id, current_turn_id);
@@ -599,8 +659,13 @@ async fn unified_exec_zsh_fork_guardian_reviews_persistent_terminal_in_current_t
             request.body_json()["client_metadata"]["x-openai-subagent"].as_str() == Some("guardian")
         })
         .collect::<Vec<_>>();
-    assert_eq!(guardian_requests.len(), 1);
+    assert_eq!(guardian_requests.len(), 2);
     assert!(guardian_requests[0].body_contains_text(&outside_path.to_string_lossy()));
+    let environment_id = &test.executor_environment().selection().environment_id;
+    let environment = format!(r#""environment_id": "{environment_id}""#);
+    assert!(guardian_requests[0].body_contains_text(&environment));
+    assert!(guardian_requests[0].body_contains_text("The `cwd` field is its launch directory"));
+    assert!(guardian_requests[1].body_contains_text(&outside_path.to_string_lossy()));
 
     Ok(())
 }
@@ -623,15 +688,36 @@ where
         return Ok(None);
     };
 
+    struct ExecveIdentityCheck;
+
+    impl codex_extension_api::ApprovalReviewContributor for ExecveIdentityCheck {
+        fn decide<'a>(
+            &'a self,
+            input: &'a codex_extension_api::ApprovalDecisionInput<'_>,
+        ) -> codex_extension_api::ExtensionFuture<'a, Option<codex_extension_api::ApprovalDecision>>
+        {
+            if input.action.get("program").is_some() {
+                assert_eq!(input.tool_call_id, None);
+            }
+            Box::pin(async { None })
+        }
+    }
+
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    extensions.approval_review_contributor(Arc::new(ExecveIdentityCheck));
     let server = start_mock_server().await;
-    let test = build_zsh_fork_test(
-        &server,
-        runtime,
-        approval_policy,
-        permission_profile,
-        pre_build_hook,
-    )
-    .await?;
+    let test = zsh_fork_test_builder(runtime, approval_policy)
+        .with_extensions(Arc::new(extensions.build()))
+        .with_pre_build_hook(pre_build_hook)
+        .with_config(move |config| {
+            config
+                .permissions
+                .set_permission_profile(permission_profile)
+                .expect("set permission profile");
+            assert!(config.features.enable(Feature::WriteStdinApproval).is_ok());
+        })
+        .build(&server)
+        .await?;
     Ok(Some((server, test)))
 }
 

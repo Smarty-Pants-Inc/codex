@@ -16,14 +16,19 @@ class RequiredNextestTests(unittest.TestCase):
             (True, "matches", ["^pkg::new_case$"], False),
             (False, "mismatch", ["^pkg::new_case$"], False),
         ]:
-            with self.subTest(ignored=ignored, status=match_status, required=requirements):
+            with self.subTest(
+                ignored=ignored, status=match_status, required=requirements
+            ):
                 inventory = {
                     "rust-suites": {
                         "pkg": {
                             "package-name": "pkg",
                             "status": "listed",
                             "testcases": {
-                                name: {"ignored": ignored, "filter-match": {"status": match_status}}
+                                name: {
+                                    "ignored": ignored,
+                                    "filter-match": {"status": match_status},
+                                }
                                 for name in ["new_case", "family::companion"]
                             },
                         }
@@ -38,7 +43,9 @@ class RequiredNextestTests(unittest.TestCase):
                         text=True,
                         check=False,
                     )
-                self.assertEqual(result.returncode == 0, expected_success, result.stderr)
+                self.assertEqual(
+                    result.returncode == 0, expected_success, result.stderr
+                )
                 if expected_success:
                     self.assertEqual(
                         json.loads(result.stdout.splitlines()[-1]),

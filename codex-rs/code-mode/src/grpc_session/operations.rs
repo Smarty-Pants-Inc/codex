@@ -5,6 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use codex_code_mode_protocol::CellId;
+use codex_code_mode_protocol::CodeModeSessionDelegate;
 use codex_code_mode_protocol::DEFAULT_EXEC_YIELD_TIME_MS;
 use codex_code_mode_protocol::ExecuteRequest;
 use codex_code_mode_protocol::RuntimeResponse;
@@ -12,8 +13,10 @@ use codex_code_mode_protocol::StartedCell;
 use codex_code_mode_protocol::WaitOutcome;
 use codex_code_mode_protocol::WaitRequest;
 use codex_code_mode_protocol::grpc;
+use codex_protocol::protocol::W3cTraceContext;
 use tokio::sync::OwnedMutexGuard;
 use tokio::sync::oneshot;
+use tracing::Instrument;
 use tracing::debug;
 use uuid::Uuid;
 
@@ -43,10 +46,11 @@ impl Drop for ExecutionOwnership {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove_execution(&self.execution_id);
-        let Some(cell_id) = cell else {
+        let Some((cell_id, delegate)) = cell else {
             return;
         };
-        self.session.report_closed_cell(Some(cell_id.clone()));
+        self.session
+            .report_closed_cell(Some((cell_id.clone(), delegate)));
         if self.session.stopped.is_cancelled() {
             return;
         }
@@ -65,14 +69,22 @@ impl SessionInner {
     pub(super) async fn execute(
         self: &Arc<Self>,
         request: ExecuteRequest,
+        delegate: Arc<dyn CodeModeSessionDelegate>,
     ) -> Result<StartedCell, String> {
         self.require_open()?;
         let execution_id = Uuid::new_v4().to_string();
+        let execute_span = tracing::info_span!(
+            "code_mode.grpc.execute",
+            otel.name = "code_mode.grpc.execute",
+            execution.id = %execution_id,
+            call_id = %request.tool_call_id,
+        );
+        let trace = codex_otel::span_w3c_trace_context(&execute_span);
         let request = conversion::execute_request(&self.id, execution_id.clone(), request)?;
         self.state
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
-            .begin_execution(&request)?;
+            .begin_execution(&request, delegate)?;
         let ownership = ExecutionOwnership {
             session: Arc::clone(self),
             execution_id,
@@ -81,7 +93,10 @@ impl SessionInner {
         let (started_tx, started_rx) = oneshot::channel();
         let inner = Arc::clone(self);
         self.stream_tasks.spawn(async move {
-            inner.drive_execution(request, ownership, started_tx).await;
+            inner
+                .drive_execution(request, ownership, started_tx, trace)
+                .instrument(execute_span)
+                .await;
         });
         started_rx
             .await
@@ -93,12 +108,19 @@ impl SessionInner {
         request: grpc::ExecuteRequest,
         ownership: ExecutionOwnership,
         started_tx: oneshot::Sender<Result<StartedCell, String>>,
+        trace: Option<W3cTraceContext>,
     ) {
         let runtime_timeout =
             Duration::from_millis(request.yield_time_ms.unwrap_or(DEFAULT_EXEC_YIELD_TIME_MS))
                 .saturating_add(Duration::from_secs(1));
         let opening = async {
             let mut client = self.client();
+            let mut request = tonic::Request::new(request);
+            if let Some(traceparent) = trace.and_then(|trace| trace.traceparent)
+                && let Ok(traceparent) = traceparent.parse()
+            {
+                request.metadata_mut().insert("traceparent", traceparent);
+            }
             let mut stream =
                 deadline::request(&self, "execution", Duration::ZERO, client.execute(request))
                     .await?

@@ -10,6 +10,8 @@ mod bundled_bwrap;
 #[cfg(target_os = "linux")]
 mod bwrap;
 #[cfg(target_os = "linux")]
+mod daemon_mounts;
+#[cfg(target_os = "linux")]
 mod exec_util;
 #[cfg(target_os = "linux")]
 mod fd_mount;
@@ -25,6 +27,8 @@ mod proxy_lifecycle;
 mod proxy_routing;
 #[cfg(target_os = "linux")]
 mod synthetic_mount_origin;
+#[cfg(target_os = "linux")]
+mod wslg;
 
 /// Exit status returned when bundled bubblewrap fails digest verification.
 #[cfg(target_os = "linux")]
