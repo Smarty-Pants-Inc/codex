@@ -113,7 +113,17 @@ impl ChatWidget {
                 crate::app_backtrack::is_hidden_nested_review_turn(&turns[0], &turns[1])
             }))
             .collect::<Vec<_>>();
-        for (turn, hidden_nested_review_turn) in turns.into_iter().zip(hidden_nested_review_turns) {
+        // Record each item's owner as it started; voice-private items stay hidden. One walk
+        // over all saved turns keeps the installed boundary ownership from being evicted.
+        let visibilities = self
+            .realtime_conversation
+            .item_owners
+            .history_visibility(&turns);
+        for ((turn, hidden_nested_review_turn), visibility) in turns
+            .into_iter()
+            .zip(hidden_nested_review_turns)
+            .zip(visibilities)
+        {
             self.restore_realtime_transcripts_before_turn(&turn.id);
             // Defer completed metadata-only turns until their page loads. Active
             // turns must restore their lifecycle even before any items are available.
@@ -123,11 +133,6 @@ impl ChatWidget {
             {
                 continue;
             }
-            // Record each item's owner as it started; voice-private items stay hidden.
-            let visibility = self
-                .realtime_conversation
-                .item_owners
-                .saved_item_visibility(&turn);
             let Turn {
                 id: turn_id,
                 items_view: _,

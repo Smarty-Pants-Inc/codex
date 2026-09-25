@@ -322,9 +322,8 @@ impl ChatWidget {
         self.transcript.take_active_cell();
         self.transcript.reset_copy_history();
         self.transcript.reset_turn_flags();
-        let mut owners = realtime::RealtimeItemOwners::default();
-        for turn in retained_turns {
-            let visibility = owners.saved_item_visibility(turn);
+        let visibility = realtime::RealtimeItemOwners::default().history_visibility(retained_turns);
+        for (turn, visibility) in retained_turns.iter().zip(visibility) {
             for (item, visible) in turn.items.iter().zip(visibility) {
                 if !visible {
                     continue;

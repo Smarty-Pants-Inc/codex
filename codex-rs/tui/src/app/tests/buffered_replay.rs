@@ -719,8 +719,8 @@ fn buffered_output_continues_from_the_saved_turns_final_owner() {
     );
 }
 
-#[test]
-fn saved_history_longer_than_the_owner_map_keeps_the_buffer_boundary_owner() {
+#[tokio::test]
+async fn saved_history_longer_than_the_owner_map_keeps_the_buffer_boundary_owner() {
     let commentary = |id: &str, text: &str| ThreadItem::AgentMessage {
         id: id.into(),
         text: text.into(),
@@ -796,6 +796,24 @@ fn saved_history_longer_than_the_owner_map_keeps_the_buffer_boundary_owner() {
         serde_json::to_value(events).unwrap(),
         serde_json::to_value(vec![typed_delta, typed_completed]).unwrap()
     );
+
+    // The widget walks the saved turns again on the thread-switch path; the buffered typed
+    // completion must still render and the voice commentary must stay hidden.
+    let (mut app, mut app_events, _ops) = make_test_app_with_channels().await;
+    app.replay_thread_snapshot(store.snapshot(), /*resume_restored_queue*/ false);
+    let rendered = std::iter::from_fn(|| app_events.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => {
+                Some(lines_to_single_string(&cell.transcript_lines(/*width*/ 80)))
+            }
+            _ => None,
+        })
+        .collect::<String>();
+    assert!(
+        rendered.contains("Typed commentary after the steer"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("Voice-private commentary"), "{rendered}");
 }
 
 #[tokio::test]

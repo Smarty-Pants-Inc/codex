@@ -157,9 +157,7 @@ impl ThreadEventStore {
         self.latest_turn_id = turns.last().map(|turn| turn.id.clone());
         // The saved turns supersede events evicted before them.
         self.buffer_start_owners = Default::default();
-        for turn in &turns {
-            self.buffer_start_owners.saved_item_visibility(turn);
-        }
+        self.buffer_start_owners.history_visibility(&turns);
         self.turns = turns;
     }
 
@@ -414,15 +412,15 @@ impl ThreadEventStore {
                 boundary.note_voice_turn(turn_id);
             }
         }
-        // Filter saved turns on a separate map, so walking older history cannot evict the
-        // newer ownership that buffered events continue from. Items already recorded keep
-        // their owners; the boundary state then wins as the newest entries.
-        let mut owners = crate::chatwidget::RealtimeItemOwners::default();
-        for turn in &mut snapshot.turns {
-            owners.copy_turn_from(&boundary, &turn.id);
-            owners.retain_visible_items(turn);
+        // Buffered events continue from the saved turns' final owners; the history walk
+        // cannot evict the boundary ownership that events left the buffer with.
+        let mut owners = boundary;
+        let visibility = owners.history_visibility(&snapshot.turns);
+        for (turn, visibility) in snapshot.turns.iter_mut().zip(visibility) {
+            let mut visibility = visibility.into_iter();
+            turn.items
+                .retain(|_| visibility.next().unwrap_or(/*default*/ true));
         }
-        owners.overlay(&boundary);
         if let Some(started) = &self.active_reasoning_item {
             owners.note_typed_item(&started.turn_id, started.item.id());
         }

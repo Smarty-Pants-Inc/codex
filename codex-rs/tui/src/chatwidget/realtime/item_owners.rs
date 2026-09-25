@@ -158,7 +158,7 @@ impl RealtimeItemOwners {
     ///
     /// Items without a trigger or marker cannot show where a handoff happened, so a turn that
     /// is already voice-owned hides all of its private items.
-    pub(crate) fn saved_item_visibility(&mut self, turn: &Turn) -> Vec<bool> {
+    fn saved_item_visibility(&mut self, turn: &Turn) -> Vec<bool> {
         let triggered = is_realtime_triggered_turn(turn);
         if !triggered && !turn.items.iter().any(is_handoff_marker) {
             return turn
@@ -204,8 +204,31 @@ impl RealtimeItemOwners {
             .retain(|_| visibility.next().unwrap_or(/*default*/ true));
     }
 
+    /// Returns each saved turn's item visibility; see [`Self::saved_item_visibility`].
+    ///
+    /// Every walk over saved history goes through here. The walk runs on a separate map so
+    /// older turns cannot evict newer ownership, such as a turn's typed owner recorded from
+    /// events that left the buffer. Items this map already recorded keep their owners, and
+    /// this map's state is applied last as the newest entries.
+    pub(crate) fn history_visibility<'a>(
+        &mut self,
+        turns: impl IntoIterator<Item = &'a Turn>,
+    ) -> Vec<Vec<bool>> {
+        let mut walk = Self::default();
+        let visibility = turns
+            .into_iter()
+            .map(|turn| {
+                walk.copy_turn_from(self, &turn.id);
+                walk.saved_item_visibility(turn)
+            })
+            .collect();
+        walk.overlay(self);
+        *self = walk;
+        visibility
+    }
+
     /// Copies `other`'s ownership of `turn_id`, when it has any, as this map's newest turn.
-    pub(crate) fn copy_turn_from(&mut self, other: &Self, turn_id: &str) {
+    fn copy_turn_from(&mut self, other: &Self, turn_id: &str) {
         if let Some(turn) = other.turn(turn_id) {
             self.insert_newest(turn_id.to_string(), turn.clone());
         }
@@ -213,7 +236,7 @@ impl RealtimeItemOwners {
 
     /// Moves every turn of `newer` behind this map's turns, so capacity eviction drops the
     /// older ones first. `newer`'s owners win; item owners only this map recorded are kept.
-    pub(crate) fn overlay(&mut self, newer: &Self) {
+    fn overlay(&mut self, newer: &Self) {
         for (turn_id, newer_turn) in &newer.turns {
             let mut turn = match self.turns.iter().position(|(id, _)| id == turn_id) {
                 Some(index) => self
