@@ -22,11 +22,6 @@ use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
-// ponytail: the fork submits realtime delegations as developer input, so the TUI never sees
-// the user-role `<realtime_delegation>` item it keys on, and delegated turns render as ordinary
-// visible turns (fork-main behavior). Revisit when the server exposes the realtime turn trigger
-// to clients (smarty-dev#487); then remove this ignore.
-#[ignore = "fork: realtime delegations are developer input; TUI detection needs a server-side trigger (smarty-dev#487)"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn delegated_core_events_keep_private_output_hidden_and_deliver_final_speech() -> Result<()> {
     core_test_support::skip_if_no_network!(Ok(()));

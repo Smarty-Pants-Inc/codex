@@ -1032,6 +1032,7 @@ mod tests {
                     started_at: None,
                     completed_at: Some(0),
                     duration_ms: None,
+                    turn_trigger: None,
                 },
             })
         ));

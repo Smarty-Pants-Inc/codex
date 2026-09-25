@@ -278,6 +278,7 @@ fn turn_started_event(turn_id: &str) -> RolloutItem {
             started_at: None,
             model_context_window: Some(128_000),
             collaboration_mode_kind: ModeKind::Default,
+            turn_trigger: None,
         },
     ))
 }
@@ -335,6 +336,7 @@ fn completed_user_turn_rollout(
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -1018,6 +1020,7 @@ async fn record_initial_history_resumed_hydrates_previous_turn_settings_from_lif
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -1091,6 +1094,7 @@ async fn reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_com
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -1128,6 +1132,7 @@ async fn reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_com
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -1213,6 +1218,7 @@ async fn reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_inc
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -1247,6 +1253,7 @@ async fn reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_inc
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -1314,6 +1321,7 @@ async fn reconstruct_history_rollback_skips_non_user_turns_for_history_and_metad
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -1348,6 +1356,7 @@ async fn reconstruct_history_rollback_skips_non_user_turns_for_history_and_metad
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -1381,6 +1390,7 @@ async fn reconstruct_history_rollback_skips_non_user_turns_for_history_and_metad
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::ResponseItem(standalone_assistant.into()),
@@ -1454,6 +1464,7 @@ async fn reconstruct_history_rollback_counts_inter_agent_assistant_turns() {
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -1488,6 +1499,7 @@ async fn reconstruct_history_rollback_counts_inter_agent_assistant_turns() {
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::TurnContext(assistant_turn_context),
@@ -1553,6 +1565,7 @@ async fn reconstruct_history_rollback_clears_history_and_metadata_when_exceeding
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -1611,6 +1624,7 @@ async fn record_initial_history_resumed_rollback_skips_only_user_turns() {
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -1644,6 +1658,7 @@ async fn record_initial_history_resumed_rollback_skips_only_user_turns() {
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::TurnComplete(
@@ -1693,6 +1708,7 @@ async fn record_initial_history_resumed_rollback_drops_incomplete_user_turn_comp
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -1725,6 +1741,7 @@ async fn record_initial_history_resumed_rollback_drops_incomplete_user_turn_comp
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -2343,6 +2360,7 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_clear
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -2421,6 +2439,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -2559,6 +2578,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -2591,6 +2611,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -2696,6 +2717,7 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -2728,6 +2750,7 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -2834,6 +2857,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -2866,6 +2890,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -2931,6 +2956,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_preserves_turn_
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -3018,6 +3044,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -3050,6 +3077,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(
@@ -3086,6 +3114,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
     ];

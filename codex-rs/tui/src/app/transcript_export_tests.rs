@@ -90,6 +90,7 @@ fn transcript_export_excludes_hidden_review_prompts_and_nested_duplicates() {
         started_at: None,
         completed_at: None,
         duration_ms: None,
+        turn_trigger: None,
     };
     let review = turn(
         "review-turn",

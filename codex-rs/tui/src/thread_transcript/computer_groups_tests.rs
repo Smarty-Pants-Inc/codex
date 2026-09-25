@@ -30,6 +30,7 @@ fn turn(id: &str, items: Vec<ThreadItem>) -> Turn {
         started_at: None,
         completed_at: None,
         duration_ms: None,
+        turn_trigger: None,
     }
 }
 

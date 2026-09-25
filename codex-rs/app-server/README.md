@@ -30,6 +30,16 @@ the choice unset. Ephemeral threads cannot save it.
 Use `thread/metadata/update` for later changes. This preference does not select
 `turn/start.cyberAccessProgram` or grant access to an access program.
 
+# Turn trigger (experimental)
+
+`Turn.turnTrigger` is the source classification the turn started with. It is
+the value of `turn/start.turnTrigger`, or a value that the server sets (for
+example `realtime` for voice delegations). It is null for turns started
+without one. The `turn/started` notification and turns rebuilt from legacy
+rollout history include it. Other payloads that embed a `Turn`, such as
+`turn/completed` and paged `thread/turns/list` results, send null. The
+field is experimental and appears only in the experimental schema.
+
 # Application network policy
 
 App-server loads application network policy at startup and existing explicit

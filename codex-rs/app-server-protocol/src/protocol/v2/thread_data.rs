@@ -380,7 +380,7 @@ impl<'de> Deserialize<'de> for Thread {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS, ExperimentalApi)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct Turn {
@@ -403,6 +403,11 @@ pub struct Turn {
     /// Duration between turn start and completion in milliseconds, if known.
     #[ts(type = "number | null")]
     pub duration_ms: Option<i64>,
+    /// Source classification the turn started with, as supplied by `turn/start.turnTrigger`
+    /// or by the server (for example `realtime` for voice delegations). Absent for turns
+    /// started without one.
+    #[experimental("turn.turnTrigger")]
+    pub turn_trigger: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, JsonSchema, TS)]

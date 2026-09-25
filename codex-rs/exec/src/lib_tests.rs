@@ -399,6 +399,7 @@ fn turn_items_for_thread_returns_matching_turn_items() {
                 started_at: None,
                 completed_at: None,
                 duration_ms: None,
+                turn_trigger: None,
             },
             codex_app_server_protocol::Turn {
                 id: "turn-2".to_string(),
@@ -412,6 +413,7 @@ fn turn_items_for_thread_returns_matching_turn_items() {
                 started_at: None,
                 completed_at: None,
                 duration_ms: None,
+                turn_trigger: None,
             },
         ],
     };
@@ -444,6 +446,7 @@ fn should_backfill_turn_completed_items_backfills_persisted_summaries_only() {
                 started_at: None,
                 completed_at: None,
                 duration_ms: None,
+                turn_trigger: None,
             },
         });
 
