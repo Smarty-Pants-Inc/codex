@@ -393,6 +393,7 @@ fn turn_items_for_thread_returns_matching_turn_items() {
                     memory_citation: None,
                     delivery: None,
                     questions: None,
+                    origin: None,
                 }],
                 status: codex_app_server_protocol::TurnStatus::Completed,
                 error: None,
@@ -427,6 +428,7 @@ fn turn_items_for_thread_returns_matching_turn_items() {
             memory_citation: None,
             delivery: None,
             questions: None,
+            origin: None,
         }])
     );
     assert_eq!(turn_items_for_thread(&thread, "missing-turn"), None);

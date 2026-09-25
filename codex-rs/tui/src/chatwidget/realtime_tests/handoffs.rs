@@ -196,6 +196,7 @@ async fn delegated_async_question_stays_local_and_expires_when_its_turn_ends() {
         }]),
         memory_citation: None,
         delivery: None,
+        origin: None,
     };
     start_item(&mut chat, thread_id, turn_id, answer.clone());
     complete_item(&mut chat, thread_id, turn_id, answer.clone());

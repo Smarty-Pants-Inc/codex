@@ -829,6 +829,7 @@ async fn live_app_server_turn_completed_clears_working_status_after_answer_item(
         memory_citation: None,
         delivery: None,
         questions: None,
+        origin: None,
     };
     chat.handle_server_notification(
         ServerNotification::ItemCompleted(ItemCompletedNotification {
@@ -1567,6 +1568,7 @@ async fn live_app_server_turn_completion_repairs_dropped_message_deltas() {
             title: "Which way?".into(),
             options: None,
         }]),
+        origin: None,
     }];
     chat.handle_server_notification(
         ServerNotification::TurnCompleted(TurnCompletedNotification {

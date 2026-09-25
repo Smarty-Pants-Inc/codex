@@ -657,6 +657,7 @@ source = {:?}
                 memory_citation: None,
                 delivery: None,
                 questions: None,
+                origin: None,
             },
             ThreadItem::AgentMessage {
                 id: "item-3".into(),
@@ -665,6 +666,7 @@ source = {:?}
                 memory_citation: None,
                 delivery: None,
                 questions: None,
+                origin: None,
             },
         ]
     );
@@ -2053,6 +2055,7 @@ async fn external_agent_config_import_creates_session_rollouts() -> Result<()> {
                 memory_citation: None,
                 delivery: None,
                 questions: None,
+                origin: None,
             },
             ThreadItem::AgentMessage {
                 id: "item-4".into(),
@@ -2061,6 +2064,7 @@ async fn external_agent_config_import_creates_session_rollouts() -> Result<()> {
                 memory_citation: None,
                 delivery: None,
                 questions: None,
+                origin: None,
             },
         ]
     );

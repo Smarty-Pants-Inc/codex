@@ -6,6 +6,7 @@
 //! together with the replay behavior that consumes them.
 
 use super::*;
+use codex_app_server_protocol::ItemOrigin;
 use std::borrow::Cow;
 
 #[derive(Debug, Clone)]
@@ -242,10 +243,11 @@ impl ThreadEventStore {
             }
             ServerNotification::ItemStarted(
                 started @ codex_app_server_protocol::ItemStartedNotification {
-                    item: ThreadItem::Reasoning { id, .. },
+                    item: ThreadItem::Reasoning { id, origin, .. },
                     ..
                 },
-            ) if !self.delegated_turns.contains(&started.turn_id)
+            ) if *origin != Some(ItemOrigin::Voice)
+                && !self.delegated_turns.contains(&started.turn_id)
                 && !self.turns.iter().any(|turn| {
                     turn.id == started.turn_id
                         && (crate::chatwidget::is_realtime_triggered_turn(turn)
@@ -260,6 +262,7 @@ impl ThreadEventStore {
                             id: id.clone(),
                             summary: Vec::new(),
                             content: Vec::new(),
+                            origin: *origin,
                         },
                         started_at_ms: started.started_at_ms,
                     });
@@ -951,7 +954,8 @@ mod tests {
                 "item": {
                     "type": "agentMessage", "id": "question", "text": "already in the snapshot",
                     "phase": null, "memoryCitation": null, "delivery": null,
-                    "questions": [{"title": "Which way?", "options": null}]
+                    "questions": [{"title": "Which way?", "options": null}],
+                    "origin": null
                 }
             }
         });
@@ -1033,6 +1037,7 @@ mod tests {
             id: "typed-reasoning".into(),
             summary: Vec::new(),
             content: Vec::new(),
+            origin: None,
         };
         store.push_notification(ServerNotification::ItemStarted(ItemStartedNotification {
             thread_id: thread_id.clone(),
@@ -1067,6 +1072,7 @@ mod tests {
                         id: id.into(),
                         summary: Vec::new(),
                         content: Vec::new(),
+                        origin: None,
                     },
                     started_at_ms: 0,
                 }));
@@ -1088,6 +1094,7 @@ mod tests {
                         id: id.into(),
                         summary: vec![text.into()],
                         content: Vec::new(),
+                        origin: None,
                     },
                     completed_at_ms: 0,
                 },
@@ -1131,6 +1138,7 @@ mod tests {
                 id: "private-reasoning".into(),
                 summary: Vec::new(),
                 content: Vec::new(),
+                origin: None,
             },
             started_at_ms: 0,
         }));

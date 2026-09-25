@@ -6737,6 +6737,7 @@ session_picker_view = "dense"
                         memory_citation: None,
                         delivery: None,
                         questions: None,
+                        origin: None,
                     },
                     ThreadItem::Plan {
                         id: String::from("plan-1"),
@@ -6813,6 +6814,7 @@ session_picker_view = "dense"
                     id: String::from("reasoning-1"),
                     summary: Vec::new(),
                     content: vec![String::from("private raw chain of thought")],
+                    origin: None,
                 }],
                 status: codex_app_server_protocol::TurnStatus::Completed,
                 error: None,
@@ -6892,6 +6894,7 @@ session_picker_view = "dense"
                     id: String::from("reasoning-1"),
                     summary: vec![String::from("public summary")],
                     content: vec![String::from("raw reasoning content")],
+                    origin: None,
                 }],
                 status: codex_app_server_protocol::TurnStatus::Completed,
                 error: None,

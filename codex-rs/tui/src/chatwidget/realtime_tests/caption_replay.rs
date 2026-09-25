@@ -21,6 +21,7 @@ async fn replay_preserves_typed_updates_before_voice_steers_the_turn() {
                     id: "typed-reasoning".into(),
                     summary: vec!["Typed reasoning summary".into()],
                     content: Vec::new(),
+                    origin: None,
                 },
                 user_item(
                     "<realtime_delegation><input>spoken correction</input></realtime_delegation>",
@@ -34,6 +35,7 @@ async fn replay_preserves_typed_updates_before_voice_steers_the_turn() {
                     id: "private-reasoning".into(),
                     summary: vec!["Private voice reasoning".into()],
                     content: Vec::new(),
+                    origin: None,
                 },
             ],
             items_view: TurnItemsView::Full,
@@ -120,6 +122,7 @@ async fn in_progress_voice_replay_restores_the_late_reasoning_guard() {
                 id: "late-reasoning".into(),
                 summary: vec!["private after switch".into()],
                 content: Vec::new(),
+                origin: None,
             },
         );
         assert!(

@@ -3182,6 +3182,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             memory_citation: None,
             delivery: None,
             questions: None,
+            origin: None,
         }
     );
 
@@ -3222,6 +3223,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             }),
             delivery: None,
             questions: None,
+            origin: None,
         }
     );
 
@@ -3237,13 +3239,14 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             title: "Which?".to_string(),
             options: None,
         }]),
-        origin: None,
+        origin: Some(ItemOrigin::Typed),
     }));
     assert_eq!(
         serde_json::to_value(&async_item).unwrap(),
         json!({
             "type": "agentMessage", "id": "async-1", "text": "Which?", "phase": "final_answer",
-            "memoryCitation": null, "delivery": "async", "questions": [{"title": "Which?", "options": null}]
+            "memoryCitation": null, "delivery": "async", "questions": [{"title": "Which?", "options": null}],
+            "origin": "typed"
         })
     );
     let old_item: ThreadItem = serde_json::from_value(json!({
@@ -3254,6 +3257,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         old_item,
         ThreadItem::AgentMessage {
             questions: None,
+            origin: None,
             ..
         }
     ));
@@ -3262,7 +3266,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         id: "reasoning-1".to_string(),
         summary_text: vec!["line one".to_string(), "line two".to_string()],
         raw_content: vec![],
-        origin: None,
+        origin: Some(ItemOrigin::Voice),
     });
 
     assert_eq!(
@@ -3271,6 +3275,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             id: "reasoning-1".to_string(),
             summary: vec!["line one".to_string(), "line two".to_string()],
             content: vec![],
+            origin: Some(ItemOrigin::Voice),
         }
     );
 

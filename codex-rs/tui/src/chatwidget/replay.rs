@@ -81,6 +81,7 @@ impl ChatWidget {
                     id: item_id.clone(),
                     summary: Vec::new(),
                     content: Vec::new(),
+                    origin: None,
                 },
                 started_at_ms: 0,
             },
@@ -169,6 +170,7 @@ impl ChatWidget {
                         id,
                         summary,
                         content,
+                        origin,
                     } = item
                 {
                     self.restore_active_reasoning_item(
@@ -179,6 +181,7 @@ impl ChatWidget {
                                 id,
                                 summary: Vec::new(),
                                 content: Vec::new(),
+                                origin,
                             },
                             started_at_ms: 0,
                         },
@@ -293,7 +296,7 @@ impl ChatWidget {
                 memory_citation,
                 delivery,
                 questions,
-                ..
+                origin,
             } => {
                 if self.complete_realtime_delegated_agent_item(
                     &turn_id,
@@ -304,6 +307,7 @@ impl ChatWidget {
                         memory_citation: memory_citation.clone(),
                         delivery,
                         questions: questions.clone(),
+                        origin,
                     },
                     from_replay,
                 ) {
@@ -333,7 +337,7 @@ impl ChatWidget {
                         }),
                         delivery,
                         questions,
-                        origin: None,
+                        origin,
                     },
                     &turn_id,
                     from_replay,
@@ -344,6 +348,7 @@ impl ChatWidget {
                 id,
                 summary,
                 content,
+                origin: _,
             } => {
                 let recover_completion = self.status_state.reasoning_recovered_after_refresh
                     && (!summary.is_empty()

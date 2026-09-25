@@ -38,6 +38,7 @@ fn reasoning(id: &str) -> ThreadItem {
             "**Considering {id}**\n\nRetained reasoning for {id}."
         )],
         content: Vec::new(),
+        origin: None,
     }
 }
 
@@ -198,6 +199,7 @@ async fn every_page_split_folds_reasoning_before_answer_and_completion_boundarie
                     memory_citation: None,
                     delivery: None,
                     questions: None,
+                    origin: None,
                 });
             }
             let current = turn(items);

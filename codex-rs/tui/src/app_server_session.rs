@@ -4040,6 +4040,7 @@ mod tests {
                             memory_citation: None,
                             delivery: None,
                             questions: None,
+                            origin: None,
                         },
                     ],
                     status: TurnStatus::Completed,

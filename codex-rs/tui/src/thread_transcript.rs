@@ -308,6 +308,7 @@ fn item_to_cells(
             id,
             summary,
             content,
+            origin: _,
         } => {
             let (header, mut text) = split_reasoning_summary_parts(&summary);
             if matches!(raw_reasoning_visibility, RawReasoningVisibility::Visible)

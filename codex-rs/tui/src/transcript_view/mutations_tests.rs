@@ -375,6 +375,7 @@ fn folding_a_reasoning_only_page_retains_its_find_and_copy_revision() {
         id: "reasoning".to_owned(),
         summary: vec!["retained needle  text with exact spacing".to_owned()],
         content: Vec::new(),
+        origin: None,
     };
     let current = Turn {
         id: "turn".to_owned(),
