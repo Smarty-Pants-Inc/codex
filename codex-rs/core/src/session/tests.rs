@@ -4138,6 +4138,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
                 started_at: None,
                 model_context_window: Some(128_000),
                 collaboration_mode_kind: ModeKind::Default,
+                turn_trigger: None,
             },
         )),
         RolloutItem::EventMsg(EventMsg::UserMessage(

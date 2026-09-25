@@ -4047,6 +4047,7 @@ mod tests {
                     started_at: None,
                     completed_at: None,
                     duration_ms: None,
+                    turn_trigger: None,
                 }],
             },
             model: "gpt-5.4".to_string(),

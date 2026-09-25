@@ -263,7 +263,11 @@ async fn delegated_reasoning_never_enters_live_history() {
         "late-start-turn",
         user_item("<realtime_delegation><input>delayed input</input></realtime_delegation>"),
     );
-    assert!(chat.is_realtime_delegated_reasoning_turn("late-start-turn"));
+    assert!(
+        chat.realtime_conversation
+            .item_owners
+            .voice_owns_turn("late-start-turn")
+    );
     chat.handle_server_notification(
         ServerNotification::ReasoningSummaryTextDelta(ReasoningSummaryTextDeltaNotification {
             thread_id: thread_id.to_string(),
@@ -346,7 +350,12 @@ async fn delegated_reasoning_never_enters_live_history() {
             assert!(!rendered.contains("private"), "{rendered}");
         }
     }
-    assert!(!chat.is_realtime_delegated_reasoning_turn(turn_id));
+    assert!(
+        !chat
+            .realtime_conversation
+            .item_owners
+            .voice_owns_turn(turn_id)
+    );
     let typed_reasoning = ThreadItem::Reasoning {
         id: "typed-reasoning".into(),
         summary: vec!["ordinary summary".into()],

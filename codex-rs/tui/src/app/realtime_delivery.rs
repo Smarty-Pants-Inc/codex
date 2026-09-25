@@ -55,6 +55,9 @@ pub(super) fn replayed_voice_texts_from_turns(turns: &[Turn]) -> ReplayedVoiceTe
     let mut delegated = HashSet::new();
     let mut items = HashMap::new();
     for turn in turns {
+        if crate::chatwidget::is_realtime_triggered_turn(turn) {
+            delegated.insert(turn.id.clone());
+        }
         for item in &turn.items {
             record_voice_item(item, &turn.id, &mut delegated, &mut items);
         }
@@ -82,6 +85,9 @@ pub(super) fn replayed_voice_texts(snapshot: &ThreadEventSnapshot) -> ReplayedVo
         .collect::<HashSet<_>>();
     let mut items = HashMap::new();
     for turn in &snapshot.turns {
+        if crate::chatwidget::is_realtime_triggered_turn(turn) {
+            delegated.insert(turn.id.clone());
+        }
         for item in &turn.items {
             record_voice_item(item, &turn.id, &mut delegated, &mut items);
         }
@@ -98,10 +104,18 @@ pub(super) fn replayed_voice_texts(snapshot: &ThreadEventSnapshot) -> ReplayedVo
                     delegated.insert(n.turn_id.clone());
                 }
             }
+            ServerNotification::TurnStarted(n)
+                if crate::chatwidget::is_realtime_triggered_turn(&n.turn) =>
+            {
+                delegated.insert(n.turn.id.clone());
+            }
             ServerNotification::ItemCompleted(n) => {
                 record_voice_item(&n.item, &n.turn_id, &mut delegated, &mut items);
             }
             ServerNotification::TurnCompleted(n) if n.turn.status == TurnStatus::Completed => {
+                if crate::chatwidget::is_realtime_triggered_turn(&n.turn) {
+                    delegated.insert(n.turn.id.clone());
+                }
                 if let Some(item) = n.turn.items.iter().rev().find(|item| {
                     matches!(
                         item,

@@ -277,6 +277,7 @@ async fn check_thread_title_generation(scenario: TitleScenario) -> color_eyre::R
             started_at: None,
             completed_at: None,
             duration_ms: None,
+            turn_trigger: None,
         });
     while event_rx.try_recv().is_ok() {}
 

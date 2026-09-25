@@ -133,6 +133,7 @@ fn finish_turn(
                 started_at: None,
                 completed_at: None,
                 duration_ms: None,
+                turn_trigger: None,
             },
         }),
         /*replay_kind*/ None,
@@ -151,3 +152,5 @@ mod lifecycle;
 mod speech_recovery;
 #[path = "realtime_tests/transcripts.rs"]
 mod transcripts;
+#[path = "realtime_tests/triggered_turns.rs"]
+mod triggered_turns;
