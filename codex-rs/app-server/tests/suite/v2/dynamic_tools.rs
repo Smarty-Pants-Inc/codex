@@ -42,6 +42,9 @@ use tempfile::TempDir;
 use tokio::time::timeout;
 use wiremock::MockServer;
 
+#[path = "dynamic_tools_turn_binding_tests.rs"]
+mod turn_binding;
+
 const TINY_PNG_DATA_URL: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
 const INLINE_AUDIO_DATA_URL: &str = "data:audio/wav;base64,YXVkaW8=";
 const INVALID_AUDIO_URL_ERROR: &str = "audio URLs must use an inline data URL";
@@ -594,6 +597,15 @@ async fn start_function_dynamic_tool_call(call_id: &str) -> Result<PendingDynami
         ]),
         create_final_assistant_message_sse_response("Done")?,
     ];
+    start_function_dynamic_tool_call_with_responses(call_id, response_sequence).await
+}
+
+async fn start_function_dynamic_tool_call_with_responses(
+    call_id: &str,
+    response_sequence: Vec<String>,
+) -> Result<PendingDynamicToolCall> {
+    let tool_name = "demo_tool";
+    let tool_args = json!({ "city": "Paris" });
     let server = create_mock_responses_server_sequence_unchecked(response_sequence).await;
 
     let codex_home = TempDir::new()?;

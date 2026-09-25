@@ -228,7 +228,12 @@ pub async fn request_permissions_response(
 }
 
 pub async fn dynamic_tool_response(sess: &Arc<Session>, id: String, response: DynamicToolResponse) {
-    sess.notify_dynamic_tool_response(&id, response).await;
+    sess.notify_dynamic_tool_response(
+        super::dynamic_tool_response::DynamicToolResponseTarget::ActiveTurn,
+        &id,
+        response,
+    )
+    .await;
 }
 
 pub fn refresh_mcp_servers(sess: &Session) {
@@ -563,6 +568,19 @@ pub(super) async fn submission_loop(
                 }
                 Op::DynamicToolResponse { id, response } => {
                     dynamic_tool_response(&sess, id, response).await;
+                    false
+                }
+                Op::DynamicToolResponseForTurn {
+                    turn_id,
+                    id,
+                    response,
+                } => {
+                    sess.notify_dynamic_tool_response(
+                        super::dynamic_tool_response::DynamicToolResponseTarget::Turn(&turn_id),
+                        &id,
+                        response,
+                    )
+                    .await;
                     false
                 }
                 Op::RefreshMcpServers => {
