@@ -268,6 +268,58 @@ jobs:
           git diff --cached --exit-code
           test -z "$(git ls-files --others --exclude-standard)"
 
+  # Agents cannot build Rust locally, and the schema fixture test reports only the first
+  # differing file. This job regenerates every fixture and publishes the full diff as a patch.
+  schema:
+    name: smarty-ci-schema
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+      CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      # ponytail: this job builds codex-app-server-protocol a second time on its own runner, and
+      # the shared setup also installs V8 and DotSlash that this build does not use. Reusing the
+      # tested setup keeps the toolchain and native build packages identical to the other gates.
+      - uses: ./.github/actions/smarty-ci-setup
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Regenerate app-server schema fixtures
+        working-directory: codex-rs
+        run: |
+          python3 app-server-protocol/scripts/write_schema_fixtures.py
+          python3 app-server-protocol/scripts/write_schema_fixtures.py --experimental
+      - name: Publish schema fixture diff
+        id: diff
+        run: |
+          set -euo pipefail
+          # Intent-to-add makes new fixture files appear in the diff without staging content.
+          # It also stages deletions, so compare against HEAD: the generator empties the
+          # fixture directories first, and a removed type must show up as a deleted file.
+          git add -N .
+          git diff --binary HEAD > "$RUNNER_TEMP/app-server-schema.patch"
+          if test -s "$RUNNER_TEMP/app-server-schema.patch"; then
+            git diff --stat HEAD
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Upload schema fixture patch
+        if: steps.diff.outputs.changed == 'true'
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: app-server-schema.patch
+          path: ${{ runner.temp }}/app-server-schema.patch
+          retention-days: 7
+      - name: Fail when schema fixtures are stale
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          echo "::error::App-server schema fixtures are stale. Download the app-server-schema.patch artifact and run 'git apply app-server-schema.patch' from the repo root."
+          exit 1
+
   smarty-ci:
     name: smarty-ci
     # Skip on cancellation, so that a cancelled run cannot leave a failing aggregate.
@@ -277,6 +329,7 @@ jobs:
       - affected
       - core
       - workspace
+      - schema
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -293,5 +346,5 @@ jobs:
           failed = {name: need["result"] for name, need in needs.items() if need["result"] != "success"}
           for name, need in sorted(needs.items()):
               print(f"{name}: {need['result']}")
-          sys.exit(1 if failed or len(needs) != 4 else 0)
+          sys.exit(1 if failed or len(needs) != 5 else 0)
           PY
