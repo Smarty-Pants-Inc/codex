@@ -103,7 +103,7 @@ async fn release_finished_turn_state_clears_turn_and_returns_late_input() {
 }
 
 #[tokio::test]
-async fn release_finished_turn_state_moves_late_input_to_replacing_turn() {
+async fn release_finished_turn_state_returns_late_input_when_a_reservation_replaced_it() {
     let (session, turn_context, _rx_event) = make_session_and_context_with_rx().await;
     let (finished_state, expected) = inject_into_finished_turn(&session, &turn_context).await;
     let successor = ActiveTurn::default();
@@ -112,19 +112,17 @@ async fn release_finished_turn_state_moves_late_input_to_replacing_turn() {
 
     let released = session.release_finished_turn_state(&finished_state).await;
 
-    assert_eq!(released, (false, Vec::new()));
-    let active_state = session
-        .active_turn
-        .lock()
-        .await
-        .as_ref()
-        .map(|active_turn| Arc::clone(&active_turn.turn_state));
-    assert!(active_state.is_some_and(|state| Arc::ptr_eq(&state, &successor_state)));
+    assert_eq!(released, (false, expected.clone()));
     let successor_input = session
         .input_queue
         .take_pending_input_for_turn_state(successor_state.as_ref())
         .await;
-    assert_eq!(successor_input, expected);
+    assert_eq!(successor_input, Vec::<TurnInput>::new());
+
+    // A rejected start clears the reservation without draining it. The late input survives
+    // because the release returned it to the caller.
+    *session.active_turn.lock().await = None;
+    assert_eq!(released.1, expected);
 }
 
 #[tokio::test]

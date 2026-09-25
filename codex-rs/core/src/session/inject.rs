@@ -137,8 +137,10 @@ impl Session {
     /// Returns whether this call cleared the active turn, and late input the caller must record.
     /// - This state is active with a task: a new task reuses it and owns its input.
     /// - This state is active without a task: clear the active turn and return its input.
-    /// - Another turn replaced it: move its input to that turn, as a later inject would.
-    /// - No active turn: return its input, as an idle inject would record it.
+    /// - A running turn replaced it: move its input to that turn, as a later inject would.
+    /// - A taskless reservation replaced it, or no turn is active: return its input. A rejected
+    ///   start clears a reservation without draining it, and the caller records the input
+    ///   before the new submission's input.
     #[expect(
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
@@ -163,7 +165,7 @@ impl Session {
             .take_pending_input_for_turn_state(turn_state.as_ref())
             .await;
         match active.as_ref() {
-            Some(successor) => {
+            Some(successor) if successor.task.is_some() => {
                 if !late_input.is_empty() {
                     self.input_queue
                         .extend_pending_input_and_accept_mailbox_delivery_for_turn_state(
@@ -174,7 +176,7 @@ impl Session {
                 }
                 (false, Vec::new())
             }
-            None => (cleared_active_turn, late_input),
+            Some(_) | None => (cleared_active_turn, late_input),
         }
     }
 

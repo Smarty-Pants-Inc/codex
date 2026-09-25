@@ -8,6 +8,7 @@ use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::tests::make_session_and_context_with_rx;
 use crate::session::turn_context::TurnContext;
+use crate::state::ActiveTurn;
 use crate::state::TaskKind;
 use codex_otel::MetricsClient;
 use codex_otel::MetricsConfig;
@@ -19,8 +20,12 @@ use codex_otel::TURN_TOOL_CALL_METRIC;
 use codex_otel::TURN_UNIFIED_EXEC_RUNNING_PROCESSES_METRIC;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
+use codex_protocol::models::ConfigurationReasoning;
+use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::TokenUsage;
+use codex_protocol::protocol::TurnAbortReason;
 use opentelemetry::KeyValue;
 use opentelemetry_sdk::metrics::InMemoryMetricExporter;
 use opentelemetry_sdk::metrics::data::AggregatedMetrics;
@@ -478,4 +483,47 @@ fn emit_compact_metric_records_auto_local() {
             ("type".to_string(), "local".to_string()),
         ])
     );
+}
+
+#[tokio::test]
+async fn release_finished_turn_state_moves_late_input_to_running_turn() {
+    let (session, turn_context, _rx_event) = make_session_and_context_with_rx().await;
+    let item = ResponseItem::ConfigurationUpdate {
+        reasoning: ConfigurationReasoning {
+            effort: ReasoningEffort::High,
+        },
+    };
+    let finished = ActiveTurn::default();
+    let finished_state = Arc::clone(&finished.turn_state);
+    *session.active_turn.lock().await = Some(finished);
+    session
+        .inject_client_response_items(vec![item.clone()], &turn_context)
+        .await;
+    let expected = vec![TurnInput::ResponseItem(
+        session.annotate_client_response_item(item),
+    )];
+    // A task reuses a taskless active turn's state, so clear it to give the task its own state.
+    *session.active_turn.lock().await = None;
+    session
+        .spawn_task(Arc::clone(&turn_context), Vec::new(), PendingTask)
+        .await;
+
+    let released = session.release_finished_turn_state(&finished_state).await;
+
+    assert_eq!(released, (false, Vec::new()));
+    let running_state = session
+        .active_turn
+        .lock()
+        .await
+        .as_ref()
+        .filter(|active_turn| active_turn.task.is_some())
+        .map(|active_turn| Arc::clone(&active_turn.turn_state))
+        .expect("the spawned task should own the active turn");
+    let running_input = session
+        .input_queue
+        .take_pending_input_for_turn_state(running_state.as_ref())
+        .await;
+    assert_eq!(running_input, expected);
+
+    session.abort_all_tasks(TurnAbortReason::Interrupted).await;
 }
