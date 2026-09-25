@@ -1,4 +1,11 @@
+use std::sync::Arc;
+
+use crate::session::TurnInput;
+use crate::session::session::Session;
 use crate::session::tests::make_session_and_context_with_rx;
+use crate::session::turn_context::TurnContext;
+use crate::state::ActiveTurn;
+use crate::state::TurnState;
 use codex_features::Feature;
 use codex_history::CodexHarnessMetadata;
 use codex_history::ResponseItemEnvelope;
@@ -8,6 +15,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::EventMsg;
 use pretty_assertions::assert_eq;
+use tokio::sync::Mutex;
 
 #[tokio::test]
 async fn harness_authored_configuration_updates_preserve_metadata_and_resume() {
@@ -59,4 +67,73 @@ async fn harness_authored_configuration_updates_preserve_metadata_and_resume() {
         .reconstruct_history_from_rollout(&turn_context, &rollout_items)
         .await;
     assert_eq!(reconstructed.history, recorded);
+}
+
+/// Makes a taskless active turn, as a finished task leaves it, and injects one item into it.
+async fn inject_into_finished_turn(
+    session: &Session,
+    turn_context: &TurnContext,
+) -> (Arc<Mutex<TurnState>>, Vec<TurnInput>) {
+    let item = ResponseItem::ConfigurationUpdate {
+        reasoning: ConfigurationReasoning {
+            effort: ReasoningEffort::High,
+        },
+    };
+    let finished = ActiveTurn::default();
+    let finished_state = Arc::clone(&finished.turn_state);
+    *session.active_turn.lock().await = Some(finished);
+    session
+        .inject_client_response_items(vec![item.clone()], turn_context)
+        .await;
+    let expected = vec![TurnInput::ResponseItem(
+        session.annotate_client_response_item(item),
+    )];
+    (finished_state, expected)
+}
+
+#[tokio::test]
+async fn release_finished_turn_state_clears_turn_and_returns_late_input() {
+    let (session, turn_context, _rx_event) = make_session_and_context_with_rx().await;
+    let (finished_state, expected) = inject_into_finished_turn(&session, &turn_context).await;
+
+    let released = session.release_finished_turn_state(&finished_state).await;
+
+    assert_eq!(released, (true, expected));
+    assert!(session.active_turn.lock().await.is_none());
+}
+
+#[tokio::test]
+async fn release_finished_turn_state_moves_late_input_to_replacing_turn() {
+    let (session, turn_context, _rx_event) = make_session_and_context_with_rx().await;
+    let (finished_state, expected) = inject_into_finished_turn(&session, &turn_context).await;
+    let successor = ActiveTurn::default();
+    let successor_state = Arc::clone(&successor.turn_state);
+    *session.active_turn.lock().await = Some(successor);
+
+    let released = session.release_finished_turn_state(&finished_state).await;
+
+    assert_eq!(released, (false, Vec::new()));
+    let active_state = session
+        .active_turn
+        .lock()
+        .await
+        .as_ref()
+        .map(|active_turn| Arc::clone(&active_turn.turn_state));
+    assert!(active_state.is_some_and(|state| Arc::ptr_eq(&state, &successor_state)));
+    let successor_input = session
+        .input_queue
+        .take_pending_input_for_turn_state(successor_state.as_ref())
+        .await;
+    assert_eq!(successor_input, expected);
+}
+
+#[tokio::test]
+async fn release_finished_turn_state_returns_late_input_when_turn_already_cleared() {
+    let (session, turn_context, _rx_event) = make_session_and_context_with_rx().await;
+    let (finished_state, expected) = inject_into_finished_turn(&session, &turn_context).await;
+    *session.active_turn.lock().await = None;
+
+    let released = session.release_finished_turn_state(&finished_state).await;
+
+    assert_eq!(released, (false, expected));
 }
