@@ -17,6 +17,7 @@ use crate::bottom_pane::VoiceStripState;
 use crate::history_cell;
 use crate::motion::MotionMode;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::UserInput;
 use codex_features::Feature;
 use codex_protocol::ThreadId;
@@ -174,6 +175,9 @@ pub(super) struct RealtimeConversationUiState {
     pending_typed_input: Option<String>,
     turn_origins: HashMap<String, RealtimeTurnOrigin>,
     delegated_reasoning_turns: VecDeque<String>,
+    // Turns already handled from their `realtime` trigger; a later marker for
+    // the same turn must not count the delegation again.
+    triggered_turns: VecDeque<String>,
     pub(super) agent_items: HashMap<(String, String), RealtimeAgentItemOrigin>,
     pending_speech: VecDeque<PendingRealtimeSpeech>,
 }
@@ -215,6 +219,15 @@ pub(crate) fn realtime_delegation_input(items: &[UserInput]) -> Option<&str> {
         .and_then(|body| body.strip_suffix("</realtime_delegation>"))?;
     let (_, input) = body.split_once("<input>")?;
     input.split_once("</input>").map(|(input, _)| input)
+}
+
+/// Turn trigger the server sets on turns that run a voice (realtime) delegation.
+pub(crate) const REALTIME_TURN_TRIGGER: &str = "realtime";
+
+/// Servers that submit voice delegations as developer input mark the turn with
+/// this trigger instead of a `<realtime_delegation>` user item.
+pub(crate) fn is_realtime_triggered_turn(turn: &Turn) -> bool {
+    turn.turn_trigger.as_deref() == Some(REALTIME_TURN_TRIGGER)
 }
 
 pub(crate) fn is_private_realtime_agent_item(item: &ThreadItem) -> bool {
@@ -588,6 +601,19 @@ impl ChatWidget {
             }
             return;
         }
+        let triggered_index = self
+            .realtime_conversation
+            .triggered_turns
+            .iter()
+            .position(|saved| saved == turn_id);
+        if let Some(index) = triggered_index
+            && realtime_delegation_input(items).is_some()
+        {
+            // The turn/started trigger already counted this delegation. Later
+            // markers for this turn are voice steers and take the usual path.
+            self.realtime_conversation.triggered_turns.remove(index);
+            return;
+        }
         let matches_local_typed_input = self
             .realtime_conversation
             .pending_typed_input
@@ -615,78 +641,10 @@ impl ChatWidget {
                         latest
                             == realtime_input_fingerprint(&realtime_delegation_display_text(input))
                     });
-            let (typed_turn_generation, delegated_turn_generation) =
-                match self.realtime_conversation.turn_origins.get(turn_id) {
-                    Some(RealtimeTurnOrigin::Typed { input_generation }) => {
-                        (Some(*input_generation), None)
-                    }
-                    Some(RealtimeTurnOrigin::Delegated {
-                        input_generation, ..
-                    }) => (None, Some(*input_generation)),
-                    None => (None, None),
-                };
-            let voice_supersedes_typed_turn = typed_turn_generation.is_some_and(|generation| {
-                generation != self.realtime_conversation.input_generation
-                    || !self.realtime_conversation.latest_input_was_voice
-            }) && !transcript_tail_flush
-                && !stale_voice_input;
-            let typed_turn = typed_turn_generation.is_some() && !voice_supersedes_typed_turn;
-            let may_speak = !transcript_tail_flush && !stale_voice_input && !typed_turn;
-            if may_speak {
-                let replaces_current_delegation = self
-                    .realtime_conversation
-                    .turn_origins
-                    .values()
-                    .any(|origin| {
-                        matches!(
-                            origin,
-                            RealtimeTurnOrigin::Delegated {
-                                may_speak: true,
-                                input_generation,
-                            } if *input_generation == self.realtime_conversation.input_generation
-                        )
-                    });
-                if !self.realtime_conversation.latest_input_was_voice || replaces_current_delegation
-                {
-                    self.realtime_conversation.input_generation = self
-                        .realtime_conversation
-                        .input_generation
-                        .wrapping_add(/*rhs*/ 1);
-                    if self
-                        .realtime_conversation
-                        .speaker_suppression_generation
-                        .is_some()
-                    {
-                        self.realtime_conversation.speaker_suppression_generation =
-                            Some(self.realtime_conversation.input_generation);
-                    }
-                }
-                self.realtime_conversation.latest_input_was_voice = true;
-            }
-            let delegated_origin = RealtimeTurnOrigin::Delegated {
-                may_speak,
-                input_generation: self.realtime_conversation.input_generation,
-            };
-            let supersedes_previous_delegation = may_speak
-                && delegated_turn_generation.is_some_and(|generation| {
-                    generation != self.realtime_conversation.input_generation
-                });
-            if voice_supersedes_typed_turn || supersedes_previous_delegation {
-                self.realtime_conversation
-                    .turn_origins
-                    .insert(turn_id.to_string(), delegated_origin);
-            } else {
-                self.realtime_conversation
-                    .turn_origins
-                    .entry(turn_id.to_string())
-                    .or_insert(delegated_origin);
-            }
-            if matches!(
-                self.realtime_conversation.turn_origins.get(turn_id),
-                Some(RealtimeTurnOrigin::Delegated { .. })
-            ) {
-                self.remember_realtime_delegated_reasoning_turn(turn_id);
-            }
+            self.note_realtime_delegated_turn(
+                turn_id,
+                /*fresh_voice_input*/ !transcript_tail_flush && !stale_voice_input,
+            );
             return;
         }
 
@@ -700,6 +658,110 @@ impl ChatWidget {
         self.realtime_conversation
             .delegated_reasoning_turns
             .retain(|saved| saved != turn_id);
+    }
+
+    /// Handles a turn that the server started with the `realtime` trigger.
+    ///
+    /// The trigger carries no delegation text, so the stale-transcript and
+    /// tail-flush checks of the marker path do not apply: the turn is fresh voice input.
+    pub(super) fn note_realtime_triggered_turn_started(
+        &mut self,
+        turn_id: &str,
+        replay_kind: Option<super::ReplayKind>,
+    ) {
+        if replay_kind.is_some()
+            || !matches!(
+                self.realtime_conversation.phase,
+                RealtimeConversationPhase::Starting | RealtimeConversationPhase::Active
+            )
+        {
+            self.remember_realtime_delegated_reasoning_turn(turn_id);
+            return;
+        }
+        let triggered_turns = &mut self.realtime_conversation.triggered_turns;
+        if triggered_turns.iter().any(|saved| saved == turn_id) {
+            return;
+        }
+        if turn_id.len() <= MAX_PENDING_SPEECH_TURN_ID_BYTES {
+            triggered_turns.push_back(turn_id.to_string());
+            if triggered_turns.len() > MAX_RETAINED_DELEGATED_REASONING_TURNS {
+                triggered_turns.pop_front();
+            }
+        }
+        self.note_realtime_delegated_turn(turn_id, /*fresh_voice_input*/ true);
+    }
+
+    fn note_realtime_delegated_turn(&mut self, turn_id: &str, fresh_voice_input: bool) {
+        let (typed_turn_generation, delegated_turn_generation) =
+            match self.realtime_conversation.turn_origins.get(turn_id) {
+                Some(RealtimeTurnOrigin::Typed { input_generation }) => {
+                    (Some(*input_generation), None)
+                }
+                Some(RealtimeTurnOrigin::Delegated {
+                    input_generation, ..
+                }) => (None, Some(*input_generation)),
+                None => (None, None),
+            };
+        let voice_supersedes_typed_turn = typed_turn_generation.is_some_and(|generation| {
+            generation != self.realtime_conversation.input_generation
+                || !self.realtime_conversation.latest_input_was_voice
+        }) && fresh_voice_input;
+        let typed_turn = typed_turn_generation.is_some() && !voice_supersedes_typed_turn;
+        let may_speak = fresh_voice_input && !typed_turn;
+        if may_speak {
+            let replaces_current_delegation =
+                self.realtime_conversation
+                    .turn_origins
+                    .values()
+                    .any(|origin| {
+                        matches!(
+                            origin,
+                            RealtimeTurnOrigin::Delegated {
+                                may_speak: true,
+                                input_generation,
+                            } if *input_generation == self.realtime_conversation.input_generation
+                        )
+                    });
+            if !self.realtime_conversation.latest_input_was_voice || replaces_current_delegation {
+                self.realtime_conversation.input_generation = self
+                    .realtime_conversation
+                    .input_generation
+                    .wrapping_add(/*rhs*/ 1);
+                if self
+                    .realtime_conversation
+                    .speaker_suppression_generation
+                    .is_some()
+                {
+                    self.realtime_conversation.speaker_suppression_generation =
+                        Some(self.realtime_conversation.input_generation);
+                }
+            }
+            self.realtime_conversation.latest_input_was_voice = true;
+        }
+        let delegated_origin = RealtimeTurnOrigin::Delegated {
+            may_speak,
+            input_generation: self.realtime_conversation.input_generation,
+        };
+        let supersedes_previous_delegation = may_speak
+            && delegated_turn_generation.is_some_and(|generation| {
+                generation != self.realtime_conversation.input_generation
+            });
+        if voice_supersedes_typed_turn || supersedes_previous_delegation {
+            self.realtime_conversation
+                .turn_origins
+                .insert(turn_id.to_string(), delegated_origin);
+        } else {
+            self.realtime_conversation
+                .turn_origins
+                .entry(turn_id.to_string())
+                .or_insert(delegated_origin);
+        }
+        if matches!(
+            self.realtime_conversation.turn_origins.get(turn_id),
+            Some(RealtimeTurnOrigin::Delegated { .. })
+        ) {
+            self.remember_realtime_delegated_reasoning_turn(turn_id);
+        }
     }
 
     pub(crate) fn remember_realtime_delegated_reasoning_turn(&mut self, turn_id: &str) {
@@ -1207,6 +1269,9 @@ impl ChatWidget {
         self.realtime_conversation.turn_origins.remove(turn_id);
         self.realtime_conversation
             .delegated_reasoning_turns
+            .retain(|saved| saved != turn_id);
+        self.realtime_conversation
+            .triggered_turns
             .retain(|saved| saved != turn_id);
         self.realtime_conversation
             .agent_items

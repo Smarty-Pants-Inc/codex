@@ -385,6 +385,7 @@ fn folding_a_reasoning_only_page_retains_its_find_and_copy_revision() {
         started_at: None,
         completed_at: None,
         duration_ms: None,
+        turn_trigger: None,
     };
     let project = |items: &[ThreadItem]| {
         thread_items_to_transcript_cells(

@@ -2220,6 +2220,7 @@ async fn resume_picker_round_trip_preserves_each_threads_input() -> Result<()> {
                             started_at: None,
                             completed_at: None,
                             duration_ms: None,
+                            turn_trigger: None,
                         },
                     },
                 ),

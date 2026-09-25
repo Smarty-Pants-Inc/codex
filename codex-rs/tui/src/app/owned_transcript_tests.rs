@@ -609,6 +609,7 @@ async fn owned_details_escape_interrupts_work_without_starting_backtrack() -> Re
                 started_at: None,
                 completed_at: None,
                 duration_ms: None,
+                turn_trigger: None,
             },
         }),
         /*replay_kind*/ None,

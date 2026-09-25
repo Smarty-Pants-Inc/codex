@@ -124,6 +124,7 @@ impl ChatWidget {
             {
                 continue;
             }
+            let triggered = realtime::is_realtime_triggered_turn(&turn);
             let Turn {
                 id: turn_id,
                 items_view: _,
@@ -133,11 +134,13 @@ impl ChatWidget {
                 started_at,
                 completed_at,
                 duration_ms,
+                turn_trigger,
             } = turn;
-            let delegated = items.iter().any(|item| {
-                matches!(item, ThreadItem::UserMessage { content, .. }
+            let delegated = triggered
+                || items.iter().any(|item| {
+                    matches!(item, ThreadItem::UserMessage { content, .. }
                     if realtime::realtime_delegation_input(content).is_some())
-            });
+                });
             if matches!(status, TurnStatus::InProgress) {
                 if delegated {
                     self.remember_realtime_delegated_reasoning_turn(&turn_id);
@@ -154,7 +157,7 @@ impl ChatWidget {
                     ThreadItem::Reasoning { id, .. } => Some(id.clone()),
                     _ => None,
                 });
-            let mut replaying_delegation = false;
+            let mut replaying_delegation = triggered;
             for item in items {
                 if matches!(&item, ThreadItem::UserMessage { content, .. }
                     if realtime::realtime_delegation_input(content).is_some())
@@ -231,6 +234,7 @@ impl ChatWidget {
                             started_at,
                             completed_at,
                             duration_ms,
+                            turn_trigger,
                         },
                     },
                     Some(replay_kind),

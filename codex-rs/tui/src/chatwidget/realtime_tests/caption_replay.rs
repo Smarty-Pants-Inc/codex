@@ -42,6 +42,7 @@ async fn replay_preserves_typed_updates_before_voice_steers_the_turn() {
             started_at: None,
             completed_at: None,
             duration_ms: None,
+            turn_trigger: None,
         }],
         ReplayKind::ThreadSnapshot,
     );
@@ -86,6 +87,7 @@ async fn in_progress_voice_replay_restores_the_late_reasoning_guard() {
             started_at: None,
             completed_at: None,
             duration_ms: None,
+            turn_trigger: None,
         }],
         ReplayKind::ThreadSnapshot,
     );

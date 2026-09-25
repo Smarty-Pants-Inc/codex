@@ -311,6 +311,7 @@ fn evicted_voice_delegation_marker_still_suppresses_private_replay() {
         started_at: None,
         completed_at: None,
         duration_ms: None,
+        turn_trigger: None,
     }]);
     resumed.push_notification(delta("thread", "voice-turn", "unfinished"));
     let mut newer = resumed.turns[0].clone();
@@ -352,6 +353,7 @@ fn saved_voice_turn_suppresses_reasoning_without_hiding_typed_reasoning() {
         started_at: None,
         completed_at: None,
         duration_ms: None,
+        turn_trigger: None,
     };
     let mut store = ThreadEventStore::new(/*capacity*/ 4);
     store.set_turns(vec![
@@ -397,6 +399,7 @@ fn snapshot_keeps_typed_output_before_voice_handoff_in_the_same_turn() {
         started_at: None,
         completed_at: None,
         duration_ms: None,
+        turn_trigger: None,
     }]);
     for item in [typed.clone(), marker.clone(), private] {
         store.push_notification(ServerNotification::ItemCompleted(

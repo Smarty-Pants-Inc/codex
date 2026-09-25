@@ -84,6 +84,9 @@ impl ChatWidget {
                         MisalignmentTurnSource::ServerNotification,
                     );
                 }
+                if realtime::is_realtime_triggered_turn(&notification.turn) {
+                    self.note_realtime_triggered_turn_started(&notification.turn.id, replay_kind);
+                }
                 self.turn_lifecycle.last_turn_id = Some(notification.turn.id);
                 self.last_non_retry_error = None;
                 if !matches!(replay_kind, Some(ReplayKind::ResumeInitialMessages)) {
