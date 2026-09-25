@@ -136,14 +136,23 @@ impl ChatWidget {
                 duration_ms,
                 turn_trigger,
             } = turn;
-            let delegated = triggered
-                || items.iter().any(|item| {
-                    matches!(item, ThreadItem::UserMessage { content, .. }
-                    if realtime::realtime_delegation_input(content).is_some())
-                });
+            // Live output ownership: the trigger starts the turn as voice, a
+            // marker hands it to voice, and a typed steer hands it back.
+            let voice_owns_end = items.iter().fold(triggered, |voice_owned, item| {
+                realtime::realtime_voice_owns_turn_after(item, voice_owned)
+            });
             if matches!(status, TurnStatus::InProgress) {
-                if delegated {
+                if voice_owns_end {
                     self.remember_realtime_delegated_reasoning_turn(&turn_id);
+                } else if triggered
+                    || items.iter().any(|item| {
+                        matches!(item, ThreadItem::UserMessage { content, .. }
+                            if realtime::realtime_delegation_input(content).is_some())
+                    })
+                {
+                    // The items end with a typed steer. Without a trigger or marker they
+                    // cannot overrule a guard that an evicted buffered marker set.
+                    self.forget_realtime_delegated_reasoning_turn(&turn_id);
                 }
                 self.warning_display_state.startup_complete = true;
                 self.turn_lifecycle.last_turn_id = Some(turn_id.clone());
@@ -159,13 +168,10 @@ impl ChatWidget {
                 });
             let mut replaying_delegation = triggered;
             for item in items {
-                if matches!(&item, ThreadItem::UserMessage { content, .. }
-                    if realtime::realtime_delegation_input(content).is_some())
-                {
-                    replaying_delegation = true;
-                }
-                // Voice can steer a typed turn already in progress. Its earlier
-                // commentary and reasoning still belong to the typed request.
+                replaying_delegation =
+                    realtime::realtime_voice_owns_turn_after(&item, replaying_delegation);
+                // Voice and typed input can steer each other's turn. Commentary
+                // and reasoning stay with the input that owned the turn when they began.
                 if replaying_delegation && realtime::is_private_realtime_agent_item(&item) {
                     continue;
                 }

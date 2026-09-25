@@ -489,6 +489,105 @@ fn snapshot_keeps_typed_item_completed_after_voice_handoff() {
     assert_eq!(completed, vec![typed]);
 }
 
+#[test]
+fn snapshot_keeps_typed_steer_output_in_a_triggered_turn() {
+    let commentary = |id: &str, text: &str| ThreadItem::AgentMessage {
+        id: id.into(),
+        text: text.into(),
+        phase: Some(codex_protocol::models::MessagePhase::Commentary),
+        questions: None,
+        memory_citation: None,
+        delivery: None,
+    };
+    let user = |id: &str, text: &str| ThreadItem::UserMessage {
+        id: id.into(),
+        client_id: None,
+        content: vec![codex_app_server_protocol::UserInput::Text {
+            text: text.into(),
+            text_elements: Vec::new(),
+        }],
+    };
+    let voice = commentary("voice", "Voice-private commentary");
+    let steer = user("steer", "Typed steer");
+    let typed = commentary("typed", "Typed commentary");
+    let typed_reasoning = ThreadItem::Reasoning {
+        id: "typed-reasoning".into(),
+        summary: vec!["Typed reasoning".into()],
+        content: Vec::new(),
+    };
+    let marker = user(
+        "marker",
+        "<realtime_delegation><input>question</input></realtime_delegation>",
+    );
+    let later_voice = commentary("later-voice", "Later voice-private commentary");
+    let items = vec![
+        voice.clone(),
+        steer.clone(),
+        typed.clone(),
+        typed_reasoning.clone(),
+        marker.clone(),
+        later_voice.clone(),
+    ];
+    let turn = |turn_id: &str, items| Turn {
+        id: turn_id.into(),
+        items,
+        items_view: codex_app_server_protocol::TurnItemsView::Full,
+        status: TurnStatus::InProgress,
+        error: None,
+        started_at: None,
+        completed_at: None,
+        duration_ms: None,
+        turn_trigger: Some("realtime".into()),
+    };
+    let visible = vec![
+        steer.clone(),
+        typed.clone(),
+        typed_reasoning.clone(),
+        marker.clone(),
+    ];
+
+    // Saved turn items.
+    let mut saved = ThreadEventStore::new(/*capacity*/ 32);
+    saved.set_turns(vec![turn("saved", items.clone())]);
+    assert_eq!(saved.snapshot().turns, vec![turn("saved", visible.clone())]);
+
+    // Buffered notifications.
+    let mut buffered = ThreadEventStore::new(/*capacity*/ 32);
+    buffered.push_notification(ServerNotification::TurnStarted(TurnStartedNotification {
+        thread_id: "thread".into(),
+        turn: turn("live", Vec::new()),
+    }));
+    for item in items {
+        buffered.push_notification(ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: "thread".into(),
+            turn_id: "live".into(),
+            started_at_ms: 0,
+            item: item.clone(),
+        }));
+        buffered.push_notification(ServerNotification::ItemCompleted(
+            ItemCompletedNotification {
+                thread_id: "thread".into(),
+                turn_id: "live".into(),
+                completed_at_ms: 0,
+                item,
+            },
+        ));
+    }
+    let completed = buffered
+        .snapshot()
+        .events
+        .into_iter()
+        .filter_map(|event| match event {
+            ThreadBufferedEvent::Notification(notification) => match *notification {
+                ServerNotification::ItemCompleted(n) => Some(n.item),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completed, visible);
+}
+
 #[tokio::test]
 async fn evicted_voice_marker_survives_widget_snapshot_for_late_reasoning() {
     let thread_id = ThreadId::new();

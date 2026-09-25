@@ -31,16 +31,27 @@ fn is_voice_handoff_item(item: &ThreadItem) -> bool {
         if crate::chatwidget::realtime_delegation_input(content).is_some())
 }
 
-fn hide_private_items_after_voice_handoff(items: &mut Vec<ThreadItem>, delegated: bool) {
+fn is_ordinary_user_item(item: &ThreadItem) -> bool {
+    matches!(item, ThreadItem::UserMessage { .. }) && !is_voice_handoff_item(item)
+}
+
+/// Hides voice-private items as live handling does: the `realtime` trigger
+/// starts the turn as voice, a marker hands it to voice and a typed steer hands it back.
+fn hide_private_items_after_voice_handoff(
+    items: &mut Vec<ThreadItem>,
+    triggered: bool,
+    delegated: bool,
+) {
     let has_marker = items.iter().any(is_voice_handoff_item);
     // An evicted marker leaves no reliable order, so hide private items
     // conservatively. A present marker lets earlier typed output survive.
-    let mut voice_started = delegated && !has_marker;
+    let order_unknown = delegated && !triggered && !has_marker;
+    let mut voice_owned = triggered || order_unknown;
     items.retain(|item| {
-        if is_voice_handoff_item(item) {
-            voice_started = true;
+        if !order_unknown {
+            voice_owned = crate::chatwidget::realtime_voice_owns_turn_after(item, voice_owned);
         }
-        !voice_started || !crate::chatwidget::is_private_realtime_agent_item(item)
+        !voice_owned || !crate::chatwidget::is_private_realtime_agent_item(item)
     });
 }
 
@@ -396,9 +407,29 @@ impl ThreadEventStore {
             .map(|turn| turn.id.clone())
             .chain(self.delegated_turns.iter().cloned())
             .collect::<std::collections::HashSet<_>>();
+        let mut triggered = std::collections::HashSet::new();
         for turn in &mut snapshot.turns {
-            hide_private_items_after_voice_handoff(&mut turn.items, delegated.contains(&turn.id));
+            let turn_triggered = crate::chatwidget::is_realtime_triggered_turn(turn);
+            if turn_triggered {
+                triggered.insert(turn.id.clone());
+            }
+            hide_private_items_after_voice_handoff(
+                &mut turn.items,
+                turn_triggered,
+                delegated.contains(&turn.id),
+            );
         }
+        triggered.extend(snapshot.events.iter().filter_map(|event| match event {
+            ThreadBufferedEvent::Notification(notification) => match notification.as_ref() {
+                ServerNotification::TurnStarted(n)
+                    if crate::chatwidget::is_realtime_triggered_turn(&n.turn) =>
+                {
+                    Some(n.turn.id.clone())
+                }
+                _ => None,
+            },
+            _ => None,
+        }));
         let buffered_markers = snapshot
             .events
             .iter()
@@ -415,8 +446,10 @@ impl ThreadEventStore {
                 _ => None,
             })
             .collect::<std::collections::HashSet<_>>();
+        // A triggered turn starts as voice even when its marker is also buffered.
         let mut voice_started = delegated
-            .difference(&buffered_markers)
+            .iter()
+            .filter(|turn_id| triggered.contains(*turn_id) || !buffered_markers.contains(*turn_id))
             .cloned()
             .collect::<std::collections::HashSet<_>>();
         let mut typed_items = self
@@ -439,6 +472,10 @@ impl ThreadEventStore {
                     if crate::chatwidget::is_realtime_triggered_turn(&n.turn) =>
                 {
                     voice_started.insert(n.turn.id.clone());
+                }
+                // A typed steer returns later output to typed input, as live handling does.
+                ServerNotification::ItemStarted(n) if is_ordinary_user_item(&n.item) => {
+                    voice_started.remove(&n.turn_id);
                 }
                 ServerNotification::ItemStarted(n) => {
                     if let ThreadItem::AgentMessage { id, .. } | ThreadItem::Reasoning { id, .. } =
@@ -480,8 +517,11 @@ impl ThreadEventStore {
                     if delegated.contains(&n.turn.id)
                         || crate::chatwidget::is_realtime_triggered_turn(&n.turn) =>
                 {
+                    let turn_triggered = crate::chatwidget::is_realtime_triggered_turn(&n.turn)
+                        || triggered.contains(&n.turn.id);
                     hide_private_items_after_voice_handoff(
                         &mut n.turn.items,
+                        turn_triggered,
                         /*delegated*/ true,
                     );
                     true

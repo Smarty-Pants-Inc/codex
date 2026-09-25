@@ -360,6 +360,7 @@ pub(crate) use realtime::is_private_realtime_agent_item;
 pub(crate) use realtime::is_realtime_triggered_turn;
 pub(crate) use realtime::realtime_delegation_display_text;
 pub(crate) use realtime::realtime_delegation_input;
+pub(crate) use realtime::realtime_voice_owns_turn_after;
 #[cfg(test)]
 pub(crate) use realtime::tests::activate_voice_for_thread;
 #[cfg(test)]

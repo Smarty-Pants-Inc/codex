@@ -323,13 +323,10 @@ impl ChatWidget {
         self.transcript.reset_copy_history();
         self.transcript.reset_turn_flags();
         for turn in retained_turns {
-            let mut replaying_delegation = false;
+            let mut replaying_delegation = realtime::is_realtime_triggered_turn(turn);
             for item in &turn.items {
-                if matches!(item, ThreadItem::UserMessage { content, .. }
-                    if realtime::realtime_delegation_input(content).is_some())
-                {
-                    replaying_delegation = true;
-                }
+                replaying_delegation =
+                    realtime::realtime_voice_owns_turn_after(item, replaying_delegation);
                 if replaying_delegation && realtime::is_private_realtime_agent_item(item) {
                     continue;
                 }

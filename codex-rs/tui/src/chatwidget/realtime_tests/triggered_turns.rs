@@ -135,6 +135,105 @@ async fn realtime_trigger_and_marker_on_one_turn_count_the_delegation_once() {
 }
 
 #[tokio::test]
+async fn realtime_trigger_then_tail_flush_marker_does_not_speak() {
+    let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
+    let thread_id = activate_voice(&mut chat);
+    let turn_id = "triggered-tail-flush-turn";
+    let input_generation = chat.realtime_conversation.input_generation;
+
+    start_turn(&mut chat, thread_id, turn_id, Some("realtime"));
+    let marker = user_item(
+        "<realtime_delegation><source>transcript_tail_flush</source><input>late tail</input></realtime_delegation>",
+    );
+    start_item(&mut chat, thread_id, turn_id, marker.clone());
+    complete_item(&mut chat, thread_id, turn_id, marker);
+
+    // The marker keeps the trigger's generation but removes its speech permission.
+    assert_eq!(
+        chat.realtime_conversation.input_generation,
+        input_generation
+    );
+    assert!(matches!(
+        chat.realtime_conversation.turn_origins.get(turn_id),
+        Some(RealtimeTurnOrigin::Delegated {
+            may_speak: false,
+            input_generation: generation,
+        }) if *generation == input_generation
+    ));
+    complete_answer(&mut chat, thread_id, turn_id);
+    assert_eq!(spoken_texts(&mut ops), Vec::<String>::new());
+    let history = history_text(&mut chat, &mut events);
+    assert!(history.contains("Spoken answer"), "{history}");
+    assert!(!history.contains("private voice work"), "{history}");
+}
+
+#[tokio::test]
+async fn replay_of_triggered_turn_keeps_typed_steer_output_visible() {
+    let (mut chat, _sender, mut events, _ops) = make_chatwidget_manual_with_sender().await;
+    chat.thread_id = Some(ThreadId::new());
+    let reasoning = |id: &str, summary: &str| ThreadItem::Reasoning {
+        id: id.into(),
+        summary: vec![summary.into()],
+        content: Vec::new(),
+    };
+    chat.replay_thread_turns(
+        vec![Turn {
+            id: "triggered-then-typed".into(),
+            items: vec![
+                agent_item(
+                    "voice-update",
+                    "Private voice commentary",
+                    Some(MessagePhase::Commentary),
+                ),
+                reasoning("voice-reasoning", "Private voice reasoning"),
+                user_item("Typed steer"),
+                agent_item(
+                    "typed-update",
+                    "Checking the typed steer",
+                    Some(MessagePhase::Commentary),
+                ),
+                reasoning("typed-reasoning", "Typed reasoning summary"),
+                user_item(
+                    "<realtime_delegation><input>spoken correction</input></realtime_delegation>",
+                ),
+                agent_item(
+                    "later-voice-update",
+                    "Private voice follow-up",
+                    Some(MessagePhase::Commentary),
+                ),
+            ],
+            items_view: TurnItemsView::Full,
+            status: TurnStatus::Completed,
+            error: None,
+            started_at: None,
+            completed_at: None,
+            duration_ms: None,
+            turn_trigger: Some("realtime".into()),
+        }],
+        ReplayKind::ThreadSnapshot,
+    );
+    chat.flush_answer_stream_with_separator();
+    commit_realtime_history_events(&mut chat, &mut events);
+
+    let history = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => Some(
+                cell.transcript_lines(/*width*/ 80)
+                    .into_iter()
+                    .map(|line| line.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(history.contains("Checking the typed steer"), "{history}");
+    assert!(history.contains("Typed reasoning summary"), "{history}");
+    assert!(!history.contains("Private voice"), "{history}");
+}
+
+#[tokio::test]
 async fn turn_without_trigger_or_marker_stays_typed() {
     let (mut chat, _sender, mut events, mut ops) = make_chatwidget_manual_with_sender().await;
     let thread_id = activate_voice(&mut chat);

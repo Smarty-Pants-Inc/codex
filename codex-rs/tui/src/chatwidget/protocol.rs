@@ -545,10 +545,14 @@ impl ChatWidget {
             ThreadItem::UserMessage { content, .. } if replay_kind.is_none() => {
                 self.note_realtime_user_item_started(&notification.turn_id, &content);
             }
-            ThreadItem::UserMessage { content, .. }
-                if realtime::realtime_delegation_input(&content).is_some() =>
-            {
-                self.remember_realtime_delegated_reasoning_turn(&notification.turn_id);
+            ThreadItem::UserMessage { content, .. } => {
+                // Replay mirrors live ownership: a marker hands the turn to voice
+                // and a typed steer hands it back.
+                if realtime::realtime_delegation_input(&content).is_some() {
+                    self.remember_realtime_delegated_reasoning_turn(&notification.turn_id);
+                } else {
+                    self.forget_realtime_delegated_reasoning_turn(&notification.turn_id);
+                }
             }
             ThreadItem::AgentMessage { id, .. } if replay_kind.is_none() => {
                 self.is_realtime_delegated_agent_item(&notification.turn_id, &id);
