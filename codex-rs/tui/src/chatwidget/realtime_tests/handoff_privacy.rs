@@ -1,6 +1,7 @@
 //! Typed and spoken steering preserve ownership and private reasoning boundaries.
 
 use super::*;
+use codex_app_server_protocol::TurnStartedNotification;
 use pretty_assertions::assert_eq;
 
 fn complete_stale_handoff(chat: &mut ChatWidget, thread_id: ThreadId, question: &str) {
@@ -354,13 +355,37 @@ async fn typed_agent_item_completes_visibly_after_voice_handoff() {
 
 #[tokio::test]
 async fn stale_voice_handoff_after_newer_typed_input_is_never_spoken() {
-    let (mut chat, _sender, _events, mut ops) = make_chatwidget_manual_with_sender().await;
-    let thread_id = activate_voice(&mut chat);
-    chat.on_realtime_transcript_done("user".to_string(), "How are you doing".to_string());
-    chat.note_realtime_typed_input("what's the best pizza in new york?");
-    complete_stale_handoff(&mut chat, thread_id, "How are you doing");
+    for turn_trigger in [None, Some("realtime")] {
+        let (mut chat, _sender, _events, mut ops) = make_chatwidget_manual_with_sender().await;
+        let thread_id = activate_voice(&mut chat);
+        chat.on_realtime_transcript_done("user".to_string(), "How are you doing".to_string());
+        chat.note_realtime_typed_input("what's the best pizza in new york?");
+        // The trigger provisionally marks the latest input as voice. The stale
+        // marker that follows must still be judged against the typed correction.
+        if let Some(turn_trigger) = turn_trigger {
+            chat.handle_server_notification(
+                ServerNotification::TurnStarted(TurnStartedNotification {
+                    thread_id: thread_id.to_string(),
+                    turn: Turn {
+                        id: "stale-turn".to_string(),
+                        items: Vec::new(),
+                        items_view: TurnItemsView::Full,
+                        status: TurnStatus::InProgress,
+                        error: None,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: None,
+                        turn_trigger: Some(turn_trigger.to_string()),
+                    },
+                }),
+                /*replay_kind*/ None,
+            );
+        }
+        complete_stale_handoff(&mut chat, thread_id, "How are you doing");
 
-    assert!(ops.try_recv().is_err());
+        assert!(ops.try_recv().is_err(), "turn trigger: {turn_trigger:?}");
+        assert!(!chat.realtime_conversation.latest_input_was_voice);
+    }
 }
 
 #[tokio::test]

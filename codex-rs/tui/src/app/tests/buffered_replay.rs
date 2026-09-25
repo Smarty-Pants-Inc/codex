@@ -589,6 +589,137 @@ fn snapshot_keeps_typed_steer_output_in_a_triggered_turn() {
 }
 
 #[tokio::test]
+async fn voice_commentary_that_completes_after_a_typed_steer_stays_private_on_replay() {
+    let thread_id = ThreadId::new();
+    let commentary = ThreadItem::AgentMessage {
+        id: "voice-commentary".into(),
+        text: "Private voice commentary".into(),
+        phase: Some(codex_protocol::models::MessagePhase::Commentary),
+        questions: None,
+        memory_citation: None,
+        delivery: None,
+    };
+    let steer = ThreadItem::UserMessage {
+        id: "steer".into(),
+        client_id: None,
+        content: vec![codex_app_server_protocol::UserInput::Text {
+            text: "Typed steer".into(),
+            text_elements: Vec::new(),
+        }],
+    };
+    let mut store = ThreadEventStore::new(/*capacity*/ 16);
+    store.push_notification(ServerNotification::TurnStarted(TurnStartedNotification {
+        thread_id: thread_id.to_string(),
+        turn: Turn {
+            turn_trigger: Some("realtime".into()),
+            ..test_turn("voice-turn", TurnStatus::InProgress, Vec::new())
+        },
+    }));
+    // The commentary starts while voice owns the turn and completes after the typed steer.
+    for item in [commentary.clone(), steer] {
+        store.push_notification(ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: thread_id.to_string(),
+            turn_id: "voice-turn".into(),
+            started_at_ms: 0,
+            item,
+        }));
+    }
+    store.push_notification(ServerNotification::ItemCompleted(
+        ItemCompletedNotification {
+            thread_id: thread_id.to_string(),
+            turn_id: "voice-turn".into(),
+            completed_at_ms: 0,
+            item: commentary,
+        },
+    ));
+
+    // Switch away and back.
+    let mut app = make_test_app().await;
+    let (widget, _sender, mut events, _ops) =
+        crate::chatwidget::tests::make_chatwidget_manual_with_sender().await;
+    app.active_thread_id = Some(thread_id);
+    app.replace_chat_widget(widget);
+    app.replay_thread_snapshot(store.snapshot(), /*resume_restored_queue*/ false);
+    let rendered = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => {
+                Some(lines_to_single_string(&cell.transcript_lines(/*width*/ 80)))
+            }
+            _ => None,
+        })
+        .collect::<String>();
+    assert!(!rendered.contains("Private voice commentary"), "{rendered}");
+}
+
+#[test]
+fn buffered_output_continues_from_the_saved_turns_final_owner() {
+    let commentary = |id: &str, text: &str| ThreadItem::AgentMessage {
+        id: id.into(),
+        text: text.into(),
+        phase: Some(codex_protocol::models::MessagePhase::Commentary),
+        questions: None,
+        memory_citation: None,
+        delivery: None,
+    };
+    let steer = ThreadItem::UserMessage {
+        id: "steer".into(),
+        client_id: None,
+        content: vec![codex_app_server_protocol::UserInput::Text {
+            text: "Typed steer".into(),
+            text_elements: Vec::new(),
+        }],
+    };
+    let typed = commentary("typed", "Typed commentary after the steer");
+    let mut store = ThreadEventStore::new(/*capacity*/ 2);
+    store.set_turns(vec![Turn {
+        turn_trigger: Some("realtime".into()),
+        ..test_turn(
+            "shared",
+            TurnStatus::InProgress,
+            vec![
+                commentary("voice", "Voice-private commentary"),
+                steer.clone(),
+            ],
+        )
+    }]);
+    // The typed item's start leaves the bounded buffer before the switch.
+    let typed_delta = delta("thread", "shared", "typed");
+    let typed_completed = ServerNotification::ItemCompleted(ItemCompletedNotification {
+        thread_id: "thread".into(),
+        turn_id: "shared".into(),
+        completed_at_ms: 0,
+        item: typed.clone(),
+    });
+    for notification in [
+        ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: "thread".into(),
+            turn_id: "shared".into(),
+            started_at_ms: 0,
+            item: typed,
+        }),
+        typed_delta.clone(),
+        typed_completed.clone(),
+    ] {
+        store.push_notification(notification);
+    }
+
+    let snapshot = store.snapshot();
+    assert_eq!(snapshot.turns[0].items, vec![steer]);
+    let events = snapshot
+        .events
+        .into_iter()
+        .map(|event| match event {
+            ThreadBufferedEvent::Notification(notification) => *notification,
+            other => panic!("unexpected event: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        serde_json::to_value(events).unwrap(),
+        serde_json::to_value(vec![typed_delta, typed_completed]).unwrap()
+    );
+}
+
+#[tokio::test]
 async fn evicted_voice_marker_survives_widget_snapshot_for_late_reasoning() {
     let thread_id = ThreadId::new();
     let mut store = ThreadEventStore::new(/*capacity*/ 1);

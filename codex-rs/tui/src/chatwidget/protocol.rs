@@ -84,8 +84,12 @@ impl ChatWidget {
                         MisalignmentTurnSource::ServerNotification,
                     );
                 }
-                if realtime::is_realtime_triggered_turn(&notification.turn) {
-                    self.note_realtime_triggered_turn_started(&notification.turn.id, replay_kind);
+                self.realtime_conversation
+                    .item_owners
+                    .note_turn_started(&notification.turn);
+                if replay_kind.is_none() && realtime::is_realtime_triggered_turn(&notification.turn)
+                {
+                    self.note_realtime_triggered_turn_started(&notification.turn.id);
                 }
                 self.turn_lifecycle.last_turn_id = Some(notification.turn.id);
                 self.last_non_retry_error = None;
@@ -106,12 +110,14 @@ impl ChatWidget {
             }
             ServerNotification::AgentMessageDelta(notification) => {
                 self.restore_realtime_transcripts_before_turn(&notification.turn_id);
-                if !self.is_realtime_delegated_reasoning_turn(&notification.turn_id)
-                    && (from_replay
-                        || !self.is_realtime_delegated_agent_item(
-                            &notification.turn_id,
-                            &notification.item_id,
-                        ))
+                if !self.is_realtime_delegated_reasoning_item(
+                    &notification.turn_id,
+                    &notification.item_id,
+                ) && (from_replay
+                    || !self.is_realtime_delegated_agent_item(
+                        &notification.turn_id,
+                        &notification.item_id,
+                    ))
                 {
                     self.on_agent_message_delta(notification.delta);
                 }
@@ -437,8 +443,9 @@ impl ChatWidget {
                                 phase: Some(MessagePhase::FinalAnswer) | None,
                                 ..
                             } if !self
-                                .is_realtime_delegated_reasoning_turn(&notification.turn.id)
-                                || !realtime::is_private_realtime_agent_item(item) =>
+                                .realtime_conversation
+                                .item_owners
+                                .hides(&notification.turn.id, item) =>
                             {
                                 Some((item.clone(), id.clone(), text.clone()))
                             }
@@ -541,33 +548,17 @@ impl ChatWidget {
         replay_kind: Option<ReplayKind>,
     ) {
         self.restore_realtime_transcripts_before_turn(&notification.turn_id);
+        self.realtime_conversation
+            .item_owners
+            .note_item(&notification.turn_id, &notification.item);
         match notification.item {
             ThreadItem::UserMessage { content, .. } if replay_kind.is_none() => {
                 self.note_realtime_user_item_started(&notification.turn_id, &content);
-            }
-            ThreadItem::UserMessage { content, .. } => {
-                // Replay mirrors live ownership: a marker hands the turn to voice
-                // and a typed steer hands it back.
-                if realtime::realtime_delegation_input(&content).is_some() {
-                    self.remember_realtime_delegated_reasoning_turn(&notification.turn_id);
-                } else {
-                    self.forget_realtime_delegated_reasoning_turn(&notification.turn_id);
-                }
             }
             ThreadItem::AgentMessage { id, .. } if replay_kind.is_none() => {
                 self.is_realtime_delegated_agent_item(&notification.turn_id, &id);
             }
             ThreadItem::Reasoning { id, .. } => {
-                if replay_kind.is_none()
-                    && !self.is_realtime_delegated_reasoning_turn(&notification.turn_id)
-                {
-                    // A later voice handoff can steer this turn without making an
-                    // already-started typed reasoning item private.
-                    self.realtime_conversation
-                        .agent_items
-                        .entry((notification.turn_id.clone(), id.clone()))
-                        .or_insert(realtime::RealtimeAgentItemOrigin::Typed);
-                }
                 if !matches!(replay_kind, Some(ReplayKind::ResumeInitialMessages))
                     && !self.is_realtime_delegated_reasoning_item(&notification.turn_id, &id)
                 {
@@ -635,15 +626,10 @@ impl ChatWidget {
         replay_kind: Option<ReplayKind>,
     ) {
         self.restore_realtime_transcripts_before_turn(&notification.turn_id);
-        if replay_kind.is_none()
-            && self.is_realtime_delegated_reasoning_turn(&notification.turn_id)
-            && realtime::is_private_realtime_agent_item(&notification.item)
-            && !matches!(&notification.item, ThreadItem::AgentMessage { id, .. } | ThreadItem::Reasoning { id, .. }
-            if matches!(
-                self.realtime_conversation.agent_items.get(&(notification.turn_id.clone(), id.clone())),
-                Some(realtime::RealtimeAgentItemOrigin::Typed)
-            ))
-        {
+        // Live and replayed completions read the owner recorded when the item started.
+        let owners = &mut self.realtime_conversation.item_owners;
+        owners.note_item(&notification.turn_id, &notification.item);
+        if owners.hides(&notification.turn_id, &notification.item) {
             return;
         }
         // Buffered live notifications can introduce questions; historical turn replay cannot.

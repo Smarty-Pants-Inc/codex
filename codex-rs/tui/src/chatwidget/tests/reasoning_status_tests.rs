@@ -151,7 +151,23 @@ async fn voice_handoff_preserves_typed_reasoning_and_ignores_private_items() {
     handle_agent_reasoning_started(&mut chat, "typed");
     delta(&mut chat, "typed", "**Checking repository**");
 
-    chat.remember_realtime_delegated_reasoning_turn("turn-1");
+    chat.handle_server_notification(
+        ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            started_at_ms: 0,
+            item: AppServerThreadItem::UserMessage {
+                id: "voice-handoff".to_string(),
+                client_id: None,
+                content: vec![AppServerUserInput::Text {
+                    text: "<realtime_delegation><input>spoken</input></realtime_delegation>"
+                        .to_string(),
+                    text_elements: Vec::new(),
+                }],
+            },
+        }),
+        /*replay_kind*/ None,
+    );
     handle_agent_reasoning_started(&mut chat, "private");
     delta(&mut chat, "private", "**Private voice reasoning**");
     complete(&mut chat, "private");

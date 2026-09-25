@@ -17,9 +17,8 @@ impl ChatWidget {
         let turn_id = started.turn_id;
         let id = started.item.id().to_string();
         self.realtime_conversation
-            .agent_items
-            .entry((turn_id, id.clone()))
-            .or_insert(realtime::RealtimeAgentItemOrigin::Typed);
+            .item_owners
+            .note_typed_item(&turn_id, &id);
         self.on_reasoning_item_started(id);
         self.status_state.reasoning_recovered_after_refresh = true;
         if let Some((summary, content)) = parts {
@@ -124,7 +123,11 @@ impl ChatWidget {
             {
                 continue;
             }
-            let triggered = realtime::is_realtime_triggered_turn(&turn);
+            // Record each item's owner as it started; voice-private items stay hidden.
+            let visibility = self
+                .realtime_conversation
+                .item_owners
+                .saved_item_visibility(&turn);
             let Turn {
                 id: turn_id,
                 items_view: _,
@@ -136,24 +139,7 @@ impl ChatWidget {
                 duration_ms,
                 turn_trigger,
             } = turn;
-            // Live output ownership: the trigger starts the turn as voice, a
-            // marker hands it to voice, and a typed steer hands it back.
-            let voice_owns_end = items.iter().fold(triggered, |voice_owned, item| {
-                realtime::realtime_voice_owns_turn_after(item, voice_owned)
-            });
             if matches!(status, TurnStatus::InProgress) {
-                if voice_owns_end {
-                    self.remember_realtime_delegated_reasoning_turn(&turn_id);
-                } else if triggered
-                    || items.iter().any(|item| {
-                        matches!(item, ThreadItem::UserMessage { content, .. }
-                            if realtime::realtime_delegation_input(content).is_some())
-                    })
-                {
-                    // The items end with a typed steer. Without a trigger or marker they
-                    // cannot overrule a guard that an evicted buffered marker set.
-                    self.forget_realtime_delegated_reasoning_turn(&turn_id);
-                }
                 self.warning_display_state.startup_complete = true;
                 self.turn_lifecycle.last_turn_id = Some(turn_id.clone());
                 self.last_non_retry_error = None;
@@ -166,13 +152,8 @@ impl ChatWidget {
                     ThreadItem::Reasoning { id, .. } => Some(id.clone()),
                     _ => None,
                 });
-            let mut replaying_delegation = triggered;
-            for item in items {
-                replaying_delegation =
-                    realtime::realtime_voice_owns_turn_after(&item, replaying_delegation);
-                // Voice and typed input can steer each other's turn. Commentary
-                // and reasoning stay with the input that owned the turn when they began.
-                if replaying_delegation && realtime::is_private_realtime_agent_item(&item) {
+            for (item, visible) in items.into_iter().zip(visibility) {
+                if !visible {
                     continue;
                 }
                 if hidden_nested_review_turn && matches!(item, ThreadItem::UserMessage { .. }) {

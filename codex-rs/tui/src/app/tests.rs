@@ -1403,6 +1403,7 @@ async fn replayed_turn_complete_submits_restored_queued_follow_up() {
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
             delegated_turns: Vec::new(),
+            realtime_owners: Default::default(),
             session: None,
             turns: Vec::new(),
             events: vec![ThreadBufferedEvent::Notification(Box::new(
@@ -1458,6 +1459,7 @@ async fn replay_only_thread_keeps_restored_queue_visible() {
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
             delegated_turns: Vec::new(),
+            realtime_owners: Default::default(),
             session: None,
             turns: Vec::new(),
             events: vec![ThreadBufferedEvent::Notification(Box::new(
@@ -1511,6 +1513,7 @@ async fn replay_thread_snapshot_keeps_queue_when_running_state_only_comes_from_s
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
             delegated_turns: Vec::new(),
+            realtime_owners: Default::default(),
             session: None,
             turns: Vec::new(),
             events: vec![],
@@ -1562,6 +1565,7 @@ async fn replay_thread_snapshot_in_progress_turn_restores_running_queue_state() 
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
             delegated_turns: Vec::new(),
+            realtime_owners: Default::default(),
             session: None,
             turns: vec![test_turn("turn-1", TurnStatus::InProgress, Vec::new())],
             events: Vec::new(),
@@ -1593,6 +1597,7 @@ async fn replay_thread_snapshot_in_progress_turn_restores_running_state_without_
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
             delegated_turns: Vec::new(),
+            realtime_owners: Default::default(),
             session: None,
             turns: vec![test_turn("turn-1", TurnStatus::InProgress, Vec::new())],
             events: Vec::new(),
@@ -1637,6 +1642,7 @@ async fn replay_thread_snapshot_does_not_submit_queue_before_replay_catches_up()
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
             delegated_turns: Vec::new(),
+            realtime_owners: Default::default(),
             session: None,
             turns: Vec::new(),
             events: vec![
@@ -1780,6 +1786,7 @@ async fn replay_thread_snapshot_restores_collaboration_mode_for_draft_submit() {
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
             delegated_turns: Vec::new(),
+            realtime_owners: Default::default(),
             session: None,
             turns: Vec::new(),
             events: vec![],
@@ -1866,6 +1873,7 @@ async fn replay_thread_snapshot_restores_collaboration_mode_without_input() {
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
             delegated_turns: Vec::new(),
+            realtime_owners: Default::default(),
             session: None,
             turns: Vec::new(),
             events: vec![],
@@ -1926,6 +1934,7 @@ async fn replayed_interrupted_turn_restores_queued_input_to_composer() {
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
             delegated_turns: Vec::new(),
+            realtime_owners: Default::default(),
             session: None,
             turns: Vec::new(),
             events: vec![ThreadBufferedEvent::Notification(Box::new(
@@ -3834,6 +3843,7 @@ async fn replay_snapshot_with_pending_request_retains_warnings_without_covering_
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
             delegated_turns: Vec::new(),
+            realtime_owners: Default::default(),
             session: Some(test_thread_session(thread_id, test_path_buf("/tmp/main"))),
             turns: Vec::new(),
             events: vec![
@@ -4223,6 +4233,7 @@ async fn replayed_file_change_approval_recovers_snapshot_changes() {
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
             delegated_turns: Vec::new(),
+            realtime_owners: Default::default(),
             session: Some(test_thread_session(thread_id, cwd.clone().into_path_buf())),
             turns: vec![test_turn(
                 "turn-replayed-approval",
@@ -5189,6 +5200,7 @@ async fn side_thread_snapshot_does_not_refresh_from_fork_history() {
 
     let snapshot = ThreadEventSnapshot {
         delegated_turns: Vec::new(),
+        realtime_owners: Default::default(),
         session: Some(ThreadSessionState {
             rollout_path: None,
             ..test_thread_session(side_thread_id, test_path_buf("/tmp/side"))
@@ -5219,6 +5231,7 @@ async fn side_thread_snapshot_skips_session_header_preamble() {
 
     let snapshot = ThreadEventSnapshot {
         delegated_turns: Vec::new(),
+        realtime_owners: Default::default(),
         session: Some(ThreadSessionState {
             windows_sandbox_host: crate::app::WindowsSandboxHost::Local,
             forked_from_id: Some(parent_thread_id),
@@ -5397,6 +5410,7 @@ async fn active_side_thread_renders_live_mcp_startup_notifications() {
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
             delegated_turns: Vec::new(),
+            realtime_owners: Default::default(),
             session: Some(test_thread_session(
                 side_thread_id,
                 test_path_buf("/tmp/side"),
@@ -6546,6 +6560,7 @@ async fn snapshot_thread_switch_discards_queued_previous_history() -> Result<()>
         next_thread_id,
         ThreadEventSnapshot {
             delegated_turns: Vec::new(),
+            realtime_owners: Default::default(),
             session: Some(test_thread_session(
                 next_thread_id,
                 test_path_buf("/tmp/next"),
@@ -8556,6 +8571,7 @@ async fn replay_thread_snapshot_replays_turn_history_in_order() {
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
             delegated_turns: Vec::new(),
+            realtime_owners: Default::default(),
             session: Some(test_thread_session(
                 thread_id,
                 test_path_buf("/home/user/project"),
@@ -8676,6 +8692,7 @@ async fn replace_chat_widget_reseeds_collab_agent_metadata_for_replay() {
     app.replay_thread_snapshot(
         ThreadEventSnapshot {
             delegated_turns: Vec::new(),
+            realtime_owners: Default::default(),
             session: None,
             turns: Vec::new(),
             events: vec![ThreadBufferedEvent::Notification(Box::new(
@@ -8753,6 +8770,7 @@ async fn refreshed_snapshot_session_persists_resumed_turns() {
     };
     let mut snapshot = ThreadEventSnapshot {
         delegated_turns: Vec::new(),
+        realtime_owners: Default::default(),
         session: Some(initial_session),
         turns: Vec::new(),
         events: Vec::new(),

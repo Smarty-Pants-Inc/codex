@@ -91,7 +91,11 @@ async fn realtime_triggered_turn_is_delegated_and_speaks_its_final_answer() {
 
     start_turn(&mut chat, thread_id, turn_id, Some("realtime"));
 
-    assert!(chat.is_realtime_delegated_reasoning_turn(turn_id));
+    assert!(
+        chat.realtime_conversation
+            .item_owners
+            .voice_owns_turn(turn_id)
+    );
     assert!(matches!(
         chat.realtime_conversation.turn_origins.get(turn_id),
         Some(RealtimeTurnOrigin::Delegated {
@@ -241,7 +245,12 @@ async fn turn_without_trigger_or_marker_stays_typed() {
 
     start_turn(&mut chat, thread_id, turn_id, /*turn_trigger*/ None);
 
-    assert!(!chat.is_realtime_delegated_reasoning_turn(turn_id));
+    assert!(
+        !chat
+            .realtime_conversation
+            .item_owners
+            .voice_owns_turn(turn_id)
+    );
     assert!(
         chat.realtime_conversation
             .turn_origins

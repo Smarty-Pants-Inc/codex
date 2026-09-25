@@ -1733,6 +1733,8 @@ impl App {
             store.set_session(session.clone(), turns.clone());
             store.rebase_buffer_after_session_refresh();
             snapshot.active_reasoning_item = store.active_reasoning_item.clone();
+            // Replay continues from the refreshed turns' output ownership.
+            snapshot.realtime_owners = store.snapshot().realtime_owners;
         }
         snapshot.session = Some(session);
         snapshot.turns = turns;
@@ -1875,10 +1877,8 @@ impl App {
         }
         let retained_assistant_captions =
             self.prepare_realtime_transcript_replay(replayed_voice_texts);
-        for turn_id in &snapshot.delegated_turns {
-            self.chat_widget
-                .remember_realtime_delegated_reasoning_turn(turn_id);
-        }
+        self.chat_widget
+            .set_realtime_item_owners(snapshot.realtime_owners);
         let recovered_input = snapshot
             .input_state
             .as_ref()

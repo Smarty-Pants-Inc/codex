@@ -60,6 +60,7 @@ impl ThreadEventStore {
             };
             match removed {
                 ThreadBufferedEvent::Notification(notification) => {
+                    self.buffer_start_owners.note_notification(&notification);
                     if let ServerNotification::AgentMessageDelta(delta) = notification.as_ref() {
                         self.buffered_agent_message_delta_bytes = self
                             .buffered_agent_message_delta_bytes

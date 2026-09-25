@@ -2,8 +2,11 @@
 //! Completed captions and both speakers' partials stay bounded across widget replacement.
 //! Interleaved speakers retain separate displays so settled caption text never reanimates.
 
+mod item_owners;
 mod recording_controls;
 mod transcript_replay;
+
+pub(crate) use item_owners::RealtimeItemOwners;
 
 use super::ChatWidget;
 use super::HistoryCell;
@@ -47,7 +50,7 @@ pub(crate) const MAX_TRANSCRIPT_BYTES: usize = 1024;
 const MAX_PENDING_TRANSCRIPT_CELLS: usize = 32;
 pub(crate) const MAX_REPLAY_TRANSCRIPT_CELLS: usize = MAX_PENDING_TRANSCRIPT_CELLS + 2;
 const MAX_PENDING_SPEECH_DELIVERIES: usize = 16;
-const MAX_RETAINED_DELEGATED_REASONING_TURNS: usize = 16;
+const MAX_RETAINED_TRIGGERED_TURNS: usize = 16;
 const MAX_PENDING_SPEECH_ITEM_BYTES: usize = 64 * 1024;
 const MAX_PENDING_SPEECH_TURN_ID_BYTES: usize = 512;
 // Leave room for Core's optional backend prefix within its 1,000-token speech limit.
@@ -124,6 +127,16 @@ enum RealtimeTurnOrigin {
     },
 }
 
+/// A turn already counted from its `realtime` trigger, with the input state before the
+/// trigger. A later marker for the turn checks its freshness against that state, because the
+/// trigger itself marks the latest input as voice.
+#[derive(Debug)]
+struct TriggeredTurn {
+    turn_id: String,
+    input_was_voice: bool,
+    voice_input_fingerprint: Option<(usize, u64)>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum StartupRetry {
     #[default]
@@ -174,10 +187,10 @@ pub(super) struct RealtimeConversationUiState {
     latest_voice_input_fingerprint: Option<(usize, u64)>,
     pending_typed_input: Option<String>,
     turn_origins: HashMap<String, RealtimeTurnOrigin>,
-    delegated_reasoning_turns: VecDeque<String>,
+    pub(super) item_owners: RealtimeItemOwners,
     // Turns already handled from their `realtime` trigger; a later marker for
     // the same turn must not count the delegation again.
-    triggered_turns: VecDeque<String>,
+    triggered_turns: VecDeque<TriggeredTurn>,
     pub(super) agent_items: HashMap<(String, String), RealtimeAgentItemOrigin>,
     pending_speech: VecDeque<PendingRealtimeSpeech>,
 }
@@ -228,17 +241,6 @@ pub(crate) const REALTIME_TURN_TRIGGER: &str = "realtime";
 /// this trigger instead of a `<realtime_delegation>` user item.
 pub(crate) fn is_realtime_triggered_turn(turn: &Turn) -> bool {
     turn.turn_trigger.as_deref() == Some(REALTIME_TURN_TRIGGER)
-}
-
-/// Whether voice owns a turn's private output after `item`, given the owner before it.
-///
-/// Live handling moves the turn to voice on a delegation marker and back to typed input on
-/// an ordinary user message (a typed steer). Other items keep the current owner.
-pub(crate) fn realtime_voice_owns_turn_after(item: &ThreadItem, voice_owned: bool) -> bool {
-    match item {
-        ThreadItem::UserMessage { content, .. } => realtime_delegation_input(content).is_some(),
-        _ => voice_owned,
-    }
 }
 
 pub(crate) fn is_private_realtime_agent_item(item: &ThreadItem) -> bool {
@@ -607,27 +609,29 @@ impl ChatWidget {
             self.realtime_conversation.phase,
             RealtimeConversationPhase::Starting | RealtimeConversationPhase::Active
         ) {
-            if realtime_delegation_input(items).is_some() {
-                self.remember_realtime_delegated_reasoning_turn(turn_id);
-            } else {
-                self.forget_realtime_delegated_reasoning_turn(turn_id);
-            }
             return;
         }
         let triggered_index = self
             .realtime_conversation
             .triggered_turns
             .iter()
-            .position(|saved| saved == turn_id);
+            .position(|triggered| triggered.turn_id == turn_id);
         if let Some(index) = triggered_index
             && let Some(input) = realtime_delegation_input(items)
+            && let Some(triggered) = self.realtime_conversation.triggered_turns.remove(index)
         {
             // The turn/started trigger already counted this delegation. Later
             // markers for this turn are voice steers and take the usual path.
-            self.realtime_conversation.triggered_turns.remove(index);
+            // The trigger marked the latest input as voice, so judge this marker
+            // against the input state before the trigger. A newer transcript
+            // since then is voice input too.
+            let input_was_voice = triggered.input_was_voice
+                || self.realtime_conversation.latest_voice_input_fingerprint
+                    != triggered.voice_input_fingerprint;
             // Keep the trigger's generation, but a tail-flush or stale marker
             // still must not let the turn answer by voice.
-            if !self.is_fresh_realtime_delegation(items, input) {
+            if !self.is_fresh_realtime_delegation(items, input, input_was_voice) {
+                self.realtime_conversation.latest_input_was_voice = input_was_voice;
                 if let Some(RealtimeTurnOrigin::Delegated { may_speak, .. }) =
                     self.realtime_conversation.turn_origins.get_mut(turn_id)
                 {
@@ -658,7 +662,11 @@ impl ChatWidget {
         if let Some(input) = realtime_delegation_input(items)
             && !matches_local_typed_input
         {
-            let fresh_voice_input = self.is_fresh_realtime_delegation(items, input);
+            let fresh_voice_input = self.is_fresh_realtime_delegation(
+                items,
+                input,
+                self.realtime_conversation.latest_input_was_voice,
+            );
             self.note_realtime_delegated_turn(turn_id, fresh_voice_input);
             return;
         }
@@ -670,17 +678,21 @@ impl ChatWidget {
                 input_generation: self.realtime_conversation.input_generation,
             },
         );
-        self.forget_realtime_delegated_reasoning_turn(turn_id);
     }
 
     /// A delegation marker is fresh voice input unless it flushes the transcript
     /// tail or repeats voice input that typing already superseded.
-    fn is_fresh_realtime_delegation(&self, items: &[UserInput], input: &str) -> bool {
+    fn is_fresh_realtime_delegation(
+        &self,
+        items: &[UserInput],
+        input: &str,
+        input_was_voice: bool,
+    ) -> bool {
         let transcript_tail_flush = items.iter().any(|item| {
             matches!(item, UserInput::Text { text, .. }
                 if text.contains("<source>transcript_tail_flush</source>"))
         });
-        let stale_voice_input = !self.realtime_conversation.latest_input_was_voice
+        let stale_voice_input = !input_was_voice
             && self
                 .realtime_conversation
                 .latest_voice_input_fingerprint
@@ -690,31 +702,33 @@ impl ChatWidget {
         !transcript_tail_flush && !stale_voice_input
     }
 
-    /// Handles a turn that the server started with the `realtime` trigger.
+    /// Handles the speech origin of a live turn that the server started with the
+    /// `realtime` trigger. [`RealtimeItemOwners`] tracks the privacy of its output.
     ///
     /// The trigger carries no delegation text, so the stale-transcript and
-    /// tail-flush checks of the marker path do not apply: the turn is fresh voice input.
-    pub(super) fn note_realtime_triggered_turn_started(
-        &mut self,
-        turn_id: &str,
-        replay_kind: Option<super::ReplayKind>,
-    ) {
-        if replay_kind.is_some()
-            || !matches!(
-                self.realtime_conversation.phase,
-                RealtimeConversationPhase::Starting | RealtimeConversationPhase::Active
-            )
+    /// tail-flush checks of the marker path wait for a marker: until then the turn is
+    /// fresh voice input.
+    pub(super) fn note_realtime_triggered_turn_started(&mut self, turn_id: &str) {
+        if !matches!(
+            self.realtime_conversation.phase,
+            RealtimeConversationPhase::Starting | RealtimeConversationPhase::Active
+        ) || self
+            .realtime_conversation
+            .triggered_turns
+            .iter()
+            .any(|triggered| triggered.turn_id == turn_id)
         {
-            self.remember_realtime_delegated_reasoning_turn(turn_id);
-            return;
-        }
-        let triggered_turns = &mut self.realtime_conversation.triggered_turns;
-        if triggered_turns.iter().any(|saved| saved == turn_id) {
             return;
         }
         if turn_id.len() <= MAX_PENDING_SPEECH_TURN_ID_BYTES {
-            triggered_turns.push_back(turn_id.to_string());
-            if triggered_turns.len() > MAX_RETAINED_DELEGATED_REASONING_TURNS {
+            let triggered = TriggeredTurn {
+                turn_id: turn_id.to_string(),
+                input_was_voice: self.realtime_conversation.latest_input_was_voice,
+                voice_input_fingerprint: self.realtime_conversation.latest_voice_input_fingerprint,
+            };
+            let triggered_turns = &mut self.realtime_conversation.triggered_turns;
+            triggered_turns.push_back(triggered);
+            if triggered_turns.len() > MAX_RETAINED_TRIGGERED_TURNS {
                 triggered_turns.pop_front();
             }
         }
@@ -786,48 +800,12 @@ impl ChatWidget {
                 .entry(turn_id.to_string())
                 .or_insert(delegated_origin);
         }
-        if matches!(
-            self.realtime_conversation.turn_origins.get(turn_id),
-            Some(RealtimeTurnOrigin::Delegated { .. })
-        ) {
-            self.remember_realtime_delegated_reasoning_turn(turn_id);
-        }
     }
 
-    pub(crate) fn remember_realtime_delegated_reasoning_turn(&mut self, turn_id: &str) {
-        if turn_id.len() > 512
-            || self
-                .realtime_conversation
-                .delegated_reasoning_turns
-                .iter()
-                .any(|saved| saved == turn_id)
-        {
-            return;
-        }
-        self.realtime_conversation
-            .delegated_reasoning_turns
-            .push_back(turn_id.to_string());
-        if self.realtime_conversation.delegated_reasoning_turns.len()
-            > MAX_RETAINED_DELEGATED_REASONING_TURNS
-        {
-            self.realtime_conversation
-                .delegated_reasoning_turns
-                .pop_front();
-        }
-    }
-
-    /// A typed steer makes the turn's later reasoning and commentary visible again.
-    pub(super) fn forget_realtime_delegated_reasoning_turn(&mut self, turn_id: &str) {
-        self.realtime_conversation
-            .delegated_reasoning_turns
-            .retain(|saved| saved != turn_id);
-    }
-
-    pub(super) fn is_realtime_delegated_reasoning_turn(&self, turn_id: &str) -> bool {
-        self.realtime_conversation
-            .delegated_reasoning_turns
-            .iter()
-            .any(|saved| saved == turn_id)
+    /// Replaces output ownership with the state that a thread snapshot recorded before
+    /// its buffered events. Those events then replay on top of it.
+    pub(crate) fn set_realtime_item_owners(&mut self, owners: RealtimeItemOwners) {
+        self.realtime_conversation.item_owners = owners;
     }
 
     pub(super) fn is_realtime_delegated_reasoning_item(
@@ -835,13 +813,9 @@ impl ChatWidget {
         turn_id: &str,
         item_id: &str,
     ) -> bool {
-        self.is_realtime_delegated_reasoning_turn(turn_id)
-            && !matches!(
-                self.realtime_conversation
-                    .agent_items
-                    .get(&(turn_id.to_string(), item_id.to_string())),
-                Some(RealtimeAgentItemOrigin::Typed)
-            )
+        self.realtime_conversation
+            .item_owners
+            .voice_owns_item(turn_id, item_id)
     }
 
     pub(super) fn should_hide_realtime_delegation(&self, turn_id: &str) -> bool {
@@ -1304,12 +1278,10 @@ impl ChatWidget {
 
     fn forget_realtime_turn_origin(&mut self, turn_id: &str) {
         self.realtime_conversation.turn_origins.remove(turn_id);
-        self.realtime_conversation
-            .delegated_reasoning_turns
-            .retain(|saved| saved != turn_id);
+        self.realtime_conversation.item_owners.forget_turn(turn_id);
         self.realtime_conversation
             .triggered_turns
-            .retain(|saved| saved != turn_id);
+            .retain(|triggered| triggered.turn_id != turn_id);
         self.realtime_conversation
             .agent_items
             .retain(|(item_turn_id, _), _| item_turn_id != turn_id);
@@ -1935,8 +1907,7 @@ impl ChatWidget {
             std::mem::take(&mut self.realtime_conversation.pending_history_cells);
         let accepted_transcripts =
             std::mem::take(&mut self.realtime_conversation.accepted_transcripts);
-        let delegated_reasoning_turns =
-            std::mem::take(&mut self.realtime_conversation.delegated_reasoning_turns);
+        let item_owners = std::mem::take(&mut self.realtime_conversation.item_owners);
         let had_live_transcript = self
             .realtime_conversation
             .live_transcript_cells()
@@ -1947,7 +1918,7 @@ impl ChatWidget {
             pending_speech: std::mem::take(&mut self.realtime_conversation.pending_speech),
             pending_history_cells,
             accepted_transcripts,
-            delegated_reasoning_turns,
+            item_owners,
             ..RealtimeConversationUiState::default()
         };
         if had_live_transcript {

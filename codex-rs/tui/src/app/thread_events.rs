@@ -12,6 +12,8 @@ use std::borrow::Cow;
 pub(super) struct ThreadEventSnapshot {
     pub(super) session: Option<ThreadSessionState>,
     pub(super) delegated_turns: Vec<String>,
+    /// Output ownership after the saved turns, before the buffered events replay.
+    pub(super) realtime_owners: crate::chatwidget::RealtimeItemOwners,
     pub(super) turns: Vec<Turn>,
     pub(super) events: Vec<ThreadBufferedEvent>,
     pub(super) active_reasoning_item: Option<codex_app_server_protocol::ItemStartedNotification>,
@@ -29,30 +31,6 @@ pub(super) enum ThreadBufferedEvent {
 fn is_voice_handoff_item(item: &ThreadItem) -> bool {
     matches!(item, ThreadItem::UserMessage { content, .. }
         if crate::chatwidget::realtime_delegation_input(content).is_some())
-}
-
-fn is_ordinary_user_item(item: &ThreadItem) -> bool {
-    matches!(item, ThreadItem::UserMessage { .. }) && !is_voice_handoff_item(item)
-}
-
-/// Hides voice-private items as live handling does: the `realtime` trigger
-/// starts the turn as voice, a marker hands it to voice and a typed steer hands it back.
-fn hide_private_items_after_voice_handoff(
-    items: &mut Vec<ThreadItem>,
-    triggered: bool,
-    delegated: bool,
-) {
-    let has_marker = items.iter().any(is_voice_handoff_item);
-    // An evicted marker leaves no reliable order, so hide private items
-    // conservatively. A present marker lets earlier typed output survive.
-    let order_unknown = delegated && !triggered && !has_marker;
-    let mut voice_owned = triggered || order_unknown;
-    items.retain(|item| {
-        if !order_unknown {
-            voice_owned = crate::chatwidget::realtime_voice_owns_turn_after(item, voice_owned);
-        }
-        !voice_owned || !crate::chatwidget::is_private_realtime_agent_item(item)
-    });
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +65,8 @@ pub(super) struct ThreadEventStore {
     pub(super) active: bool,
     pub(super) buffered_agent_message_delta_bytes: usize,
     delegated_turns: VecDeque<String>,
+    // Output ownership where the buffer starts: the saved turns, then evicted events.
+    pub(super) buffer_start_owners: crate::chatwidget::RealtimeItemOwners,
     recap_progress: recap::RecapProgress,
 }
 
@@ -131,6 +111,7 @@ impl ThreadEventStore {
             active: false,
             buffered_agent_message_delta_bytes: 0,
             delegated_turns: VecDeque::new(),
+            buffer_start_owners: Default::default(),
             recap_progress: recap::RecapProgress::default(),
         }
     }
@@ -174,6 +155,11 @@ impl ThreadEventStore {
             .find(|turn| matches!(turn.status, TurnStatus::InProgress))
             .map(|turn| turn.id.clone());
         self.latest_turn_id = turns.last().map(|turn| turn.id.clone());
+        // The saved turns supersede events evicted before them.
+        self.buffer_start_owners = Default::default();
+        for turn in &turns {
+            self.buffer_start_owners.saved_item_visibility(turn);
+        }
         self.turns = turns;
     }
 
@@ -375,6 +361,7 @@ impl ThreadEventStore {
         let mut snapshot = ThreadEventSnapshot {
             session: self.session.clone(),
             delegated_turns: self.delegated_turns.iter().cloned().collect(),
+            realtime_owners: Default::default(),
             turns: self.turns.clone(),
             // Thread switches replay buffered events into a rebuilt ChatWidget. Only replay
             // interactive prompts that are still pending, or answered approvals/input will reappear.
@@ -397,133 +384,66 @@ impl ThreadEventStore {
         if let Some(latest_turn_id) = &self.latest_turn_id {
             replay_filter::omit_resolved_misalignment_errors(&mut snapshot, latest_turn_id);
         }
-        let delegated = snapshot
-            .turns
-            .iter()
-            .filter(|turn| {
-                crate::chatwidget::is_realtime_triggered_turn(turn)
-                    || turn.items.iter().any(is_voice_handoff_item)
-            })
-            .map(|turn| turn.id.clone())
-            .chain(self.delegated_turns.iter().cloned())
-            .collect::<std::collections::HashSet<_>>();
-        let mut triggered = std::collections::HashSet::new();
-        for turn in &mut snapshot.turns {
-            let turn_triggered = crate::chatwidget::is_realtime_triggered_turn(turn);
-            if turn_triggered {
-                triggered.insert(turn.id.clone());
-            }
-            hide_private_items_after_voice_handoff(
-                &mut turn.items,
-                turn_triggered,
-                delegated.contains(&turn.id),
-            );
-        }
-        triggered.extend(snapshot.events.iter().filter_map(|event| match event {
-            ThreadBufferedEvent::Notification(notification) => match notification.as_ref() {
-                ServerNotification::TurnStarted(n)
-                    if crate::chatwidget::is_realtime_triggered_turn(&n.turn) =>
-                {
-                    Some(n.turn.id.clone())
-                }
-                _ => None,
-            },
-            _ => None,
-        }));
-        let buffered_markers = snapshot
+        // Handoffs known only from `delegated_turns`, for example a marker that a
+        // session refresh dropped. Their position among the turn's items is
+        // unknown, so voice owns the turn's output after them.
+        let buffered_handoffs = snapshot
             .events
             .iter()
             .filter_map(|event| match event {
                 ThreadBufferedEvent::Notification(notification) => match notification.as_ref() {
+                    ServerNotification::TurnStarted(n)
+                        if crate::chatwidget::is_realtime_triggered_turn(&n.turn) =>
+                    {
+                        Some(&n.turn.id)
+                    }
                     ServerNotification::ItemStarted(n) if is_voice_handoff_item(&n.item) => {
-                        Some(n.turn_id.clone())
+                        Some(&n.turn_id)
                     }
                     ServerNotification::ItemCompleted(n) if is_voice_handoff_item(&n.item) => {
-                        Some(n.turn_id.clone())
+                        Some(&n.turn_id)
                     }
                     _ => None,
                 },
                 _ => None,
             })
             .collect::<std::collections::HashSet<_>>();
-        // A triggered turn starts as voice even when its marker is also buffered.
-        let mut voice_started = delegated
-            .iter()
-            .filter(|turn_id| triggered.contains(*turn_id) || !buffered_markers.contains(*turn_id))
-            .cloned()
-            .collect::<std::collections::HashSet<_>>();
-        let mut typed_items = self
-            .active_reasoning_item
-            .iter()
-            .map(|started| (started.turn_id.clone(), started.item.id().to_string()))
-            .collect::<std::collections::HashSet<_>>();
+        let mut owners = self.buffer_start_owners.clone();
+        for turn_id in &self.delegated_turns {
+            if !owners.tracks_turn(turn_id) && !buffered_handoffs.contains(turn_id) {
+                owners.note_voice_turn(turn_id);
+            }
+        }
+        // Buffered events continue from each saved turn's final owner, updated by
+        // evicted events, and from the owners its items recorded.
+        for turn in &mut snapshot.turns {
+            owners.retain_visible_items(turn);
+        }
+        if let Some(started) = &self.active_reasoning_item {
+            owners.note_typed_item(&started.turn_id, started.item.id());
+        }
+        snapshot.realtime_owners = owners.clone();
         snapshot.events.retain_mut(|event| {
             let ThreadBufferedEvent::Notification(notification) = event else {
                 return true;
             };
-            match notification.as_ref() {
-                ServerNotification::ItemStarted(n) if is_voice_handoff_item(&n.item) => {
-                    voice_started.insert(n.turn_id.clone());
-                }
-                ServerNotification::ItemCompleted(n) if is_voice_handoff_item(&n.item) => {
-                    voice_started.insert(n.turn_id.clone());
-                }
-                ServerNotification::TurnStarted(n)
-                    if crate::chatwidget::is_realtime_triggered_turn(&n.turn) =>
-                {
-                    voice_started.insert(n.turn.id.clone());
-                }
-                // A typed steer returns later output to typed input, as live handling does.
-                ServerNotification::ItemStarted(n) if is_ordinary_user_item(&n.item) => {
-                    voice_started.remove(&n.turn_id);
-                }
-                ServerNotification::ItemStarted(n) => {
-                    if let ThreadItem::AgentMessage { id, .. } | ThreadItem::Reasoning { id, .. } =
-                        &n.item
-                    {
-                        let key = (n.turn_id.clone(), id.clone());
-                        if voice_started.contains(&n.turn_id) {
-                            typed_items.remove(&key);
-                        } else {
-                            typed_items.insert(key);
-                        }
-                    }
-                }
-                _ => {}
-            }
+            owners.note_notification(notification);
             match notification.as_mut() {
+                ServerNotification::ItemCompleted(n) => !owners.hides(&n.turn_id, &n.item),
                 ServerNotification::AgentMessageDelta(n) => {
-                    !voice_started.contains(&n.turn_id)
-                        || typed_items.contains(&(n.turn_id.clone(), n.item_id.clone()))
+                    !owners.voice_owns_item(&n.turn_id, &n.item_id)
                 }
                 ServerNotification::ReasoningSummaryTextDelta(n) => {
-                    !voice_started.contains(&n.turn_id)
-                        || typed_items.contains(&(n.turn_id.clone(), n.item_id.clone()))
+                    !owners.voice_owns_item(&n.turn_id, &n.item_id)
                 }
                 ServerNotification::ReasoningTextDelta(n) => {
-                    !voice_started.contains(&n.turn_id)
-                        || typed_items.contains(&(n.turn_id.clone(), n.item_id.clone()))
+                    !owners.voice_owns_item(&n.turn_id, &n.item_id)
                 }
                 ServerNotification::ReasoningSummaryPartAdded(n) => {
-                    !voice_started.contains(&n.turn_id)
-                        || typed_items.contains(&(n.turn_id.clone(), n.item_id.clone()))
+                    !owners.voice_owns_item(&n.turn_id, &n.item_id)
                 }
-                ServerNotification::ItemCompleted(n) if voice_started.contains(&n.turn_id) => {
-                    matches!(&n.item, ThreadItem::AgentMessage { id, .. } | ThreadItem::Reasoning { id, .. }
-                        if typed_items.contains(&(n.turn_id.clone(), id.clone())))
-                        || !crate::chatwidget::is_private_realtime_agent_item(&n.item)
-                }
-                ServerNotification::TurnCompleted(n)
-                    if delegated.contains(&n.turn.id)
-                        || crate::chatwidget::is_realtime_triggered_turn(&n.turn) =>
-                {
-                    let turn_triggered = crate::chatwidget::is_realtime_triggered_turn(&n.turn)
-                        || triggered.contains(&n.turn.id);
-                    hide_private_items_after_voice_handoff(
-                        &mut n.turn.items,
-                        turn_triggered,
-                        /*delegated*/ true,
-                    );
+                ServerNotification::TurnCompleted(n) => {
+                    owners.retain_visible_items(&mut n.turn);
                     true
                 }
                 _ => true,
