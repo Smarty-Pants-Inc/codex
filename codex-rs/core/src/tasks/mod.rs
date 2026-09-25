@@ -897,18 +897,17 @@ impl Session {
             self.send_event(turn_context.as_ref(), event.clone()).await;
         }
 
-        let cleared_active_turn = {
-            let mut active = self.active_turn.lock().await;
-            if let Some(active_turn) = active.as_ref()
-                && active_turn.task.is_none()
-                && Arc::ptr_eq(&active_turn.turn_state, &turn_state)
-            {
-                *active = None;
-                true
-            } else {
-                false
-            }
-        };
+        let (cleared_active_turn, late_input) = self.release_finished_turn_state(&turn_state).await;
+        if !late_input.is_empty() {
+            run_hooks_and_record_inputs(
+                self,
+                &turn_context,
+                &turn_context.capture_current_model_info(),
+                &late_input,
+                PersistContext::Standard,
+            )
+            .await;
+        }
         if saved_guardian_completion {
             // The parent can request another review as soon as it receives this event.
             self.send_event(turn_context.as_ref(), event).await;
