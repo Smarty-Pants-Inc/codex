@@ -299,10 +299,12 @@ jobs:
         run: |
           set -euo pipefail
           # Intent-to-add makes new fixture files appear in the diff without staging content.
+          # It also stages deletions, so compare against HEAD: the generator empties the
+          # fixture directories first, and a removed type must show up as a deleted file.
           git add -N .
-          git diff --binary > "$RUNNER_TEMP/app-server-schema.patch"
+          git diff --binary HEAD > "$RUNNER_TEMP/app-server-schema.patch"
           if test -s "$RUNNER_TEMP/app-server-schema.patch"; then
-            git diff --stat
+            git diff --stat HEAD
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
       - name: Upload schema fixture patch
