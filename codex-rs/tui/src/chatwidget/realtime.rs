@@ -134,7 +134,7 @@ enum RealtimeTurnOrigin {
 struct TriggeredTurn {
     turn_id: String,
     input_was_voice: bool,
-    voice_input_fingerprint: Option<(usize, u64)>,
+    current_voice_inputs: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -185,6 +185,9 @@ pub(super) struct RealtimeConversationUiState {
     latest_input_was_voice: bool,
     input_generation: u64,
     latest_voice_input_fingerprint: Option<(usize, u64)>,
+    /// Voice transcripts accepted as current input. A superseded transcript completing late
+    /// updates the fingerprint for stale-marker checks but does not count here.
+    current_voice_inputs: u64,
     pending_typed_input: Option<String>,
     turn_origins: HashMap<String, RealtimeTurnOrigin>,
     pub(super) item_owners: RealtimeItemOwners,
@@ -623,11 +626,12 @@ impl ChatWidget {
             // The turn/started trigger already counted this delegation. Later
             // markers for this turn are voice steers and take the usual path.
             // The trigger marked the latest input as voice, so judge this marker
-            // against the input state before the trigger. A newer transcript
-            // since then is voice input too.
+            // against the input state before the trigger. Only a transcript accepted
+            // as current input since then is newer voice input; a superseded one
+            // completing late is not.
             let input_was_voice = triggered.input_was_voice
-                || self.realtime_conversation.latest_voice_input_fingerprint
-                    != triggered.voice_input_fingerprint;
+                || self.realtime_conversation.current_voice_inputs
+                    != triggered.current_voice_inputs;
             // Keep the trigger's generation, but a tail-flush or stale marker
             // still must not let the turn answer by voice.
             if !self.is_fresh_realtime_delegation(items, input, input_was_voice) {
@@ -724,7 +728,7 @@ impl ChatWidget {
             let triggered = TriggeredTurn {
                 turn_id: turn_id.to_string(),
                 input_was_voice: self.realtime_conversation.latest_input_was_voice,
-                voice_input_fingerprint: self.realtime_conversation.latest_voice_input_fingerprint,
+                current_voice_inputs: self.realtime_conversation.current_voice_inputs,
             };
             let triggered_turns = &mut self.realtime_conversation.triggered_turns;
             triggered_turns.push_back(triggered);
@@ -1582,7 +1586,12 @@ impl ChatWidget {
                 Some(generation) => {
                     if generation == self.realtime_conversation.input_generation {
                         self.realtime_conversation.latest_input_was_voice = has_text;
-                        if !has_text {
+                        if has_text {
+                            self.realtime_conversation.current_voice_inputs = self
+                                .realtime_conversation
+                                .current_voice_inputs
+                                .wrapping_add(/*rhs*/ 1);
+                        } else {
                             self.release_realtime_speaker();
                         }
                     }
@@ -1602,6 +1611,10 @@ impl ChatWidget {
                         .input_generation
                         .wrapping_add(/*rhs*/ 1);
                     self.realtime_conversation.latest_input_was_voice = true;
+                    self.realtime_conversation.current_voice_inputs = self
+                        .realtime_conversation
+                        .current_voice_inputs
+                        .wrapping_add(/*rhs*/ 1);
                     self.suppress_active_realtime_speaker();
                 }
             }

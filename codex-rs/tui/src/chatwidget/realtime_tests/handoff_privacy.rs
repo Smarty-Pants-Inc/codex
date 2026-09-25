@@ -412,17 +412,43 @@ async fn typed_submission_suppresses_old_speaker_audio() {
 
 #[tokio::test]
 async fn late_voice_transcript_after_typed_input_cannot_revive_a_stale_handoff() {
-    let (mut chat, _sender, _events, mut ops) = make_chatwidget_manual_with_sender().await;
-    let thread_id = activate_voice(&mut chat);
-    chat.on_realtime_transcript_delta("user".to_string(), "How are ".to_string());
-    chat.note_realtime_typed_input("what's the best pizza in new york?");
-    chat.on_realtime_transcript_delta("user".to_string(), "you doing".to_string());
-    chat.on_realtime_transcript_done("user".to_string(), "How are you doing".to_string());
+    for turn_trigger in [None, Some("realtime")] {
+        let (mut chat, _sender, _events, mut ops) = make_chatwidget_manual_with_sender().await;
+        let thread_id = activate_voice(&mut chat);
+        chat.on_realtime_transcript_delta("user".to_string(), "How are ".to_string());
+        chat.note_realtime_typed_input("what's the best pizza in new york?");
+        // A realtime turn can start before the superseded transcript completes. That
+        // late completion is not new voice input for the marker that follows.
+        if let Some(turn_trigger) = turn_trigger {
+            chat.handle_server_notification(
+                ServerNotification::TurnStarted(TurnStartedNotification {
+                    thread_id: thread_id.to_string(),
+                    turn: Turn {
+                        id: "stale-turn".to_string(),
+                        items: Vec::new(),
+                        items_view: TurnItemsView::Full,
+                        status: TurnStatus::InProgress,
+                        error: None,
+                        started_at: None,
+                        completed_at: None,
+                        duration_ms: None,
+                        turn_trigger: Some(turn_trigger.to_string()),
+                    },
+                }),
+                /*replay_kind*/ None,
+            );
+        }
+        chat.on_realtime_transcript_delta("user".to_string(), "you doing".to_string());
+        chat.on_realtime_transcript_done("user".to_string(), "How are you doing".to_string());
 
-    complete_stale_handoff(&mut chat, thread_id, "How are you doing");
+        complete_stale_handoff(&mut chat, thread_id, "How are you doing");
 
-    assert!(!chat.realtime_conversation.latest_input_was_voice);
-    assert!(ops.try_recv().is_err());
+        assert!(
+            !chat.realtime_conversation.latest_input_was_voice,
+            "turn trigger: {turn_trigger:?}"
+        );
+        assert!(ops.try_recv().is_err(), "turn trigger: {turn_trigger:?}");
+    }
 }
 
 #[tokio::test]

@@ -719,6 +719,85 @@ fn buffered_output_continues_from_the_saved_turns_final_owner() {
     );
 }
 
+#[test]
+fn saved_history_longer_than_the_owner_map_keeps_the_buffer_boundary_owner() {
+    let commentary = |id: &str, text: &str| ThreadItem::AgentMessage {
+        id: id.into(),
+        text: text.into(),
+        phase: Some(codex_protocol::models::MessagePhase::Commentary),
+        questions: None,
+        memory_citation: None,
+        delivery: None,
+    };
+    let triggered_turn = |id: &str, status: TurnStatus| Turn {
+        turn_trigger: Some("realtime".into()),
+        ..test_turn(
+            id,
+            status,
+            vec![commentary(
+                &format!("{id}-voice"),
+                "Voice-private commentary",
+            )],
+        )
+    };
+    // More realtime turns than the owner map tracks, with the active turn last.
+    let mut turns = (0..64)
+        .map(|index| triggered_turn(&format!("old-{index}"), TurnStatus::Completed))
+        .collect::<Vec<_>>();
+    turns.push(triggered_turn("active", TurnStatus::InProgress));
+    let mut store = ThreadEventStore::new(/*capacity*/ 2);
+    store.set_turns(turns);
+    let typed = commentary("typed", "Typed commentary after the steer");
+    let typed_delta = delta("thread", "active", "typed");
+    let typed_completed = ServerNotification::ItemCompleted(ItemCompletedNotification {
+        thread_id: "thread".into(),
+        turn_id: "active".into(),
+        completed_at_ms: 0,
+        item: typed.clone(),
+    });
+    // The typed steer and the typed item's start both leave the bounded buffer.
+    for notification in [
+        ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: "thread".into(),
+            turn_id: "active".into(),
+            started_at_ms: 0,
+            item: ThreadItem::UserMessage {
+                id: "steer".into(),
+                client_id: None,
+                content: vec![codex_app_server_protocol::UserInput::Text {
+                    text: "Typed steer".into(),
+                    text_elements: Vec::new(),
+                }],
+            },
+        }),
+        ServerNotification::ItemStarted(ItemStartedNotification {
+            thread_id: "thread".into(),
+            turn_id: "active".into(),
+            started_at_ms: 0,
+            item: typed,
+        }),
+        typed_delta.clone(),
+        typed_completed.clone(),
+    ] {
+        store.push_notification(notification);
+    }
+
+    let snapshot = store.snapshot();
+    assert!(snapshot.turns.iter().all(|turn| turn.items.is_empty()));
+    let events = snapshot
+        .events
+        .into_iter()
+        .map(|event| match event {
+            ThreadBufferedEvent::Notification(notification) => *notification,
+            other => panic!("unexpected event: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        serde_json::to_value(events).unwrap(),
+        serde_json::to_value(vec![typed_delta, typed_completed]).unwrap()
+    );
+}
+
 #[tokio::test]
 async fn evicted_voice_marker_survives_widget_snapshot_for_late_reasoning() {
     let thread_id = ThreadId::new();

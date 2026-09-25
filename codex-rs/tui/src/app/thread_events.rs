@@ -408,17 +408,21 @@ impl ThreadEventStore {
                 _ => None,
             })
             .collect::<std::collections::HashSet<_>>();
-        let mut owners = self.buffer_start_owners.clone();
+        let mut boundary = self.buffer_start_owners.clone();
         for turn_id in &self.delegated_turns {
-            if !owners.tracks_turn(turn_id) && !buffered_handoffs.contains(turn_id) {
-                owners.note_voice_turn(turn_id);
+            if !boundary.tracks_turn(turn_id) && !buffered_handoffs.contains(turn_id) {
+                boundary.note_voice_turn(turn_id);
             }
         }
-        // Buffered events continue from each saved turn's final owner, updated by
-        // evicted events, and from the owners its items recorded.
+        // Filter saved turns on a separate map, so walking older history cannot evict the
+        // newer ownership that buffered events continue from. Items already recorded keep
+        // their owners; the boundary state then wins as the newest entries.
+        let mut owners = crate::chatwidget::RealtimeItemOwners::default();
         for turn in &mut snapshot.turns {
+            owners.copy_turn_from(&boundary, &turn.id);
             owners.retain_visible_items(turn);
         }
+        owners.overlay(&boundary);
         if let Some(started) = &self.active_reasoning_item {
             owners.note_typed_item(&started.turn_id, started.item.id());
         }

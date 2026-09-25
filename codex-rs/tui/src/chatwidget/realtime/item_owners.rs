@@ -204,6 +204,44 @@ impl RealtimeItemOwners {
             .retain(|_| visibility.next().unwrap_or(/*default*/ true));
     }
 
+    /// Copies `other`'s ownership of `turn_id`, when it has any, as this map's newest turn.
+    pub(crate) fn copy_turn_from(&mut self, other: &Self, turn_id: &str) {
+        if let Some(turn) = other.turn(turn_id) {
+            self.insert_newest(turn_id.to_string(), turn.clone());
+        }
+    }
+
+    /// Moves every turn of `newer` behind this map's turns, so capacity eviction drops the
+    /// older ones first. `newer`'s owners win; item owners only this map recorded are kept.
+    pub(crate) fn overlay(&mut self, newer: &Self) {
+        for (turn_id, newer_turn) in &newer.turns {
+            let mut turn = match self.turns.iter().position(|(id, _)| id == turn_id) {
+                Some(index) => self
+                    .turns
+                    .remove(index)
+                    .map(|(_, turn)| turn)
+                    .unwrap_or_else(|| newer_turn.clone()),
+                None => newer_turn.clone(),
+            };
+            turn.owner = newer_turn.owner;
+            turn.items.extend(
+                newer_turn
+                    .items
+                    .iter()
+                    .map(|(item_id, owner)| (item_id.clone(), *owner)),
+            );
+            self.insert_newest(turn_id.clone(), turn);
+        }
+    }
+
+    fn insert_newest(&mut self, turn_id: String, turn: TurnOwners) {
+        self.turns.retain(|(id, _)| *id != turn_id);
+        if self.turns.len() == MAX_TRACKED_TURNS {
+            self.turns.pop_front();
+        }
+        self.turns.push_back((turn_id, turn));
+    }
+
     pub(crate) fn forget_turn(&mut self, turn_id: &str) {
         self.turns.retain(|(id, _)| id != turn_id);
     }
