@@ -3,6 +3,7 @@ use super::*;
 use codex_core::McpManager;
 use codex_mcp::McpServerSource;
 use codex_mcp::ReadResourceRequestParams;
+use codex_mcp::resolve_oauth_callback;
 
 use crate::thread_state::ThreadStateManager;
 
@@ -169,6 +170,11 @@ impl McpRequestProcessor {
             StreamableHttpRedirectMode::Legacy
         };
         let server = server.config();
+        if matches!(server.auth, codex_config::McpServerAuth::EmaAuth) {
+            return Err(invalid_request(
+                "EMA MCP connections are not enabled in this version",
+            ));
+        }
 
         let (url, http_headers, env_http_headers) = match &server.transport {
             McpServerTransportConfig::StreamableHttp {
@@ -204,6 +210,11 @@ impl McpRequestProcessor {
         let resolved_scopes =
             resolve_oauth_scopes(scopes, server.scopes.clone(), discovered_scopes);
         let oauth_credential_name = server.oauth_credential_name(&name);
+        let callback_url =
+            resolve_oauth_callback(server, &url, mcp_config.mcp_oauth_callback_url.as_deref())
+                .map_err(|err| {
+                    internal_error(format!("failed to resolve MCP OAuth callback: {err}"))
+                })?;
 
         let handle = perform_oauth_login_return_url(
             oauth_credential_name.as_ref(),
@@ -218,6 +229,7 @@ impl McpRequestProcessor {
             server.oauth_resource.as_deref(),
             timeout_secs,
             server.oauth_callback_port(mcp_config.mcp_oauth_callback_port),
+            callback_url.as_deref(),
             mcp_config.mcp_oauth_callback_url.as_deref(),
             http_client,
             redirect_mode,
@@ -267,7 +279,10 @@ impl McpRequestProcessor {
                 let thread_config = thread.config().await;
                 let config = self
                     .config_manager
-                    .load_latest_config_for_thread(thread_config.as_ref())
+                    .load_latest_config_with_session_layers(
+                        &thread_config.config_layer_stack,
+                        &thread_config.cwd,
+                    )
                     .await
                     .map_err(|err| internal_error(format!("failed to reload config: {err}")))?;
                 (config, Some(thread))
@@ -334,11 +349,13 @@ impl McpRequestProcessor {
             None => HashMap::new(),
         };
         let McpServerStatusSnapshot {
-            server_infos,
-            tools_by_server,
-            resources,
-            resource_templates,
-            auth_statuses,
+            mut server_infos,
+            mut server_capabilities,
+            mut tools_by_server,
+            mut tools_errors,
+            mut resources,
+            mut resource_templates,
+            mut auth_statuses,
             mut server_names,
         } = snapshot;
         server_names.extend(runtime_statuses.keys().cloned());
@@ -387,13 +404,26 @@ impl McpRequestProcessor {
                         | McpServerSource::Extension { .. } => None,
                     },
                 ),
-                server_info: server_infos.get(name).cloned(),
-                tools: tools_by_server.get(name).cloned().unwrap_or_default(),
-                resources: resources.get(name).cloned().unwrap_or_default(),
-                resource_templates: resource_templates.get(name).cloned().unwrap_or_default(),
+                http_origin: mcp_config
+                    .mcp_server_catalog
+                    .server(name)
+                    .and_then(|server| match &server.config().transport {
+                        McpServerTransportConfig::StreamableHttp { url, .. } => {
+                            url::Url::parse(url).ok().and_then(|url| {
+                                matches!(url.scheme(), "http" | "https")
+                                    .then(|| url.origin().ascii_serialization())
+                            })
+                        }
+                        McpServerTransportConfig::Stdio { .. } => None,
+                    }),
+                server_info: server_infos.remove(name),
+                server_capabilities: server_capabilities.remove(name),
+                tools: tools_by_server.remove(name).unwrap_or_default(),
+                tools_error: tools_errors.remove(name),
+                resources: resources.remove(name).unwrap_or_default(),
+                resource_templates: resource_templates.remove(name).unwrap_or_default(),
                 auth_status: auth_statuses
-                    .get(name)
-                    .cloned()
+                    .remove(name)
                     .unwrap_or(CoreMcpAuthStatus::Unsupported)
                     .into(),
             })
@@ -420,20 +450,40 @@ impl McpRequestProcessor {
             server,
             uri,
             connector_id,
+            target,
         } = params;
         let mut resource_params = ReadResourceRequestParams::new(uri);
+        let mut meta = serde_json::Map::new();
         if let Some(connector_id) = connector_id {
-            resource_params.meta = Some(
-                serde_json::Map::from_iter([(
-                    "x-codex-turn-metadata".to_string(),
-                    serde_json::json!({
-                        "mcp_request_meta": {
-                            "selected_connector_ids": [connector_id],
-                        },
-                    }),
-                )])
-                .into(),
+            meta.insert(
+                "x-codex-turn-metadata".to_string(),
+                serde_json::json!({
+                    "mcp_request_meta": {"selected_connector_ids": [connector_id]},
+                }),
             );
+        }
+        if origin_call_id.is_none()
+            && let Some(target) = target
+        {
+            if server != codex_mcp::CODEX_APPS_MCP_SERVER_NAME
+                || target.connector_id.trim().is_empty()
+                || target
+                    .link_id
+                    .as_ref()
+                    .is_some_and(|id| id.trim().is_empty() || id.starts_with("synthetic_link::"))
+            {
+                return Err(invalid_request(
+                    "target requires codex_apps, a connectorId, and a real linkId or null",
+                ));
+            }
+            meta.insert(
+                "connector_id".to_string(),
+                serde_json::json!(target.connector_id),
+            );
+            meta.insert("link_id".to_string(), serde_json::json!(target.link_id));
+        }
+        if !meta.is_empty() {
+            resource_params.meta = Some(meta.into());
         }
 
         if let Some(thread_id) = thread_id {
@@ -502,7 +552,7 @@ impl McpRequestProcessor {
         origin_call_id: Option<String>,
     ) {
         let result = result
-            .map_err(|error| internal_error(format!("{error:#}")))
+            .map_err(mcp_operation_error)
             .and_then(|result| {
                 serde_json::from_value::<McpResourceReadResponse>(result).map_err(|error| {
                     internal_error(format!(
@@ -534,10 +584,21 @@ impl McpRequestProcessor {
                 .call_mcp_tool(&params.server, &params.tool, params.arguments, meta)
                 .await
                 .map(McpServerToolCallResponse::from)
-                .map_err(|error| internal_error(format!("{error:#}")));
+                .map_err(mcp_operation_error);
             outgoing.send_result(request_id, result).await;
         });
         Ok(())
+    }
+}
+
+fn mcp_operation_error(error: anyhow::Error) -> JSONRPCErrorError {
+    match codex_rmcp_client::mcp_error(&error) {
+        Some(error) => JSONRPCErrorError {
+            code: i64::from(error.code.0),
+            message: error.message.to_string(),
+            data: error.data.clone(),
+        },
+        None => internal_error(format!("{error:#}")),
     }
 }
 

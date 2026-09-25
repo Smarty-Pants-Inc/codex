@@ -16,6 +16,7 @@ use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::sync::oneshot;
+use tokio::sync::watch;
 use tokio_tungstenite::accept_hdr_async_with_config;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::extensions::ExtensionsConfig;
@@ -577,6 +578,7 @@ pub struct WebSocketTestServer {
     connections: Arc<Mutex<Vec<Vec<WebSocketRequest>>>>,
     handshakes: Arc<Mutex<Vec<WebSocketHandshake>>>,
     request_log_updated: Arc<Notify>,
+    closed_connections: watch::Receiver<usize>,
     shutdown: oneshot::Sender<()>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -598,6 +600,16 @@ impl WebSocketTestServer {
         connections.first().cloned().unwrap_or_default()
     }
 
+    pub async fn wait_for_connections(&self, expected: usize, timeout: Duration) -> bool {
+        tokio::time::timeout(timeout, async {
+            while self.connections.lock().unwrap().len() < expected {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
     pub async fn wait_for_request(
         &self,
         connection_index: usize,
@@ -617,6 +629,17 @@ impl WebSocketTestServer {
             }
             notified.await;
         }
+    }
+
+    /// Waits for the server to finish reading any frames preceding the socket close.
+    pub async fn wait_for_closed_connections(&self, expected: usize, timeout: Duration) -> bool {
+        let mut closed_connections = self.closed_connections.clone();
+        tokio::time::timeout(
+            timeout,
+            closed_connections.wait_for(|count| *count >= expected),
+        )
+        .await
+        .is_ok_and(|result| result.is_ok())
     }
 
     pub fn handshakes(&self) -> Vec<WebSocketHandshake> {
@@ -1084,14 +1107,6 @@ fn base_mock() -> (MockBuilder, ResponseMock) {
     (mock, response_mock)
 }
 
-fn compact_mock() -> (MockBuilder, ResponseMock) {
-    let response_mock = ResponseMock::new();
-    let mock = Mock::given(method("POST"))
-        .and(path_regex(".*/responses/compact$"))
-        .and(response_mock.clone());
-    (mock, response_mock)
-}
-
 fn models_mock() -> (MockBuilder, ModelsMock) {
     let models_mock = ModelsMock::new();
     let mock = Mock::given(method("GET"))
@@ -1116,119 +1131,6 @@ where
 pub async fn mount_sse_once(server: &MockServer, body: String) -> ResponseMock {
     let (mock, response_mock) = base_mock();
     mock.respond_with(sse_response(body))
-        .up_to_n_times(1)
-        .mount(server)
-        .await;
-    response_mock
-}
-
-pub async fn mount_compact_json_once(server: &MockServer, body: serde_json::Value) -> ResponseMock {
-    mount_compact_response_once(
-        server,
-        ResponseTemplate::new(200)
-            .insert_header("content-type", "application/json")
-            .set_body_json(body),
-    )
-    .await
-}
-
-/// Mount a `/responses/compact` mock that mirrors the default remote compaction shape:
-/// keep user+developer messages from the request, drop assistant/tool artifacts, and append one
-/// compaction item carrying the provided summary text.
-pub async fn mount_compact_user_history_with_summary_once(
-    server: &MockServer,
-    summary_text: &str,
-) -> ResponseMock {
-    mount_compact_user_history_with_summary_sequence(server, vec![summary_text.to_string()]).await
-}
-
-/// Same as [`mount_compact_user_history_with_summary_once`], but for multiple compact calls.
-/// Each incoming compact request receives the next summary text in order.
-pub async fn mount_compact_user_history_with_summary_sequence(
-    server: &MockServer,
-    summary_texts: Vec<String>,
-) -> ResponseMock {
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
-
-    #[derive(Debug)]
-    struct UserHistorySummaryResponder {
-        num_calls: AtomicUsize,
-        summary_texts: Vec<String>,
-    }
-
-    impl Respond for UserHistorySummaryResponder {
-        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
-            let call_num = self.num_calls.fetch_add(1, Ordering::SeqCst);
-            let summary_text = self
-                .summary_texts
-                .get(call_num)
-                .expect("missing summary text for compact request");
-            let body_bytes = decode_body_bytes(
-                &request.body,
-                request
-                    .headers
-                    .get("content-encoding")
-                    .and_then(|value| value.to_str().ok()),
-            );
-            let body_json: Value =
-                serde_json::from_slice(&body_bytes).expect("failed to parse compact request body");
-            let mut output = body_json
-                .get("input")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-                // TODO(ccunningham): Update this mock to match future compaction model behavior:
-                // return user/developer/assistant messages since the last compaction item, then
-                // append a single newest compaction item.
-                // Match current remote compaction behavior: keep user/developer messages and
-                // omit assistant/tool history entries.
-                .filter(|item| {
-                    item.get("type").and_then(Value::as_str) == Some("message")
-                        && matches!(
-                            item.get("role").and_then(Value::as_str),
-                            Some("user") | Some("developer")
-                        )
-                })
-                .collect::<Vec<Value>>();
-            let compaction_turn_id = body_json["client_metadata"]["turn_id"].as_str();
-            // Match Responses API: generated compaction items inherit the compact request turn.
-            let mut compaction_item = serde_json::json!({
-                "type": "compaction",
-                "encrypted_content": summary_text,
-            });
-            if let Some(turn_id) = compaction_turn_id {
-                compaction_item["internal_chat_message_metadata_passthrough"] =
-                    serde_json::json!({ "turn_id": turn_id });
-            }
-            output.push(compaction_item);
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "application/json")
-                .set_body_json(serde_json::json!({ "output": output }))
-        }
-    }
-
-    let num_calls = summary_texts.len();
-    let responder = UserHistorySummaryResponder {
-        num_calls: AtomicUsize::new(0),
-        summary_texts,
-    };
-    let (mock, response_mock) = compact_mock();
-    mock.respond_with(responder)
-        .up_to_n_times(num_calls as u64)
-        .expect(num_calls as u64)
-        .mount(server)
-        .await;
-    response_mock
-}
-
-pub async fn mount_compact_response_once(
-    server: &MockServer,
-    response: ResponseTemplate,
-) -> ResponseMock {
-    let (mock, response_mock) = compact_mock();
-    mock.respond_with(response)
         .up_to_n_times(1)
         .mount(server)
         .await;
@@ -1327,6 +1229,7 @@ pub async fn start_websocket_server_with_headers(
     let connections_log = Arc::new(Mutex::new(Vec::new()));
     let handshakes_log = Arc::new(Mutex::new(Vec::new()));
     let request_log_updated = Arc::new(Notify::new());
+    let (closed_tx, closed_connections) = watch::channel(0);
     let requests = Arc::clone(&connections_log);
     let handshakes = Arc::clone(&handshakes_log);
     let request_log = Arc::clone(&request_log_updated);
@@ -1472,6 +1375,7 @@ pub async fn start_websocket_server_with_headers(
 
             if close_after_requests {
                 let _ = ws_stream.close(None).await;
+                closed_tx.send_modify(|count| *count += 1);
             } else {
                 let _ = shutdown_rx.await;
                 return;
@@ -1488,6 +1392,7 @@ pub async fn start_websocket_server_with_headers(
         connections: connections_log,
         handshakes: handshakes_log,
         request_log_updated,
+        closed_connections,
         shutdown: shutdown_tx,
         task,
     }
@@ -1622,51 +1527,13 @@ pub async fn mount_response_sequence(
     response_mock
 }
 
-/// Mounts a sequence of responses for each POST to `/v1/responses/compact`.
-/// Panics if more requests are received than responses provided.
-pub async fn mount_compact_response_sequence(
-    server: &MockServer,
-    responses: Vec<ResponseTemplate>,
-) -> ResponseMock {
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
-
-    struct SeqResponder {
-        num_calls: AtomicUsize,
-        responses: Vec<ResponseTemplate>,
-    }
-
-    impl Respond for SeqResponder {
-        fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
-            let call_num = self.num_calls.fetch_add(1, Ordering::SeqCst);
-            self.responses
-                .get(call_num)
-                .expect("missing response for compact call")
-                .clone()
-        }
-    }
-
-    let num_calls = responses.len();
-    let responder = SeqResponder {
-        num_calls: AtomicUsize::new(0),
-        responses,
-    };
-
-    let (mock, response_mock) = compact_mock();
-    mock.respond_with(responder)
-        .up_to_n_times(num_calls as u64)
-        .expect(num_calls as u64)
-        .mount(server)
-        .await;
-    response_mock
-}
-
 /// Validate invariants on the request body sent to `/v1/responses`.
 ///
-/// - No `function_call_output`/`custom_tool_call_output` with missing/empty `call_id`.
+/// - A `function_call_output` with missing/empty `call_id` must have a nonempty `name`.
+/// - No `custom_tool_call_output` with missing/empty `call_id`.
 /// - `tool_search_output` must have a `call_id` unless it is a server-executed legacy item.
-/// - Every `function_call_output` must match a prior `function_call` or
-///   `local_shell_call` with the same `call_id` in the same `input`.
+/// - Every `function_call_output` with a `call_id` must match a prior `function_call`
+///   or `local_shell_call` with the same `call_id` in the same `input`.
 /// - Every `custom_tool_call_output` must match a prior `custom_tool_call`.
 /// - Every `tool_search_output` must match a prior `tool_search_call`.
 /// - Additionally, enforce symmetry: every `function_call`/`custom_tool_call`/
@@ -1712,9 +1579,19 @@ fn validate_request_body_invariants(request: &wiremock::Request) {
         items
             .iter()
             .filter(|item| item.get("type").and_then(Value::as_str) == Some(kind))
-            .map(|item| {
-                let id = get_call_id(item).expect(missing_msg);
-                id.to_string()
+            .filter_map(|item| {
+                if let Some(id) = get_call_id(item) {
+                    return Some(id.to_string());
+                }
+                if kind == "function_call_output"
+                    && item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| !name.is_empty())
+                {
+                    return None;
+                }
+                panic!("{missing_msg}");
             })
             .collect()
     }

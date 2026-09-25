@@ -3,14 +3,20 @@
 //! The queue data itself lives in `input_queue`; this module owns the app-level
 //! effects around taking composer input, submitting user turns, draining queued
 //! follow-ups, and restoring draft state across interrupts or thread switches.
+//! Composer submissions resume transcript following before dispatch or startup queueing,
+//! except for reversible settings pickers that preserve the reading position.
 
 use std::collections::HashSet;
 use std::collections::VecDeque;
 
 use super::*;
+use crate::bottom_pane::prompt_args::parse_slash_name;
+use crate::bottom_pane::slash_commands::SlashCommandItem;
+use crate::bottom_pane::slash_commands::find_slash_command;
 
 impl ChatWidget {
     pub(crate) fn set_parent_owned_thread(&mut self) {
+        self.cancel_image_submission();
         self.blocks_direct_input = true;
         self.bottom_pane.set_parent_owned_thread();
     }
@@ -20,6 +26,28 @@ impl ChatWidget {
         input_result: InputResult,
         had_modal_or_popup: bool,
     ) {
+        let follow_transcript = match &input_result {
+            // Opening settings is not a request to leave the current reading anchor.
+            // Inline commands still follow so their output (including usage errors) is visible.
+            InputResult::Command(
+                SlashCommand::Model
+                | SlashCommand::Keymap
+                | SlashCommand::Memories
+                | SlashCommand::Title
+                | SlashCommand::Statusline
+                | SlashCommand::Theme,
+            ) => false,
+            InputResult::Command(_)
+            | InputResult::ServiceTierCommand(_)
+            | InputResult::CommandWithArgs(..) => true,
+            InputResult::Submitted { .. }
+            | InputResult::Queued { .. }
+            | InputResult::ParentOwnedInputBlocked
+            | InputResult::None => false,
+        };
+        if follow_transcript {
+            self.app_event_tx.send(AppEvent::FollowTranscript);
+        }
         match input_result {
             InputResult::Submitted {
                 text,
@@ -32,9 +60,11 @@ impl ChatWidget {
                 {
                     return;
                 }
+                self.app_event_tx.send(AppEvent::FollowTranscript);
                 let should_submit_now = self.is_session_configured()
                     && !self.is_plan_streaming_in_tui()
                     && !self.input_queue.suppress_queue_autosend
+                    && !self.input_queue.rate_limit_recovery_pending
                     && (!self.input_queue.user_turn_pending_start
                         || self.turn_lifecycle.agent_turn_running);
                 if should_submit_now {
@@ -62,10 +92,16 @@ impl ChatWidget {
                 pending_pastes,
             } => {
                 let user_message = self.user_message_from_submission(text, text_elements);
-                self.queue_user_message_with_options(user_message, action, pending_pastes);
+                if self.queue_user_message_with_options(user_message, action, pending_pastes) {
+                    self.app_event_tx.send(AppEvent::FollowTranscript);
+                }
             }
             InputResult::Command(cmd) => {
                 self.handle_slash_command_dispatch(cmd);
+                // A settings command can instead report why it is unavailable.
+                if !follow_transcript && self.bottom_pane.no_modal_or_popup_active() {
+                    self.app_event_tx.send(AppEvent::FollowTranscript);
+                }
             }
             InputResult::ServiceTierCommand(command) => {
                 self.handle_service_tier_command_dispatch(command);
@@ -97,8 +133,13 @@ impl ChatWidget {
         }
     }
 
-    pub(super) fn queue_user_message(&mut self, user_message: UserMessage) {
-        self.queue_user_message_with_options(user_message, QueuedInputAction::Plain, Vec::new());
+    pub(super) fn queue_user_message(&mut self, user_message: UserMessage) -> bool {
+        self.queue_user_message_with_options_and_source(
+            user_message,
+            QueuedInputAction::Plain,
+            Vec::new(),
+            UserMessageSource::Prompt,
+        )
     }
 
     pub(crate) fn set_queue_submissions_until_session_configured(&mut self, queue: bool) {
@@ -106,24 +147,50 @@ impl ChatWidget {
             .set_queue_submissions(queue && !self.is_session_configured());
     }
 
-    pub(super) fn queue_user_message_with_options(
+    pub(crate) fn queue_user_message_with_options(
         &mut self,
         user_message: UserMessage,
         action: QueuedInputAction,
         pending_pastes: Vec<(String, String)>,
-    ) {
-        if self.misalignment_policy_violation {
-            return;
+    ) -> bool {
+        self.queue_user_message_with_options_and_source(
+            user_message,
+            action,
+            pending_pastes,
+            UserMessageSource::Prompt,
+        )
+    }
+
+    pub(super) fn queue_user_message_with_options_and_source(
+        &mut self,
+        user_message: UserMessage,
+        action: QueuedInputAction,
+        pending_pastes: Vec<(String, String)>,
+        source: UserMessageSource,
+    ) -> bool {
+        if self.has_misalignment_policy_violation() {
+            return false;
         }
         let should_run_now = self.is_session_configured()
             && !self.is_user_turn_pending_or_running()
-            && !self.input_queue.suppress_queue_autosend;
+            && !self.input_queue.suppress_queue_autosend
+            && !self.input_queue.rate_limit_recovery_pending;
+        if action != QueuedInputAction::ParseSlash {
+            self.empty_state_animation.borrow_mut().dismiss();
+        }
         let can_admit_to_server_queue = matches!(&self.codex_op_target, CodexOpTarget::AppEvent)
             && action == QueuedInputAction::Plain
+            && source == UserMessageSource::Prompt
             && self.is_session_configured()
             && self.is_user_turn_pending_or_running()
+            && !self.input_queue.rate_limit_recovery_pending
             && self.thread_id.is_some()
             && self.input_queue.can_admit_to_server_queue()
+            // Keep FIFO order behind an earlier submission whose images are still being prepared.
+            && self.pending_image_submission.is_none()
+            // Client-local image paths must be snapshotted on this host before the server sees them;
+            // the local queue drains through the ordinary submission path, which prepares them.
+            && (user_message.local_images.is_empty() || !self.snapshot_local_images)
             && (user_message.local_images.is_empty() && user_message.remote_image_urls.is_empty()
                 || self.current_model_supports_images())
             && !self
@@ -135,13 +202,40 @@ impl ChatWidget {
             self.thread_id
                 .filter(|_| can_admit_to_server_queue)
                 .map(|thread_id| {
-                    let mut input = self.app_server_user_inputs(&user_message);
+                    let mut input =
+                        self.app_server_user_inputs(&user_message, /*prepared_images*/ None);
                     self.maybe_apply_ide_context(&mut input);
                     (thread_id, uuid::Uuid::new_v4().to_string(), input)
                 });
         if !should_run_now || action != QueuedInputAction::Plain {
+            let queued_slash_prompt = action == QueuedInputAction::ParseSlash
+                && parse_slash_name(&user_message.text).is_none_or(|(name, args, _)| {
+                    if name.contains('/') {
+                        return true;
+                    }
+                    !args.trim().is_empty()
+                        && find_slash_command(
+                            name,
+                            self.builtin_command_flags(),
+                            &self.current_model_service_tier_commands(),
+                        )
+                        .is_some_and(|command| {
+                            !command.supports_inline_args()
+                                || matches!(
+                                    command,
+                                    SlashCommandItem::Builtin(
+                                        SlashCommand::Plan | SlashCommand::Review
+                                    )
+                                )
+                        })
+                });
+            let model_prompt = source == UserMessageSource::Prompt
+                && (action == QueuedInputAction::Literal
+                    || action == QueuedInputAction::Plain && !user_message.text.starts_with('!')
+                    || queued_slash_prompt);
             let mut queued_message = QueuedUserMessage::new(user_message, action);
             queued_message.pending_pastes = pending_pastes;
+            queued_message.source = source;
             if let Some((_, client_user_message_id, _)) = &server_queue_request {
                 queued_message.mark_pending_server_admission(client_user_message_id.clone());
             }
@@ -159,11 +253,21 @@ impl ChatWidget {
                     input,
                 });
             }
+            if model_prompt && !should_run_now {
+                self.bottom_pane.clear_pending_questions();
+            }
             if should_run_now {
                 self.maybe_send_next_queued_input();
             }
+            true
         } else {
-            self.submit_user_message(user_message);
+            self.submit_user_message_with_history_and_shell_escape_policy(
+                user_message,
+                UserMessageHistoryRecord::UserMessageText,
+                ShellEscapePolicy::Allow,
+                source,
+            )
+            .0
         }
     }
 
@@ -258,8 +362,10 @@ impl ChatWidget {
     /// If idle and there are queued inputs, submit exactly one to start the next turn.
     pub(crate) fn maybe_send_next_queued_input(&mut self) -> bool {
         if !self.is_session_configured()
-            || self.misalignment_policy_violation
+            || self.has_misalignment_policy_violation()
             || self.input_queue.suppress_queue_autosend
+            || self.input_queue.rate_limit_recovery_pending
+            || self.input_queue.recovered_queue
         {
             return false;
         }
@@ -286,16 +392,22 @@ impl ChatWidget {
             };
             match queued_message.action {
                 QueuedInputAction::Plain => {
-                    submitted_follow_up = self.submit_user_message_with_history_record(
-                        queued_message.into_user_message(),
-                        history_record,
-                    );
+                    let source = queued_message.source;
+                    submitted_follow_up = self
+                        .submit_user_message_with_history_and_shell_escape_policy(
+                            queued_message.into_user_message(),
+                            history_record,
+                            ShellEscapePolicy::Allow,
+                            source,
+                        )
+                        .0;
                     break;
                 }
                 QueuedInputAction::Literal => {
                     let QueuedUserMessage {
                         user_message,
                         pending_pastes,
+                        source,
                         ..
                     } = queued_message;
                     let mut restored_pending_pastes = self.bottom_pane.composer_pending_pastes();
@@ -322,11 +434,13 @@ impl ChatWidget {
                             );
                     }
                     submitted_follow_up = self
-                        .submit_user_message_with_shell_escape_policy(
+                        .submit_user_message_with_history_and_shell_escape_policy(
                             user_message,
+                            history_record,
                             ShellEscapePolicy::Disallow,
+                            source,
                         )
-                        .is_some();
+                        .0;
                     if !submitted_follow_up {
                         restored_pending_pastes.extend(pending_pastes);
                         self.bottom_pane
@@ -356,7 +470,8 @@ impl ChatWidget {
     }
 
     pub(crate) fn is_user_turn_pending_or_running(&self) -> bool {
-        self.input_queue.user_turn_pending_start
+        self.pending_image_submission.is_some()
+            || self.input_queue.user_turn_pending_start
             || self.turn_lifecycle.agent_turn_running
             || self.review.is_review_mode
             || (self.bottom_pane.is_task_running() && self.mcp_startup_status.is_none())
@@ -373,7 +488,17 @@ impl ChatWidget {
 
     /// Rebuild and update the bottom-pane pending-input preview.
     pub(super) fn refresh_pending_input_preview(&mut self) {
-        let preview = self.input_queue.preview();
+        let has_queued = self.has_queued_follow_up_messages();
+        if let Some(questions) = &mut self.bottom_pane.questions {
+            questions.has_queued_messages = has_queued;
+        }
+        let mut preview = self.input_queue.preview();
+        if let Some(pending) = &self.pending_image_submission {
+            preview.queued_messages.insert(
+                /*index*/ 0,
+                format!("Preparing images: {}", pending.message.text),
+            );
+        }
         self.bottom_pane.set_pending_input_preview(
             preview.queued_messages,
             preview.pending_steers,
@@ -387,7 +512,12 @@ impl ChatWidget {
         mut collaboration_mode: CollaborationModeMask,
     ) {
         if self.blocks_direct_input {
-            self.add_error_message(PARENT_OWNED_INPUT_MESSAGE.to_string());
+            self.add_error_message(if self.external_writer_view {
+                "This thread is open elsewhere. Close it there and retry resume to continue."
+                    .to_string()
+            } else {
+                PARENT_OWNED_INPUT_MESSAGE.to_string()
+            });
             return;
         }
         if collaboration_mode.mode == Some(ModeKind::Plan)

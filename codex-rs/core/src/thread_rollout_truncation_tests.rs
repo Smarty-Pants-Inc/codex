@@ -1,4 +1,5 @@
 use super::*;
+use crate::session::step_context::StepContext;
 use crate::session::tests::build_world_state_from_turn_context;
 use crate::session::tests::make_session_and_context;
 use codex_protocol::AgentPath;
@@ -78,6 +79,7 @@ fn inter_agent_communication(text: &str, trigger_turn: bool) -> RolloutItem {
 fn turn_started(turn_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
         turn_id: turn_id.to_string(),
+        root_turn_id: None,
         trace_id: None,
         started_at: None,
         model_context_window: None,
@@ -114,6 +116,34 @@ fn truncates_rollout_after_terminal_canonical_turn_id() {
     assert_eq!(
         serde_json::to_value(&truncated).unwrap(),
         serde_json::to_value(&rollout[..4]).unwrap()
+    );
+}
+
+#[test]
+fn terminal_interval_includes_items_before_the_next_native_start() {
+    let initial = response_item(developer_msg("initial interval"));
+    let rollout = vec![
+        initial.clone(),
+        turn_started("turn-1"),
+        turn_completed("turn-1"),
+        response_item(developer_msg("after completion, still turn-1 interval")),
+        turn_started("turn-2"),
+        turn_completed("turn-2"),
+    ];
+    let through = truncate_rollout_after_turn_id(rollout.clone(), "turn-1")
+        .expect("retain the full terminal interval");
+    let before_next = truncate_rollout_before_turn_id(rollout.clone(), "turn-2")
+        .expect("cut at the next persisted start");
+    let before_first = truncate_rollout_before_turn_id(rollout, "turn-1")
+        .expect("retain only the initial interval");
+    assert_eq!(
+        serde_json::to_value(&through).unwrap(),
+        serde_json::to_value(&before_next).unwrap(),
+    );
+    assert_eq!(through.len(), 4);
+    assert_eq!(
+        serde_json::to_value(&before_first).unwrap(),
+        serde_json::to_value(vec![initial]).unwrap(),
     );
 }
 
@@ -364,8 +394,9 @@ async fn ignores_session_prefix_messages_when_truncating_rollout_from_start() {
     let (session, turn_context) = make_session_and_context().await;
     let turn_context = Arc::new(turn_context);
     let world_state = build_world_state_from_turn_context(&session, &turn_context).await;
+    let step_context = StepContext::for_test(turn_context);
     let mut items = session
-        .build_initial_context_with_world_state(&turn_context, &world_state)
+        .build_initial_context_with_world_state(&step_context, &world_state)
         .await;
     items.push(user_msg("feature request"));
     items.push(assistant_msg("ack"));

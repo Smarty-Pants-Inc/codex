@@ -8,6 +8,7 @@ use super::start_streaming_output;
 use super::utf8_boundary;
 use crate::session::tests::make_session_and_context_with_rx;
 use crate::unified_exec::UnifiedExecContext;
+use crate::unified_exec::UnifiedExecProcessManager;
 use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
 use crate::unified_exec::process::NoopSpawnLifecycle;
 use crate::unified_exec::process::UnifiedExecProcess;
@@ -58,8 +59,7 @@ async fn streaming_output_harness() -> anyhow::Result<StreamingOutputHarness> {
         tokio_util::sync::CancellationToken::new(),
         "streaming-output-test".to_string(),
     );
-    let transcript = Arc::clone(&process.output_handles().transcript);
-    start_streaming_output(&process, &context);
+    let transcript = process.transcript();
 
     Ok(StreamingOutputHarness {
         process,
@@ -71,6 +71,76 @@ async fn streaming_output_harness() -> anyhow::Result<StreamingOutputHarness> {
     })
 }
 
+#[test_case::test_case(b""; "no_late_output")]
+#[test_case::test_case(b"late\n"; "with_late_output")]
+#[tokio::test]
+async fn completed_output_preserves_bytes_before_subscription(
+    late_output: &[u8],
+) -> anyhow::Result<()> {
+    let StreamingOutputHarness {
+        process,
+        stdout_tx,
+        exit_tx,
+        transcript,
+        context,
+        rx_event,
+    } = streaming_output_harness().await?;
+
+    let collected = process.output_handles().output_notify.notified();
+    tokio::pin!(collected);
+    collected.as_mut().enable();
+    stdout_tx.send(b"early\n".to_vec())?;
+    collected.await;
+
+    let model_output = UnifiedExecProcessManager::collect_output_until_deadline(
+        process.output_handles(),
+        /*pause_state*/ None,
+        Instant::now(),
+    )
+    .await;
+    assert_eq!(model_output.to_bytes(), b"early\n");
+
+    start_streaming_output(&process, &context);
+    #[allow(deprecated)]
+    let cwd = context.step_context.turn.cwd.clone().into();
+    spawn_exit_watcher(
+        Arc::clone(&process),
+        &context,
+        vec!["proof".to_string()],
+        cwd,
+        /*process_id*/ 123,
+        /*plugin_attribution*/ None,
+        transcript,
+        Instant::now(),
+        /*network_denial_monitor*/ None,
+        /*plugin_metrics_sidecar*/ None,
+    );
+    stdout_tx.send(late_output.to_vec())?;
+    drop(stdout_tx);
+    exit_tx.send(0).expect("send exit");
+
+    let item = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let EventMsg::ItemCompleted(completed) = rx_event.recv().await?.msg
+                && let TurnItem::CommandExecution(item) = completed.item
+            {
+                return Ok::<_, async_channel::RecvError>(item);
+            }
+        }
+    })
+    .await??;
+    let expected_output = String::from_utf8([b"early\n".as_slice(), late_output].concat())?;
+    assert_eq!(
+        (item.status, item.exit_code, item.aggregated_output),
+        (
+            CommandExecutionStatus::Completed,
+            Some(0),
+            Some(expected_output)
+        )
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn streaming_output_preserves_multibyte_characters_across_chunks() -> anyhow::Result<()> {
     let StreamingOutputHarness {
@@ -79,8 +149,9 @@ async fn streaming_output_preserves_multibyte_characters_across_chunks() -> anyh
         exit_tx,
         transcript,
         rx_event,
-        ..
+        context,
     } = streaming_output_harness().await?;
+    start_streaming_output(&process, &context);
     let output_drained = process.output_drained_notify();
     let drained = output_drained.notified();
     tokio::pin!(drained);
@@ -121,8 +192,10 @@ async fn streaming_output_finishes_on_close_without_waiting_for_grace() -> anyho
         stdout_tx,
         exit_tx,
         transcript,
+        context,
         ..
     } = streaming_output_harness().await?;
+    start_streaming_output(&process, &context);
     let output_drained = process.output_drained_notify();
     let drained = output_drained.notified();
     tokio::pin!(drained);
@@ -161,8 +234,9 @@ async fn streaming_output_keeps_grace_as_fallback_without_close() -> anyhow::Res
         exit_tx,
         transcript,
         rx_event,
-        ..
+        context,
     } = streaming_output_harness().await?;
+    start_streaming_output(&process, &context);
     let output_drained = process.output_drained_notify();
     let drained = output_drained.notified();
     tokio::pin!(drained);
@@ -208,9 +282,10 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() -> 
         stdout_tx,
         exit_tx,
         transcript,
-        context,
+        mut context,
         rx_event,
     } = streaming_output_harness().await?;
+    start_streaming_output(&process, &context);
 
     tokio::time::pause();
     let process_for_late_denial = Arc::clone(&process);
@@ -226,11 +301,15 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() -> 
 
     #[allow(deprecated)]
     let cwd = context.step_context.turn.cwd.clone().into();
+    let step = Arc::get_mut(&mut context.step_context).expect("unshared test step");
+    let model_info = Arc::make_mut(&mut Arc::make_mut(&mut step.settings).model_info);
+    model_info.truncation_policy = codex_protocol::openai_models::TruncationPolicyConfig {
+        mode: codex_protocol::openai_models::TruncationMode::Bytes,
+        limit: 4,
+    };
     spawn_exit_watcher(
         Arc::clone(&process),
-        Arc::clone(&context.session),
-        Arc::clone(&context.step_context.turn),
-        context.call_id,
+        &context,
         vec!["proof".to_string()],
         cwd,
         /*process_id*/ 123,
@@ -266,6 +345,13 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() -> 
             Some("LATE_DENIAL")
         )
     );
+    assert_eq!(
+        item.formatted_output,
+        Some(codex_utils_output_truncation::formatted_truncate_text(
+            "LATE_DENIAL",
+            codex_utils_output_truncation::TruncationPolicy::Bytes(4),
+        ))
+    );
     assert!(
         elapsed >= Duration::from_millis(10) && elapsed < TRAILING_OUTPUT_GRACE,
         "completion should wait for denial without falling back to the output grace: {elapsed:?}"
@@ -292,9 +378,12 @@ async fn terminal_status_uses_trusted_subcommand_approval(
     let (session, turn, events) = make_session_and_context_with_rx().await;
     #[allow(deprecated)]
     let cwd = codex_utils_path_uri::PathUri::from_abs_path(&turn.cwd);
+    let model_info = Arc::clone(turn.model_info());
     super::emit_exec_end_for_unified_exec(
+        /*sandbox_type*/ None,
         session,
         turn,
+        model_info,
         "approval-status".to_string(),
         vec!["command".to_string()],
         cwd,
@@ -305,6 +394,7 @@ async fn terminal_status_uses_trusted_subcommand_approval(
         approval_status,
         /*exit_code*/ 1,
         Duration::from_millis(1),
+        /*timed_out*/ false,
     )
     .await;
     let event = events.recv().await.expect("command end event");

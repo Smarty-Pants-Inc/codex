@@ -4,6 +4,8 @@ use codex_app_server_client::AppServerRequestHandle;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::ConfigReadParams;
+use codex_app_server_protocol::ConfigReadResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::SandboxMode;
 use codex_app_server_protocol::SandboxPolicy;
@@ -14,15 +16,19 @@ use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadUnsubscribeParams;
 use codex_app_server_protocol::ThreadUnsubscribeResponse;
+use codex_app_server_protocol::TurnInterruptParams;
+use codex_app_server_protocol::TurnInterruptResponse;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
+use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_READ_ONLY;
 use codex_protocol::openai_models::ReasoningEffort;
 use color_eyre::eyre::eyre;
 use serde_json::Value;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedReceiver;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 const STRUCTURED_TURN_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 30);
@@ -30,6 +36,7 @@ const STRUCTURED_RESPONSE_MAX_BYTES: usize = 8 * 1024;
 
 /// Preserve the visible thread's provider, permissions, and external-tool isolation.
 pub(crate) struct TemporaryStructuredThreadOptions {
+    pub(crate) thread_source: ThreadSource,
     pub(crate) model: String,
     pub(crate) model_provider: String,
     pub(crate) cwd: String,
@@ -37,12 +44,16 @@ pub(crate) struct TemporaryStructuredThreadOptions {
     pub(crate) mcp_server_names: Vec<String>,
 }
 
-/// Start an ephemeral, non-interactive thread without widening its parent's permissions.
+/// Start an ephemeral thread without widening permissions or exposing tools and environment access.
+///
+/// Structured prompts can contain untrusted transcript text, so the effective app-server config is
+/// read first and every MCP server is explicitly disabled alongside built-in and extension tools.
 pub(crate) async fn start_temporary_thread(
     request_handle: &AppServerRequestHandle,
     options: TemporaryStructuredThreadOptions,
 ) -> color_eyre::Result<ThreadStartResponse> {
     let TemporaryStructuredThreadOptions {
+        thread_source,
         model,
         model_provider,
         cwd,
@@ -55,6 +66,7 @@ pub(crate) async fn start_temporary_thread(
         ("features.apps".to_string(), false.into()),
         ("features.code_mode".to_string(), false.into()),
         ("features.code_mode_only".to_string(), false.into()),
+        ("features.context_management".to_string(), false.into()),
         ("features.current_time_reminder".to_string(), false.into()),
         ("features.deferred_executor".to_string(), false.into()),
         ("features.enable_fanout".to_string(), false.into()),
@@ -72,9 +84,12 @@ pub(crate) async fn start_temporary_thread(
         ("features.shell_snapshot".to_string(), false.into()),
         ("features.shell_tool".to_string(), false.into()),
         ("features.standalone_web_search".to_string(), false.into()),
+        ("features.token_budget".to_string(), false.into()),
         ("features.tool_suggest".to_string(), false.into()),
         ("features.unified_exec".to_string(), false.into()),
         ("features.view_image".to_string(), false.into()),
+        ("cloud.skills.enabled".to_string(), false.into()),
+        ("skills.include_instructions".to_string(), false.into()),
         (
             "tools.experimental_request_user_input.enabled".to_string(),
             false.into(),
@@ -82,34 +97,69 @@ pub(crate) async fn start_temporary_thread(
         ("tools.update_plan.enabled".to_string(), false.into()),
         ("web_search".to_string(), "disabled".into()),
     ]);
-    for server_name in mcp_server_names {
-        config.insert(format!("mcp_servers.{server_name}.enabled"), false.into());
+    if custom_permission_profile.is_none() {
+        // Managed profiles take precedence over the legacy sandbox override below.
+        config.insert(
+            "default_permissions".to_string(),
+            BUILT_IN_PERMISSION_PROFILE_READ_ONLY.into(),
+        );
     }
+    let response: ThreadStartResponse = tokio::time::timeout(STRUCTURED_TURN_TIMEOUT, async {
+        // Fail closed if the remote-effective MCP configuration cannot be read.
+        let effective_config: ConfigReadResponse = request_handle
+            .request_typed(ClientRequest::ConfigRead {
+                request_id: RequestId::String(format!("temporary-config-{}", Uuid::new_v4())),
+                params: ConfigReadParams {
+                    include_layers: false,
+                    cwd: Some(cwd.clone()),
+                },
+            })
+            .await?;
+        let mut mcp_server_names = mcp_server_names
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        if let Some(effective_mcp_servers) = effective_config
+            .config
+            .additional
+            .get("mcp_servers")
+            .and_then(Value::as_object)
+        {
+            mcp_server_names.extend(effective_mcp_servers.keys().cloned());
+        }
+        config.insert(
+            "mcp_servers".to_string(),
+            Value::Object(
+                mcp_server_names
+                    .into_iter()
+                    .map(|name| (name, serde_json::json!({ "enabled": false })))
+                    .collect(),
+            ),
+        );
 
-    let response: ThreadStartResponse = tokio::time::timeout(
-        STRUCTURED_TURN_TIMEOUT,
-        request_handle.request_typed(ClientRequest::ThreadStart {
-            request_id: RequestId::String(format!("temporary-structured-{}", Uuid::new_v4())),
-            params: ThreadStartParams {
-                model: Some(model),
-                model_provider: Some(model_provider),
-                cwd: Some(cwd),
-                approval_policy: Some(AskForApproval::Never),
-                sandbox: custom_permission_profile
-                    .is_none()
-                    .then_some(SandboxMode::ReadOnly),
-                permissions: custom_permission_profile.clone(),
-                runtime_workspace_roots: Some(Vec::new()),
-                ephemeral: Some(true),
-                thread_source: Some(ThreadSource::Feature("system".to_string())),
-                environments: Some(Vec::new()),
-                dynamic_tools: Some(Vec::new()),
-                selected_capability_roots: Some(Vec::new()),
-                config: Some(config),
-                ..ThreadStartParams::default()
-            },
-        }),
-    )
+        request_handle
+            .request_typed(ClientRequest::ThreadStart {
+                request_id: RequestId::String(format!("temporary-structured-{}", Uuid::new_v4())),
+                params: ThreadStartParams {
+                    model: Some(model),
+                    model_provider: Some(model_provider),
+                    cwd: Some(cwd),
+                    approval_policy: Some(AskForApproval::Never),
+                    sandbox: custom_permission_profile
+                        .is_none()
+                        .then_some(SandboxMode::ReadOnly),
+                    permissions: custom_permission_profile.clone(),
+                    runtime_workspace_roots: Some(Vec::new()),
+                    ephemeral: Some(true),
+                    thread_source: Some(thread_source),
+                    environments: Some(Vec::new()),
+                    dynamic_tools: Some(Vec::new()),
+                    selected_capability_roots: Some(Vec::new()),
+                    config: Some(config),
+                    ..ThreadStartParams::default()
+                },
+            })
+            .await
+    })
     .await
     .map_err(|_| eyre!("temporary structured thread start timed out"))??;
 
@@ -197,30 +247,11 @@ pub(crate) async fn collect_structured_response(
     ))
 }
 
-/// Run a bounded structured turn and make a bounded temporary-thread cleanup attempt.
-pub(crate) async fn run_temporary_structured_turn(
-    request_handle: AppServerRequestHandle,
+/// Make a bounded best-effort attempt to detach an ephemeral thread.
+pub(crate) async fn unsubscribe_temporary_thread(
+    request_handle: &AppServerRequestHandle,
     thread_id: String,
-    prompt: String,
-    output_schema: Value,
-    effort: Option<ReasoningEffort>,
-    notifications: UnboundedReceiver<ServerNotification>,
-) -> color_eyre::Result<String> {
-    let result = tokio::time::timeout(STRUCTURED_TURN_TIMEOUT, async {
-        let turn = start_structured_turn(
-            &request_handle,
-            thread_id.clone(),
-            prompt,
-            output_schema,
-            effort,
-        )
-        .await?;
-
-        collect_structured_response(notifications, &turn.turn.id).await
-    })
-    .await
-    .unwrap_or_else(|_| Err(eyre!("temporary structured turn timed out")));
-
+) {
     match tokio::time::timeout(
         STRUCTURED_TURN_TIMEOUT,
         request_handle.request_typed::<ThreadUnsubscribeResponse>(
@@ -243,6 +274,69 @@ pub(crate) async fn run_temporary_structured_turn(
             tracing::debug!("temporary structured thread unsubscribe timed out");
         }
     }
+}
+
+/// Run a bounded structured turn, interrupt it on cancellation, and detach the temporary thread.
+pub(crate) async fn run_temporary_structured_turn(
+    request_handle: AppServerRequestHandle,
+    thread_id: String,
+    prompt: String,
+    output_schema: Value,
+    effort: Option<ReasoningEffort>,
+    notifications: UnboundedReceiver<ServerNotification>,
+    cancellation: CancellationToken,
+) -> color_eyre::Result<String> {
+    let mut turn_id = None;
+    let result = tokio::time::timeout(STRUCTURED_TURN_TIMEOUT, async {
+        if cancellation.is_cancelled() {
+            return Err(eyre!("temporary structured turn cancelled"));
+        }
+        // Wait for turn/start to return its ID before interrupting, even if cancellation
+        // arrives during startup. Dropping that request could leave an orphaned turn.
+        let turn = start_structured_turn(
+            &request_handle,
+            thread_id.clone(),
+            prompt,
+            output_schema,
+            effort,
+        )
+        .await?;
+
+        turn_id = Some(turn.turn.id.clone());
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(eyre!("temporary structured turn cancelled")),
+            result = collect_structured_response(notifications, &turn.turn.id) => result,
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Err(eyre!("temporary structured turn timed out")));
+
+    // Give interruption its own deadline so cancellation near the response timeout
+    // still gets a chance to stop the hidden turn.
+    if cancellation.is_cancelled()
+        && let Some(turn_id) = turn_id
+    {
+        let interrupt =
+            request_handle.request_typed::<TurnInterruptResponse>(ClientRequest::TurnInterrupt {
+                request_id: RequestId::String(format!(
+                    "temporary-structured-interrupt-{}",
+                    Uuid::new_v4()
+                )),
+                params: TurnInterruptParams {
+                    thread_id: thread_id.clone(),
+                    turn_id,
+                },
+            });
+        match tokio::time::timeout(STRUCTURED_TURN_TIMEOUT, interrupt).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "failed to interrupt temporary structured turn")
+            }
+            Err(_) => tracing::debug!("temporary structured turn interrupt timed out"),
+        }
+    }
+    unsubscribe_temporary_thread(&request_handle, thread_id).await;
 
     result
 }

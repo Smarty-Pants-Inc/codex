@@ -1,6 +1,7 @@
 use crate::events::AppServerRpcTransport;
 use crate::events::CodexRuntimeMetadata;
 use crate::events::GuardianReviewEventParams;
+use crate::guardian_v2::GuardianV2Event;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ClientResponsePayload;
 use codex_app_server_protocol::InitializeParams;
@@ -42,6 +43,7 @@ pub struct TrackEventsContext {
     pub thread_id: String,
     pub turn_id: String,
     pub product_client_id: String,
+    pub turn_metadata: Option<Arc<dyn TurnAnalyticsMetadata>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -136,12 +138,14 @@ pub fn build_track_events_context(
     thread_id: String,
     turn_id: String,
     product_client_id: String,
+    turn_metadata: Option<Arc<dyn TurnAnalyticsMetadata>>,
 ) -> TrackEventsContext {
     TrackEventsContext {
         model_slug,
         thread_id,
         turn_id,
         product_client_id,
+        turn_metadata,
     }
 }
 
@@ -186,6 +190,8 @@ pub struct TurnResolvedConfigFact {
     pub turn_id: String,
     pub thread_id: String,
     pub turn_metadata: Arc<dyn TurnAnalyticsMetadata>,
+    /// Observed active plugin inventory. None is unknown; Some([]) is observed empty.
+    pub active_plugin_ids_at_turn_start: Option<Vec<String>>,
     pub num_input_images: usize,
     pub submission_type: Option<TurnSubmissionType>,
     pub ephemeral: bool,
@@ -199,6 +205,7 @@ pub struct TurnResolvedConfigFact {
     pub service_tier: Option<ServiceTier>,
     pub approval_policy: AskForApproval,
     pub approvals_reviewer: ApprovalsReviewer,
+    pub guardian_v2_enabled: bool,
     pub sandbox_network_access: bool,
     pub collaboration_mode: ModeKind,
     pub personality: Option<Personality>,
@@ -206,13 +213,17 @@ pub struct TurnResolvedConfigFact {
     pub is_first_turn: bool,
 }
 
-/// A live, read-only view of a turn's trusted analytics provenance.
+/// A live, read-only view of a turn's analytics metadata.
 ///
 /// Implementations must return `None` for unknown or ambiguous roots. The reducer
 /// reads this when constructing each event because steering can invalidate a root
 /// after the turn's configuration has been resolved.
 pub trait TurnAnalyticsMetadata: Send + Sync {
     fn root_turn_id(&self) -> Option<String>;
+    /// The caller-provided trigger recorded when this turn started.
+    fn turn_trigger(&self) -> Option<String>;
+    /// The effective Responses source at event emission, including accepted steers.
+    fn codex_turn_source(&self) -> Option<String>;
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -385,10 +396,31 @@ pub enum InvocationType {
     Implicit,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ElicitationType {
+    /// Authentication or account linking blocked the original attempt, as reported
+    /// by trusted connector auth-failure metadata. Both are treated the same when
+    /// identifying elicitation-only usage. This does not imply that an
+    /// authentication prompt was shown or completed.
+    AuthOrLink,
+    Approval,
+}
+
 pub struct AppInvocation {
     pub connector_id: Option<String>,
     pub app_name: Option<String>,
     pub invocation_type: Option<InvocationType>,
+}
+
+/// A known classification, queued before the corresponding item completion.
+/// Ordinary calls do not send this fact; their emitted classification stays null.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct McpToolCallElicitation {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub item_id: String,
+    pub elicitation_type: ElicitationType,
 }
 
 #[derive(Clone)]
@@ -398,8 +430,8 @@ pub struct SubAgentThreadStartedInput {
     pub parent_thread_id: Option<String>,
     pub forked_from_thread_id: Option<String>,
     pub product_client_id: String,
-    pub client_name: String,
-    pub client_version: String,
+    pub client_name: Option<String>,
+    pub client_version: Option<String>,
     pub model: String,
     pub ephemeral: bool,
     pub thread_source: Option<ThreadSource>,
@@ -428,7 +460,6 @@ pub enum CompactionReason {
 pub enum CompactionImplementation {
     Responses,
     ResponsesCompactionV2,
-    ResponsesCompact,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -437,6 +468,7 @@ pub enum CompactionPhase {
     StandaloneTurn,
     PreTurn,
     MidTurn,
+    PostTurn,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -547,6 +579,9 @@ pub(crate) enum AnalyticsFact {
         completed_at_ms: u64,
         request_id: RequestId,
     },
+    RealtimeHandoffRequested {
+        thread_id: String,
+    },
     Notification(Box<ServerNotification>),
     // Facts that do not naturally exist on the app-server protocol surface, or
     // would require non-trivial protocol reshaping on this branch.
@@ -560,7 +595,9 @@ pub(crate) enum CustomAnalyticsFact {
     SubAgentThreadStarted(SubAgentThreadStartedInput),
     Compaction(Box<CodexCompactionEvent>),
     Goal(Box<CodexGoalEvent>),
+    ThreadHintStatus(Box<crate::thread_hint::ThreadHintStatusEvent>),
     GuardianReview(Box<GuardianReviewEventParams>),
+    GuardianV2(Box<GuardianV2Event>),
     TurnResolvedConfig(Box<TurnResolvedConfigFact>),
     TurnTokenUsage(Box<TurnTokenUsageFact>),
     TurnProfile(Box<TurnProfileFact>),
@@ -569,6 +606,7 @@ pub(crate) enum CustomAnalyticsFact {
     SkillInvoked(SkillInvokedInput),
     AppMentioned(AppMentionedInput),
     AppUsed(AppUsedInput),
+    McpToolCallElicitation(McpToolCallElicitation),
     HookRun(HookRunInput),
     PluginUsed(PluginUsedInput),
     PluginInstallRequested(PluginInstallRequestedInput),
@@ -596,6 +634,9 @@ pub struct PluginMeasurementsInput {
     pub thread_id: String,
     pub turn_id: String,
     pub item_id: String,
+    pub originator: String,
+    pub model_slug: Option<String>,
+    pub reasoning_effort: Option<String>,
     pub plugin_id: String,
     pub execution_id: String,
     pub operation: String,
@@ -615,6 +656,7 @@ pub(crate) struct AppMentionedInput {
 pub(crate) struct AppUsedInput {
     pub tracking: TrackEventsContext,
     pub app: AppInvocation,
+    pub elicitation_type: Option<ElicitationType>,
 }
 
 pub(crate) struct HookRunInput {

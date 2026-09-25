@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use codex_exec_server::EnvironmentManager;
-use codex_extension_api::LoadUserInstructionsFuture;
+use codex_extension_api::LoadInstructionsFuture;
 use codex_extension_api::LoadedUserInstructions;
 use codex_extension_api::UserInstructionsProvider;
 use codex_http_client::HttpClientFactory;
@@ -49,12 +49,59 @@ static TEST_MODEL_PRESETS: Lazy<Vec<ModelPreset>> = Lazy::new(|| {
     presets
 });
 
+/// Inspect the same resolved environment configurations used to construct sampling steps.
+pub async fn environment_windows_sandbox_types(
+    thread: &crate::CodexThread,
+) -> Vec<(String, codex_sandboxing::SandboxType)> {
+    thread
+        .session
+        .services
+        .turn_environments
+        .snapshot()
+        .await
+        .turn_environments()
+        .map(|environment| {
+            (
+                environment.selection.environment_id.clone(),
+                environment.config().windows_sandbox_type,
+            )
+        })
+        .collect()
+}
+
+/// Reattaches request-only observations to a completed turn's history for capture assertions.
+/// Tests inspect this separately from the destination-filtered HTTP/WS request.
+pub async fn history_with_tool_call_metadata(
+    thread: &crate::CodexThread,
+) -> Vec<codex_protocol::models::ResponseItem> {
+    let history = thread.conversation_history_snapshot().await;
+    let mut items = history.items().cloned().collect::<Vec<_>>();
+    thread
+        .session
+        .services
+        .executed_tool_calls
+        .attach_to_prompt(&mut items, &mut Default::default());
+    items
+}
+
+/// Returns the recorder state used by the next session metadata snapshot.
+/// This does not change destination filtering or issue a request.
+pub fn mcp_attribution_snapshot(
+    thread: &crate::CodexThread,
+) -> codex_protocol::mcp::McpAttribution {
+    thread
+        .session
+        .services
+        .executed_tool_calls
+        .mcp_attribution_snapshot()
+}
+
 /// Test-only provider that supplies no user instructions.
 #[derive(Debug, Default)]
 pub struct EmptyUserInstructionsProvider;
 
 impl UserInstructionsProvider for EmptyUserInstructionsProvider {
-    fn load_user_instructions(&self) -> LoadUserInstructionsFuture<'_> {
+    fn load_user_instructions(&self) -> LoadInstructionsFuture<'_> {
         Box::pin(async { LoadedUserInstructions::default() })
     }
 }
@@ -214,4 +261,66 @@ pub fn all_model_presets() -> &'static Vec<ModelPreset> {
 
 pub fn builtin_collaboration_mode_presets() -> Vec<CollaborationModeMask> {
     collaboration_mode_presets::builtin_collaboration_mode_presets()
+}
+
+/// Records `items` as thread history in order, the way accepted input is recorded.
+///
+/// User-role messages go through the direct-user input path, with an acceptance order, because
+/// live injection rejects user-role items. Other items use the live injection API. Tests use
+/// this to seed history that contains user messages.
+pub async fn record_history_with_direct_user_input(
+    thread: &crate::CodexThread,
+    items: Vec<codex_protocol::models::ResponseItem>,
+) -> codex_protocol::error::Result<()> {
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseItem;
+    use codex_protocol::user_input::UserInput;
+
+    let mut pending = Vec::new();
+    for item in items {
+        let ResponseItem::Message { role, content, .. } = &item else {
+            pending.push(item);
+            continue;
+        };
+        if role != "user" {
+            pending.push(item);
+            continue;
+        }
+        if !pending.is_empty() {
+            thread
+                .inject_response_items(std::mem::take(&mut pending))
+                .await?;
+        }
+        let input = content
+            .iter()
+            .filter_map(|content| match content {
+                ContentItem::InputText { text } => Some(UserInput::Text {
+                    text: text.clone(),
+                    text_elements: Vec::new(),
+                }),
+                ContentItem::InputImage { image, detail } => Some(UserInput::Image {
+                    image: image.clone(),
+                    detail: *detail,
+                }),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let session = &thread.session;
+        let turn_context = session.new_default_turn().await;
+        let acceptance_order = Some(session.reserve_user_input_order().await);
+        session
+            .record_user_prompt_and_emit_turn_item(
+                turn_context.as_ref(),
+                turn_context.model_info(),
+                &input,
+                /*client_id*/ None,
+                acceptance_order,
+                codex_thread_store::PersistContext::Standard,
+            )
+            .await;
+    }
+    if !pending.is_empty() {
+        thread.inject_response_items(pending).await?;
+    }
+    Ok(())
 }

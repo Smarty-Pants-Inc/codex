@@ -262,7 +262,6 @@ use codex_app_server_protocol::ThreadRealtimeStopResponse;
 use codex_app_server_protocol::ThreadResumeInitialTurnsPageParams;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
-use codex_app_server_protocol::ThreadRollbackParams;
 use codex_app_server_protocol::ThreadSearchOccurrence;
 use codex_app_server_protocol::ThreadSearchOccurrencesParams;
 use codex_app_server_protocol::ThreadSearchOccurrencesResponse;
@@ -300,6 +299,9 @@ use codex_app_server_protocol::TurnError;
 use codex_app_server_protocol::TurnInterruptParams;
 use codex_app_server_protocol::TurnInterruptResponse;
 use codex_app_server_protocol::TurnItemsView;
+use codex_app_server_protocol::TurnSettingsUpdateParams;
+use codex_app_server_protocol::TurnSettingsUpdateResponse;
+use codex_app_server_protocol::TurnSettingsUpdateStatus;
 use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
@@ -364,6 +366,7 @@ use codex_core::read_head_for_summary;
 use codex_core::sandboxing::SandboxPermissions;
 use codex_core::truncate_rollout_after_turn_id;
 use codex_core::truncate_rollout_before_turn_id;
+use codex_core::validate_environment_ids_and_cwds;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_core::windows_sandbox::WindowsSandboxSetupMode as CoreWindowsSandboxSetupMode;
 use codex_core::windows_sandbox::WindowsSandboxSetupRequest;
@@ -542,18 +545,23 @@ mod diagnostics;
 mod environment_processor;
 mod feedback_doctor_report;
 mod feedback_processor;
+mod feedback_rollout_history;
+mod feedback_thread_index;
 mod fs_processor;
 mod git_processor;
 mod initialize_processor;
 mod marketplace_processor;
 mod mcp_event_stream;
 mod mcp_processor;
+mod memory_status;
 mod persisted_resume_settings;
 mod plugins;
 mod process_exec_processor;
 mod projects;
 mod remote_control_processor;
+mod rollout;
 mod search;
+mod thread_attachments;
 mod thread_enrichment;
 mod thread_fork_goal;
 mod thread_input;
@@ -586,6 +594,7 @@ pub(crate) use remote_control_processor::RemoteControlRequestProcessor;
 pub(crate) use search::SearchRequestProcessor;
 pub(crate) use thread_goal_processor::ThreadGoalRequestProcessor;
 pub(crate) use thread_processor::ThreadRequestProcessor;
+pub(crate) use thread_processor::ThreadResumeTarget;
 pub(crate) use thread_queue_processor::ThreadQueueRequestProcessor;
 pub(crate) use turn_processor::TurnRequestProcessor;
 pub(crate) use windows_sandbox_processor::WindowsSandboxRequestProcessor;
@@ -600,6 +609,21 @@ use crate::thread_state::ThreadState;
 use crate::thread_state::ThreadStateManager;
 use token_usage_replay::restored_token_usage_turn_id;
 use token_usage_replay::send_thread_token_usage_update_to_connection;
+
+pub(crate) fn apply_live_thread_settings(
+    thread: &mut Thread,
+    config_snapshot: &ThreadConfigSnapshot,
+) {
+    thread.model = Some(config_snapshot.model.clone());
+    thread.reasoning_effort = config_snapshot.reasoning_effort.clone();
+    thread.environments = Some(
+        config_snapshot
+            .environment_selections()
+            .iter()
+            .map(Into::into)
+            .collect(),
+    );
+}
 
 fn resolve_request_cwd(cwd: Option<PathBuf>) -> Result<Option<AbsolutePathBuf>, JSONRPCErrorError> {
     cwd.map(|cwd| {
@@ -653,8 +677,7 @@ fn resolve_turn_environment_selections(
             config: EnvironmentConfigState::FromThread,
         });
     }
-    thread_manager
-        .validate_environment_selections(&selections)
+    validate_environment_ids_and_cwds(&thread_manager.environment_manager(), &selections)
         .map_err(environment_selection_error)?;
     Ok(Some(selections))
 }

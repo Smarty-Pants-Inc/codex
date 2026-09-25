@@ -237,6 +237,11 @@ fn merge_configured_plugins_with_remote_installed(
     remote_global_catalog_active: bool,
 ) -> HashMap<String, PluginConfig> {
     if remote_global_catalog_active {
+        // Older Desktop clients can still sync bundled Sites to an independently updated
+        // SSH app-server. A cached remote install takes precedence, even when disabled.
+        if extra_plugins.contains_key("sites@openai-curated-remote") {
+            configured_plugins.remove("sites@openai-bundled");
+        }
         configured_plugins.retain(|plugin_key, _| match PluginId::parse(plugin_key) {
             Ok(plugin_id) => plugin_id.marketplace_name != crate::OPENAI_CURATED_MARKETPLACE_NAME,
             Err(_) => true,
@@ -723,7 +728,7 @@ fn is_full_git_sha(value: &str) -> bool {
     value.len() == 40 && value.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
-fn configured_plugins_from_user_config_value(
+fn configured_plugins_from_config_value(
     user_config: &toml::Value,
 ) -> HashMap<String, PluginConfig> {
     let Some(plugins_value) = user_config.get("plugins") else {
@@ -769,7 +774,7 @@ fn configured_plugins_from_codex_home(
         }
     };
 
-    configured_plugins_from_user_config_value(&user_config)
+    configured_plugins_from_config_value(&user_config)
 }
 
 fn configured_plugin_ids(
@@ -960,6 +965,9 @@ async fn load_plugin(
 
 fn apply_plugin_mcp_server_policy(config: &mut McpServerConfig, policy: &PluginMcpServerConfig) {
     config.enabled = policy.enabled;
+    if let Some(ema) = &policy.ema_auth {
+        ema.apply(config);
+    }
     if let Some(approval_mode) = policy.default_tools_approval_mode {
         config.default_tools_approval_mode = Some(approval_mode);
     }
@@ -974,6 +982,7 @@ fn apply_plugin_mcp_server_policy(config: &mut McpServerConfig, policy: &PluginM
         if let Some(approval_mode) = tool_policy.approval_mode {
             tool_config.approval_mode = Some(approval_mode);
         }
+        tool_config.restrict_output_token_limit(tool_policy.output_token_limit);
     }
 }
 
@@ -1067,7 +1076,7 @@ pub(crate) async fn load_plugin_skill_inventory(
     }
 }
 
-fn plugin_skill_roots(
+pub(crate) fn plugin_skill_roots(
     plugin_root: &AbsolutePathBuf,
     manifest_paths: &PluginManifestPaths,
     manifest_format: PluginManifestFormat,
@@ -1391,7 +1400,7 @@ pub async fn load_plugin_mcp_servers(
     load_plugin_mcp_servers_with_policy(plugin_root, auth_mode, /*plugin_policy*/ None).await
 }
 
-/// Loads plugin MCP servers with the effective user policy for an installed plugin.
+/// Loads plugin MCP servers with the effective configuration policy for an installed plugin.
 pub async fn load_configured_plugin_mcp_servers(
     plugin_root: &Path,
     auth_mode: Option<AuthMode>,
@@ -1412,10 +1421,7 @@ pub async fn load_configured_plugin_mcp_servers(
 pub fn configured_plugin_mcp_server_policies(
     config_layer_stack: &ConfigLayerStack,
 ) -> HashMap<String, HashMap<String, PluginMcpServerConfig>> {
-    config_layer_stack
-        .effective_user_config()
-        .map(|config| configured_plugins_from_user_config_value(&config))
-        .unwrap_or_default()
+    configured_plugins_from_config_value(&config_layer_stack.effective_config())
         .into_iter()
         .map(|(plugin_id, plugin)| (plugin_id, plugin.mcp_servers))
         .collect()
@@ -1428,8 +1434,11 @@ pub fn apply_configured_plugin_mcp_server_policies(
 ) {
     for (name, server) in servers {
         if let Some(policy) = policies.get(name) {
-            let declared_approval_mode = server.default_tools_approval_mode.unwrap_or_default();
             server.enabled &= policy.enabled;
+            if let Some(ema) = &policy.ema_auth {
+                ema.apply(server);
+            }
+            let declared_approval_mode = server.default_tools_approval_mode.unwrap_or_default();
 
             if let Some(approval_mode) = policy.default_tools_approval_mode {
                 server.default_tools_approval_mode =
@@ -1452,7 +1461,7 @@ pub fn apply_configured_plugin_mcp_server_policies(
                 }
             }
             for (tool_name, tool_policy) in &policy.tools {
-                if tool_policy.approval_mode.is_some() {
+                if tool_policy.approval_mode.is_some() || tool_policy.output_token_limit.is_some() {
                     server.tools.entry(tool_name.clone()).or_default();
                 }
             }
@@ -1470,6 +1479,12 @@ pub fn apply_configured_plugin_mcp_server_policies(
                             .restrict_to(approval_mode),
                     );
                 }
+                tool_config.restrict_output_token_limit(
+                    policy
+                        .tools
+                        .get(tool_name)
+                        .and_then(|tool_policy| tool_policy.output_token_limit),
+                );
             }
         }
     }
