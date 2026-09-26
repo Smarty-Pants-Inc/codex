@@ -281,6 +281,7 @@ mod tests {
                 memory_citation: None,
                 delivery: None,
                 questions: None,
+                origin: None,
             }
         );
     }
@@ -315,6 +316,7 @@ mod tests {
                 memory_citation: None,
                 delivery: None,
                 questions: None,
+                origin: None,
             })
         );
         let last_turn_complete = imported

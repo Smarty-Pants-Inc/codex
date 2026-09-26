@@ -282,6 +282,7 @@ async fn adjacent_exploration_groups_across_reasoning_live_and_replayed() {
                                 id: summary.to_string(),
                                 summary: vec![summary.to_string()],
                                 content: Vec::new(),
+                                origin: None,
                             },
                             "turn-1".to_string(),
                             ReplayKind::ThreadSnapshot,

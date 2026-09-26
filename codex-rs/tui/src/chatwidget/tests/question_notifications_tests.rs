@@ -17,6 +17,7 @@ async fn live_async_question_notifies_once_and_takes_priority_over_turn_completi
             title: "Which environment?".into(),
             options: None,
         }]),
+        origin: None,
     };
     for kind in [
         ReplayKind::ResumeInitialMessages,

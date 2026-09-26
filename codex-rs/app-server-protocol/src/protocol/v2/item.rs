@@ -31,6 +31,7 @@ use codex_protocol::items::CollabAgentTool as CoreCollabAgentTool;
 use codex_protocol::items::CollabAgentToolCallStatus as CoreCollabAgentToolCallStatus;
 use codex_protocol::items::CommandExecutionStatus as CoreCommandExecutionStatus;
 use codex_protocol::items::DynamicToolCallStatus as CoreDynamicToolCallStatus;
+pub use codex_protocol::items::ItemOrigin;
 pub use codex_protocol::items::McpAppDisplayMode;
 pub use codex_protocol::items::McpAppUi;
 use codex_protocol::items::McpToolCallStatus as CoreMcpToolCallStatus;
@@ -260,6 +261,11 @@ pub enum ThreadItem {
         delivery: Option<AgentMessageDelivery>,
         #[serde(default)]
         questions: Option<Vec<AsyncUserInputQuestion>>,
+        /// EXPERIMENTAL - which realtime input (voice or typed) this item responds to. Set only
+        /// for turns that received realtime voice input; clients use it to keep voice-private
+        /// output hidden.
+        #[serde(default)]
+        origin: Option<ItemOrigin>,
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
@@ -285,6 +291,11 @@ pub enum ThreadItem {
         summary: Vec<String>,
         #[serde(default)]
         content: Vec<String>,
+        /// EXPERIMENTAL - which realtime input (voice or typed) this item responds to. Set only
+        /// for turns that received realtime voice input; clients use it to keep voice-private
+        /// output hidden.
+        #[serde(default)]
+        origin: Option<ItemOrigin>,
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
@@ -897,6 +908,7 @@ impl From<CoreTurnItem> for ThreadItem {
                     memory_citation: agent.memory_citation.map(Into::into),
                     delivery: agent.delivery,
                     questions: agent.questions,
+                    origin: agent.origin,
                 }
             }
             CoreTurnItem::FunctionCallOutput(output) => ThreadItem::FunctionCallOutput {
@@ -913,6 +925,7 @@ impl From<CoreTurnItem> for ThreadItem {
                 id: reasoning.id,
                 summary: reasoning.summary_text,
                 content: reasoning.raw_content,
+                origin: reasoning.origin,
             },
             CoreTurnItem::CommandExecution(command) => {
                 let presentation = CommandExecutionPresentation::from_raw(

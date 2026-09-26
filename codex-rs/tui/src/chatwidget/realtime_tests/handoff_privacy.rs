@@ -183,6 +183,7 @@ async fn voice_handoff_preserves_started_typed_reasoning_but_hides_new_reasoning
             id: "typed-reasoning".into(),
             summary: Vec::new(),
             content: Vec::new(),
+            origin: None,
         },
     );
     chat.handle_server_notification(
@@ -217,6 +218,7 @@ async fn voice_handoff_preserves_started_typed_reasoning_but_hides_new_reasoning
             id: "typed-reasoning".into(),
             summary: vec!["Typed beginning and typed tail".into()],
             content: Vec::new(),
+            origin: None,
         },
     );
     start_item(
@@ -227,6 +229,7 @@ async fn voice_handoff_preserves_started_typed_reasoning_but_hides_new_reasoning
             id: "private-reasoning".into(),
             summary: Vec::new(),
             content: Vec::new(),
+            origin: None,
         },
     );
     chat.handle_server_notification(
@@ -247,6 +250,7 @@ async fn voice_handoff_preserves_started_typed_reasoning_but_hides_new_reasoning
             id: "private-reasoning".into(),
             summary: vec!["private after handoff".into()],
             content: Vec::new(),
+            origin: None,
         },
     );
 

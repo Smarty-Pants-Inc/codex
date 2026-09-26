@@ -279,6 +279,7 @@ fn transcript_preview_reverse_scan_stops_before_older_items() {
         memory_citation: None,
         delivery: None,
         questions: None,
+        origin: None,
     };
     let mut lines = Vec::new();
 

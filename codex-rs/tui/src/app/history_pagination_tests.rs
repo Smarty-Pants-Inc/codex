@@ -264,3 +264,82 @@ async fn browsing_waits_for_a_prompt_outside_the_initial_history_window() -> Res
     tui.set_owned_screen(/*owned*/ false)?;
     Ok(())
 }
+
+#[tokio::test]
+async fn older_page_hides_persisted_voice_private_output() {
+    use codex_app_server_protocol::ItemOrigin;
+    use codex_protocol::models::MessagePhase;
+
+    let agent = |id: &str, text: &str, phase: MessagePhase, origin: Option<ItemOrigin>| {
+        ThreadItem::AgentMessage {
+            id: id.to_string(),
+            text: text.to_string(),
+            phase: Some(phase),
+            memory_citation: None,
+            delivery: None,
+            questions: None,
+            origin,
+        }
+    };
+    let app = make_test_app().await;
+    let cwd = app.config.cwd.clone();
+    let mut page_turn = turn("voice-turn", TurnStatus::InProgress, &[]);
+    page_turn.items = vec![
+        ThreadItem::Reasoning {
+            id: "voice-reasoning".to_string(),
+            summary: vec!["Private voice reasoning".to_string()],
+            content: Vec::new(),
+            origin: Some(ItemOrigin::Voice),
+        },
+        agent(
+            "voice-commentary",
+            "Private voice commentary",
+            MessagePhase::Commentary,
+            Some(ItemOrigin::Voice),
+        ),
+        agent(
+            "voice-answer",
+            "Spoken final answer",
+            MessagePhase::FinalAnswer,
+            Some(ItemOrigin::Voice),
+        ),
+        agent(
+            "typed-commentary",
+            "Typed commentary",
+            MessagePhase::Commentary,
+            Some(ItemOrigin::Typed),
+        ),
+    ];
+    let turns = vec![page_turn];
+    let items = turns[0].items.clone();
+
+    let mut app = app;
+    let cells = app.project_older_history_cells(
+        items,
+        &turns,
+        &HashSet::new(),
+        ThreadId::new(),
+        &cwd,
+        RawReasoningVisibility::Visible,
+    );
+    let rendered = cells
+        .iter()
+        .flat_map(|cell| cell.transcript_lines(/*width*/ 80))
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let shown = [
+        "Private voice reasoning",
+        "Private voice commentary",
+        "Spoken final answer",
+        "Typed commentary",
+    ]
+    .into_iter()
+    .filter(|text| rendered.contains(text))
+    .collect::<Vec<_>>();
+    assert_eq!(
+        shown,
+        vec!["Spoken final answer", "Typed commentary"],
+        "{rendered}"
+    );
+}

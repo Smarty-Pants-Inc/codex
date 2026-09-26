@@ -5,14 +5,22 @@
 //! typed input and a `<realtime_delegation>` marker hands it back to voice. An item keeps the
 //! owner it started with through its updates and completion. Live handling, saved-turn replay
 //! and the buffered-event filter all read this one map, so they agree on what stays private.
+//!
+//! An item's persisted `origin`, which the server records for turns with realtime voice input,
+//! is final: it overrides the owner guessed from the item's position, and a later guess, such as
+//! the typed owner of a restored reasoning item or a newer map's owner in `overlay`, does not
+//! replace it. Paged history has no trigger or marker, so the origin is its only ownership record.
 
+use super::is_persisted_voice_private;
 use super::is_private_realtime_agent_item;
 use super::is_realtime_triggered_turn;
 use super::realtime_delegation_input;
+use codex_app_server_protocol::ItemOrigin;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::Turn;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::VecDeque;
 
 // ponytail: insertion order bounds memory; only recent turns receive more events. Revisit
@@ -31,6 +39,8 @@ struct TurnOwners {
     // The owner that the turn's next item starts with.
     owner: Owner,
     items: HashMap<String, Owner>,
+    // Items whose owner came from their persisted origin; no guess replaces these owners.
+    persisted: HashSet<String>,
 }
 
 /// Who owns each item of the recent turns, recorded when the item starts.
@@ -42,6 +52,18 @@ pub(crate) struct RealtimeItemOwners {
 fn is_handoff_marker(item: &ThreadItem) -> bool {
     matches!(item, ThreadItem::UserMessage { content, .. }
         if realtime_delegation_input(content).is_some())
+}
+
+/// The owner that the server persisted with the item, when it recorded one.
+fn persisted_owner(item: &ThreadItem) -> Option<Owner> {
+    let (ThreadItem::AgentMessage { origin, .. } | ThreadItem::Reasoning { origin, .. }) = item
+    else {
+        return None;
+    };
+    origin.map(|origin| match origin {
+        ItemOrigin::Typed => Owner::Typed,
+        ItemOrigin::Voice => Owner::Voice,
+    })
 }
 
 impl RealtimeItemOwners {
@@ -67,6 +89,7 @@ impl RealtimeItemOwners {
                     TurnOwners {
                         owner,
                         items: HashMap::new(),
+                        persisted: HashSet::new(),
                     },
                 ));
                 self.turns.len() - 1
@@ -95,9 +118,12 @@ impl RealtimeItemOwners {
         }
     }
 
-    /// Records an item that started before the turn's handoff to voice.
+    /// Records an item that started before the turn's handoff to voice. An item with a
+    /// persisted owner keeps it.
     pub(crate) fn note_typed_item(&mut self, turn_id: &str, item_id: &str) {
-        if let Some(turn) = self.turn_mut(turn_id, Owner::Typed) {
+        if let Some(turn) = self.turn_mut(turn_id, Owner::Typed)
+            && !turn.persisted.contains(item_id)
+        {
             turn.items.insert(item_id.to_string(), Owner::Typed);
         }
     }
@@ -105,11 +131,20 @@ impl RealtimeItemOwners {
     /// Records the owner of `item` the first time it is seen, normally at its start.
     ///
     /// A user item changes the turn's owner for the items that follow it. An item seen again
-    /// (an update or completion) keeps the owner it started with.
+    /// (an update or completion) keeps the owner it started with. A persisted owner always
+    /// wins. When the item is new, it also owns the turn's next items; a completion does not
+    /// change the turn's owner, because the item can complete after a later handoff.
     pub(crate) fn note_item(&mut self, turn_id: &str, item: &ThreadItem) {
         let Some(turn) = self.turn_mut(turn_id, Owner::Typed) else {
             return;
         };
+        if let Some(owner) = persisted_owner(item) {
+            if turn.items.insert(item.id().to_string(), owner).is_none() {
+                turn.owner = owner;
+            }
+            turn.persisted.insert(item.id().to_string());
+            return;
+        }
         if turn.items.contains_key(item.id()) {
             return;
         }
@@ -156,11 +191,17 @@ impl RealtimeItemOwners {
     /// the owner of its last handoff, so later events for the turn continue from there; a
     /// tracked turn keeps its current owner, which newer events already set.
     ///
-    /// Items without a trigger or marker cannot show where a handoff happened, so a turn that
-    /// is already voice-owned hides all of its private items.
+    /// Items without a trigger, marker or persisted owner cannot show where a handoff
+    /// happened, so a turn that is already voice-owned hides all of its private items. A
+    /// persisted owner wins over the walk and sets the owner of the items after it.
     fn saved_item_visibility(&mut self, turn: &Turn) -> Vec<bool> {
         let triggered = is_realtime_triggered_turn(turn);
-        if !triggered && !turn.items.iter().any(is_handoff_marker) {
+        if !triggered
+            && !turn
+                .items
+                .iter()
+                .any(|item| is_handoff_marker(item) || persisted_owner(item).is_some())
+        {
             return turn
                 .items
                 .iter()
@@ -180,6 +221,12 @@ impl RealtimeItemOwners {
             .items
             .iter()
             .map(|item| {
+                if let Some(persisted) = persisted_owner(item) {
+                    entry.items.insert(item.id().to_string(), persisted);
+                    entry.persisted.insert(item.id().to_string());
+                    owner = persisted;
+                    return !is_persisted_voice_private(item);
+                }
                 if matches!(item, ThreadItem::UserMessage { .. }) {
                     owner = if is_handoff_marker(item) {
                         Owner::Voice
@@ -235,7 +282,8 @@ impl RealtimeItemOwners {
     }
 
     /// Moves every turn of `newer` behind this map's turns, so capacity eviction drops the
-    /// older ones first. `newer`'s owners win; item owners only this map recorded are kept.
+    /// older ones first. `newer`'s owners win, except over a persisted item owner that only
+    /// this map read; item owners only this map recorded are kept.
     fn overlay(&mut self, newer: &Self) {
         for (turn_id, newer_turn) in &newer.turns {
             let mut turn = match self.turns.iter().position(|(id, _)| id == turn_id) {
@@ -247,12 +295,12 @@ impl RealtimeItemOwners {
                 None => newer_turn.clone(),
             };
             turn.owner = newer_turn.owner;
-            turn.items.extend(
-                newer_turn
-                    .items
-                    .iter()
-                    .map(|(item_id, owner)| (item_id.clone(), *owner)),
-            );
+            for (item_id, owner) in &newer_turn.items {
+                if newer_turn.persisted.contains(item_id) || !turn.persisted.contains(item_id) {
+                    turn.items.insert(item_id.clone(), *owner);
+                }
+            }
+            turn.persisted.extend(newer_turn.persisted.iter().cloned());
             self.insert_newest(turn_id.clone(), turn);
         }
     }

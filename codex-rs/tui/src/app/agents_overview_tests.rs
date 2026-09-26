@@ -902,6 +902,7 @@ async fn agents_overview_details_render_markdown() {
                 memory_citation: None,
                 delivery: None,
                 questions: None,
+                origin: None,
             },
         }),
     );
@@ -1003,6 +1004,7 @@ async fn agents_overview_reasoning_uses_existing_events_and_expires_with_attachm
                 memory_citation: None,
                 delivery: None,
                 questions: None,
+                origin: None,
             },
         },
     ));

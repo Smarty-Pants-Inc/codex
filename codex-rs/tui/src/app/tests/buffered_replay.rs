@@ -4,6 +4,7 @@ use super::*;
 use crate::chatwidget::tests::helpers::normalize_snapshot_paths;
 use crate::chatwidget::tests::helpers::render_bottom_popup;
 use codex_app_server_protocol::ItemCompletedNotification;
+use codex_app_server_protocol::ItemOrigin;
 use codex_app_server_protocol::ItemStartedNotification;
 use codex_app_server_protocol::ReasoningSummaryTextDeltaNotification;
 use pretty_assertions::assert_eq;
@@ -29,6 +30,7 @@ fn completed(thread: &str) -> ServerNotification {
             memory_citation: None,
             delivery: None,
             questions: None,
+            origin: None,
         },
     })
 }
@@ -57,6 +59,7 @@ async fn refreshed_active_reasoning_accepts_later_deltas_and_complete_summary() 
                     id: "reasoning".into(),
                     summary: Vec::new(),
                     content: Vec::new(),
+                    origin: None,
                 },
                 started_at_ms: 0,
             }));
@@ -93,6 +96,7 @@ async fn refreshed_active_reasoning_accepts_later_deltas_and_complete_summary() 
                 id: "reasoning".into(),
                 summary: vec!["**First heading**\nOriginal analysis paragraph".into()],
                 content: Vec::new(),
+                origin: None,
             });
         }
         if refresh {
@@ -132,6 +136,7 @@ async fn refreshed_active_reasoning_accepts_later_deltas_and_complete_summary() 
                             .into(),
                     ],
                     content: Vec::new(),
+                    origin: None,
                 },
                 completed_at_ms: 0,
             });
@@ -252,6 +257,7 @@ fn evicted_voice_delegation_marker_still_suppresses_private_replay() {
             memory_citation: None,
             delivery: None,
             questions: None,
+            origin: None,
         },
     });
     store.push_notification(private.clone());
@@ -294,6 +300,7 @@ fn evicted_voice_delegation_marker_still_suppresses_private_replay() {
                 id: "reasoning".into(),
                 summary: vec!["private summary".into()],
                 content: vec!["private raw reasoning".into()],
+                origin: None,
             },
         }),
     ] {
@@ -335,6 +342,7 @@ fn saved_voice_turn_suppresses_reasoning_without_hiding_typed_reasoning() {
         id: "reasoning".into(),
         summary: vec!["private summary".into()],
         content: vec!["private raw reasoning".into()],
+        origin: None,
     };
     let voice_request = ThreadItem::UserMessage {
         id: "voice-request".into(),
@@ -378,6 +386,7 @@ fn snapshot_keeps_typed_output_before_voice_handoff_in_the_same_turn() {
         questions: None,
         memory_citation: None,
         delivery: None,
+        origin: None,
     };
     let marker = ThreadItem::UserMessage {
         id: "voice".into(),
@@ -436,6 +445,7 @@ fn snapshot_keeps_typed_item_completed_after_voice_handoff() {
         questions: None,
         memory_citation: None,
         delivery: None,
+        origin: None,
     };
     let private = ThreadItem::AgentMessage {
         id: "private".into(),
@@ -444,6 +454,7 @@ fn snapshot_keeps_typed_item_completed_after_voice_handoff() {
         questions: None,
         memory_citation: None,
         delivery: None,
+        origin: None,
     };
     let marker = ThreadItem::UserMessage {
         id: "voice".into(),
@@ -498,6 +509,7 @@ fn snapshot_keeps_typed_steer_output_in_a_triggered_turn() {
         questions: None,
         memory_citation: None,
         delivery: None,
+        origin: None,
     };
     let user = |id: &str, text: &str| ThreadItem::UserMessage {
         id: id.into(),
@@ -514,6 +526,7 @@ fn snapshot_keeps_typed_steer_output_in_a_triggered_turn() {
         id: "typed-reasoning".into(),
         summary: vec!["Typed reasoning".into()],
         content: Vec::new(),
+        origin: None,
     };
     let marker = user(
         "marker",
@@ -598,6 +611,7 @@ async fn voice_commentary_that_completes_after_a_typed_steer_stays_private_on_re
         questions: None,
         memory_citation: None,
         delivery: None,
+        origin: None,
     };
     let steer = ThreadItem::UserMessage {
         id: "steer".into(),
@@ -660,6 +674,7 @@ fn buffered_output_continues_from_the_saved_turns_final_owner() {
         questions: None,
         memory_citation: None,
         delivery: None,
+        origin: None,
     };
     let steer = ThreadItem::UserMessage {
         id: "steer".into(),
@@ -728,6 +743,7 @@ async fn saved_history_longer_than_the_owner_map_keeps_the_buffer_boundary_owner
         questions: None,
         memory_citation: None,
         delivery: None,
+        origin: None,
     };
     let triggered_turn = |id: &str, status: TurnStatus| Turn {
         turn_trigger: Some("realtime".into()),
@@ -816,6 +832,90 @@ async fn saved_history_longer_than_the_owner_map_keeps_the_buffer_boundary_owner
     assert!(!rendered.contains("Voice-private commentary"), "{rendered}");
 }
 
+/// A paged cold resume carries no trigger or marker, and its items are in completion order.
+/// The persisted origins must keep voice output hidden, also for a live voice item that
+/// starts after the typed steer's output.
+#[tokio::test]
+async fn paged_resume_hides_voice_output_by_persisted_origin() {
+    let commentary = |id: &str, text: &str, origin: ItemOrigin| ThreadItem::AgentMessage {
+        id: id.into(),
+        text: text.into(),
+        phase: Some(codex_protocol::models::MessagePhase::Commentary),
+        questions: None,
+        memory_citation: None,
+        delivery: None,
+        origin: Some(origin),
+    };
+    let voice_reasoning = |id: &str, summary: Vec<String>| ThreadItem::Reasoning {
+        id: id.into(),
+        summary,
+        content: Vec::new(),
+        origin: Some(ItemOrigin::Voice),
+    };
+    let mut store = ThreadEventStore::new(/*capacity*/ 8);
+    store.set_turns(vec![test_turn(
+        "paged",
+        TurnStatus::InProgress,
+        vec![
+            voice_reasoning("voice-reasoning", vec!["Voice-private reasoning".into()]),
+            ThreadItem::UserMessage {
+                id: "steer".into(),
+                client_id: None,
+                content: vec![codex_app_server_protocol::UserInput::Text {
+                    text: "Typed steer".into(),
+                    text_elements: Vec::new(),
+                }],
+            },
+            commentary(
+                "voice-update",
+                "Voice-private commentary",
+                ItemOrigin::Voice,
+            ),
+            commentary("typed-update", "Typed commentary", ItemOrigin::Typed),
+        ],
+    )]);
+    store.push_notification(ServerNotification::ItemStarted(ItemStartedNotification {
+        thread_id: "thread".into(),
+        turn_id: "paged".into(),
+        started_at_ms: 0,
+        item: voice_reasoning("late-voice-reasoning", Vec::new()),
+    }));
+    store.push_notification(ServerNotification::ReasoningSummaryTextDelta(
+        ReasoningSummaryTextDeltaNotification {
+            thread_id: "thread".into(),
+            turn_id: "paged".into(),
+            item_id: "late-voice-reasoning".into(),
+            delta: "Late voice-private reasoning".into(),
+            summary_index: 0,
+        },
+    ));
+    store.push_notification(ServerNotification::ItemCompleted(
+        ItemCompletedNotification {
+            thread_id: "thread".into(),
+            turn_id: "paged".into(),
+            completed_at_ms: 0,
+            item: voice_reasoning(
+                "late-voice-reasoning",
+                vec!["Late voice-private reasoning".into()],
+            ),
+        },
+    ));
+
+    let (mut app, mut app_events, _ops) = make_test_app_with_channels().await;
+    app.replay_thread_snapshot(store.snapshot(), /*resume_restored_queue*/ false);
+    let rendered = std::iter::from_fn(|| app_events.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => {
+                Some(lines_to_single_string(&cell.transcript_lines(/*width*/ 80)))
+            }
+            _ => None,
+        })
+        .collect::<String>();
+    assert!(rendered.contains("Typed commentary"), "{rendered}");
+    assert!(!rendered.contains("Voice-private"), "{rendered}");
+    assert!(!rendered.contains("voice-private"), "{rendered}");
+}
+
 #[tokio::test]
 async fn evicted_voice_marker_survives_widget_snapshot_for_late_reasoning() {
     let thread_id = ThreadId::new();
@@ -869,6 +969,7 @@ async fn evicted_voice_marker_survives_widget_snapshot_for_late_reasoning() {
                 id: "late-reasoning".into(),
                 summary: vec!["private after switch".into()],
                 content: Vec::new(),
+                origin: None,
             },
         }),
         /*replay_kind*/ None,
@@ -889,6 +990,7 @@ async fn evicted_voice_marker_survives_widget_snapshot_for_late_reasoning() {
                 memory_citation: None,
                 delivery: None,
                 questions: None,
+                origin: None,
             },
         }),
         /*replay_kind*/ None,

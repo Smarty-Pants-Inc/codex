@@ -254,6 +254,7 @@ async fn delegated_reasoning_never_enters_live_history() {
             id: "reasoning".into(),
             summary: vec!["private summary".into()],
             content: vec!["private raw reasoning".into()],
+            origin: None,
         },
     );
     chat.reset_realtime_conversation();
@@ -286,6 +287,7 @@ async fn delegated_reasoning_never_enters_live_history() {
             id: "late-reasoning".into(),
             summary: vec!["private late summary".into()],
             content: Vec::new(),
+            origin: None,
         },
     );
     chat.handle_server_notification(
@@ -306,6 +308,7 @@ async fn delegated_reasoning_never_enters_live_history() {
             id: "late-start-reasoning".into(),
             summary: vec!["private delayed start".into()],
             content: Vec::new(),
+            origin: None,
         },
     );
     chat.handle_server_notification(
@@ -360,6 +363,7 @@ async fn delegated_reasoning_never_enters_live_history() {
         id: "typed-reasoning".into(),
         summary: vec!["ordinary summary".into()],
         content: Vec::new(),
+        origin: None,
     };
     start_item(&mut chat, thread_id, "typed-turn", typed_reasoning.clone());
     chat.handle_server_notification(

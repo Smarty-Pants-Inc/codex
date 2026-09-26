@@ -1578,6 +1578,7 @@ async fn slash_copy_picker_uses_completed_commentary_during_active_turn() {
                 memory_citation: None,
                 delivery: None,
                 questions: None,
+                origin: None,
             },
         }),
         /*replay_kind*/ None,

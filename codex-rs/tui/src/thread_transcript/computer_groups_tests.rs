@@ -54,6 +54,7 @@ fn every_page_split_retains_the_same_rich_computer_group() {
                 id: "reasoning-first".to_owned(),
                 summary: vec!["Inspect the second screen".to_owned()],
                 content: Vec::new(),
+                origin: None,
             },
             computer("second"),
             computer("third"),
@@ -61,6 +62,7 @@ fn every_page_split_retains_the_same_rich_computer_group() {
                 id: "reasoning-second".to_owned(),
                 summary: vec!["Confirm the final screen".to_owned()],
                 content: Vec::new(),
+                origin: None,
             },
             computer("last"),
         ],
@@ -151,6 +153,7 @@ fn joins_respect_actual_turns_and_intervening_items() {
                 id: "reasoning".to_string(),
                 summary: Vec::new(),
                 content: Vec::new(),
+                origin: None,
             },
             last,
         ],
@@ -169,6 +172,7 @@ fn joins_respect_actual_turns_and_intervening_items() {
         memory_citation: None,
         delivery: None,
         questions: None,
+        origin: None,
     };
     assert!(join_computer_groups(&older[0], &newer[0], &turns).is_none());
 }

@@ -26,6 +26,7 @@ async fn resumed_reasoning_without_start_accepts_deltas_and_completion() {
                             .into(),
                         ],
                         content: Vec::new(),
+                        origin: None,
                     })
                     .collect();
                 let turns = vec![test_turn("turn", TurnStatus::InProgress, items)];
@@ -82,6 +83,7 @@ async fn resumed_reasoning_without_start_accepts_deltas_and_completion() {
                                 "**Inspecting**\nSnapshot paragraph.\nCompleted paragraph.".into(),
                             ],
                             content: Vec::new(),
+                            origin: None,
                         },
                     }),
                     /*replay_kind*/ None,
@@ -130,6 +132,7 @@ async fn resumed_trailing_reasoning_is_kept_when_no_more_reasoning_arrives() {
                     id: "finished".into(),
                     summary: vec!["**Inspecting**\nSaved paragraph.".into()],
                     content: Vec::new(),
+                    origin: None,
                 }],
             )],
         );
@@ -145,6 +148,7 @@ async fn resumed_trailing_reasoning_is_kept_when_no_more_reasoning_arrives() {
                             id: "next".into(),
                             summary: Vec::new(),
                             content: Vec::new(),
+                            origin: None,
                         },
                     },
                 ),

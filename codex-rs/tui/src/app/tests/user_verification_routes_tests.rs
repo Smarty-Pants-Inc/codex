@@ -250,6 +250,7 @@ async fn inactive_thread_user_verification_preserves_foreground_stream() -> Resu
                 memory_citation: None,
                 delivery: None,
                 questions: None,
+                origin: None,
             },
         }),
         /*replay_kind*/ None,

@@ -87,6 +87,7 @@ async fn computer_activity_keeps_reasoning_in_order_live_and_replayed() {
                             id: summary.clone(),
                             summary: vec![summary],
                             content: Vec::new(),
+                            origin: None,
                         },
                         "turn-1".to_string(),
                         ReplayKind::ThreadSnapshot,

@@ -87,6 +87,7 @@ fn agent_item(item_id: &str, text: &str, phase: Option<MessagePhase>) -> ThreadI
         questions: None,
         memory_citation: None,
         delivery: None,
+        origin: None,
     }
 }
 

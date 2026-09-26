@@ -1293,6 +1293,7 @@ fn turn_summary(turn: &Turn, include_outputs: bool, output_chars: usize) -> Valu
                 id,
                 summary,
                 content,
+                origin: _,
             } => {
                 let mut item = json!({
                     "type": "reasoning",

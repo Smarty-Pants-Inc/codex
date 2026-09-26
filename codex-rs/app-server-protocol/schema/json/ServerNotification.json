@@ -2702,6 +2702,25 @@
       ],
       "type": "object"
     },
+    "ItemOrigin": {
+      "description": "Who started the input that an assistant item responds to.\n\nThis is display metadata only. It never enters model-visible context.",
+      "oneOf": [
+        {
+          "description": "The user typed the input.",
+          "enum": [
+            "typed"
+          ],
+          "type": "string"
+        },
+        {
+          "description": "The input came from a realtime voice delegation.",
+          "enum": [
+            "voice"
+          ],
+          "type": "string"
+        }
+      ]
+    },
     "ItemStartedNotification": {
       "properties": {
         "item": {
@@ -4679,6 +4698,18 @@
               ],
               "default": null
             },
+            "origin": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ItemOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "EXPERIMENTAL - which realtime input (voice or typed) this item responds to. Set only for turns that received realtime voice input; clients use it to keep voice-private output hidden."
+            },
             "phase": {
               "anyOf": [
                 {
@@ -4789,6 +4820,18 @@
             },
             "id": {
               "type": "string"
+            },
+            "origin": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ItemOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null,
+              "description": "EXPERIMENTAL - which realtime input (voice or typed) this item responds to. Set only for turns that received realtime voice input; clients use it to keep voice-private output hidden."
             },
             "summary": {
               "default": [],

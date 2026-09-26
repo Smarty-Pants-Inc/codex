@@ -73,6 +73,7 @@ async fn older_tool_projection_matches_initial_replay() {
                 id: "computer-reasoning".to_string(),
                 summary: vec!["**Inspecting the page**".to_string()],
                 content: Vec::new(),
+                origin: None,
             });
         }
         items.push(AppServerThreadItem::McpToolCall {
@@ -103,6 +104,7 @@ async fn older_tool_projection_matches_initial_replay() {
                 id: "exploration-reasoning".to_string(),
                 summary: vec!["**Checking the implementation**".to_string()],
                 content: Vec::new(),
+                origin: None,
             });
         }
         let mut read = items[index].clone();
@@ -192,6 +194,7 @@ async fn snapshot_formatter_reasoning_matches_compact_and_detailed_replay() {
                 "**Checking tests**\n\n<!-- -->".to_string(),
             ],
             content: vec!["Raw detail.".to_string()],
+            origin: None,
         };
         let projected = thread_items_to_transcript_cells(
             chat.thread_id,
@@ -254,6 +257,7 @@ fn raw_reasoning_keeps_its_own_heading() {
             id: "raw".into(),
             summary: Vec::new(),
             content: vec!["**Raw investigation**\nKeep this heading and its details.".into()],
+            origin: None,
         }],
         RawReasoningVisibility::Visible,
         /*config*/ None,

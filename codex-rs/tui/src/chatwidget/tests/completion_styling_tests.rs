@@ -18,6 +18,7 @@ fn completed_turn(duration_ms: Option<i64>, completed_at: Option<i64>) -> AppSer
             memory_citation: None,
             delivery: None,
             questions: None,
+            origin: None,
         }],
         ..app_server_turn(
             "turn-1",

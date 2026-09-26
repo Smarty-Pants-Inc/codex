@@ -752,6 +752,7 @@ fn title_agent_message(id: &str, text: &str, phase: Option<MessagePhase>) -> Thr
         memory_citation: None,
         delivery: None,
         questions: None,
+        origin: None,
     }
 }
 

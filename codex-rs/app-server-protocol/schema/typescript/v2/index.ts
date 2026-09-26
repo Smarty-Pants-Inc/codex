@@ -239,6 +239,7 @@ export type { InstalledApp } from "./InstalledApp";
 export type { ItemCompletedNotification } from "./ItemCompletedNotification";
 export type { ItemGuardianApprovalReviewCompletedNotification } from "./ItemGuardianApprovalReviewCompletedNotification";
 export type { ItemGuardianApprovalReviewStartedNotification } from "./ItemGuardianApprovalReviewStartedNotification";
+export type { ItemOrigin } from "./ItemOrigin";
 export type { ItemStartedNotification } from "./ItemStartedNotification";
 export type { ListMcpServerStatusParams } from "./ListMcpServerStatusParams";
 export type { ListMcpServerStatusResponse } from "./ListMcpServerStatusResponse";

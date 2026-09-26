@@ -3,6 +3,7 @@
 
 use super::super::RealtimeTurnOrigin;
 use super::*;
+use codex_app_server_protocol::ItemOrigin;
 use codex_app_server_protocol::TurnStartedNotification;
 use pretty_assertions::assert_eq;
 
@@ -179,6 +180,7 @@ async fn replay_of_triggered_turn_keeps_typed_steer_output_visible() {
         id: id.into(),
         summary: vec![summary.into()],
         content: Vec::new(),
+        origin: None,
     };
     chat.replay_thread_turns(
         vec![Turn {
@@ -234,6 +236,75 @@ async fn replay_of_triggered_turn_keeps_typed_steer_output_visible() {
         .join("\n");
     assert!(history.contains("Checking the typed steer"), "{history}");
     assert!(history.contains("Typed reasoning summary"), "{history}");
+    assert!(!history.contains("Private voice"), "{history}");
+}
+
+/// A paged cold resume has no trigger or marker and lists items in completion order, so
+/// the persisted origin is the only record of which items voice owns.
+#[tokio::test]
+async fn paged_resume_uses_persisted_origin_to_hide_voice_output() {
+    let (mut chat, _sender, mut events, _ops) = make_chatwidget_manual_with_sender().await;
+    chat.thread_id = Some(ThreadId::new());
+    let commentary = |id: &str, text: &str, origin: ItemOrigin| ThreadItem::AgentMessage {
+        id: id.into(),
+        text: text.into(),
+        phase: Some(MessagePhase::Commentary),
+        questions: None,
+        memory_citation: None,
+        delivery: None,
+        origin: Some(origin),
+    };
+    chat.replay_thread_turns(
+        vec![Turn {
+            id: "paged-voice-then-typed".into(),
+            items: vec![
+                ThreadItem::Reasoning {
+                    id: "voice-reasoning".into(),
+                    summary: vec!["Private voice reasoning".into()],
+                    content: Vec::new(),
+                    origin: Some(ItemOrigin::Voice),
+                },
+                user_item("Typed steer"),
+                // Started before the steer and completed after it.
+                commentary(
+                    "voice-update",
+                    "Private voice commentary",
+                    ItemOrigin::Voice,
+                ),
+                commentary(
+                    "typed-update",
+                    "Checking the typed steer",
+                    ItemOrigin::Typed,
+                ),
+            ],
+            items_view: TurnItemsView::Full,
+            status: TurnStatus::Completed,
+            error: None,
+            started_at: None,
+            completed_at: None,
+            duration_ms: None,
+            turn_trigger: None,
+        }],
+        ReplayKind::ThreadSnapshot,
+    );
+    chat.flush_answer_stream_with_separator();
+    commit_realtime_history_events(&mut chat, &mut events);
+
+    let history = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            AppEvent::InsertHistoryCell(cell) => Some(
+                cell.transcript_lines(/*width*/ 80)
+                    .into_iter()
+                    .map(|line| line.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(history.contains("Typed steer"), "{history}");
+    assert!(history.contains("Checking the typed steer"), "{history}");
     assert!(!history.contains("Private voice"), "{history}");
 }
 

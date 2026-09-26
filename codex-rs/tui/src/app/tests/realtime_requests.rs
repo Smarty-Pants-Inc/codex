@@ -52,6 +52,7 @@ fn test_agent_message(id: &str, text: &str) -> ThreadItem {
         questions: None,
         memory_citation: None,
         delivery: None,
+        origin: None,
     }
 }
 
@@ -747,6 +748,7 @@ async fn retained_caption_consumes_only_one_matching_answer_fallback_on_reattach
         questions: None,
         memory_citation: None,
         delivery: None,
+        origin: None,
     };
     app.pending_realtime_speech_replay.insert(
         source,

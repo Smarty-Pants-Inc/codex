@@ -784,6 +784,7 @@ async fn question_drafts_survive_navigation_and_snapshot_replay() {
         memory_citation: None,
         delivery: None,
         questions: Some(vec![question("Buffered?", /*options*/ None)]),
+        origin: None,
     };
     for kind in [
         ReplayKind::ResumeInitialMessages,

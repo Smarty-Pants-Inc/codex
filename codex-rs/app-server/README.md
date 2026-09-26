@@ -40,6 +40,19 @@ rollout history include it. Other payloads that embed a `Turn`, such as
 `turn/completed` and paged `thread/turns/list` results, send null. The
 field is experimental and appears only in the experimental schema.
 
+# Item origin (experimental)
+
+`agentMessage` and `reasoning` items have an `origin` field: `voice` or
+`typed`. It tells which realtime input the item responds to. The server sets
+it only for turns that received realtime voice input, and it is null for all
+other items. Unlike `turnTrigger`, it is persisted with the item, so
+`item/started`, `item/completed`, `thread/read`, `thread/resume` and paged
+`thread/turns/list` and `thread/items/list` results carry it. Clients use it to
+keep voice-private reasoning and commentary hidden when a typed steer shares
+the turn. Items rebuilt from legacy rollout events do not have it. The field is
+experimental, but an enum-variant field cannot be gated, so it also appears in
+the stable schema.
+
 # Application network policy
 
 App-server loads application network policy at startup and existing explicit

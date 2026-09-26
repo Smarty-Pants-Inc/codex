@@ -133,7 +133,11 @@ pub(crate) fn thread_items_to_transcript_cells(
     });
     let mut cells: TranscriptCells = Vec::new();
     let mut pending = None;
-    for item in items {
+    // Persisted voice-private output stays hidden in every projection of saved history.
+    for item in items
+        .into_iter()
+        .filter(|item| !crate::chatwidget::is_persisted_voice_private(item))
+    {
         if matches!(item, ThreadItem::Reasoning { .. })
             && let Some(group) = &mut pending
         {
@@ -308,6 +312,7 @@ fn item_to_cells(
             id,
             summary,
             content,
+            origin: _,
         } => {
             let (header, mut text) = split_reasoning_summary_parts(&summary);
             if matches!(raw_reasoning_visibility, RawReasoningVisibility::Visible)
@@ -338,3 +343,7 @@ fn item_to_cells(
     }
     cells
 }
+
+#[cfg(test)]
+#[path = "thread_transcript_tests.rs"]
+mod tests;

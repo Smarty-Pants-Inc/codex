@@ -533,6 +533,7 @@ impl ThreadHistoryBuilder {
             memory_citation: payload.memory_citation.clone().map(Into::into),
             delivery: payload.delivery,
             questions: payload.questions.clone(),
+            origin: None,
         });
     }
 
@@ -573,6 +574,7 @@ impl ThreadHistoryBuilder {
             id,
             summary: vec![payload.text.clone()],
             content: Vec::new(),
+            origin: None,
         });
     }
 
@@ -613,6 +615,7 @@ impl ThreadHistoryBuilder {
             id,
             summary: Vec::new(),
             content: vec![payload.text.clone()],
+            origin: None,
         });
     }
 
@@ -1932,6 +1935,7 @@ mod tests {
                 memory_citation: None,
                 delivery: None,
                 questions: None,
+                origin: None,
             }
         );
         assert_eq!(
@@ -1940,6 +1944,7 @@ mod tests {
                 id: "item-3".into(),
                 summary: vec!["thinking".into()],
                 content: vec!["full reasoning".into()],
+                origin: None,
             }
         );
 
@@ -1967,6 +1972,7 @@ mod tests {
                 memory_citation: None,
                 delivery: None,
                 questions: None,
+                origin: None,
             }
         );
     }
@@ -2637,6 +2643,7 @@ mod tests {
                 memory_citation: None,
                 delivery: Some(AgentMessageDelivery::Async),
                 questions: Some(questions),
+                origin: None,
             }
         );
     }
@@ -2773,6 +2780,7 @@ mod tests {
                 id: "item-2".into(),
                 summary: vec!["first summary".into()],
                 content: vec!["first content".into()],
+                origin: None,
             }
         );
         assert_eq!(
@@ -2781,6 +2789,7 @@ mod tests {
                 id: "item-4".into(),
                 summary: vec!["second summary".into()],
                 content: Vec::new(),
+                origin: None,
             }
         );
     }
@@ -2857,6 +2866,7 @@ mod tests {
                 memory_citation: None,
                 delivery: None,
                 questions: None,
+                origin: None,
             }
         );
 
@@ -2883,6 +2893,7 @@ mod tests {
                 memory_citation: None,
                 delivery: None,
                 questions: None,
+                origin: None,
             }
         );
     }
@@ -2967,6 +2978,7 @@ mod tests {
                     memory_citation: None,
                     delivery: None,
                     questions: None,
+                    origin: None,
                 },
             ]
         );
@@ -2988,6 +3000,7 @@ mod tests {
                     memory_citation: None,
                     delivery: None,
                     questions: None,
+                    origin: None,
                 },
             ]
         );
@@ -5333,6 +5346,7 @@ mod tests {
                         id: "item-1".into(),
                         summary: vec!["summary".into()],
                         content: vec!["raw content".into()],
+                        origin: None,
                     },
                     started_at_ms: None,
                     completed_at_ms: None,

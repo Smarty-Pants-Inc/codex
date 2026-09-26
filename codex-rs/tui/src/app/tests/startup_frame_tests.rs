@@ -24,6 +24,7 @@ async fn owned_startup_preserves_loading_until_resume_replay_is_applied() -> Res
             memory_citation: None,
             delivery: None,
             questions: None,
+            origin: None,
         }],
     ] {
         let (mut app, mut events, _ops) = make_test_app_with_channels().await;
