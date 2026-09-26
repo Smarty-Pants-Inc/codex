@@ -237,6 +237,7 @@ pub(crate) mod extension_metrics;
 mod guardian_checkpoint;
 mod handlers;
 mod inject;
+mod item_origin;
 mod reasoning_effort;
 mod submission;
 pub(crate) use reasoning_effort::RequestEffortUsage;
@@ -2591,7 +2592,7 @@ impl Session {
             EventMsg::ItemStarted(ItemStartedEvent {
                 thread_id: self.thread_id,
                 turn_id: turn_context.sub_id.clone(),
-                item: item.clone(),
+                item: item_origin::stamp_started(turn_context, item.clone()),
                 started_at_ms,
             }),
         )
@@ -2603,6 +2604,7 @@ impl Session {
         turn_context: &TurnContext,
         item: TurnItem,
     ) {
+        let item = item_origin::stamp_completed(turn_context, item);
         record_turn_ttfm_metric(turn_context, &item).await;
         for contributor in self.services.extensions.turn_lifecycle_contributors() {
             contributor

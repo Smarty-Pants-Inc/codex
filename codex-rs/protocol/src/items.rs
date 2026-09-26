@@ -167,6 +167,25 @@ pub struct AgentMessageItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub questions: Option<Vec<AsyncUserInputQuestion>>,
+    /// Who started the input this item responds to. Core records it only for
+    /// turns that received realtime voice input; it is `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub origin: Option<ItemOrigin>,
+}
+
+/// Who started the input that an assistant item responds to.
+///
+/// This is display metadata only. It never enters model-visible context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, TS, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+#[ts(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub enum ItemOrigin {
+    /// The user typed the input.
+    Typed,
+    /// The input came from a realtime voice delegation.
+    Voice,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
@@ -194,6 +213,11 @@ pub struct ReasoningItem {
     pub summary_text: Vec<String>,
     #[serde(default)]
     pub raw_content: Vec<String>,
+    /// Who started the input this item responds to. Core records it only for
+    /// turns that received realtime voice input; it is `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub origin: Option<ItemOrigin>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]

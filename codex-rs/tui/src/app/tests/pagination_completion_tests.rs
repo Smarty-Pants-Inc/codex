@@ -83,6 +83,7 @@ pub(super) async fn completed_history_app(
                 memory_citation: None,
                 delivery: None,
                 questions: None,
+                origin: None,
             }),
         ];
         events.extend(items.into_iter().map(|item| {

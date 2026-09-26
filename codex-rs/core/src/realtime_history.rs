@@ -4,6 +4,8 @@
 
 mod presentation;
 
+use crate::context::ContextualUserFragment;
+use crate::context::RealtimeDelegation;
 use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RealtimeEvent;
@@ -109,11 +111,10 @@ impl RealtimeHistoryState {
                 .into_iter()
                 .flatten()
                 .any(|segment| !segment.text.is_empty())
-            && !matches!(input, [UserInput::Text { text, .. }] if {
-                let text = text.trim();
-                text.starts_with("<realtime_delegation>")
-                    && text.ends_with("</realtime_delegation>")
-            })
+            && !matches!(
+                input,
+                [UserInput::Text { text, .. }] if RealtimeDelegation::matches_text(text)
+            )
     }
 
     fn seal_user_input(&mut self, input: &[UserInput]) -> Vec<RealtimeItem> {

@@ -657,6 +657,7 @@ fn open_questions(chat: &mut ChatWidget, options: Option<Vec<String>>) {
                 },
                 question("Second?", Some(vec!["Next".into()])),
             ]),
+            origin: None,
         },
         "turn",
         /*from_replay*/ false,

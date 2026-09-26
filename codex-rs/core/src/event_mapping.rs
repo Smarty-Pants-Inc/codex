@@ -170,6 +170,7 @@ fn parse_agent_message(
         memory_citation: None,
         delivery: None,
         questions: None,
+        origin: None,
     }
 }
 
@@ -219,6 +220,7 @@ pub fn parse_turn_item(item: &ResponseItem) -> Option<TurnItem> {
                 id: id.as_deref().unwrap_or_default().to_string(),
                 summary_text,
                 raw_content,
+                origin: None,
             }))
         }
         ResponseItem::WebSearchCall { id, action, .. } => {

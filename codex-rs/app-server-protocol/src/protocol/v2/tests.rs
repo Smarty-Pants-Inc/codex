@@ -3170,6 +3170,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         memory_citation: None,
         delivery: None,
         questions: None,
+        origin: None,
     });
 
     assert_eq!(
@@ -3201,6 +3202,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         }),
         delivery: None,
         questions: None,
+        origin: None,
     });
 
     assert_eq!(
@@ -3235,6 +3237,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
             title: "Which?".to_string(),
             options: None,
         }]),
+        origin: None,
     }));
     assert_eq!(
         serde_json::to_value(&async_item).unwrap(),
@@ -3259,6 +3262,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
         id: "reasoning-1".to_string(),
         summary_text: vec!["line one".to_string(), "line two".to_string()],
         raw_content: vec![],
+        origin: None,
     });
 
     assert_eq!(
