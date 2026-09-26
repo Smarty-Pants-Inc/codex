@@ -11,6 +11,7 @@
 //! the typed owner of a restored reasoning item or a newer map's owner in `overlay`, does not
 //! replace it. Paged history has no trigger or marker, so the origin is its only ownership record.
 
+use super::is_persisted_voice_private;
 use super::is_private_realtime_agent_item;
 use super::is_realtime_triggered_turn;
 use super::realtime_delegation_input;
@@ -224,7 +225,7 @@ impl RealtimeItemOwners {
                     entry.items.insert(item.id().to_string(), persisted);
                     entry.persisted.insert(item.id().to_string());
                     owner = persisted;
-                    return persisted == Owner::Typed || !is_private_realtime_agent_item(item);
+                    return !is_persisted_voice_private(item);
                 }
                 if matches!(item, ThreadItem::UserMessage { .. }) {
                     owner = if is_handoff_marker(item) {
