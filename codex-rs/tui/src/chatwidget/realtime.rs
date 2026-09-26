@@ -246,6 +246,21 @@ pub(crate) fn is_realtime_triggered_turn(turn: &Turn) -> bool {
     turn.turn_trigger.as_deref() == Some(REALTIME_TURN_TRIGGER)
 }
 
+/// Whether the server persisted this item as voice-owned output that stays private: the one
+/// rule for history that has only the persisted `origin`, such as older pages and exports.
+pub(crate) fn is_persisted_voice_private(item: &ThreadItem) -> bool {
+    matches!(
+        item,
+        ThreadItem::AgentMessage {
+            origin: Some(codex_app_server_protocol::ItemOrigin::Voice),
+            ..
+        } | ThreadItem::Reasoning {
+            origin: Some(codex_app_server_protocol::ItemOrigin::Voice),
+            ..
+        }
+    ) && is_private_realtime_agent_item(item)
+}
+
 pub(crate) fn is_private_realtime_agent_item(item: &ThreadItem) -> bool {
     if matches!(item, ThreadItem::Reasoning { .. }) {
         return true;
