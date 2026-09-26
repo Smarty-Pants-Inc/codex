@@ -477,3 +477,9 @@ credential discovery/signing, are disabled while restrictions apply. Supported
 HTTP, WebSocket, and code-mode gRPC requests use the shared destination checks.
 User-directed Git, SSH, shell, and other subprocess traffic retain their existing
 execution and sandbox policies.
+
+# Dynamic tool responses
+
+A client's response to an `item/tool/call` request stays bound to the turn that
+issued the request. If that turn is interrupted, a late response cannot resolve a
+tool call in a later turn, even when the later call reuses the same call ID.
