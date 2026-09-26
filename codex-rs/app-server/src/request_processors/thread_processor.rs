@@ -2994,6 +2994,9 @@ impl ThreadRequestProcessor {
                 thread.path = fallback_thread.path.clone();
             }
             thread.session_id.clone_from(&fallback_thread.session_id);
+            // The live thread owns its cwd. Saved metadata can lag a settings update,
+            // because the SQLite metadata write is best effort.
+            thread.cwd.clone_from(&fallback_thread.cwd);
             thread.ephemeral = fallback_thread.ephemeral;
             thread.can_accept_direct_input = fallback_thread.can_accept_direct_input;
             thread
