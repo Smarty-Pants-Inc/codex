@@ -2196,6 +2196,11 @@ class InternalChatMessageMetadataPassthrough(BaseModel):
     turn_id: str | None = None
 
 
+class ItemOrigin(Enum):
+    typed = "typed"
+    voice = "voice"
+
+
 class LegacyAppPathString(RootModel[str]):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -5367,6 +5372,12 @@ class ReasoningThreadItem(BaseModel):
     )
     content: list[str] | None = []
     id: str
+    origin: Annotated[
+        ItemOrigin | None,
+        Field(
+            description="EXPERIMENTAL - which realtime input (voice or typed) this item responds to. Set only for turns that received realtime voice input; clients use it to keep voice-private output hidden."
+        ),
+    ] = None
     summary: list[str] | None = []
     type: Annotated[Literal["reasoning"], Field(title="ReasoningThreadItemType")]
 
@@ -9861,6 +9872,12 @@ class AgentMessageThreadItem(BaseModel):
     delivery: AgentMessageDelivery | None = None
     id: str
     memory_citation: Annotated[MemoryCitation | None, Field(alias="memoryCitation")] = None
+    origin: Annotated[
+        ItemOrigin | None,
+        Field(
+            description="EXPERIMENTAL - which realtime input (voice or typed) this item responds to. Set only for turns that received realtime voice input; clients use it to keep voice-private output hidden."
+        ),
+    ] = None
     phase: MessagePhase | None = None
     questions: list[AsyncUserInputQuestion] | None = None
     text: str
