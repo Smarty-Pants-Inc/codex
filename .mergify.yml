@@ -38,3 +38,7 @@ commands_restrictions:
       - or:
           - sender-permission >= write
           - sender = smarty-fleet-write[bot]
+          # Keep Mergify's default arm: a fork PR's own author may refresh it (docs.mergify.com/commands/restrictions).
+          - and:
+              - sender = {{author}}
+              - from-fork
