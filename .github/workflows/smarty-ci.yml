@@ -24,7 +24,8 @@ concurrency:
 jobs:
   lint:
     name: smarty-ci-lint
-    runs-on: ubuntu-24.04
+    # Depot overflow (smarty-dev#2267, Paul YES 2026-10-02): ordinary pull_request runs only; queue drafts, priority-ci, push and other events keep their runner.
+    runs-on: ${{ (startsWith(github.ref, 'refs/heads/mergify/merge-queue/') || startsWith(github.ref, 'refs/heads/tmp-mergify/merge-queue/') || startsWith(github.head_ref, 'mergify/merge-queue/') || startsWith(github.head_ref, 'tmp-mergify/merge-queue/') || contains(github.event.pull_request.labels.*.name, 'priority-ci')) && 'ubuntu-24.04' || github.event_name == 'pull_request' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     timeout-minutes: 90
     env:
       CARGO_BUILD_JOBS: "2"
@@ -83,7 +84,8 @@ jobs:
 
   affected:
     name: smarty-ci-affected
-    runs-on: ubuntu-24.04
+    # Depot overflow (smarty-dev#2267, Paul YES 2026-10-02): ordinary pull_request runs only; queue drafts, priority-ci, push and other events keep their runner.
+    runs-on: ${{ (startsWith(github.ref, 'refs/heads/mergify/merge-queue/') || startsWith(github.ref, 'refs/heads/tmp-mergify/merge-queue/') || startsWith(github.head_ref, 'mergify/merge-queue/') || startsWith(github.head_ref, 'tmp-mergify/merge-queue/') || contains(github.event.pull_request.labels.*.name, 'priority-ci')) && 'ubuntu-24.04' || github.event_name == 'pull_request' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     timeout-minutes: 90
     env:
       CARGO_BUILD_JOBS: "2"
@@ -192,7 +194,8 @@ jobs:
 
   core:
     name: smarty-ci-core
-    runs-on: ubuntu-24.04
+    # Depot overflow (smarty-dev#2267, Paul YES 2026-10-02): ordinary pull_request runs only; queue drafts, priority-ci, push and other events keep their runner.
+    runs-on: ${{ (startsWith(github.ref, 'refs/heads/mergify/merge-queue/') || startsWith(github.ref, 'refs/heads/tmp-mergify/merge-queue/') || startsWith(github.head_ref, 'mergify/merge-queue/') || startsWith(github.head_ref, 'tmp-mergify/merge-queue/') || contains(github.event.pull_request.labels.*.name, 'priority-ci')) && 'ubuntu-24.04' || github.event_name == 'pull_request' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     timeout-minutes: 90
     env:
       CARGO_BUILD_JOBS: "2"
@@ -228,7 +231,8 @@ jobs:
 
   workspace:
     name: smarty-ci-workspace
-    runs-on: ubuntu-24.04
+    # Depot overflow (smarty-dev#2267, Paul YES 2026-10-02): ordinary pull_request runs only; queue drafts, priority-ci, push and other events keep their runner.
+    runs-on: ${{ (startsWith(github.ref, 'refs/heads/mergify/merge-queue/') || startsWith(github.ref, 'refs/heads/tmp-mergify/merge-queue/') || startsWith(github.head_ref, 'mergify/merge-queue/') || startsWith(github.head_ref, 'tmp-mergify/merge-queue/') || contains(github.event.pull_request.labels.*.name, 'priority-ci')) && 'ubuntu-24.04' || github.event_name == 'pull_request' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     # The complete workspace build and run took about 55 minutes of the former single job.
     timeout-minutes: 120
     env:
@@ -277,7 +281,8 @@ jobs:
       - affected
       - core
       - workspace
-    runs-on: ubuntu-24.04
+    # Depot overflow (smarty-dev#2267, Paul YES 2026-10-02): ordinary pull_request runs only; queue drafts, priority-ci, push and other events keep their runner.
+    runs-on: ${{ (startsWith(github.ref, 'refs/heads/mergify/merge-queue/') || startsWith(github.ref, 'refs/heads/tmp-mergify/merge-queue/') || startsWith(github.head_ref, 'mergify/merge-queue/') || startsWith(github.head_ref, 'tmp-mergify/merge-queue/') || contains(github.event.pull_request.labels.*.name, 'priority-ci')) && 'ubuntu-24.04' || github.event_name == 'pull_request' && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:
       - name: Require every gate job to succeed
