@@ -31,3 +31,12 @@ commands_restrictions:
       - or:
           - sender-permission >= write
           - sender = smarty-fleet-write[bot]
+  # The stuck-work check posts one `@mergifyio refresh` per head as the write App (smarty-dev#868);
+  # without this Mergify answers "Command disallowed" (F3566).
+  refresh:
+    conditions:
+      - or:
+          - sender-permission >= write
+          - sender = smarty-fleet-write[bot]
+          - sender = smarty-fleet-write-leads[bot]
+          - sender = smarty-fleet-write-lanes[bot]
