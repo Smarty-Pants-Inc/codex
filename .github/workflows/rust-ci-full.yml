@@ -404,6 +404,7 @@ jobs:
           name: cargo-timings-rust-ci-clippy-${{ matrix.target }}-${{ matrix.profile }}
           path: ${{ env.CARGO_TARGET_DIR }}/**/cargo-timings/cargo-timing.html
           if-no-files-found: warn
+          retention-days: 3 # smarty-dev#1246
 
       # Save caches explicitly; make non-fatal so cache packaging
       # never fails the overall job. Only save when key wasn't hit.
