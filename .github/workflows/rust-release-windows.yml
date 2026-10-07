@@ -119,6 +119,7 @@ jobs:
           name: cargo-timings-rust-release-windows-${{ matrix.target }}-${{ matrix.bundle }}
           path: ${{ env.CARGO_TARGET_DIR }}/**/cargo-timings/cargo-timing.html
           if-no-files-found: warn
+          retention-days: 3 # smarty-dev#1246
 
       - name: Stage Windows binaries
         shell: bash

@@ -299,6 +299,7 @@ jobs:
         with:
           name: v8-canary-${{ needs.metadata.outputs.v8_version }}-${{ matrix.variant }}-${{ matrix.target }}
           path: dist/${{ matrix.target }}/*
+          retention-days: 7 # smarty-dev#1246
 
       - name: Check for a clean worktree
         if: always() && !cancelled()
@@ -443,6 +444,7 @@ jobs:
         with:
           name: v8-canary-${{ needs.metadata.outputs.v8_version }}-ptrcomp-sandbox-${{ matrix.target }}
           path: dist/${{ matrix.target }}/*
+          retention-days: 7 # smarty-dev#1246
 
       - name: Check for a clean worktree
         if: always() && !cancelled()
