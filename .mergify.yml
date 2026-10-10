@@ -9,7 +9,8 @@ merge_queue:
 queue_rules:
   - name: default
     batch_size: 1
-    checks_timeout: 130 min
+    # ponytail: above the fleet CI-wait p95 (151 min, 10-09); a lower value dequeued green PRs mid-run (smarty-dev#8527). Lower once queue-draft p95 < 60 min.
+    checks_timeout: 180 min
     merge_method: merge
     queue_conditions:
       - base ~= ^(?:main|codex/maintenance-0\.153\.4)$
