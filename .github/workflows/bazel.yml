@@ -114,6 +114,7 @@ jobs:
           name: bazel-execution-logs-test-${{ matrix.target }}
           path: ${{ runner.temp }}/bazel-execution-logs
           if-no-files-found: ignore
+          retention-days: 3 # smarty-dev#1246
 
       # Save the job-scoped Bazel repository cache after cache misses. Keep the
       # upload non-fatal so cache service issues never fail the job itself.
@@ -231,6 +232,7 @@ jobs:
           name: bazel-execution-logs-test-x86_64-pc-windows-gnullvm-shard-${{ matrix.shard }}
           path: ${{ runner.temp }}/bazel-execution-logs
           if-no-files-found: ignore
+          retention-days: 3 # smarty-dev#1246
 
       - name: Check for a clean worktree
         if: always() && !cancelled()
@@ -319,6 +321,7 @@ jobs:
           name: bazel-execution-logs-test-windows-native-x86_64-pc-windows-msvc
           path: ${{ runner.temp }}/bazel-execution-logs
           if-no-files-found: ignore
+          retention-days: 3 # smarty-dev#1246
 
       # Save the job-scoped Bazel repository cache after cache misses. Keep the
       # upload non-fatal so cache service issues never fail the job itself.
@@ -422,6 +425,7 @@ jobs:
           name: bazel-execution-logs-clippy-${{ matrix.target }}
           path: ${{ runner.temp }}/bazel-execution-logs
           if-no-files-found: ignore
+          retention-days: 3 # smarty-dev#1246
 
       # Save the job-scoped Bazel repository cache after cache misses. Keep the
       # upload non-fatal so cache service issues never fail the job itself.
@@ -538,6 +542,7 @@ jobs:
           name: bazel-execution-logs-verify-release-build-${{ matrix.target }}
           path: ${{ runner.temp }}/bazel-execution-logs
           if-no-files-found: ignore
+          retention-days: 3 # smarty-dev#1246
 
       # Save the job-scoped Bazel repository cache after cache misses. Keep the
       # upload non-fatal so cache service issues never fail the job itself.
