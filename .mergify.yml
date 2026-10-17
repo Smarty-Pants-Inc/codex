@@ -12,6 +12,7 @@ queue_rules:
     checks_timeout: 130 min
     merge_method: merge
     queue_conditions:
+      - -check-failure = review/security  # a failed security verdict refuses admission, label or not
       - base ~= ^(?:main|codex/maintenance-0\.153\.4)$
       - -draft
       - -label = hold
@@ -20,6 +21,7 @@ queue_rules:
       - check-success = smarty-ci
       - -check-failure = smarty-ci
     merge_conditions:
+      - -check-failure = review/security  # a failed security verdict refuses admission, label or not
       - check-success = smarty-ci
       - -check-failure = smarty-ci
 
